@@ -1,0 +1,109 @@
+{
+  "HVIGOR_OHOS_PLUGIN": {
+    "MODULES": [
+      {
+        "MODULE_NAME": "923fe53966c6cd9343e11af776cd4b05be315ea4b200b02e4d5dfb0f929b73bf",
+        "API_TYPE": "stageMode",
+        "INCLUDE_IN_BUILD": true,
+        "IS_COMMAND_LINE_ENTRY_MODULE": false,
+        "BUILD_OPTION": [
+          {
+            "path": "debuggable",
+            "traceValue": true,
+            "value": true
+          },
+          {
+            "path": "copyFrom",
+            "traceValue": false,
+            "value": ""
+          },
+          {
+            "path": "strictMode",
+            "traceValue": false,
+            "value": ""
+          },
+          {
+            "path": "strictMode.caseSensitiveCheck",
+            "traceValue": true,
+            "value": true
+          },
+          {
+            "path": "strictMode.useNormalizedOHMUrl",
+            "traceValue": true,
+            "value": true
+          }
+        ],
+        "PACKAGE_JSON": [],
+        "MODULE_TYPE": "entry",
+        "INCREMENTAL_TASKS": {
+          "COMPILE_ARKTS": false
+        },
+        "IS_INCREMENTAL_MODULE": false
+      }
+    ],
+    "NATIVE_COMPILER": "Default",
+    "IS_FULL_BUILD": true,
+    "PACKAGE_JSON": [],
+    "BUILD_MODE": "debug"
+  },
+  "HVIGOR": {
+    "IS_INCREMENTAL": true,
+    "IS_DAEMON": true,
+    "IS_PARALLEL": true,
+    "IS_HVIGORFILE_TYPE_CHECK": false,
+    "IS_EXECUTION_OHPM_BY_HVIGOR": false,
+    "IS_SYNCNATIVE_COMPILATION": false,
+    "BUILD_ANALYSIS_MODE": "normal",
+    "OPTIMIZATION_STRATEGY": "memory",
+    "TASK_TIME": {
+      "923fe53966c6cd9343e11af776cd4b05be315ea4b200b02e4d5dfb0f929b73bf": {
+        "clean": 80584800,
+        "CreateModuleInfo": 904300,
+        "GenerateMetadata": 2803500,
+        "ConfigureCmake": 395100,
+        "MergeProfile": 25482000,
+        "CreateBuildProfile": 2603400,
+        "PreCheckSyscap": 408000,
+        "GeneratePkgContextInfo": 8180500,
+        "GeneratePkgSdkInfo": 2078000,
+        "ProcessIntegratedHsp": 841100,
+        "BuildNativeWithCmake": 395800,
+        "MakePackInfo": 3070800,
+        "SyscapTransform": 9893400,
+        "ProcessProfile": 110058900,
+        "ProcessRouterMap": 3182400,
+        "ProcessShareConfig": 2483800,
+        "ProcessStartupConfig": 1541000,
+        "BuildNativeWithNinja": 2358300,
+        "ProcessResource": 3918600,
+        "GenerateLoaderJson": 7473700,
+        "ProcessLibs": 5369300,
+        "CompileResource": 203011000,
+        "DoNativeStrip": 2528500,
+        "BuildJS": 1719900,
+        "CacheNativeLibs": 622323900,
+        "CompileArkTS": 9756991300,
+        "GeneratePkgModuleJson": 3099500,
+        "ProcessCompiledResources": 663600,
+        "PackageHap": 524944400,
+        "PackingCheck": 3995000,
+        "SignHap": 1230900,
+        "CollectDebugSymbol": 740700,
+        "assembleHap": 238300
+      }
+    },
+    "CUSTOM_TASK_TIME": {},
+    "CUSTOM_PLUGIN_TIME": {},
+    "APIS": [
+      "getProperty"
+    ],
+    "CONFIG_EXPERIMENT": {
+      "ENABLE_MODULE_SKIP": false,
+      "ENABLE_CPP_FUNCTION_LEVEL_INCREMENTAL": false
+    },
+    "CONFIG_PROPERTIES": {},
+    "BUILD_ID": "202610011204235140",
+    "PID": 2736,
+    "TOTAL_TIME": 12560092900
+  }
+}

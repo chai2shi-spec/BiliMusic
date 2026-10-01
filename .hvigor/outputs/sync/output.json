@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "ohos-module-entry": {
+    "SELECT_TARGET": "default",
+    "MODULE_BUILD_DIR": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build",
+    "TARGETS": {
+      "default": {
+        "SOURCE_ROOT": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\src\\main",
+        "RESOURCES_PATH": [
+          "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\src\\main\\resources"
+        ],
+        "BUILD_PATH": {
+          "OUTPUT_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\outputs\\default",
+          "INTERMEDIA_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates",
+          "JS_ASSETS_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\loader_out\\default",
+          "JS_LITE_ASSETS_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\loader_out_lite\\default",
+          "RES_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\res\\default",
+          "RES_PROFILE_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\res\\default\\resources\\base\\profile",
+          "ETS_SUPER_VISUAL_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\cache\\default\\default@CompileArkTS\\esmodule",
+          "JS_SUPER_VISUAL_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\cache\\default\\default@CompileJS\\jsbundle",
+          "WORKER_LOADER": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\loader\\default\\loader.json",
+          "MANIFEST_JSON": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\manifest\\default",
+          "OUTPUT_METADATA_JSON": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\hap_metadata\\default\\output_metadata.json",
+          "SOURCE_MAP_DIR": "E:\\BiliMusic\\HarmonyOS-Phone\\entry\\build\\default\\intermediates\\source_map\\default"
+        },
+        "BUILD_OPTION": {
+          "debuggable": true
+        }
+      }
+    },
+    "BUILD_OPTION": {
+      "default-default": {
+        "debuggable": true,
+        "copyFrom": "default",
+        "strictMode": {
+          "caseSensitiveCheck": true,
+          "useNormalizedOHMUrl": true
+        },
+        "name": "debug"
+      }
+    },
+    "BUILD_PROFILE_OPT": {
+      "apiType": "stageMode",
+      "buildOption": {},
+      "buildOptionSet": [
+        {
+          "name": "release",
+          "arkOptions": {
+            "obfuscation": {
+              "ruleOptions": {
+                "enable": false
+              },
+              "consumerFiles": []
+            }
+          }
+        },
+        {
+          "name": "default"
+        },
+        {
+          "name": "debug"
+        }
+      ],
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    "BUILD_CACHE_DIR": ""
+  },
+  "ohos-project": {
+    "SELECT_PRODUCT_NAME": "default",
+    "MODULE_BUILD_DIR": "E:\\BiliMusic\\HarmonyOS-Phone\\build",
+    "BUNDLE_NAME": "com.chai.bilimusic",
+    "VERSION_CODE": 1000002,
+    "VERSION_NAME": "1.0.2",
+    "BUILD_PATH": {
+      "OUTPUT_PATH": "E:\\BiliMusic\\HarmonyOS-Phone\\build\\outputs\\default"
+    },
+    "MODULES": [
+      {
+        "name": "entry",
+        "srcPath": "E:\\BiliMusic\\HarmonyOS-Phone\\entry",
+        "targets": [
+          {
+            "name": "default",
+            "applyToProducts": [
+              "default"
+            ]
+          }
+        ],
+        "belongProjectPath": "E:\\BiliMusic\\HarmonyOS-Phone"
+      }
+    ],
+    "PROFILE_OPT": {
+      "app": {
+        "signingConfigs": [
+          {
+            "name": "default",
+            "type": "HarmonyOS",
+            "material": {
+              "certpath": "C:\\Users\\Administrator\\.ohos\\config\\default_HarmonyOS-Phone_9ensYEUMsPXc_6glfbjR3s8ec4pE4MUehHCappTRvzU=.cer",
+              "keyAlias": "debugKey",
+              "keyPassword": "0000001BFA4F55DAC44B1B482C5DF9DB6DFF5B8D84561E677124E6DF1080642AECFCC390A3D950E7213E7F",
+              "profile": "C:\\Users\\Administrator\\.ohos\\config\\default_HarmonyOS-Phone_9ensYEUMsPXc_6glfbjR3s8ec4pE4MUehHCappTRvzU=.p7b",
+              "signAlg": "SHA256withECDSA",
+              "storeFile": "C:\\Users\\Administrator\\.ohos\\config\\default_HarmonyOS-Phone_9ensYEUMsPXc_6glfbjR3s8ec4pE4MUehHCappTRvzU=.p12",
+              "storePassword": "0000001B22893D646C03D19C4E6FE8AA611BBD94D0A1AEB711DD838ACAA7F50F726ABF501CC8500059352D"
+            }
+          }
+        ],
+        "products": [
+          {
+            "name": "default",
+            "compatibleSdkVersion": "6.1.0(23)",
+            "targetSdkVersion": "26.0.0",
+            "runtimeOS": "HarmonyOS",
+            "buildOption": {
+              "strictMode": {
+                "caseSensitiveCheck": true,
+                "useNormalizedOHMUrl": true
+              }
+            }
+          }
+        ],
+        "buildModeSet": [
+          {
+            "name": "debug"
+          },
+          {
+            "name": "release"
+          }
+        ]
+      },
+      "modules": [
+        {
+          "name": "entry",
+          "srcPath": "./entry",
+          "targets": [
+            {
+              "name": "default",
+              "applyToProducts": [
+                "default"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "CONFIG_PROPERTIES": {
+      "enableSignTask": true,
+      "skipNativeIncremental": false,
+      "hvigor.keepDependency": true
+    },
+    "OVERALL_PROJECT_PATHS": [
+      "E:\\BiliMusic\\HarmonyOS-Phone"
+    ],
+    "BUILD_CACHE_DIR": ""
+  }
+}

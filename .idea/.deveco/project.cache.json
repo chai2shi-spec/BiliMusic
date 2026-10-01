@@ -1,0 +1,17 @@
+{
+	"CommonInfo":{
+		"project.ide.version":"26.0.0.821",
+		"current.select.product":"default",
+		"current.select.buildMode":"",
+		"crossplatform.projectType":""
+	},
+	"BuildOptions":{
+		"SELECT_BUILD_PRODUCT":"default",
+		"BUNDLE_NAME":"com.chai.bilimusic",
+		"BUILD_PATH":{
+			"OUTPUT_PATH":"E:\\BiliMusic\\HarmonyOS-Phone\\build\\outputs\\default"
+		},
+		"SELECT_BUILD_MODE":""
+	},
+	"CertConfig":{}
+}

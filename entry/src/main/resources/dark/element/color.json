@@ -1,0 +1,60 @@
+{
+  "color": [
+    {
+      "name": "brand_deep",
+      "value": "#FFFF8BAC"
+    },
+    {
+      "name": "brand_surface",
+      "value": "#FF33222B"
+    },
+    {
+      "name": "text_primary",
+      "value": "#FFF5F5F7"
+    },
+    {
+      "name": "text_secondary",
+      "value": "#FFABABB5"
+    },
+    {
+      "name": "text_tertiary",
+      "value": "#FF83838F"
+    },
+    {
+      "name": "text_disabled",
+      "value": "#FF55555F"
+    },
+    {
+      "name": "bg_divider",
+      "value": "#FF33333C"
+    },
+    {
+      "name": "progress_track",
+      "value": "#FF38383F"
+    },
+    {
+      "name": "progress_paused",
+      "value": "#FF5A5A64"
+    },
+    {
+      "name": "state_success",
+      "value": "#FF6FD34C"
+    },
+    {
+      "name": "state_error",
+      "value": "#FFFF6B5E"
+    },
+    {
+      "name": "press_overlay",
+      "value": "#14FFFFFF"
+    },
+    {
+      "name": "bg_page",
+      "value": "#FF121216"
+    },
+    {
+      "name": "bg_card",
+      "value": "#FF1E1E24"
+    }
+  ]
+}

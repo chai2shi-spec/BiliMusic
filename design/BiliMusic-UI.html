@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BiliMusic 界面/组件/原型方案 · 依据最新代码 · B站粉色基调</title>
+<style>
+  :root{
+    /* ══ 品牌色：哔哩哔哩粉 ══════════════════════════
+       brand      视觉主色 —— 图标 / 实底填充 / 大字号 / 底栏光晕
+       brand-deep 品牌深粉 —— 白底上的粉字（2.20:1 → 5.81:1，AA 达标）
+       brand-blue B 站蓝 —— 链接与次要强调
+       brand-tint 浅粉 —— 区块底 / 搜索框 / 模式药丸                      */
+    --brand:#FB7299;
+    --brand-deep:#C2185B;
+    --brand-blue:#00AEEC;
+    --brand-tint:#FFF1F5;
+    --brand-tint2:#FFE0EA;
+    --brand-mid:#F48FB1;
+
+    /* ══ 中性色（对齐 resources/base/element/color.json）══ */
+    --tp:#1A1A1A;   /* text_primary   16.75:1 AAA */
+    --ts:#6B6B70;   /* text_secondary  5.31:1 AA  */
+    --tt:#8A8A90;   /* text_tertiary   4.62:1 AA  */
+    --td:#BDBDC4;   /* text_disabled */
+    --divider:#E8E8EC;
+    --track:#E0E0E0;
+    --success:#52C41A;
+    --error:#D93026;
+    --press:rgba(0,0,0,.06);
+    --bg:#F5F5F5;
+    --surface:#FFFFFF;
+    --surface2:#F2F2F4;
+
+    /* ══ 字阶（六档，行高 1.4）══ */
+    --f24:24px; --f20:20px; --f18:18px; --f16:16px; --f13:13px; --f11:11px;
+    /* ══ 间距（4 的倍数）══ */
+    --s4:4px; --s8:8px; --s12:12px; --s16:16px; --s24:24px; --s40:40px;
+    /* ══ 圆角（三档）══ */
+    --r8:8px; --r12:12px; --rpill:999px;
+    /* ══ 尺度 ══ */
+    --hit:44px;
+    --bar-h:56px;
+    --bar-bottom:54px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#1E1E22;color:#E8E8EC;
+    font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    padding:32px 24px;line-height:1.4;
+  }
+  .doc-head{max-width:1320px;margin:0 auto 28px}
+  .doc-head h1{font-size:24px;font-weight:500;margin-bottom:8px}
+  .doc-head p{font-size:13px;color:#9A9AA4}
+  .tag{
+    display:inline-block;background:rgba(251,114,153,.16);color:#FB7299;
+    font-size:11px;padding:3px 10px;border-radius:999px;margin:10px 6px 0 0;
+  }
+  .tag.b{background:rgba(194,24,91,.22);color:#E8589B}
+  .grid{display:flex;flex-wrap:wrap;gap:24px;max-width:1320px;margin:0 auto}
+  .slot{display:flex;flex-direction:column;gap:8px}
+  .slot-label{font-size:12px;color:#9A9AA4;display:flex;align-items:baseline;gap:8px}
+  .slot-label b{font-size:13px;color:#E8E8EC;font-weight:500}
+  .slot-label i{font-style:normal;color:#6B6B70}
+  .screen-wrap{width:390px;height:844px;border-radius:20px;overflow:hidden;position:relative}
+  .phone{width:390px;height:844px;background:var(--bg);position:relative;overflow:hidden}
+  .flex-col{display:flex;flex-direction:column}
+  .flex1{flex:1;min-height:0}
+  .status{
+    height:47px;display:flex;align-items:flex-end;justify-content:space-between;
+    padding:0 24px 6px;font-size:11px;flex:none;
+  }
+  .home-ind{
+    position:absolute;left:50%;transform:translateX(-50%);bottom:8px;
+    width:134px;height:5px;border-radius:3px;background:rgba(0,0,0,.28);z-index:9;
+  }
+
+  /* ══ 底栏：HDS 沉浸光感悬浮胶囊（不变更项）══ */
+  .lye{
+    position:absolute;left:16px;right:16px;bottom:var(--bar-bottom);height:var(--bar-h);
+    border-radius:36px;display:flex;align-items:center;z-index:8;overflow:hidden;
+    background:rgba(255,255,255,.78);
+    backdrop-filter:blur(24px) saturate(1.9);-webkit-backdrop-filter:blur(24px) saturate(1.9);
+    box-shadow:0 6px 24px rgba(0,0,0,.10);
+  }
+  .lye::before{
+    content:"";position:absolute;inset:0;border-radius:36px;
+    background:var(--brand);opacity:.12;pointer-events:none;
+  }
+  .mini{display:flex;align-items:center;gap:8px;padding:0 8px;position:relative;z-index:1;flex:none}
+  .mini-collapsed{padding:0 6px}
+  .mini-disc{width:40px;height:40px;border-radius:50%;object-fit:cover;display:block}
+  .mini-cover{width:32px;height:32px;border-radius:50%;object-fit:cover;display:block;flex:none}
+  .mini-text{min-width:0;max-width:96px}
+  .mini-title{font-size:12px;font-weight:500;color:var(--tp);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini-artist{font-size:10px;color:var(--ts);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini-ctrl{display:flex;align-items:center;gap:8px}
+  .tabbar{display:flex;flex:1;align-items:center;justify-content:space-around;position:relative;z-index:1;height:100%}
+  .tab{flex:1;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+  .tab svg{width:22px;height:22px}
+  .tab span{font-size:10px;line-height:1.4}
+  .tab.on{color:var(--brand)}
+  .tab.off{color:var(--ts)}
+  .ic{width:22px;height:22px;display:block;stroke:currentColor;fill:none;stroke-width:1.8}
+
+  /* 通用 */
+  .title-bar{display:flex;align-items:center;padding:6px 16px 8px;gap:8px}
+  .title-bar h2{font-size:var(--f20);font-weight:700;color:var(--tp)}
+  .spacer{flex:1}
+  .row-item{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--surface)}
+  .pressable:active{background:var(--press)}
+  .cover48{width:48px;height:48px;border-radius:var(--r8);object-fit:cover;flex:none;background:var(--divider)}
+  .cover40{width:40px;height:40px;border-radius:6px;object-fit:cover;flex:none;background:var(--divider)}
+  .ti-main{flex:1;min-width:0}
+  .ti-title{font-size:var(--f16);color:var(--tp);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ti-sub{display:flex;align-items:center;gap:8px;margin-top:var(--s4)}
+  .ti-artist{font-size:var(--f13);color:var(--ts);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+  .ti-dur{font-size:var(--f13);color:var(--tt);flex:none}
+  .hit-more{
+    width:var(--hit);height:var(--hit);display:flex;align-items:center;justify-content:center;
+    flex:none;color:var(--ts);border-radius:var(--r8);
+  }
+  .hit-more:active{background:var(--press)}
+  .hit-more svg{width:20px;height:20px}
+  .divider{height:1px;background:var(--divider);margin-left:16px}
+  .sec-title{font-size:var(--f16);font-weight:500;color:var(--tp);padding:12px 16px 6px}
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:0 40px;text-align:center}
+  .empty .big{font-size:var(--f16);color:var(--ts)}
+  .empty .sub{font-size:var(--f13);color:var(--tt)}
+  .cta-pill{
+    font-size:var(--f13);font-weight:500;color:#3D0018;
+    background:var(--brand);padding:8px 18px;border-radius:var(--rpill);margin-top:8px;
+  }
+  .seg{display:flex;gap:8px;padding:8px 12px;flex:none}
+  .seg .pill{padding:6px 14px;border-radius:var(--rpill);font-size:var(--f13);background:var(--surface);color:var(--ts)}
+  .seg .pill.on{background:var(--brand);color:#3D0018;font-weight:500}
+  .searchbox{
+    margin:8px 16px 4px;height:40px;border-radius:var(--rpill);
+    background:var(--brand-tint);display:flex;align-items:center;gap:8px;padding:0 16px;
+    color:var(--ts);font-size:var(--f13);
+  }
+  .searchbox svg{width:18px;height:18px;color:var(--brand)}
+  .set-row{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--surface)}
+  .set-row .lbl{font-size:var(--f16);color:var(--tp)}
+  .set-row .desc{font-size:var(--f11);color:var(--tt);margin-top:2px}
+  .switch{width:44px;height:26px;border-radius:13px;background:var(--track);position:relative;flex:none}
+  .switch.on{background:var(--brand)}
+  .switch::after{
+    content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2)
+  }
+  .switch.on::after{left:21px}
+  .chev{width:16px;height:16px;color:var(--td);flex:none}
+  .dl-row{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--surface)}
+  .prog{height:3px;border-radius:2px;background:var(--track);margin-top:6px;overflow:hidden}
+  .prog i{display:block;height:100%;background:var(--brand);border-radius:2px}
+  .prog.paused i{background:var(--td)}
+  .hit-icon{
+    width:var(--hit);height:var(--hit);display:flex;align-items:center;justify-content:center;
+    flex:none;border-radius:var(--r8);color:var(--ts)
+  }
+  .hit-icon:active{background:var(--press)}
+  .hit-icon svg{width:18px;height:18px}
+  .badge-live{font-size:11px;color:var(--brand-deep);margin-left:6px;flex:none}
+  .btn-pill{
+    flex:1;height:32px;border-radius:16px;background:var(--brand-tint);
+    display:flex;align-items:center;justify-content:center;font-size:13px;
+    color:var(--brand-deep);font-weight:500;
+  }
+  .btn-solid{
+    flex:1;height:40px;border-radius:20px;background:var(--brand);
+    display:flex;align-items:center;justify-content:center;
+    font-size:16px;font-weight:500;color:#3D0018;
+  }
+
+  /* ══ 播放页：沉浸背景（主色取封面）══ */
+  .player-bg{
+    width:100%;height:100%;position:relative;color:#fff;overflow:hidden;
+    background:linear-gradient(165deg,#7A2E52 0%,#4A1B38 48%,#24101F 100%);
+  }
+  .player-bg::before{
+    content:"";position:absolute;inset:0;
+    background:
+      radial-gradient(circle at 28% 18%, rgba(251,114,153,.42), transparent 55%),
+      radial-gradient(circle at 78% 62%, rgba(168,85,247,.26), transparent 52%);
+    opacity:.55;
+  }
+  .top-cast{height:48px;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;position:relative;z-index:3;flex:none;color:#fff}
+  .top-cast svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.8}
+  .big-cover{width:calc(100% - 6px);aspect-ratio:1;border-radius:var(--r8);object-fit:cover;display:block;box-shadow:0 8px 12px rgba(0,0,0,.25);margin:0 3px;background:rgba(255,255,255,.12)}
+  .p-title{font-size:var(--f20);font-weight:700;color:#fff;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .p-artist{font-size:14px;color:rgba(255,255,255,.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ctrl-fn{display:flex;align-items:center;justify-content:space-between;width:100%}
+  .ctrl-fn svg{width:24px;height:24px;color:#fff;opacity:.86}
+  .slider{height:16px;display:flex;align-items:center;margin:0 -4px}
+  .slider .line{height:3px;background:rgba(255,255,255,.2);border-radius:2px;flex:1;position:relative}
+  .slider .line i{position:absolute;left:0;top:0;height:100%;background:rgba(255,255,255,.86);border-radius:2px;display:block}
+  .slider .knob{position:absolute;width:12px;height:12px;border-radius:50%;background:#fff;top:50%;transform:translate(-50%,-50%);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+  .times{display:flex;justify-content:space-between;font-size:10px;color:rgba(255,255,255,.6);font-weight:500}
+  .ctrl-main{display:flex;align-items:center;justify-content:space-between;padding:0 36px;width:100%}
+  .ctrl-main .side{width:26px;height:26px;color:#fff;opacity:.86}
+  .ctrl-main .play{width:44px;height:44px;color:#fff}
+  .dots{display:flex;gap:6px;justify-content:center;padding:10px 0 0;flex:none}
+  .dots i{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.2);display:block}
+  .dots i.on{background:rgba(255,255,255,.86)}
+  .lyric-head{display:flex;align-items:center;gap:10px;width:100%}
+  .lyric-head img{width:48px;height:48px;border-radius:var(--r8);object-fit:cover}
+  .lyric-head .t{font-size:var(--f16);font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lyric-head .a{font-size:12px;color:rgba(255,255,255,.6);margin-top:2px;font-weight:500}
+  .lyric-body{flex:1;display:flex;flex-direction:column;justify-content:center;gap:16px;padding:0 4px}
+  .lyric-body .ln{font-size:var(--f16);color:rgba(255,255,255,.45);line-height:1.5;text-align:center}
+  .lyric-body .ln.cur{color:#fff;font-weight:500;font-size:var(--f18)}
+  .sheet{
+    position:absolute;left:0;right:0;bottom:0;height:520px;background:var(--surface);
+    border-radius:16px 16px 0 0;z-index:10;display:flex;flex-direction:column;overflow:hidden;
+    box-shadow:0 -4px 24px rgba(0,0,0,.12);
+  }
+  .sheet-drag{width:36px;height:4px;border-radius:2px;background:var(--td);margin:8px auto 0;flex:none}
+  .sheet-head{display:flex;align-items:center;gap:8px;padding:16px 24px 12px;flex:none}
+  .sheet-head h3{font-size:var(--f18);font-weight:700;color:var(--tp)}
+  .mode-pill{
+    display:flex;align-items:center;gap:4px;padding:4px 12px;border-radius:var(--r12);
+    background:var(--brand-tint);color:var(--brand-deep);font-size:12px;font-weight:500;
+  }
+  .mode-pill svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8}
+  .q-row{display:flex;align-items:center;gap:10px;padding:8px 12px 8px 24px}
+  .q-idx{width:24px;flex:none;text-align:center;font-size:var(--f13);color:var(--ts)}
+  .q-idx .wf{width:16px;height:16px;margin:0 auto;color:var(--brand)}
+  .spec-note{
+    background:rgba(255,255,255,.06);border-radius:var(--r12);padding:12px 16px;
+    font-size:12px;color:#9A9AA4;line-height:1.7;
+  }
+  .spec-note.on-light{background:rgba(0,0,0,.04);color:var(--ts)}
+  .spec-note b{color:#E8E8EC;font-weight:500}
+  .spec-note.on-light b{color:var(--tp)}
+  .spec-note code{
+    background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;
+    font-family:Consolas,Monaco,monospace;font-size:11px;color:#C9A9E8;
+  }
+  .spec-note.on-light code{background:rgba(251,114,153,.12);color:var(--brand-deep)}
+  .spec-screen{
+    width:390px;height:844px;background:var(--bg);position:relative;
+    padding:60px 20px 0;display:flex;flex-direction:column;gap:14px;overflow:hidden;
+  }
+  .spec-card{background:var(--surface);border-radius:var(--r12);padding:12px 14px;flex:none}
+  .spec-card h4{font-size:var(--f13);font-weight:500;color:var(--tp);margin-bottom:10px}
+  .lye-static{position:relative;left:0;right:0;bottom:0;margin:0}
+  .hit-ring{position:absolute;border:1px dashed rgba(251,114,153,.55);border-radius:var(--r8);pointer-events:none}
+  .anno{
+    position:absolute;font-size:10px;color:var(--ts);z-index:11;
+    background:rgba(255,255,255,.92);padding:2px 6px;border-radius:4px;white-space:nowrap;
+  }
+  .anno-pink{color:var(--brand-deep);background:var(--brand-tint)}
+  .swatch{display:flex;align-items:center;gap:12px;padding:8px 0}
+  .swatch .chip{width:56px;height:40px;border-radius:8px;flex:none;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+  .swatch .meta{flex:1;min-width:0}
+  .swatch .nm{font-size:13px;font-weight:500;color:var(--tp)}
+  .swatch .hex{font-size:11px;color:var(--tt);font-family:Consolas,Monaco,monospace}
+  .swatch .use{font-size:11px;color:var(--ts);margin-top:2px}
+  .ratio{font-size:11px;font-weight:500;padding:2px 8px;border-radius:999px;flex:none}
+  .ratio.pass{background:#EAF3DE;color:#3B6D11}
+  .ratio.fail{background:#FCEBEB;color:#A32D2D}
+  .ratio.na{background:var(--surface2);color:var(--tt)}
+</style>
+</head>
+<body>
+
+<div class="doc-head">
+  <h1>BiliMusic · 界面 / 组件 / 原型方案</h1>
+  <p>依据 <code style="color:#C9A9E8">HarmonyOS-Phone/entry/src/main/ets</code> 最新代码绘制 · 画布 390×844 · 底栏（HDS 沉浸光感悬浮胶囊）为不变更项 · 哔哩哔哩粉色基调</p>
+  <div>
+    <span class="tag">底栏不变更</span>
+    <span class="tag">播放页重构</span>
+    <span class="tag">双粉策略</span>
+    <span class="tag b">三档灰 / 六档字阶</span>
+    <span class="tag b">44vp 触达</span>
+  </div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<script>
+/* ══════ 图标集（内联 SVG，对应 sys.symbol.*）══════ */
+const I = {
+  search:'<svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21" stroke-linecap="round"/></svg>',
+  list:'<svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round"/></svg>',
+  download:'<svg class="ic" viewBox="0 0 24 24"><path d="M12 3v11"/><path d="M7.5 10.5L12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 18h14"/></svg>',
+  gear:'<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6" stroke-linecap="round"/></svg>',
+  prev:'<svg class="ic" viewBox="0 0 24 24"><path d="M18 5v14L8 12l10-7z" stroke-linejoin="round"/><rect x="4" y="5" width="2.5" height="14" rx="1" fill="currentColor" stroke="none"/></svg>',
+  next:'<svg class="ic" viewBox="0 0 24 24"><path d="M6 5v14l10-7L6 5z" stroke-linejoin="round"/><rect x="17.5" y="5" width="2.5" height="14" rx="1" fill="currentColor" stroke="none"/></svg>',
+  play:'<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M10 8.5l6 3.5-6 3.5z" stroke-linejoin="round"/></svg>',
+  pause:'<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M10 9v6M14 9v6" stroke-linecap="round" stroke-width="2"/></svg>',
+  trash:'<svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4.5h6V7"/><path d="M6.5 7l1 12.5h9L17.5 7"/><path d="M10.5 10.5v6M13.5 10.5v6" stroke-linecap="round"/></svg>',
+  xmark:'<svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>',
+  waveform:'<svg class="ic" viewBox="0 0 24 24"><path d="M4 12h2M8 8v8M12 5v14M16 8v8M20 11v2" stroke-linecap="round" stroke-width="2"/></svg>',
+  more:'<svg class="ic" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>',
+  chev:'<svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  cast:'<svg viewBox="0 0 24 24"><path d="M3 17.5v2a2 2 0 002 2h2"/><path d="M21 17.5v2a2 2 0 01-2 2h-2"/><rect x="12" y="3" width="9" height="9" rx="1.5"/></svg>',
+  repeat:'<svg class="ic" viewBox="0 0 24 24"><path d="M4 9a5 5 0 015-5h11"/><path d="M17 1.5l3.5 3L17 8"/><path d="M20 15a5 5 0 01-5 5H4"/><path d="M7 22.5L3.5 19.5 7 16.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  back:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>'
+};
+
+/* 封面占位：粉色系渐变（贴合 B 站基调） */
+function coverData(size, hue){
+  return 'data:image/svg+xml;utf8,'+encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="'+size+'" height="'+size+'">'+
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
+    '<stop offset="0" stop-color="hsl('+hue+',68%,68%)"/>'+
+    '<stop offset="1" stop-color="hsl('+((hue+38)%360)+',62%,50%)"/></linearGradient></defs>'+
+    '<rect width="'+size+'" height="'+size+'" fill="url(#g)"/></svg>');
+}
+function cover(size,hue){
+  return '<img class="'+(size===48?'cover48':'cover40')+'" src="'+coverData(size,hue)+'" alt="">';
+}
+
+/* ══════ 底栏：HDS 沉浸光感悬浮胶囊（不变更项）═════
+   tabsOnly  → 队列为空，胶囊退回纯页签
+   collapsed → 融合播放栏收起为 40 圆盘
+   默认      → 展开：封面32 + 文字 + 三键，与页签一行融合            */
+function Bar(active, opts){
+  const o = opts || {};
+  const tabs = [['搜索',I.search,0],['歌单',I.list,1],['下载',I.download,2],['设置',I.gear,3]];
+  const tabHtml = tabs.map(function(t){
+    return '<div class="tab '+(active===t[2]?'on':'off')+'">'+t[1]+'<span>'+t[0]+'</span></div>';
+  }).join('');
+  let mini = '';
+  if(!o.tabsOnly){
+    mini = o.collapsed
+      ? '<div class="mini mini-collapsed"><img class="mini-disc" src="'+coverData(40,330)+'" alt=""></div>'
+      : '<div class="mini">'+
+          '<img class="mini-cover" src="'+coverData(32,330)+'" alt="">'+
+          '<div class="mini-text"><div class="mini-title">妄想感傷代償連盟</div>'+
+          '<div class="mini-artist">雨宮天</div></div>'+
+          '<div class="mini-ctrl" style="color:var(--tp)">'+
+            '<div style="width:16px;height:16px">'+I.prev+'</div>'+
+            '<div style="width:20px;height:20px">'+I.pause+'</div>'+
+            '<div style="width:16px;height:16px">'+I.next+'</div>'+
+          '</div></div>';
+  }
+  return '<div class="lye">'+mini+'<div class="tabbar">'+tabHtml+'</div></div>';
+}
+
+function tabsOnly(active){
+  const t=[['搜索',I.search,0],['歌单',I.list,1],['下载',I.download,2],['设置',I.gear,3]];
+  return '<div class="tabbar">'+t.map(function(x){
+    return '<div class="tab '+(active===x[2]?'on':'off')+'">'+x[1]+'<span>'+x[0]+'</span></div>';
+  }).join('')+'</div>';
+}
+
+function StatusBar(dark){
+  const c = dark ? '#fff' : 'var(--tp)';
+  return '<div class="status" style="color:'+c+'"><span>9:41</span><span style="display:flex;gap:4px;align-items:center">'+
+    '<svg width="14" height="10" viewBox="0 0 16 11" fill="'+c+'"><rect x="0" y="6" width="2.5" height="5" rx=".8"/><rect x="4.2" y="4" width="2.5" height="7" rx=".8"/><rect x="8.4" y="2" width="2.5" height="9" rx=".8"/><rect x="12.6" y="0" width="2.5" height="11" rx=".8"/></svg>'+
+    '<svg width="14" height="10" viewBox="0 0 16 11" fill="'+c+'"><path d="M8 1.6c2.5 0 4.8.9 6.6 2.4l1.2-1.4A12.4 12.4 0 008 0 12.4 12.4 0 00.2 2.6L1.4 4A10.2 10.2 0 018 1.6z"/><path d="M8 5.2c1.5 0 2.9.5 4 1.4l1.2-1.4A8.2 8.2 0 008 3.6 8.2 8.2 0 002.8 5.2L4 6.6c1.1-.9 2.5-1.4 4-1.4z"/><circle cx="8" cy="9.2" r="1.6"/></svg>'+
+    '<svg width="20" height="10" viewBox="0 0 22 11"><rect x="0" y="1" width="18" height="9" rx="2.5" fill="none" stroke="'+c+'" stroke-width="1"/><rect x="1.6" y="2.6" width="11" height="5.8" rx="1.2" fill="'+c+'"/><path d="M19.5 4v3a2 2 0 000-3z" fill="'+c+'"/></svg>'+
+    '</span></div>';
+}
+
+/* ══════ TrackItem（已按新规范改造：字阶 + 44vp ⋯ + 按压态）═════ */
+function TrackItem(title, artist, dur, hue, opts){
+  const o = opts || {};
+  const durHtml = dur ? '<span class="ti-dur">'+dur+'</span>' : '';
+  const live = o.live ? '<span class="badge-live">正在播放</span>' : '';
+  return '<div class="row-item pressable" style="padding-right:4px">'+
+    cover(48,hue)+
+    '<div class="ti-main"><div class="ti-title">'+title+'</div>'+
+    '<div class="ti-sub"><span class="ti-artist">'+artist+'</span>'+live+durHtml+'</div></div>'+
+    '<div class="hit-more">'+I.more+'</div></div>';
+}
+
+/* ══════ SP1 搜索页 ══════ */
+function SP1(){
+  const tabsHtml = ['搜索','推荐','排行榜','音乐中心'].map(function(t,i){
+    return '<div class="pill'+(i===0?' on':'')+'">'+t+'</div>';
+  }).join('');
+  const songs = [
+    ['妄想感傷代償連盟','雨宮天','4:12',330],
+    ['海の幽霊','米津玄師','3:56',205],
+    ['紅蓮華','LiSA','3:58',350],
+    ['Pretender','Official髭男dism','4:26',280],
+    ['Lemon','米津玄師','4:16',52],
+    ['晴天好心情','-harmonized-','3:34',170]
+  ];
+  let list = '';
+  songs.forEach(function(s,i){
+    list += TrackItem(s[0],s[1],s[2],s[3],{live:i===1});
+    if(i<songs.length-1) list += '<div class="divider"></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div class="title-bar"><h2>搜索</h2></div>'+
+    '<div class="searchbox">'+I.search+' 搜索歌曲 / UP主</div>'+
+    '<div class="seg">'+tabsHtml+'</div>'+
+    '<div class="flex1" style="overflow:hidden;background:var(--surface)">'+list+'</div>'+
+    '<div style="height:130px;flex:none"></div>'+
+  '</div>'+Bar(0);
+}
+
+/* ══════ SP2 歌单页 ══════ */
+function SP2(){
+  let recent = '';
+  for(let i=0;i<4;i++) recent += '<div style="padding:0 8px;flex:none">'+cover(48,330+i*40)+'</div>';
+  let pl = '';
+  const names = [['我喜欢的音乐','12 首',330],['日系摇滚','34 首',205],['深夜循环','8 首',350]];
+  names.forEach(function(p,i){
+    pl += '<div class="row-item pressable" style="padding:12px 16px">'+cover(48,p[2])+
+      '<div class="ti-main"><div class="ti-title">'+p[0]+'</div>'+
+      '<div style="font-size:13px;color:var(--ts);margin-top:4px">'+p[1]+'</div></div>'+
+      '<div class="hit-more">'+I.more+'</div></div>';
+    if(i<names.length-1) pl += '<div class="divider"></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div class="title-bar"><h2>歌单</h2><div class="spacer"></div>'+
+      '<span style="font-size:13px;color:var(--brand-deep);font-weight:500">新建</span></div>'+
+    '<div class="sec-title" style="display:flex;align-items:center">最近播放<span class="spacer"></span>'+
+      '<span style="font-size:13px;color:var(--ts)">全部 ›</span></div>'+
+    '<div style="display:flex;padding:0 8px 4px;flex:none">'+recent+'</div>'+
+    '<div class="sec-title" style="flex:none">我的歌单</div>'+
+    '<div style="background:var(--surface)">'+pl+'</div>'+
+  '</div>'+Bar(1);
+}
+
+/* ══════ SP3 下载管理 ══════ */
+function SP3(){
+  const rows = [
+    ['妄想感傷代償連盟','雨宮天','已完成 · 6.2MB',330,'done',100],
+    ['紅蓮華','LiSA','正在下载 · 2.4/5.1MB',350,'ing',47],
+    ['Pretender','Official髭男dism','已暂停 · 1.8/7.3MB',280,'paused',25],
+    ['Lemon','米津玄師','下载失败 · 网络中断',52,'err',0]
+  ];
+  let list = '';
+  rows.forEach(function(r,i){
+    let tail='',prog='';
+    if(r[4]==='done'){ tail='<span style="font-size:18px;color:var(--success)">✓</span>'; }
+    else if(r[4]==='err'){ tail='<span style="font-size:13px;color:var(--brand-deep);padding:0 8px;font-weight:500">重试</span>'; }
+    else { tail='<div class="hit-icon">'+I.trash+'</div>'; }
+    if(r[4]==='ing') prog='<div class="prog"><i style="width:'+r[5]+'%"></i></div>';
+    if(r[4]==='paused') prog='<div class="prog paused"><i style="width:'+r[5]+'%"></i></div>';
+    const c = r[4]==='err' ? 'var(--error)' : 'var(--ts)';
+    list += '<div class="dl-row pressable">'+cover(48,r[3])+
+      '<div class="ti-main"><div class="ti-title">'+r[0]+'</div>'+
+      '<div style="font-size:13px;color:'+c+';margin-top:4px">'+r[2]+'</div>'+prog+'</div>'+tail+'</div>';
+    if(i<rows.length-1) list += '<div class="divider"></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div class="title-bar"><h2>下载管理</h2><div class="spacer"></div>'+
+      '<span style="font-size:13px;color:var(--ts)">多选</span></div>'+
+    '<div style="display:flex;gap:8px;padding:0 16px 8px;flex:none">'+
+      '<div class="btn-pill">全部开始</div><div class="btn-pill">全部暂停</div></div>'+
+    '<div class="flex1" style="background:var(--surface);overflow:hidden">'+list+'</div>'+
+    '<div style="height:30px;flex:none"></div>'+
+  '</div>'+Bar(2);
+}
+
+/* ══════ SP4 设置页 ══════ */
+function SP4(){
+  const row = function(label,desc,ctrl){
+    return '<div class="set-row pressable"><div style="flex:1;min-width:0">'+
+      '<div class="lbl">'+label+'</div>'+(desc?'<div class="desc">'+desc+'</div>':'')+
+      '</div>'+ctrl+'</div>';
+  };
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div class="title-bar"><h2>设置</h2></div>'+
+    '<div style="background:var(--surface)">'+
+      row('自动播放下一首','','<div class="switch on"></div>')+'<div class="divider"></div>'+
+      row('显示歌词','','<div class="switch on"></div>')+
+    '</div>'+
+    '<div class="sec-title">下载</div>'+
+    '<div style="background:var(--surface)">'+
+      row('仅 WiFi 下载','移动网络下先询问，避免消耗流量','<div class="switch"></div>')+'<div class="divider"></div>'+
+      row('下载音质','对已开始的任务不生效，重新下载才会换档','<span style="font-size:16px;color:var(--tt)">320kbps</span>'+I.chev)+
+    '</div>'+
+    '<div class="sec-title">通用</div>'+
+    '<div style="background:var(--surface)">'+
+      row('主题','','<span style="font-size:16px;color:var(--tt)">跟随系统</span>'+I.chev)+'<div class="divider"></div>'+
+      row('定时停止播放','','<span style="font-size:16px;color:var(--tt)">关闭</span>'+I.chev)+'<div class="divider"></div>'+
+      row('缓存','点击清理临时缓存','<span style="font-size:16px;color:var(--tt)">12.4MB</span>'+I.chev)+
+    '</div>'+
+  '</div>'+Bar(3);
+}
+
+/* ══════ SP5 歌单详情 ══════ */
+function SP5(){
+  let list='';
+  const songs=[['妄想感傷代償連盟','雨宮天','4:12',330],['海の幽霊','米津玄師','3:56',205],['紅蓮華','LiSA','3:58',350]];
+  songs.forEach(function(s,i){
+    list += TrackItem(s[0],s[1],s[2],s[3],{live:i===0});
+    if(i<songs.length-1) list += '<div class="divider"></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div style="display:flex;align-items:center;padding:6px 8px 8px;flex:none">'+
+      '<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--tp)">'+I.back+'</div>'+
+      '<h2 style="font-size:20px;font-weight:700">我喜欢的音乐</h2><div class="spacer"></div>'+
+      '<div class="hit-more">'+I.more+'</div></div>'+
+    '<div style="display:flex;align-items:center;gap:16px;padding:4px 16px 12px;flex:none">'+
+      '<div style="width:96px;height:96px;border-radius:12px;overflow:hidden;flex:none"><img src="'+coverData(96,330)+'" style="width:96px;height:96px;object-fit:cover"></div>'+
+      '<div style="flex:1;min-width:0"><div style="font-size:18px;font-weight:600;color:var(--tp)">我喜欢的音乐</div>'+
+      '<div style="font-size:13px;color:var(--ts);margin-top:4px">12 首</div></div></div>'+
+    '<div style="display:flex;gap:8px;padding:0 16px 8px;flex:none"><div class="btn-solid">播放全部</div></div>'+
+    '<div class="flex1" style="background:var(--surface);overflow:hidden">'+list+'</div>'+
+    '<div style="height:30px;flex:none"></div>'+
+  '</div>'+Bar(1);
+}
+
+/* ══════ SP6 最近播放 ══════ */
+function SP6(){
+  let list='';
+  const songs=[['海の幽霊','米津玄師','3:56',205],['紅蓮華','LiSA','3:58',350],['Pretender','Official髭男dism','4:26',280]];
+  songs.forEach(function(s,i){
+    list += TrackItem(s[0],s[1],s[2],s[3]);
+    if(i<songs.length-1) list += '<div class="divider"></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div style="display:flex;align-items:center;padding:6px 8px 8px;flex:none">'+
+      '<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--tp)">'+I.back+'</div>'+
+      '<h2 style="font-size:20px;font-weight:700">最近播放</h2><div class="spacer"></div>'+
+      '<span style="font-size:13px;color:var(--brand-deep);padding:0 8px;font-weight:500">清空</span></div>'+
+    '<div class="flex1" style="background:var(--surface);overflow:hidden">'+list+'</div>'+
+    '<div style="height:30px;flex:none"></div>'+
+  '</div>'+Bar(0);
+}
+
+/* ══════ SP7 播放页·封面页 ══════ */
+function SP7(){
+  return '<div class="flex-col phone" style="background:#24101F">'+
+    '<div class="player-bg flex-col">'+
+      StatusBar(true)+
+      '<div class="top-cast">'+I.cast+'</div>'+
+      '<div class="flex1 flex-col" style="padding:0 24px 24px;position:relative;z-index:2">'+
+        '<div style="margin-top:24px"><img class="big-cover" src="'+coverData(342,330)+'" alt=""></div>'+
+        '<div style="margin-top:24px"><div class="p-title">妄想感傷代償連盟</div><div class="p-artist">雨宮天</div></div>'+
+        '<div class="flex1"></div>'+PlayerControls()+
+      '</div>'+
+    '</div>'+
+    '<div class="dots" style="background:#24101F"><i class="on"></i><i></i></div><div style="height:8px;background:#24101F"></div>'+
+  '</div><div class="home-ind" style="background:rgba(255,255,255,.5)"></div>';
+}
+
+/* ══════ SP8 播放页·歌词页 ══════ */
+function SP8(){
+  return '<div class="flex-col phone" style="background:#24101F">'+
+    '<div class="player-bg flex-col">'+
+      StatusBar(true)+
+      '<div class="top-cast">'+I.cast+'</div>'+
+      '<div class="flex1 flex-col" style="padding:0 24px 20px;position:relative;z-index:2">'+
+        '<div class="lyric-head" style="margin-top:48px;flex:none"><img src="'+coverData(48,330)+'" alt="">'+
+          '<div style="flex:1;min-width:0"><div class="t">妄想感傷代償連盟</div><div class="a">雨宮天</div></div></div>'+
+        '<div class="lyric-body">'+
+          '<div class="ln">目を覚ませ 眠りから</div>'+
+          '<div class="ln">遠い記憶を手繰り寄せ</div>'+
+          '<div class="ln cur">妄想感傷代償連盟</div>'+
+          '<div class="ln">大義名分に踊る汗</div>'+
+          '<div class="ln">忘れないで その温もり</div>'+
+          '<div class="ln">いつかきっと また会える</div>'+
+        '</div>'+
+        '<div>'+PlayerControls()+'</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="dots" style="background:#24101F"><i></i><i class="on"></i></div><div style="height:8px;background:#24101F"></div>'+
+  '</div><div class="home-ind" style="background:rgba(255,255,255,.5)"></div>';
+}
+
+function PlayerControls(){
+  return '<div class="flex-col">'+
+    '<div class="ctrl-fn"><div style="padding:4px">'+I.repeat+'</div><div style="padding:4px">'+I.list+'</div></div>'+
+    '<div style="margin-top:24px">'+
+      '<div class="slider"><div class="line"><i style="width:38%"></i><div class="knob" style="left:38%"></div></div></div>'+
+      '<div class="times"><span>1:34</span><span>4:12</span></div>'+
+    '</div>'+
+    '<div class="ctrl-main" style="margin-top:16px">'+
+      '<div class="side">'+I.prev+'</div><div class="play">'+I.pause+'</div><div class="side">'+I.next+'</div></div>'+
+  '</div>';
+}
+
+/* ══════ SP9 队列弹层 ══════ */
+function SP9(){
+  const songs=[['妄想感傷代償連盟','雨宮天',330,true],['海の幽霊','米津玄師',205,false],['紅蓮華','LiSA',350,false],['Pretender','Official髭男dism',280,false]];
+  let rows='';
+  let n = 0;
+  songs.forEach(function(s){
+    n++;
+    const idx = s[3]
+      ? '<div class="q-idx"><div class="wf">'+I.waveform+'</div></div>'
+      : '<div class="q-idx">'+n+'</div>';
+    rows += '<div class="q-row pressable">'+idx+cover(40,s[2])+
+      '<div class="ti-main"><div style="font-size:14px;color:var(--tp);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+s[0]+'</div>'+
+      '<div style="font-size:11px;color:var(--ts);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+s[1]+'</div></div>'+
+      '<div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;flex:none;color:var(--ts)"><div style="width:14px;height:14px">'+I.xmark+'</div></div></div>';
+  });
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div style="background:rgba(0,0,0,.28);flex:1"></div>'+Bar(0)+
+    '<div class="sheet">'+
+      '<div class="sheet-drag"></div>'+
+      '<div class="sheet-head"><h3>播放列表(4)</h3><div class="spacer"></div>'+
+        '<div class="mode-pill">'+I.repeat+'顺序播放</div>'+
+        '<span style="font-size:13px;color:var(--brand-deep);padding:4px 2px 4px 10px;font-weight:500">清除列表</span></div>'+
+      '<div style="overflow:hidden">'+rows+'</div>'+
+    '</div></div>';
+}
+
+/* ══════ SP10 空态组 ══════ */
+function SP10(){
+  return '<div class="flex-col phone" style="background:var(--surface)">'+
+    StatusBar(false)+
+    '<div class="title-bar" style="border-bottom:1px solid var(--divider)"><h2>空态设计</h2></div>'+
+    '<div style="padding:16px 20px 0;flex:none"><div class="spec-note on-light">'+
+      '空态必须给出<b>下一步动作引导</b>，不能只有一句「暂无数据」。'+
+      '引导按钮用品牌粉实底（CTA 唯一性）。</div></div>'+
+    '<div style="flex:1;position:relative;border-bottom:1px solid var(--divider)">'+
+      '<div class="empty">'+
+        '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#F48FB1" stroke-width="1.4"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21" stroke-linecap="round"/></svg>'+
+        '<div class="big">没有找到相关歌曲</div><div class="sub">换个关键词，或试试搜索 UP 主</div>'+
+        '<div class="cta-pill">看看推荐 ›</div></div>'+
+      '<div class="anno anno-pink" style="left:16px;top:8px">搜索无结果</div></div>'+
+    '<div style="flex:1;position:relative;border-bottom:1px solid var(--divider)">'+
+      '<div class="empty"><div class="big">歌单还是空的</div>'+
+        '<div class="sub">在搜索页点击“⋯”把歌曲加进来吧</div>'+
+        '<div class="cta-pill">去搜索 ›</div></div>'+
+      '<div class="anno anno-pink" style="left:16px;top:8px">歌单为空</div></div>'+
+    '<div style="flex:1;position:relative">'+
+      '<div class="empty"><div class="big">还没有下载任务</div>'+
+        '<div class="sub">在搜索页点击“⋯”→“下载”即可保存歌曲</div>'+
+        '<div class="cta-pill">去搜索 ›</div></div>'+
+      '<div class="anno anno-pink" style="left:16px;top:8px">下载无任务</div></div>'+
+  '</div>';
+}
+
+/* ══════ SP11 品牌色板（哔哩哔哩粉色基调）═════ */
+function SP11(){
+  const sw = function(hex, nm, use, ratio, cls){
+    return '<div class="swatch"><div class="chip" style="background:'+hex+'"></div>'+
+      '<div class="meta"><div class="nm">'+nm+'</div><div class="hex">'+hex+'</div>'+
+      '<div class="use">'+use+'</div></div>'+
+      '<span class="ratio '+cls+'">'+ratio+'</span></div>';
+  };
+  return '<div class="flex-col phone">'+
+    StatusBar(false)+
+    '<div class="title-bar"><h2>品牌色板</h2></div>'+
+    '<div style="flex:1;overflow:hidden;padding:0 16px">'+
+      '<div class="spec-note on-light" style="margin-bottom:4px">'+
+        'B 站粉 <b>#FB7299</b> 白底对比度仅 <b>2.20:1</b>。'+
+        '保留它做视觉主色（图标/实底/大字号），白底小字改用'+
+        '<b>深粉 #C2185B（5.81:1）</b> —— 粉调不变，可读性达标。</div>'+
+      sw('#FB7299','brand','页签选中 · 进度条 · 实底填充 · 底栏光晕','2.20:1','fail')+
+      sw('#C2185B','brand-deep','白底上的粉字 · CTA 底色强调','5.81:1','pass')+
+      sw('#FFF1F5','brand-tint','浅粉区块底 · 搜索框 · 模式药丸','—','na')+
+      sw('#FFE0EA','brand-tint2','徽章 / 选中项浅底','—','na')+
+      sw('#00AEEC','brand-blue','链接 · 次要强调','3.06:1','na')+
+      '<div style="margin-top:8px">'+
+        sw('#1A1A1A','text_primary','标题 / 歌名','16.75:1','pass')+
+        sw('#6B6B70','text_secondary','歌手 / 状态 / 说明','5.31:1','pass')+
+        sw('#8A8A90','text_tertiary','时长 / 次要元信息','4.62:1','pass')+
+        sw('#BDBDC4','text_disabled','禁用态（无需达标）','—','na')+
+      '</div>'+
+    '</div>'+
+  '</div>'+Bar(3);
+}
+
+/* ══════ SP12 底栏规格（不变更项，三态）═════ */
+function SP12(){
+  const miniExpanded =
+    '<div class="mini"><img class="mini-cover" src="'+coverData(32,330)+'" alt="">'+
+    '<div class="mini-text"><div class="mini-title">妄想感傷代償連盟</div><div class="mini-artist">雨宮天</div></div>'+
+    '<div class="mini-ctrl" style="color:var(--tp)">'+
+      '<div style="width:16px;height:16px">'+I.prev+'</div>'+
+      '<div style="width:20px;height:20px">'+I.pause+'</div>'+
+      '<div style="width:16px;height:16px">'+I.next+'</div></div></div>';
+  return '<div class="spec-screen">'+
+    StatusBar(false)+
+    '<div style="padding:0 4px;flex:none"><h3 style="font-size:18px;font-weight:700;color:var(--tp);margin-bottom:4px">底栏规格（不变更）</h3>'+
+      '<div style="font-size:12px;color:var(--ts)">HdsTabs 沉浸光感悬浮胶囊 · 离底 20 + safeBottom</div></div>'+
+    '<div class="spec-card"><h4>A · 队列为空 → 纯页签</h4>'+
+      '<div style="height:56px"><div class="lye lye-static">'+tabsOnly(0)+'</div></div>'+
+      '<div style="font-size:11px;color:var(--tt);margin-top:10px">barFloatingStyle 不带 miniBar，播放栏整体隐藏</div></div>'+
+    '<div class="spec-card"><h4>B · 收起态 COLLAPSE → 圆盘 40</h4>'+
+      '<div style="height:56px"><div class="lye lye-static">'+
+        '<div class="mini mini-collapsed"><img class="mini-disc" src="'+coverData(40,330)+'" alt=""></div>'+tabsOnly(0)+'</div></div>'+
+      '<div style="font-size:11px;color:var(--tt);margin-top:10px">点圆盘经 onExpandRequest → applyMiniBarStyle(EXPAND)</div></div>'+
+    '<div class="spec-card"><h4>C · 展开态 EXPAND → 融合一行</h4>'+
+      '<div style="height:56px"><div class="lye lye-static">'+miniExpanded+tabsOnly(0)+'</div></div>'+
+      '<div style="font-size:11px;color:var(--tt);margin-top:10px">HORIZONTAL：播放栏左、页签右，同一个胶囊</div></div>'+
+    '<div class="spec-note on-light"><b>四项合起来才是「沉浸光感」</b><br>'+
+      'systemMaterialEffect → <code>IMMERSIVE</code>（支持时 EXQUISITE）<br>'+
+      'lightColor → <code>#FB7299 α12%</code> 主题色光晕<br>'+
+      'barOpacity → <code>0.9</code> 微透明<br>'+
+      'barBottomMargin → <code>20 + safeBottom</code></div>'+
+  '</div>';
+}
+
+/* ══════ SP13 易用性规格 ══════ */
+function SP13(){
+  return '<div class="flex-col phone" style="background:var(--surface)">'+
+    StatusBar(false)+
+    '<div class="title-bar" style="flex:none"><h2>易用性规格</h2></div>'+
+    '<div style="padding:8px 16px;flex:none"><div class="spec-note on-light">'+
+      '<b>触达铁律：视觉可以小，命中区必须 ≥ 44vp</b><br>'+
+      '外层 44×44 + 图标居中，观感不变；相邻不同语义热区间留 <code>8vp</code> 缓冲。</div></div>'+
+    '<div style="position:relative;flex:none;padding:8px 0">'+
+      '<div class="anno anno-pink" style="left:16px;top:2px">列表行：⋯ 命中区 44×44</div>'+
+      '<div style="height:24px"></div>'+
+      '<div style="position:relative">'+
+        '<div class="row-item pressable" style="padding-right:4px">'+cover(48,350)+
+          '<div class="ti-main"><div class="ti-title">紅蓮華</div>'+
+          '<div class="ti-sub"><span class="ti-artist">LiSA</span><span class="ti-dur">3:58</span></div></div>'+
+          '<div class="hit-more">'+I.more+'</div></div>'+
+        '<div class="hit-ring" style="right:4px;top:2px;width:44px;height:44px"></div></div>'+
+      '<div style="font-size:11px;color:var(--tt);padding:8px 16px 0;line-height:1.6">'+
+        '改前「⋯」仅文字宽（约 20×28）且紧贴行热区 → 想点「⋯」会触发播放。'+
+        '改后整行 padding-right 16→4，两热区不再重叠。</div></div>'+
+    '<div style="position:relative;flex:none;padding:16px 0 0">'+
+      '<div class="anno anno-pink" style="left:16px;top:4px">下载行：删除键命中区 44×44</div>'+
+      '<div style="height:24px"></div>'+
+      '<div style="position:relative">'+
+        '<div class="dl-row pressable">'+cover(48,350)+
+          '<div class="ti-main"><div class="ti-title">紅蓮華</div>'+
+          '<div style="font-size:13px;color:var(--ts);margin-top:4px">正在下载 · 2.4/5.1MB</div>'+
+          '<div class="prog"><i style="width:47%"></i></div></div>'+
+          '<div class="hit-icon">'+I.trash+'</div></div>'+
+        '<div class="hit-ring" style="right:0;top:2px;width:44px;height:44px"></div></div>'+
+      '<div style="font-size:11px;color:var(--tt);padding:8px 16px 0;line-height:1.6">'+
+        'emoji「🗑」已换 <code>sys.symbol.trash</code>（跨设备字形不一致）。</div></div>'+
+    '<div style="padding:16px;flex:none"><div class="spec-note on-light">'+
+      '<b>按压态</b><br><code>stateStyles({ pressed: press_overlay })</code><br>'+
+      '56 处 onClick 原本零反馈，已补清单条 / 下载行 / 控制键。</div></div>'+
+  '</div>';
+}
+
+/* ══════ 装配 ══════ */
+const SLOTS = [
+  ['SP1','搜索页','4 分段 + TrackItem 列表'],
+  ['SP2','歌单页','最近播放横向 + 我的歌单'],
+  ['SP3','下载管理','四态任务 · 全部开始/暂停'],
+  ['SP4','设置页','外观/下载/通用三组'],
+  ['SP5','歌单详情','大封面 + 播放全部'],
+  ['SP6','最近播放','子页 · 返回 + 清空'],
+  ['SP7','播放页 · 封面','沉浸背景 + Swiper 第 1 页'],
+  ['SP8','播放页 · 歌词','Canvas 歌词 + 第 2 页'],
+  ['SP9','播放列表弹层','模式药丸 + 队列'],
+  ['SP10','空态组','带下一步动作引导'],
+  ['SP11','品牌色板','B站粉 · 双粉策略'],
+  ['SP12','底栏规格','不变更 · 三态基准'],
+  ['SP13','易用性规格','44vp 触达 + 按压态']
+];
+const BUILDERS = [SP1,SP2,SP3,SP4,SP5,SP6,SP7,SP8,SP9,SP10,SP11,SP12,SP13];
+
+let html='';
+SLOTS.forEach(function(s,i){
+  html += '<div class="slot"><div class="slot-label"><b>'+s[0]+'</b> '+s[1]+' <i>'+s[2]+'</i></div>'+
+    '<div class="screen-wrap">'+BUILDERS[i]()+'</div></div>';
+});
+document.getElementById('grid').innerHTML = html;
+</script>
+</body>
+</html>

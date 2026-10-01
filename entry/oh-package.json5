@@ -1,0 +1,8 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "BiliMusic 主模块",
+  "main": "",
+  "dependencies": {},
+  "devDependencies": {}
+}

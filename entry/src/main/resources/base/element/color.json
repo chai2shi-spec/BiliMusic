@@ -1,0 +1,112 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#FFFB7299"
+    },
+    {
+      "name": "bili_pink",
+      "value": "#FFFB7299"
+    },
+    {
+      "name": "bili_blue",
+      "value": "#FF00AEEC"
+    },
+    {
+      "name": "brand_deep",
+      "value": "#FFC2185B"
+    },
+    {
+      "name": "brand_surface",
+      "value": "#FFFFF1F5"
+    },
+    {
+      "name": "brand_on",
+      "value": "#FF3D0018"
+    },
+    {
+      "name": "text_primary",
+      "value": "#FF1A1A1A"
+    },
+    {
+      "name": "text_secondary",
+      "value": "#FF6B6B70"
+    },
+    {
+      "name": "text_tertiary",
+      "value": "#FF8A8A90"
+    },
+    {
+      "name": "text_disabled",
+      "value": "#FFBDBDC4"
+    },
+    {
+      "name": "bg_divider",
+      "value": "#FFE8E8EC"
+    },
+    {
+      "name": "progress_track",
+      "value": "#FFE0E0E0"
+    },
+    {
+      "name": "progress_paused",
+      "value": "#FFBDBDC4"
+    },
+    {
+      "name": "state_success",
+      "value": "#FF52C41A"
+    },
+    {
+      "name": "state_error",
+      "value": "#FFD93026"
+    },
+    {
+      "name": "press_overlay",
+      "value": "#0F000000"
+    },
+    {
+      "name": "bg_page",
+      "value": "#FFF5F5F5"
+    },
+    {
+      "name": "bg_card",
+      "value": "#FFFFFFFF"
+    },
+    {
+      "name": "scrim",
+      "value": "#80800000"
+    },
+    {
+      "name": "scrim_light",
+      "value": "#14000000"
+    },
+    {
+      "name": "slider_select",
+      "value": "#DBFFFFFF"
+    },
+    {
+      "name": "slider_track",
+      "value": "#33FFFFFF"
+    },
+    {
+      "name": "play_text_color",
+      "value": "#99FFFFFF"
+    },
+    {
+      "name": "singer_text",
+      "value": "#4DFFFFFF"
+    },
+    {
+      "name": "select_swiper",
+      "value": "#DBFFFFFF"
+    },
+    {
+      "name": "shadow_color",
+      "value": "#66000000"
+    },
+    {
+      "name": "toast_bg",
+      "value": "#E61E1E22"
+    }
+  ]
+}
