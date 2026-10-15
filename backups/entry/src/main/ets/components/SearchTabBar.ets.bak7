@@ -1,0 +1,242 @@
+/**
+ * 搜索页顶栏内容件（HarmonyX 根栏移植，2026-10-10）。
+ *
+ * 搜索行（SearchInputBar）与页签行（SearchTabsBar）都回到根 HdsNavigation
+ * titleBar 的 stackBuilder（Index.immersiveTitleBarContent）：
+ * - SearchInputBar：行 1（56 锁高行内垂直居中，Index 侧承载），纯内容件，
+ *   视觉零改动（32vp 输入框、8vp 圆角语言、B 站粉滑片）——由此重获 HDS
+ *   原生 IMMERSIVE 材质（此前的页面层自绘玻璃 SearchTopBar 已整体删除）。
+ * - SearchTabsBar：行 2（position 溢出渲染到标题栏下方），纯内容件
+ *   （滑块选段行（与「视频/UP主」同款样式）+ 行级 onClick 兜底 + 实测镜像回写）。
+ *   ⚠️ 已知行为变化（用户确认接受）：HDS 材质只覆盖标题栏 [0, safeTop+56]，
+ *   行 2 无磨砂背板 —— 滚动内容从行 2 下方穿过（HarmonyX 首页页签行同款）。
+ *
+ * - 状态：keyword / searchKind / tab 是页面与栏共享的双向状态（两侧
+ *   @StorageLink，任一侧写入另一侧即见）。页签行实测高度经
+ *   STORE_SEARCH_TABS_HEIGHT 回写（SearchTabsBar onAreaChange），页面读它做
+ *   列表挂载门控与让位量（contentStartOffset）。
+ * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法（页面 aboutToAppear 注册）。
+ * - 唯一机械适配：滑片白片平移动画原是页面 setSearchKind 里的 animateTo
+ *   包裹状态写入；迁出页面后状态写入方在页面、动画节点在栏组件，animateTo
+ *   跨不了这层 —— 改为白片自带 .animation（200ms EaseOut，参数一致，观感等价）。
+ */
+
+import { TabScrollerHolder } from '../service/TabScrollerHolder';
+import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { ButtonMaterialModifier, makeButtonMaterialModifier } from '../utils/HeaderBarMaterial';
+import { SearchStateHolder } from '../service/SearchStateHolder';
+import {
+  STORE_SEARCH_KEYWORD,
+  STORE_SEARCH_KIND,
+  STORE_SEARCH_TAB,
+  STORE_SEARCH_TABS_HEIGHT
+} from '../common/Constants';
+
+/**
+ * 搜索行（根栏 stackBuilder 行 1，垂直居中在 56vp 行内）：
+ * 输入框 + 类型滑块选段（视频 / UP主）+ 搜索按钮，视觉逐字克隆原 searchBar 首行。
+ */
+@Component
+export struct SearchInputBar {
+  /** 双向：根栏输入 ↔ 页面（点历史词条 / 恢复会话词）。初值取 holder 的会话词，两侧同源不打架 */
+  @StorageLink(STORE_SEARCH_KEYWORD) keyword: string = SearchStateHolder.keyword;
+  /** 双向：滑块选段 ↔ 页面（doSearch / 占位文案都读它） */
+  @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
+  /** 搜索按钮沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
+  private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
+
+  build() {
+    Row() {
+      // text 用 $$ 双向绑定：点历史词条是**页面改 AppStorage**，单向绑定时
+      // 输入框不一定跟着刷新（用户输入侧有 $$ 回写，但外部改值没有回显路径）
+      TextInput({
+        placeholder: this.searchKind === 'user' ? '搜索UP主' : '搜索歌曲、歌单',
+        text: $$this.keyword
+      })
+        .layoutWeight(1)
+        // 高度与右侧滑块一致（32），圆角与按钮/滑块同一套 8vp 语言
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor($r('app.color.bg_card'))
+        .onSubmit((): void => {
+          TabScrollerHolder.searchSubmit();
+        })
+        // 点击 / 获焦都展开历史：已获焦时再点一次不会触发 onFocus，只靠 onClick 补
+        .onClick((): void => {
+          TabScrollerHolder.searchOpenHistory();
+        })
+        .onFocus((): void => {
+          TabScrollerHolder.searchOpenHistory();
+        })
+        .onChange((_v: string): void => {
+          // $$ 已回写 keyword；这里只收历史面板，别让面板盖着结果
+          TabScrollerHolder.searchCloseHistory();
+        })
+      // 搜索类型滑块选段（视频 / UP主，iOS segmented 式）。
+      // 放在搜索框同一行而不是下方：下方是历史面板的定位区，塞东西进去会和面板打架。
+      // 凹槽 bg_divider，滑片 B站粉 bili_pink 圆角 8 平移 50vp 切换段，
+      // 选中文字 brand_on（与所有粉底按钮同一配色）；
+      // 标签行声明在滑片之后 = 叠在滑片上层，点击落在标签上。
+      // ⚠️ 白片动画见文件头注释：原 animateTo 迁移后改为自带 .animation。
+      Stack({ alignContent: Alignment.Start }) {
+        Column()
+          .width(48)
+          .height(28)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor($r('app.color.bili_pink'))
+          .translate({ x: this.searchKind === 'user' ? 50 : 0 })
+          .animation({ duration: 200, curve: Curve.EaseOut })
+        Row() {
+          Text('视频')
+            .fontSize(13)
+            .fontColor(this.searchKind === 'user'
+              ? $r('app.color.text_secondary')
+              : $r('app.color.brand_on'))
+            .fontWeight(this.searchKind === 'user' ? FontWeight.Normal : FontWeight.Medium)
+            .width(48)
+            .height(28)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('切换到搜视频')
+            .accessibilityLevel('yes')
+            .onClick((): void => {
+              TabScrollerHolder.searchSetKind('video');
+            })
+          Text('UP主')
+            .fontSize(13)
+            .fontColor(this.searchKind === 'user'
+              ? $r('app.color.brand_on')
+              : $r('app.color.text_secondary'))
+            .fontWeight(this.searchKind === 'user' ? FontWeight.Medium : FontWeight.Normal)
+            .width(48)
+            .height(28)
+            .textAlign(TextAlign.Center)
+            .margin({ left: 2 })
+            .accessibilityText('切换到搜 UP 主')
+            .accessibilityLevel('yes')
+            .onClick((): void => {
+              TabScrollerHolder.searchSetKind('user');
+            })
+        }
+      }
+      .width(102)
+      .height(32)
+      .borderRadius(BUTTON_RADIUS_VP)
+      .backgroundColor($r('app.color.bg_divider'))
+      .padding(2)
+      // 与搜索按钮同款 left 8：输入框↔滑块↔搜索按钮 三段间距一致
+      .margin({ left: 8 })
+      Button('搜索', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor($r('app.color.bili_pink'))
+        .fontColor($r('app.color.brand_on'))
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.searchSubmit();
+        })
+        .margin({ left: 8 })
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+  }
+}
+
+/**
+ * 内容页签行（搜索 / 推荐 / 排行榜 / 音乐中心，根栏 stackBuilder 行 2）。
+ * 滑块选段与行 1「视频/UP主」同一套视觉语言（用户要求，2026-10-10）：
+ * bg_divider 凹槽 + bili_pink 圆角 8 滑片平移 200ms + 选中段文字 brand_on。
+ * 铺满整行、四段等宽（滑片宽 = 凹槽内容区 25%，translate 百分比参照滑片
+ * 自身宽度 → tabIndex*100% 精确落在段边界）。
+ * 行高 44 + 顶部下移 0.4×44（17.6vp，用户 2026-10-10）：与上方搜索行拉开
+ * 呼吸间距；下移量计入组件实测高（onAreaChange 量出 61.6 回写
+ * searchTabsHeight）→ 页面首条让位（barTotalHeight，100→117.6）与历史面板
+ * 定位读镜像自动跟随，页面侧零改动。
+ * 滑片/凹槽 28/32 高，在下移后的 44 行内垂直居中。段触达区 28（同行 1 滑块，
+ * 由原 chip 的 44 收窄——样式对齐的预期变化）。
+ * 行级 onClick：历史面板展开时点凹槽空白处照常收起（段自身点击不冒泡到行
+ * —— 切换页签不收历史面板，与原 chip 行为一致）。
+ */
+@Component
+export struct SearchTabsBar {
+  /** 只读：选中态由页面 switchTab 写入 */
+  @StorageProp(STORE_SEARCH_TAB) tab: string = 'search';
+  /** 页签行实测高（vp）：onAreaChange 回写（初值 0 = 未实测），页面门控/让位量读它 */
+  @StorageLink(STORE_SEARCH_TABS_HEIGHT) searchTabsHeight: number = 0;
+
+  build() {
+    Row() {
+      Stack({ alignContent: Alignment.Start }) {
+        // 滑片：宽 25%（凹槽内容区四等分）；x 平移用百分比 —— translate 百分比
+        // 参照组件自身宽度，tabIndex*100% 逐段落在边界上。
+        // ⚠️ 滑片动画同行 1：自带 .animation（animateTo 跨不了组件层）。
+        Column()
+          .width('25%')
+          .height(28)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor($r('app.color.bili_pink'))
+          .translate({ x: `${this.segmentIndex() * 100}%` })
+          .animation({ duration: 200, curve: Curve.EaseOut })
+        // 标签行：声明在滑片之后 = 叠在滑片上层，点击落在标签；layoutWeight(1) 四段等宽
+        Row() {
+          this.Segment('搜索', 'search')
+          this.Segment('推荐', 'recommend')
+          this.Segment('排行榜', 'ranking')
+          this.Segment('音乐中心', 'center')
+        }
+        .width('100%')
+      }
+      .layoutWeight(1)
+      .height(32)
+      .borderRadius(BUTTON_RADIUS_VP)
+      .backgroundColor($r('app.color.bg_divider'))
+      .padding(2)
+    }
+    .height(61.6)
+    .padding({ top: 17.6, left: 12, right: 12 })
+    .onClick((): void => {
+      TabScrollerHolder.searchCloseHistory();
+    })
+    // 量出页签行真实高度：页面列表挂载门控与让位量都读它
+    .onAreaChange((_old: Area, cur: Area): void => {
+      const h: number = cur.height as number;
+      if (h > 0) {
+        this.searchTabsHeight = h;
+      }
+    })
+  }
+
+  /** 页签键 → 滑片段序（与 build 里 Segment 声明顺序一致）；tabIndex 与基类保留成员撞名，故此命名 */
+  private segmentIndex(): number {
+    if (this.tab === 'recommend') {
+      return 1;
+    }
+    if (this.tab === 'ranking') {
+      return 2;
+    }
+    if (this.tab === 'center') {
+      return 3;
+    }
+    return 0;
+  }
+
+  /**
+   * 滑块段标签。只接收**静态字面量**参数，选中态 `this.tab === target` 在
+   * Builder 内部现算；onClick 落在标签上（叠于滑片上层）。
+   */
+  @Builder
+  Segment(label: string, target: string) {
+    Text(label)
+      .fontSize(13)
+      .layoutWeight(1)
+      .height(28)
+      .textAlign(TextAlign.Center)
+      .fontColor(this.tab === target ? $r('app.color.brand_on') : $r('app.color.text_secondary'))
+      .fontWeight(this.tab === target ? FontWeight.Medium : FontWeight.Normal)
+      .accessibilityText(`切换到${label}`)
+      .accessibilityLevel('yes')
+      .onClick((): void => {
+        TabScrollerHolder.searchSwitchTab(target);
+      })
+  }
+}

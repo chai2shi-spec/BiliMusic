@@ -1,0 +1,194 @@
+/**
+ * 歌单页顶栏内容（HdsNavigation 迁移批 4，机制同 DownloadsTabBar）。
+ *
+ * 歌单页原 GlassTopBar 固定栏（标题行「选择/新建」按钮 + 第二行「多选工具条 /
+ * 最近播放入口卡片」二选一）迁到根 HdsNavigation 的 titleBar：
+ * - 标题行按钮：Index.tabTitleBar 歌单页分支槽入（stackBuilder）；
+ * - 第二行：titleBar content 的 bottomBuilder 槽。
+ *
+ * - 状态：@StorageProp 订阅 PlaylistsPage 推到 AppStorage 的镜像键
+ *   （STORE_PL_BAR_*，唯一写入口 PlaylistsPage.syncBarState / refresh）。
+ * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法（页面注册）；
+ *   「最近播放」导航例外 —— NavStackHolder 全局可达，组件直接 push。
+ * - 视觉：与页面原 playlistsBar builder 逐字一致，保证「换容器不换观感」。
+ *
+ * ⚠️ bottomBuilder 高度不自适应（官方约束，批 2 UpSpace/PD 同款结论）：
+ * PlBottomBar 的内层根节点 onAreaChange 实测回写 STORE_PL_BAR_BOTTOM_HEIGHT，
+ * Index 侧用它显式给定 bottomBuilder.height（未实测前由估计值垫底）；
+ * 页面侧读同一份镜像组让位量（safeTop + 56 + 实测值）。
+ */
+
+import { TabScrollerHolder } from '../service/TabScrollerHolder';
+import { NavStackHolder } from '../service/NavStackHolder';
+import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { ButtonMaterialModifier, makeButtonMaterialModifier } from '../utils/HeaderBarMaterial';
+import { InsetCard } from './InsetCardGroup';
+import {
+  STORE_PL_BAR_SELECTING,
+  STORE_PL_BAR_CAN_SELECT,
+  STORE_PL_BAR_ALL_SELECTED,
+  STORE_PL_BAR_SELECTED_COUNT,
+  STORE_PL_BAR_RECENT_COUNT,
+  STORE_PL_BAR_BOTTOM_HEIGHT
+} from '../common/Constants';
+
+/**
+ * 标题行右侧按钮组（Index.tabTitleBar 歌单页分支槽入）。
+ * 多选模式：完成；常规模式：选择（歌单 ≥2 才出现）+ 新建。
+ */
+@Component
+export struct PlTitleActions {
+  @StorageProp(STORE_PL_BAR_SELECTING) selecting: boolean = false;
+  /** 歌单数 ≥2 才有可合并对象，「选择」才出现（镜像派生，页面 syncBarState 推送） */
+  @StorageProp(STORE_PL_BAR_CAN_SELECT) canSelect: boolean = false;
+  private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
+
+  build() {
+    if (this.selecting) {
+      Button('完成', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor($r('app.color.bili_pink'))
+        .fontColor($r('app.color.brand_on'))
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.plToggleSelecting();
+        })
+    } else {
+      if (this.canSelect) {
+        Button('选择', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor($r('app.color.bg_divider'))
+          .fontColor($r('app.color.text_primary'))
+          .margin({ right: 8 })
+          .onClick((): void => {
+            TabScrollerHolder.plToggleSelecting();
+          })
+      }
+      Button('新建', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor($r('app.color.bili_pink'))
+        .fontColor($r('app.color.brand_on'))
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.plOpenCreate();
+        })
+    }
+  }
+}
+
+/**
+ * 标题行下方第二行（titleBar content 的 bottomBuilder 槽）。
+ * 双形态：多选工具条（全选 / 合并选中）⇄ 最近播放入口卡片，随 selecting 切换。
+ * 内层根节点 onAreaChange 实测高度回写 STORE_PL_BAR_BOTTOM_HEIGHT
+ * （页面让位量与 Index 的 bottomBuilder.height 都读这份镜像）。
+ */
+@Component
+export struct PlBottomBar {
+  @StorageProp(STORE_PL_BAR_SELECTING) selecting: boolean = false;
+  @StorageProp(STORE_PL_BAR_ALL_SELECTED) allSelected: boolean = false;
+  @StorageProp(STORE_PL_BAR_SELECTED_COUNT) selectedCount: number = 0;
+  @StorageProp(STORE_PL_BAR_RECENT_COUNT) recentCount: number = 0;
+
+  build() {
+    Column() {
+      if (this.selecting) {
+        Row() {
+          Text(this.allSelected ? '取消全选' : '全选')
+            .fontSize(13)
+            .fontColor($r('app.color.brand_deep'))
+            .height(44)
+            .padding({ left: 20, right: 12 })
+            .borderRadius(8)
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              TabScrollerHolder.plToggleSelectAll();
+            })
+          Blank()
+          // 少于两个无法合并：置灰，点了只给一句提示（openMergeEditor 里兜）
+          Text(this.selectedCount > 0 ? `合并选中(${this.selectedCount})` : '合并选中')
+            .fontSize(13)
+            .fontColor(this.selectedCount >= 2 ? $r('app.color.brand_deep') : $r('app.color.text_disabled'))
+            .height(44)
+            .padding({ left: 12, right: 20 })
+            .borderRadius(8)
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              TabScrollerHolder.plOpenMergeEditor();
+            })
+        }
+        .width('100%')
+        .height(44)
+        .alignItems(VerticalAlign.Center)
+      } else {
+        // 最近播放入口：iOS 分组卡片样式（原列表头部 ListItem 平移上来）
+        Column() {
+          InsetCard() {
+            Row() {
+              // 28vp 图标底 + 系统时钟符号（替代 🕘 emoji，与其他入口的符号风格统一）
+              Stack() {
+                SymbolGlyph($r('sys.symbol.clock'))
+                  .fontSize(16)
+                  .fontColor([$r('app.color.bili_pink')])
+                  .accessibilityLevel('no')
+              }
+              .width(28)
+              .height(28)
+              .borderRadius(7)
+              .backgroundColor($r('app.color.brand_surface'))
+
+              Column() {
+                Text('最近播放')
+                  .fontSize(16)
+                  .fontColor($r('app.color.text_primary'))
+                Text(this.recentCount > 0 ? `${this.recentCount} 首` : '暂无播放记录')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .margin({ top: 4 })
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              .margin({ left: 12 })
+
+              Text('›')
+                .fontSize(20)
+                .fontColor($r('app.color.text_disabled'))
+                .margin({ right: 8 })
+            }
+            .width('100%')
+            .padding({ left: 16, right: 8, top: 12, bottom: 12 })
+            .alignItems(VerticalAlign.Center)
+            // 按压铁律⑤：可点的整行必须给按压态（stateStyles 不改布局、不引额外节点）
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              NavStackHolder.stack.pushPath({ name: 'Recent' });
+            })
+          }
+        }
+        .padding({ top: 4, bottom: 8 })
+      }
+    }
+    .width('100%')
+    // bottomBuilder 高度不自适应（官方约束）：内层根节点实测回写，根栏/页面两侧共用
+    .onAreaChange((_old: Area, cur: Area): void => {
+      const h: number = cur.height as number;
+      if (h > 0) {
+        AppStorage.setOrCreate(STORE_PL_BAR_BOTTOM_HEIGHT, h);
+      }
+    })
+  }
+}

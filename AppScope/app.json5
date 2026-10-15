@@ -1,0 +1,12 @@
+{
+  "app": {
+    "bundleName": "com.chai.bilimusic",
+    "vendor": "Hanversion",
+    "versionCode": 1001002,
+    "versionName": "1.1.2",
+    // 2026-10-08 图标分层（应用市场审核要求）：改指分层描述 layered_image.json，
+    // 前景 app_icon_fg / 背景 app_icon_bg 各 1024×1024，圆角由系统遮罩处理。
+    "icon": "$media:layered_image",
+    "label": "$string:app_name"
+  }
+}

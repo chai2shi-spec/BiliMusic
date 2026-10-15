@@ -1,0 +1,792 @@
+/**
+ * UP 主主页（站内）：显示 UP 的资料 + 投稿列表，并可把投稿**订阅成持续更新的歌单**。
+ *
+ * 为什么是站内页而不是跳 B 站：订阅要在 App 内落成可维护的歌单，
+ * 跳出去就没法「拉取新投稿」，也就没有 C 方案的意义。
+ *
+ * 数据来源（2026-10-03 匿名态实测，均可用）：
+ *  · 资料 `getUserCard`（x/web-interface/card）—— **不要用 space/wbi/acc/info**，
+ *    那个匿名只回 v_voucher，字段全空；
+ *  · 投稿 `getUserVideos`（x/space/wbi/arc/search，30 条/页，真分页）。
+ *
+ * 入参走 NavStackHolder 静态字段（upMid 必填、upName 兜底），与 PlaylistDetail 同套约定。
+ */
+
+import * as BilibiliApi from '../api/BilibiliApi';
+import { SpaceVideo } from '../api/BilibiliApi';
+import { Track, buildTrack } from '../model/MusicModels';
+import { LibraryStore, UpSubscribeResult } from '../service/LibraryStore';
+import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
+import { currentNetworkLabel } from '../utils/NetworkUtil';
+import { NavStackHolder } from '../service/NavStackHolder';
+import { MusicPlayer } from '../player/MusicPlayer';
+import { TrackItem } from '../components/TrackItem';
+import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
+import { CoverImage } from '../components/CoverImage';
+import { toHttpsUrl, toThumbUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
+import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
+import { common } from '@kit.AbilityKit';
+import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP } from '../common/Constants';
+import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { showAppToast } from '../components/AppToast';
+
+/** 每页投稿数（接口实测 30 条/页） */
+const PAGE_SIZE: number = 30;
+/** 搜索反查最多翻几页（每页 20 条，3 页 ≈ 60 条，够看又不至于太慢） */
+const SEARCH_MAX_PAGES: number = 3;
+/** 失败后「重试」的冷却（ms）：B 站这类接口按 IP 限流，连点只会继续被拒 */
+const RETRY_COOLDOWN_MS: number = 4000;
+
+/** `mm:ss` / `hh:mm:ss` → 秒（SpaceVideo.length 是字符串；榜单是秒数，两种都认） */
+function spaceDuration(raw: string): number {
+  return parseDurationText(raw);
+}
+
+/** UP 投稿 → 曲目。upMid / upName 由列表所在 UP 决定（投稿条目自身不带 mid） */
+function mapSpaceVideo(v: SpaceVideo, upMid: string, upName: string): Track {
+  return buildTrack({
+    id: v.bvid,
+    bvid: v.bvid,
+    aid: String(v.aid ?? 0),
+    title: stripHtmlTags(v.title),
+    artist: v.author || upName,
+    upMid: upMid,
+    coverUrl: toHttpsUrl(v.pic),
+    duration: spaceDuration(v.length),
+    playCount: v.play ?? 0
+  });
+}
+
+/** 粉丝数：超过 1 万折成「x.x 万」，过亿折成「x.x 亿」（避免 8 位数字撑破布局） */
+function formatFans(fans: number): string {
+  if (fans >= 100000000) {
+    return `${(fans / 100000000).toFixed(1)} 亿`;
+  }
+  if (fans >= 10000) {
+    return `${(fans / 10000).toFixed(1)} 万`;
+  }
+  return `${fans}`;
+}
+
+@Component
+export struct UpSpacePage {
+  /** UP 主 id（进入本页的必填入参） */
+  @State upMid: string = '';
+  @State upName: string = '';
+  @State upFace: string = '';
+  @State fans: number = 0;
+  @State tracks: Track[] = [];
+  @State loading: boolean = false;
+  @State loadingMore: boolean = false;
+  @State page: number = 1;
+  @State hasMore: boolean = true;
+  /** 资料 / 列表是否都失败了（空态区分「没有投稿」与「拉不到」） */
+  @State loadFailed: boolean = false;
+  /**
+   * 失败原因（人话）。
+   *
+   * 之前这里只有一句「检查网络后再试一次」，但真机失败的原因完全不是网络：
+   * B 站的空间接口对匿名访问风控很严（-352 风控校验失败 / -799 请求过于频繁 / HTTP 412），
+   * 把 code 显示出来才知道该等风控过去还是该换网络。
+   */
+  @State failReason: string = '';
+  /** 是否已订阅（进页面时按 upMid 查一次本地库） */
+  @State subscribed: boolean = false;
+  @State subscribedCount: number = 0;
+  /** 订阅 / 拉新进行中：按钮禁用并显示「处理中…」 */
+  @State subBusy: boolean = false;
+  /** 重试冷却中：按钮禁用（真正的门在 retryLocked 成员，状态只是给用户看的） */
+  @State retryCooling: boolean = false;
+  private retryLocked: boolean = false;
+  private retryTimer: number = -1;
+  /**
+   * 搜索反查本身是否可用（`code=0`）。
+   * 决定失败文案：「搜索可用但没命中」≠「搜索被限」，两者给用户的话完全不同。
+   */
+  private searchOk: boolean = true;
+
+  @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
+  @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
+  @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+
+  private player: MusicPlayer = MusicPlayer.getInstance();
+  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  /** 子页转场横移量：常驻 '0%'，转场代理按 push/pop 临时改写 */
+  @State navTransX: string = '0%';
+
+  aboutToAppear(): void {
+    const mid: string = NavStackHolder.upMid;
+    this.upMid = mid;
+    this.upName = NavStackHolder.upName;
+    // 入口方若已拿到头像（搜 UP 主结果）就先垫上，loadCard 拿到真图后会覆盖
+    this.upFace = NavStackHolder.upFace;
+    if (mid.length === 0) {
+      this.loadFailed = true;
+      this.failReason = '没有拿到 UP 主信息，请从列表里重新进入';
+      return;
+    }
+    this.refreshSubscriptionState();
+    this.loadCard();
+    this.loadPage(1);
+  }
+
+  aboutToDisappear(): void {
+    // 定时器必须清：否则离开页面后回调仍会写状态
+    if (this.retryTimer !== -1) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = -1;
+    }
+  }
+
+  /** 本地是否已有该 UP 的订阅歌单（决定按钮显示「订阅」还是「拉取新投稿」） */
+  private refreshSubscriptionState(): void {
+    const existing = LibraryStore.getPlaylistByUpMid(this.upMid);
+    this.subscribed = existing !== null;
+    this.subscribedCount = existing ? existing.tracks.length : 0;
+  }
+
+  // ===== 数据加载 =====
+
+  /**
+   * UP 资料。**失败不阻塞列表**：昵称缺失只影响头部那几行字，
+   * 投稿列表是本页主体，所以 card 失败只记日志（并保留 NavStackHolder 传进来的兜底昵称）。
+   */
+  private loadCard(): void {
+    BilibiliApi.getUserCard(Number(this.upMid))
+      .then((card: BilibiliApi.UserCard | null): void => {
+        if (!card) {
+          console.warn('up card empty');
+          return;
+        }
+        this.upName = card.name.length > 0 ? card.name : this.upName;
+        this.upFace = card.face;
+        this.fans = card.fans;
+      })
+      .catch((e: Error): void => {
+        // 匿名态被风控时这张卡会失败，属预期内：头部退回「只有昵称」的简版
+        console.error(`getUserCard failed: ${e.message}`);
+      });
+  }
+
+  /**
+   * 拉一页投稿。
+   *
+   * ⚠️ 与 SearchPage 的 onReachEnd 同款纪律：**三重闸门**（loading / loadingMore / 无更多）
+   * 少一个，短列表在首帧布局时就会连环触发，一口气把后面几页全拉下来。
+   *
+   * 加载策略（第一页与后续页走不同路子，因为空间接口只用来兜底）：
+   *   · 第一页先走**搜索反查**（`getUserVideosViaSearch`）—— 空间接口对匿名风控极强
+   *     （实测同一 URL 连打 8 次 0/8 成功），搜索接口才稳定；
+   *   · 搜索没命中（昵称搜不到 / 索引里没有）才退回空间接口；
+   *   · 后续页只能走空间接口，所以**搜索路径下不支持上拉翻页**（`hasMore` 直接置 false），
+   *     底部提示改成「仅显示最近投稿 · 订阅可持续获取新投稿」。
+   */
+  private async loadPage(pn: number): Promise<void> {
+    if (this.loading || this.loadingMore) {
+      return;
+    }
+    if (pn === 1) {
+      this.loading = true;
+      await this.loadFirstBySearch();
+      if (this.tracks.length > 0) {
+        // 搜索反查已拿到数据就不再动空间接口（省一次请求，也少一次被限流的机会）
+        this.hasMore = false;
+      } else {
+        await this.loadPageViaSpace(1);
+      }
+      this.loading = false;
+      return;
+    }
+    this.loadingMore = true;
+    await this.loadPageViaSpace(pn);
+    this.loadingMore = false;
+  }
+
+  /**
+   * 首选路径的结果。
+   *
+   * `searchOk=false` = 搜索接口自己被限 → 提示「稍后重试」；
+   * `searchOk=true` 但 list 为空 = 搜索里确实没有该 UP（昵称可能不出现在视频标题里）
+   * → 提示要说清「B 站搜不到」，否则用户会以为是 App 的 bug。
+   */
+  private fetchBySearch(): Promise<BilibiliApi.UpVideosSearchResult> {
+    return BilibiliApi.getUserVideosViaSearch(this.upMid, this.upName, PAGE_SIZE, SEARCH_MAX_PAGES)
+      .then((r: BilibiliApi.UpVideosSearchResult): BilibiliApi.UpVideosSearchResult => {
+        console.info(`up space: search ok=${r.searchOk}, hit ${r.list.length} videos`);
+        return r;
+      })
+      .catch((e: Error): BilibiliApi.UpVideosSearchResult => {
+        console.warn(`getUserVideosViaSearch failed: ${e.message}`);
+        return { list: [], searchOk: false };
+      });
+  }
+
+  /** 首选路径：搜索反查该 UP 的投稿并填进列表 */
+  private async loadFirstBySearch(): Promise<void> {
+    const r: BilibiliApi.UpVideosSearchResult = await this.fetchBySearch();
+    this.searchOk = r.searchOk;
+    if (r.list.length === 0) {
+      return;
+    }
+    const mapped: Track[] = [];
+    for (let i = 0; i < r.list.length; i++) {
+      mapped.push(mapSpaceVideo(r.list[i], this.upMid, this.upName));
+    }
+    this.tracks = mapped;
+    this.trackSource.reload(mapped);
+    this.page = 1;
+    this.loadFailed = false;
+    this.failReason = '';
+  }
+
+  /**
+   * 兜底路径：空间接口（带 3 次重试）。
+   *
+   * 失败时的提示要**区分两种「没有数据」**：
+   *   · 搜索可用但没命中 → 「B 站搜索里没有该 UP 的投稿」；
+   *   · 搜索也不可用 / 空间接口也全被拒 → 「接口被限，稍后重试」。
+   */
+  private async loadPageViaSpace(pn: number): Promise<void> {
+    try {
+      const vlist: SpaceVideo[] = await BilibiliApi.getUserVideosWithRetry(
+        Number(this.upMid), PAGE_SIZE, 'pubdate', 3
+      );
+      if (vlist.length === 0) {
+        this.hasMore = false;
+        return;
+      }
+      const mapped: Track[] = [];
+      for (let i = 0; i < vlist.length; i++) {
+        mapped.push(mapSpaceVideo(vlist[i], this.upMid, this.upName));
+      }
+      this.page = pn;
+      this.hasMore = vlist.length >= PAGE_SIZE;
+      this.tracks = pn === 1 ? mapped : [...this.tracks, ...mapped];
+      this.trackSource.reload(this.tracks);
+      this.loadFailed = false;
+      this.failReason = '';
+    } catch (e) {
+      const reason: string = this.describeError(e instanceof Error ? e : new Error(JSON.stringify(e)));
+      console.error(`getUserVideos(space) failed: ${reason}`);
+      if (this.tracks.length === 0) {
+        this.loadFailed = true;
+        this.failReason = this.searchOk
+          ? `B 站搜索里没有找到该 UP 的投稿${reason.length > 0 ? '（' + reason + '）' : ''}`
+          : reason;
+      }
+    }
+  }
+
+  private onReachEnd(): void {
+    if (this.loading || this.loadingMore || !this.hasMore) {
+      return;
+    }
+    this.loadPage(this.page + 1);
+  }
+
+  /**
+   * 把异常翻译成一句能直接决定动作的话。
+   *
+   * `BiliApiError.message` 形如 `BiliBili API Error [-352]: 风控校验失败 (/x/space/arc/search)`，
+   * 从中抠出 code 与服务端 message；HTTP 层异常（`HTTP 412 for …`）则直接用原文。
+   * 分不清时退回通用文案，**不要**把 `[object Object]` 之类甩给用户。
+   */
+  private describeError(e: Error): string {
+    const raw: string = e && e.message ? e.message : '';
+    if (raw.length === 0) {
+      return '投稿加载失败';
+    }
+    const matched: RegExpMatchArray | null = raw.match(/\[(-?\d+)\]\s*([^(\/]*)/);
+    if (matched) {
+      const code: string = matched[1];
+      const msg: string = (matched[2] || '').trim();
+      if (code === '-352' || code === '-509' || code === '-799') {
+        return `B 站限制了当前访问（${code}${msg.length > 0 ? ' ' + msg : ''}），过一会儿再试`;
+      }
+      if (code === '-403') {
+        return `请求被 B 站拒绝（${code}），签名或身份校验未通过`;
+      }
+      return `加载失败（${code}${msg.length > 0 ? ' ' + msg : ''}）`;
+    }
+    if (raw.indexOf('HTTP 412') >= 0) {
+      return 'B 站拒绝了匿名访问（412），检查网络环境后重试';
+    }
+    if (raw.indexOf('HTTP') >= 0) {
+      return raw;
+    }
+    return `加载失败：${raw.slice(0, 40)}`;
+  }
+
+  /**
+   * 失败后的重试：清干净状态重新拉第一页。
+   *
+   * 带 4 秒冷却：B 站这类接口按 IP 限流，用户连点只会继续被拒（而且每次重试都会
+   * 打两个接口，等于自己把限流阈值撞满）。
+   */
+  private retry(): void {
+    if (this.retryLocked) {
+      return;
+    }
+    this.retryLocked = true;
+    this.retryCooling = true;
+    this.retryTimer = setTimeout((): void => {
+      this.retryLocked = false;
+      this.retryCooling = false;
+    }, RETRY_COOLDOWN_MS);
+    this.loadFailed = false;
+    this.failReason = '';
+    this.hasMore = true;
+    this.page = 1;
+    this.tracks = [];
+    this.trackSource.reload(this.tracks);
+    this.loadCard();
+    this.loadPage(1);
+  }
+
+  /**
+   * 兜底：把该 UP 的投稿页交给 B 站自己打开。
+   *
+   * 站内接口被风控时这是**唯一 100% 可用**的路 —— openLink 对 https 链接会交给系统
+   * 浏览器（没装 B 站 App 也能看），装了 App 则可能直接跳 App。
+   */
+  private async openInBilibili(): Promise<void> {
+    if (this.upMid.length === 0) {
+      return;
+    }
+    const url: string = `https://space.bilibili.com/${this.upMid}/video`;
+    try {
+      // openLink 挂在 UIAbilityContext 上（不是基类 Context），所以要转一下
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await ctx.openLink(url);
+    } catch (e) {
+      console.error(`openLink failed: ${JSON.stringify(e)}`);
+      showAppToast('无法打开 B 站页面', 1800);
+    }
+  }
+
+  // ===== 订阅 =====
+
+  /**
+   * 首次订阅：取该 UP 的投稿 → 建成订阅歌单。
+   *
+   * 刻意**先取数据再建歌单**：直接建一个空歌单的话，接口失败就会留下一个永远空着的壳。
+   * 取数据的顺序＝列表页的顺序（搜索反查优先，空间接口兜底），理由见 `loadPage` 注释。
+   */
+  private subscribe(): void {
+    if (this.subBusy) {
+      return;
+    }
+    this.subBusy = true;
+    showAppToast('正在订阅…', 1200);
+    this.collectTracks()
+      .then((mapped: Track[]): void => {
+        if (mapped.length === 0) {
+          showAppToast('没取到该 UP 的投稿，稍后再试', 1800);
+          return;
+        }
+        const r: UpSubscribeResult = LibraryStore.subscribeUpPlaylist(
+          this.upMid, this.upName, mapped, this.upFace
+        );
+        this.subscribed = true;
+        this.subscribedCount = r.playlist.tracks.length;
+        this.showSubscribeResult(r);
+      })
+      .then((): void => {
+        this.subBusy = false;
+      });
+  }
+
+  /** 取该 UP 的投稿（搜索优先，空间兜底），返回已映射成 Track 的列表 */
+  private async collectTracks(): Promise<Track[]> {
+    const r: BilibiliApi.UpVideosSearchResult = await this.fetchBySearch();
+    this.searchOk = r.searchOk;
+    if (r.list.length > 0) {
+      return this.mapAll(r.list);
+    }
+    try {
+      return this.mapAll(await BilibiliApi.getUserVideosWithRetry(Number(this.upMid), PAGE_SIZE, 'pubdate', 3));
+    } catch (e) {
+      console.error(`collectTracks(space) failed: ${JSON.stringify(e)}`);
+      return [];
+    }
+  }
+
+  private mapAll(list: SpaceVideo[]): Track[] {
+    const mapped: Track[] = [];
+    for (let i = 0; i < list.length; i++) {
+      mapped.push(mapSpaceVideo(list[i], this.upMid, this.upName));
+    }
+    return mapped;
+  }
+
+  /**
+   * 拉取新投稿：并入订阅歌单。
+   *
+   * 走 `collectTracks()`（搜索反查优先）而不是顺序翻空间接口 ——「找新投稿」这件事
+   * 搜索反查反而更合适：结果按 `pubdate` 重排后天然就是「最近的投稿」，
+   * 而空间接口要翻好几页、每页都要赌一次限流。
+   */
+  private refreshSubscription(): void {
+    if (this.subBusy) {
+      return;
+    }
+    const existing = LibraryStore.getPlaylistByUpMid(this.upMid);
+    if (!existing) {
+      this.subscribe();
+      return;
+    }
+    this.subBusy = true;
+    showAppToast('正在拉取新投稿…', 1200);
+    this.collectTracks()
+      .then((collected: Track[]): void => {
+        if (collected.length === 0) {
+          showAppToast('没有拿到新投稿，稍后再试', 1800);
+          return;
+        }
+        const r = LibraryStore.mergeUpTracks(existing.id, collected);
+        this.subscribedCount = r.playlist ? r.playlist.tracks.length : this.subscribedCount;
+        if (r.added === 0) {
+          showAppToast('没有新投稿', 1500);
+        } else {
+          this.showSubscribeResult({
+            playlist: r.playlist ?? existing,
+            added: r.added,
+            dropped: r.dropped,
+            reused: true
+          });
+        }
+      })
+      .then((): void => {
+        this.subBusy = false;
+      });
+  }
+
+  private showSubscribeResult(r: UpSubscribeResult): void {
+    const parts: string[] = [];
+    parts.push(r.added === 1 ? '新增 1 首' : `新增 ${r.added} 首`);
+    if (r.dropped > 0) {
+      parts.push(`已满 ${r.playlist.tracks.length} 首，更早的未收`);
+    }
+    const prefix: string = r.reused ? '已更新订阅' : '已订阅';
+    showAppToast(`${prefix}，${parts.join('，')}`, 2000);
+  }
+
+  // ===== 曲目菜单（本页只给两项：播放队列 / 下载） =====
+
+  private showMenu(track: Track): void {
+    this.getUIContext().showAlertDialog({
+      title: track.title,
+      message: '选择操作',
+      primaryButton: {
+        value: '加入队列',
+        action: (): void => {
+          this.player.addToQueue(track);
+          showAppToast('已加入播放队列', 1500);
+        }
+      },
+      secondaryButton: {
+        value: '下载',
+        action: (): void => {
+          this.requestDownload(track);
+        }
+      }
+    });
+  }
+
+  private requestDownload(track: Track): void {
+    // 与 SearchPage.startDownload 同一条链：DownloadManager 内部按「仅 WiFi 下载」设置
+    // 返回 blockedReason，这里把它翻译成一次询问，用户确认后带 ignoreWifiLimit 重试。
+    DownloadManager.getInstance().requestDownload(track, false)
+      .then((r: DownloadStartResult): void => {
+        if (r.blockedReason.length > 0) {
+          this.confirmDownloadOnCellular(track);
+          return;
+        }
+        const head: string = r.queued === 1 ? '已开始下载 1 首' : `已开始下载 ${r.queued} 首`;
+        const tail: string = r.skipped > 0 ? `（另有 ${r.skipped} 首已在列表中）` : '';
+        showAppToast(`${head}${tail}，可在「下载」页查看进度`, 2000);
+      })
+      .catch((e: Error): void => {
+        console.error(`requestDownload failed: ${e.message}`);
+        showAppToast('下载启动失败', 1800);
+      });
+  }
+
+  /**
+   * 「仅 WiFi 下载」被触发：先问一句，而不是直接拒绝 ——
+   * 开这个开关的人多半是「不想偷跑流量」，不是「绝对不许用流量」。
+   * 措辞与 SearchPage.confirmDownloadOnCellular 保持一致。
+   */
+  private confirmDownloadOnCellular(track: Track): void {
+    this.getUIContext().showAlertDialog({
+      title: '仅 WiFi 下载',
+      message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '继续下载',
+        action: (): void => {
+          DownloadManager.getInstance().requestDownload(track, true)
+            .then((r: DownloadStartResult): void => {
+              showAppToast(r.queued > 0 ? `已开始下载 ${r.queued} 首` : '没有可下载的曲目', 1800);
+            })
+            .catch((e: Error): void => {
+              console.error(`requestDownload(ignoreWifiLimit) failed: ${e.message}`);
+              showAppToast('下载启动失败', 1800);
+            });
+        }
+      }
+    });
+  }
+
+  /**
+   * 子页转场：从右滑入 slow(400ms) EaseOut，pop 反向（照 RecentPage / PlaylistDetail 同款）。
+   */
+  private navTransitionDelegate(op: NavigationOperation,
+    isEnter: boolean): Array<NavDestinationTransition> | undefined {
+    if (op === NavigationOperation.PUSH && isEnter) {
+      this.navTransX = '100%';
+      const enter: NavDestinationTransition = {
+        duration: NAV_TRANSITION_MS,
+        curve: Curve.EaseOut,
+        event: (): void => {
+          this.navTransX = '0%';
+        }
+      };
+      return [enter];
+    }
+    if (op === NavigationOperation.POP && !isEnter) {
+      const exit: NavDestinationTransition = {
+        duration: NAV_TRANSITION_MS,
+        curve: Curve.EaseOut,
+        event: (): void => {
+          this.navTransX = '100%';
+        }
+      };
+      return [exit];
+    }
+    return undefined;
+  }
+
+  build() {
+    NavDestination() {
+      Stack() {
+        Column() {
+          // 标题栏：自绘（系统标题栏隐藏），左侧标题 + 右侧订阅动作
+          Row() {
+            Text('UP 主主页')
+              .fontSize(20)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+              .padding({ left: 16, top: 14, bottom: 6 })
+            if (this.upMid.length > 0) {
+              // ⚠️ 触达铁律：视觉 32vp 的小按钮必须外包一层 44vp 的命中区
+              // （写法＝外层 Row 撑满 44 并居中，不改按钮本身的视觉尺寸）
+              Row() {
+                Button(this.subBusy ? '处理中' : (this.subscribed ? '拉取新投稿' : '订阅投稿'),
+                  { type: ButtonType.Normal })
+                  .fontSize(13)
+                  .height(32)
+                  .borderRadius(BUTTON_RADIUS_VP)
+                  .padding({ left: 12, right: 12 })
+                  .backgroundColor(this.subscribed ? $r('app.color.brand_surface') : $r('app.color.bili_pink'))
+                  .fontColor(this.subscribed ? $r('app.color.brand_deep') : $r('app.color.brand_on'))
+                  .enabled(!this.subBusy)
+                  .onClick((): void => {
+                    if (this.subscribed) {
+                      this.refreshSubscription();
+                    } else {
+                      this.subscribe();
+                    }
+                  })
+              }
+              .height(44)
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
+              .margin({ right: 4 })
+            }
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          // UP 资料头：头像 + 昵称 + 粉丝 + 订阅状态
+          if (this.upName.length > 0) {
+            Row() {
+              CoverImage({
+                url: toThumbUrl(this.upFace, 96),
+                imgWidth: 48,
+                imgHeight: 48,
+                imgRadius: 24,
+                altText: this.upName
+              })
+              Column() {
+                Text(this.upName)
+                  .fontSize(16)
+                  .fontColor($r('app.color.text_primary'))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (this.fans > 0) {
+                  Text(`粉丝 ${formatFans(this.fans)}`)
+                    .fontSize(13)
+                    .fontColor($r('app.color.text_secondary'))
+                    .margin({ top: 4 })
+                }
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              .margin({ left: 12 })
+              if (this.subscribed) {
+                Text(`已订阅 ${this.subscribedCount} 首`)
+                  .fontSize(11)
+                  .fontColor($r('app.color.brand_deep'))
+                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                  .borderRadius(20)
+                  .backgroundColor($r('app.color.brand_surface'))
+              }
+            }
+            .width('100%')
+            .padding({ left: 16, right: 16, bottom: 12 })
+            .alignItems(VerticalAlign.Center)
+          }
+
+          if (this.loading && this.tracks.length === 0) {
+            // 首屏骨架：同款条目占位，不用「转圈 + 加载中」
+            Column() {
+              ForEach([0, 1, 2, 3, 4], (_i: number): void => {
+                SkeletonTrackItem({ index: _i })
+              }, (_i: number): string => `up_skel_${_i}`)
+            }
+            .width('100%')
+          } else if (this.loadFailed && this.tracks.length === 0) {
+            Column() {
+              Text('投稿加载失败')
+                .fontColor($r('app.color.text_secondary'))
+                .fontSize(16)
+              Text(this.failReason.length > 0 ? this.failReason : '检查网络后再试一次')
+                .fontColor($r('app.color.text_tertiary'))
+                .fontSize(13)
+                .textAlign(TextAlign.Center)
+                .padding({ left: 24, right: 24 })
+                .margin({ top: 8 })
+              Row() {
+                // 同上：32vp 视觉 + 44vp 命中区（外层 Row 撑 44 居中）
+                Row() {
+                  Button(this.retryCooling ? '稍等 4 秒' : '重试', { type: ButtonType.Normal })
+                    .fontSize(13)
+                    .height(32)
+                    .borderRadius(BUTTON_RADIUS_VP)
+                    .padding({ left: 18, right: 18 })
+                    .backgroundColor($r('app.color.bili_pink'))
+                    .fontColor($r('app.color.brand_on'))
+                    .enabled(!this.retryCooling && !this.loading)
+                    .onClick((): void => {
+                      this.retry();
+                    })
+                }
+                .height(44)
+                .justifyContent(FlexAlign.Center)
+                .alignItems(VerticalAlign.Center)
+
+                // 站内接口被风控时，这是唯一 100% 能看到内容的路
+                Row() {
+                  Button('在 B 站打开', { type: ButtonType.Normal })
+                    .fontSize(13)
+                    .height(32)
+                    .borderRadius(BUTTON_RADIUS_VP)
+                    .padding({ left: 18, right: 18 })
+                    .backgroundColor($r('app.color.brand_surface'))
+                    .fontColor($r('app.color.brand_deep'))
+                    .onClick((): void => {
+                      this.openInBilibili();
+                    })
+                }
+                .height(44)
+                .justifyContent(FlexAlign.Center)
+                .alignItems(VerticalAlign.Center)
+                .margin({ left: 4 })
+              }
+              .margin({ top: 12 })
+            }
+            .layoutWeight(1)
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+          } else if (this.tracks.length === 0) {
+            Column() {
+              Text('该 UP 还没有投稿')
+                .fontColor($r('app.color.text_secondary'))
+                .fontSize(16)
+            }
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          } else {
+            List() {
+              LazyForEach(
+                this.trackSource,
+                (t: Track, index: number): void => {
+                  ListItem() {
+                    TrackItem({
+                      track: t,
+                      entranceIndex: index,
+                      onPlay: (tr: Track): void => {
+                        this.player.playNow(tr);
+                      },
+                      onMore: (tr: Track): void => {
+                        this.showMenu(tr);
+                      }
+                    })
+                  }
+                },
+                (t: Track): string => t.id
+              )
+              if (this.loadingMore) {
+                ListItem() {
+                  Column() {
+                    ForEach([0, 1], (_i: number): void => {
+                      SkeletonTrackItem({ index: -1 })
+                    }, (_i: number): string => `up_more_${_i}`)
+                  }
+                  .width('100%')
+                }
+              } else if (!this.hasMore) {
+                ListItem() {
+                  // 搜索反查拿不到「下一页」，所以这里不写「已经到底啦」——
+                  // 那会让用户以为这个 UP 就这点投稿。订阅才是拿全量的方式。
+                  Text(this.subscribed ? '订阅已开启，可随时拉取新投稿' : '订阅该 UP 可持续获取新投稿')
+                    .fontSize(13)
+                    .fontColor($r('app.color.text_tertiary'))
+                    .width('100%')
+                    .textAlign(TextAlign.Center)
+                    .padding({ top: 14, bottom: 14 })
+                }
+              }
+            }
+            .layoutWeight(1)
+            .width('100%')
+            // 底部悬浮页签 / 迷你条让位：列表末尾要能滚到它们上方
+            .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+            .onReachEnd((): void => {
+              this.onReachEnd();
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor($r('app.color.bg_page'))
+        .padding({ top: this.safeTop })
+        .safeAreaPadding({ top: NAV_TITLE_BAR_HEIGHT, bottom: this.safeBottom })
+        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+      }
+    }
+    .hideTitleBar(true)
+    .translate({ x: this.navTransX })
+    .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
+      return this.navTransitionDelegate(op, isEnter);
+    })
+  }
+}

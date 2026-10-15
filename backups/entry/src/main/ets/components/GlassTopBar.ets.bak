@@ -1,0 +1,110 @@
+/**
+ * Sumy 式滚动浮出毛玻璃顶栏（Tab 页固定栏 / 子页钉顶条带通用）。
+ *
+ * 双层结构：
+ * - 材质层：空 Row 挂 HeaderBarMaterialModifier（backgroundEffect 真高斯模糊
+ *   + header_glass_tint 蒙版），opacity = `baseOpacity + (1 - baseOpacity) * reveal`
+ *   —— **静止时就有基线强度的毛玻璃**（默认 0.62，见 GLASS_BASE_OPACITY），
+ *   滚动后线性增强到完全显影；底部 0.5vp 边界线同层挂载，随 opacity 一起浮现；
+ * - 内容层：@BuilderParam 注入的栏体内容（标题 / 搜索框 / 按钮等），
+ *   顶部手动补 safeTop 内边距避让状态栏（配合全工程不用 expandSafeArea 的约定）。
+ *
+ * 滚动驱动：调用方用 List.scroller() + onDidScroll 读 currentOffset().yOffset，
+ * 经 calcReveal() 归一化到 0..1 后传入 reveal。
+ *
+ * ⚠️ 这里**只有毛玻璃，没有品牌粉光晕**（2026-10-06 按用户要求移除）。
+ * 曾经在这里叠过一层「整面 12% 粉 + 底缘 2vp 粉色渐变带」模拟 HDS 的 `lightColor`，
+ * 真机观感不佳（显脏），已整层删除 —— 顶栏回到「纯 `backgroundEffect` 毛玻璃 +
+ * 底部 0.5vp 边界线」。
+
+ *
+ * 若将来还要加光晕，**必须挂成独立兄弟节点**，绝不能链在材质层的 Row 上：
+ * ArkUI 链式属性优先级高于 attributeModifier，链 `.backgroundColor()` 会**覆盖掉
+ * `backgroundEffect`**，毛玻璃直接消失（`HeaderBarMaterial.ets` 文件头记着这个坑）。
+ */
+import { makeHeaderBarModifier, HeaderBarMaterialModifier } from '../utils/HeaderBarMaterial';
+
+/** 浮出距离：内容上滑 12vp 内毛玻璃从基线强度渐变到完全显影（起滑即见，避免 40vp 时前段肉眼不可见） */
+export const GLASS_TOP_BAR_REVEAL_DISTANCE: number = 12;
+
+/**
+ * 滚动偏移 → 浮出比例：负值（下拉刷新）按 0 处理，超过 12vp 封顶为 1。
+ */
+export function calcReveal(offset: number): number {
+  if (offset <= 0) {
+    return 0;
+  }
+  const ratio: number = offset / GLASS_TOP_BAR_REVEAL_DISTANCE;
+  return ratio > 1 ? 1 : ratio;
+}
+
+/**
+ * 静止时的毛玻璃基线强度（2026-10-06 按需求改：静止时也要有毛玻璃）。
+ *
+ * 早先设计是「静止全透明、滚动才浮出毛玻璃」（Sumy 式），实际用起来静止时顶栏
+ * 与内容区糊在一起、层次不清。现在改成**基线 + 滚动增强**：
+ * `opacity = base + (1 - base) * reveal`
+ *   · 静止（reveal=0）→ 0.62：能看出模糊与 tint，但下层内容仍隐约透出；
+ *   · 滚动到位（reveal=1）→ 1.0：完全显影，与内容对比拉开层次。
+ * 各页面可用 `baseOpacity` 单独覆盖（默认统一 0.62）。
+ */
+export const GLASS_BASE_OPACITY: number = 0.62;
+
+@Component
+export struct GlassTopBar {
+  /** 状态栏高度（AppStorage STORE_SAFE_TOP），内容层顶部避让用 */
+  @Prop safeTop: number = 0;
+  /** 模糊板浮出比例 0..1：0 静止（用 baseOpacity 兜底），1 已滚动（完全显影） */
+  @Prop reveal: number = 0;
+  /**
+   * 静止时的毛玻璃基线强度。默认 `GLASS_BASE_OPACITY`；
+   * 页面可覆盖 —— 例如想让某个页面的顶栏更透，就传更小的值。
+   */
+  @Prop baseOpacity: number = GLASS_BASE_OPACITY;
+  /** 栏体内容（标题行 / 搜索行等），由调用页注入 */
+  @BuilderParam bar: () => void = this.emptyBar;
+  /** 内容层实测高度（含 safeTop 内边距，onAreaChange 回写）：材质层铺满整栏用 */
+  @State barLayerHeight: number = 0;
+  /** 材质层修饰器：backgroundEffect 真高斯模糊（全环境一致可见） */
+  private material: HeaderBarMaterialModifier = makeHeaderBarModifier();
+
+  /** 材质层实际不透明度：静止取基线，随滚动线性增强到 1 */
+  private glassOpacity(): number {
+    return this.baseOpacity + (1 - this.baseOpacity) * this.reveal;
+  }
+
+  @Builder
+  emptyBar() {
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // 材质层：纯视觉，不参与命中测试。
+      // 高度必须用内容层实测值——height('100%') 会按父约束（全屏）解析，
+      // 模糊板会盖满整页（布局树实测 bounds 到屏幕底部）。
+      // 底部 0.5vp 边界线挂在同一层：借本层 opacity 与毛玻璃一起浮现。
+      // ⚠️ opacity 用 `glassOpacity()`（基线 + 滚动增强），**不是** reveal ——
+      // 早先直接挂 reveal 导致静止时完全透明，层次不清（见 GLASS_BASE_OPACITY 注释）。
+      Row()
+        .width('100%')
+        .height(this.barLayerHeight)
+        .hitTestBehavior(HitTestMode.None)
+        .attributeModifier(this.material)
+        .border({ width: { bottom: 0.5 }, color: $r('app.color.header_bar_border') })
+        .opacity(this.glassOpacity())
+      // 内容层：决定整栏高度，顶部补 safeTop 避让状态栏
+      Column() {
+        this.bar()
+      }
+      .width('100%')
+      .padding({ top: this.safeTop })
+      .onAreaChange((_old: Area, cur: Area): void => {
+        const h: number = cur.height as number;
+        if (h > 0) {
+          this.barLayerHeight = h;
+        }
+      })
+    }
+    .width('100%')
+  }
+}

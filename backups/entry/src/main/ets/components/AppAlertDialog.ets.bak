@@ -1,0 +1,350 @@
+/**
+ * 全局确认弹窗 + 菜单弹窗（替代系统 `showAlertDialog` / `showDialog`）。
+ *
+ * 为什么不用系统 AlertDialog：
+ *   1. 系统弹窗的标题 / 正文只接受 `ResourceStr`，**无法自定义字体颜色**；
+ *   2. 底色不走应用资源限定，深浅色下与页面不一致。
+ * 本组件自绘内容：
+ *   - 底色 `app.color.bg_card`（浅色 #FFFFFFFF / 深色 #FF1E1E24）→ 随主题深浅色切换；
+ *   - 标题 / 正文 / 按钮文字统一 `app.color.bili_pink`（#FFFB7299）。
+ *
+ * 交互与系统弹窗对齐：居中模态、点遮罩可关（autoCancel）、左右按钮（取消 / 确认），
+ * 点击按钮先关闭弹窗再执行回调（回调里的 AppToast 不会被弹层盖住）。
+ *
+ * ⚠️⚠️ 为什么用 `CustomDialogController` 而不是 `openCustomDialog`（**踩过的闪退坑**）
+ *
+ * 最初实现是 `promptAction.openCustomDialog({ builder: 全局 @Builder })`，
+ * 结果**点任意条目「⋯」必闪退**，日志：
+ *     TypeError: Cannot read property observeComponentCreation2 of undefined
+ *
+ * 根因（华为官方 FAQ faqs-arkui-1159）：`@Builder` 自定义构建函数**只能在所属组件的
+ * build 方法和其他自定义构建函数内调用，不允许在组件外调用**。而本文件的两个
+ * `@Builder` 是**模块级全局函数**，把它们交给 `openCustomDialog` 在弹窗渲染时
+ * 找不到父组件的 `observeComponentCreation2` 上下文 → 直接抛 TypeError 崩掉。
+ * 官方给的解法只有一种：把 `@Builder` 挪进 `@Component` 结构体内部，
+ * 于是每个调用页面都得各自持有一个 controller —— 20+ 处调用点全部要改，且
+ * 「title/message/按钮」这些数据也没法再走模块级单槽传。
+ *
+ * 改用 `@CustomDialog` + `CustomDialogController`（官方推荐的自定义弹窗方案）：
+ * CustomDialog 本身就是**结构体**，它的 `build` 由 controller.open() 触发执行，
+ * 不存在「组件外调用 @Builder」的问题，因此可以安全地放在模块级被任意页面复用。
+ * 好处：
+ *   1. `showAppAlertDialog(uiContext, options)` / `showAppMenuDialog(uiContext, options)`
+ *      **导出签名完全不变** → 8 个页面 20+ 处调用点零改动；
+ *   2. controller 持有真正的组件上下文，不会再抛 observeComponentCreation2；
+ *   3. `close()` 是同步的，不再需要原来那套「id 未就绪先挂起、Promise 回来再补关」
+ *      的竞态兜底（`alertDialogId` / `alertClosePending` 全部删掉）。
+ *
+ * ⚠️ controller 必须**单例复用、绝不重新赋值**：官方明确写了「全局变量方式实现全局
+ * 弹窗时，给 controller 重新赋值会导致旧弹窗关不掉」。所以这里只在模块级 new 一次，
+ * 每次弹窗只改它读取的模块级数据槽（`alertOptions` / `menuOptions`）再 `open()`。
+ */
+
+import { UIContext } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
+
+/** 弹窗按钮：字段名与系统 AlertDialog 的按钮保持一致，调用点迁移零成本 */
+export interface AppAlertButtonOptions {
+  value: string;
+  action?: () => void;
+}
+
+/** 确认弹窗参数：title / message / primaryButton（左）/ secondaryButton（右） */
+export interface AppAlertDialogOptions {
+  title: string;
+  message: string;
+  primaryButton: AppAlertButtonOptions;
+  secondaryButton: AppAlertButtonOptions;
+}
+
+const EMPTY_BUTTON: AppAlertButtonOptions = { value: '' };
+
+/** 菜单弹窗按钮：字段名与系统 showDialog 的按钮保持一致（text），迁移零成本 */
+export interface AppMenuButtonOptions {
+  text: string;
+  /** 置灰不可点（如「正在入队…」），点按无动作 */
+  disabled?: boolean;
+  action?: () => void;
+}
+
+/** 菜单弹窗参数：纵向罗列 N 个按钮（歌单选择器 / 曲目菜单 / 二次确认都用它） */
+export interface AppMenuDialogOptions {
+  title: string;
+  message: string;
+  buttons: AppMenuButtonOptions[];
+}
+
+const EMPTY_MENU_BUTTONS: AppMenuButtonOptions[] = [];
+
+/**
+ * 弹窗数据槽：模块级单槽，写入后再 `controller.open()`。
+ *
+ * CustomDialog 的 build 只在 open 时执行，读到的就是当次的值；同一时刻只可能存在
+ * 一个弹窗（模态阻塞），单槽不会串内容。
+ */
+let alertOptions: AppAlertDialogOptions = {
+  title: '',
+  message: '',
+  primaryButton: EMPTY_BUTTON,
+  secondaryButton: EMPTY_BUTTON
+};
+
+let menuOptions: AppMenuDialogOptions = {
+  title: '',
+  message: '',
+  buttons: EMPTY_MENU_BUTTONS
+};
+
+/** 两个弹窗各自的「是否已打开」标记：用于 open 重入前先关旧弹窗 */
+let alertOpened: boolean = false;
+let menuOpened: boolean = false;
+
+/**
+ * 确认弹窗内容。
+ *
+ * 宽度写在**自定义组件自己的根节点**上（`CustomDialogControllerOptions` 没有 width
+ * 字段，弹窗尺寸由自定义组件决定），86% 与原先 `openCustomDialog` 的观感一致。
+ */
+@CustomDialog
+struct AppAlertDialogRoot {
+  build() {
+    Column() {
+      // 文本区
+      Column() {
+        Text(alertOptions.title)
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.bili_pink'))
+          .textAlign(TextAlign.Center)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(alertOptions.message)
+          .fontSize(13)
+          .fontColor($r('app.color.bili_pink'))
+          .textAlign(TextAlign.Center)
+          .margin({ top: 8 })
+          .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 24, right: 24, top: 24, bottom: 20 })
+
+      Divider()
+        .color($r('app.color.bg_divider'))
+
+      // 按钮区：左右等分，中间竖分隔
+      Row() {
+        Text(alertOptions.primaryButton.value)
+          .fontSize(16)
+          .fontColor($r('app.color.bili_pink'))
+          .textAlign(TextAlign.Center)
+          .height(48)
+          .layoutWeight(1)
+          .onClick((): void => {
+            onAlertButtonClick(alertOptions.primaryButton);
+          })
+        Divider()
+          .vertical(true)
+          .height(48)
+          .color($r('app.color.bg_divider'))
+        Text(alertOptions.secondaryButton.value)
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.bili_pink'))
+          .textAlign(TextAlign.Center)
+          .height(48)
+          .layoutWeight(1)
+          .onClick((): void => {
+            onAlertButtonClick(alertOptions.secondaryButton);
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('86%')
+    .backgroundColor($r('app.color.bg_card'))
+    .borderRadius(24)
+    .clip(true)
+  }
+}
+
+/**
+ * 菜单弹窗内容：标题 + 说明 + 纵向 N 个按钮（按钮多时可滚动）。
+ * 底色 / 字体与确认弹窗同一套：bg_card 随主题，文字统一 bili_pink。
+ */
+@CustomDialog
+struct AppMenuDialogRoot {
+  build() {
+    Column() {
+      Column() {
+        Text(menuOptions.title)
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.bili_pink'))
+          .textAlign(TextAlign.Center)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        if (menuOptions.message.length > 0) {
+          Text(menuOptions.message)
+            .fontSize(13)
+            .fontColor($r('app.color.bili_pink'))
+            .textAlign(TextAlign.Center)
+            .margin({ top: 8 })
+            .width('100%')
+        }
+      }
+      .width('100%')
+      .padding({ left: 24, right: 24, top: 24, bottom: 16 })
+
+      Divider()
+        .color($r('app.color.bg_divider'))
+
+      // 按钮纵向罗列；歌单选择器可能到 7 个，超高给滚动
+      Scroll() {
+        Column() {
+          ForEach(menuOptions.buttons, (btn: AppMenuButtonOptions, idx: number): void => {
+            if (idx > 0) {
+              Divider()
+                .color($r('app.color.bg_divider'))
+            }
+            Text(btn.text)
+              .fontSize(16)
+              .fontColor(btn.disabled === true ? $r('app.color.text_disabled') : $r('app.color.bili_pink'))
+              .textAlign(TextAlign.Center)
+              .width('100%')
+              .height(48)
+              .onClick((): void => {
+                onMenuButtonClick(btn);
+              })
+          }, (btn: AppMenuButtonOptions, idx: number): string => `${idx}_${btn.text}`)
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .constraintSize({ maxHeight: 320 })
+      .scrollBar(BarState.Off)
+    }
+    .width('86%')
+    .backgroundColor($r('app.color.bg_card'))
+    .borderRadius(24)
+    .clip(true)
+  }
+}
+
+/**
+ * 全局单例 controller（**只 new 一次，绝不重新赋值** —— 重新赋值会导致旧弹窗关不掉）。
+ *
+ * `cancel`：点遮罩关闭时的回调，只复位标记；具体关闭由系统完成。
+ * `customStyle: true`：底色 / 圆角 / 宽高都由自定义组件自己声明。
+ */
+const alertController: CustomDialogController = new CustomDialogController({
+  builder: AppAlertDialogRoot({}),
+  autoCancel: true,
+  alignment: DialogAlignment.Center,
+  customStyle: true,
+  cancel: (): void => {
+    alertOpened = false;
+  }
+});
+
+const menuController: CustomDialogController = new CustomDialogController({
+  builder: AppMenuDialogRoot({}),
+  autoCancel: true,
+  alignment: DialogAlignment.Center,
+  customStyle: true,
+  cancel: (): void => {
+    menuOpened = false;
+  }
+});
+
+/** 关闭确认弹窗（幂等：没开时直接返回） */
+function closeAlertDialog(): void {
+  if (!alertOpened) {
+    return;
+  }
+  alertOpened = false;
+  try {
+    alertController.close();
+  } catch (e) {
+    const err = e as BusinessError;
+    console.error(`close alert dialog failed: ${err.code} ${err.message}`);
+  }
+}
+
+/** 关闭菜单弹窗（幂等：没开时直接返回） */
+function closeMenuDialog(): void {
+  if (!menuOpened) {
+    return;
+  }
+  menuOpened = false;
+  try {
+    menuController.close();
+  } catch (e) {
+    const err = e as BusinessError;
+    console.error(`close menu dialog failed: ${err.code} ${err.message}`);
+  }
+}
+
+/** 按钮点击：先关弹窗，再跑业务回调 */
+function onAlertButtonClick(button: AppAlertButtonOptions): void {
+  closeAlertDialog();
+  const act: (() => void) | undefined = button.action;
+  if (act !== undefined) {
+    act();
+  }
+}
+
+/** 菜单按钮点击：先关弹窗，再跑业务回调（置灰按钮不响应） */
+function onMenuButtonClick(button: AppMenuButtonOptions): void {
+  if (button.disabled === true) {
+    return;
+  }
+  closeMenuDialog();
+  const act: (() => void) | undefined = button.action;
+  if (act !== undefined) {
+    act();
+  }
+}
+
+/**
+ * 显示确认弹窗（系统 showAlertDialog 的替代入口）。
+ *
+ * @param uiContext 调用方页面的 UIContext（`this.getUIContext()`）。
+ *                  CustomDialogController 自带组件上下文，不需要它来定位弹窗；
+ *                  保留该参数只为**导出签名不变**，让 20+ 处调用点零改动。
+ * @param options   与系统 AlertDialog 同构的参数
+ */
+export function showAppAlertDialog(uiContext: UIContext, options: AppAlertDialogOptions): void {
+  alertOptions = options;
+  // 重入（上一个还没关就又调一次）：先关旧再开，避免两个确认框叠在一起
+  closeAlertDialog();
+  alertOpened = true;
+  try {
+    alertController.open();
+  } catch (e) {
+    alertOpened = false;
+    const err = e as BusinessError;
+    console.error(`showAppAlertDialog failed: ${err.code} ${err.message}`);
+  }
+}
+
+/**
+ * 显示菜单弹窗（系统 `showDialog` + buttons 数组的替代入口）。
+ * 按钮动作直接挂在每个按钮上（不再是 `then(resp => resp.index)` 索引分发）。
+ *
+ * @param uiContext 见 showAppAlertDialog，保留仅为签名一致。
+ * @param options   标题 / 说明 / 纵向按钮列表
+ */
+export function showAppMenuDialog(uiContext: UIContext, options: AppMenuDialogOptions): void {
+  menuOptions = options;
+  closeMenuDialog();
+  menuOpened = true;
+  try {
+    menuController.open();
+  } catch (e) {
+    menuOpened = false;
+    const err = e as BusinessError;
+    console.error(`showAppMenuDialog failed: ${err.code} ${err.message}`);
+  }
+}

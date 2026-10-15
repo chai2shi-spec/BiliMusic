@@ -1,0 +1,799 @@
+/**
+ * 歌单列表页：展示本地歌单，支持新建 / 重命名 / 删除歌单、进入详情
+ * （订阅歌单除外：行点击进 UP 主页，订阅流以 UP 为核心）。
+ * 数据来自 LibraryStore（内部有内存快照 + 异步落盘）。
+ *
+ * 简约 iOS 风格：顶栏为双行钉顶，批 4 起迁根 HdsNavigation titleBar
+ * （沉浸材质 + 滚动模糊由 HDS 承担，内容见 components/PlaylistsTabBar.ets）——
+ * 行1「歌单」小标题 + 「新建」常驻右上角，行2 最近播放入口卡片
+ * （InsetCard，点击进历史列表，记录由播放内核自动写入，emoji 换系统符号）。
+ */
+
+import {
+  LibraryStore,
+  PLAYLIST_MAX_ITEMS
+} from '../service/LibraryStore';
+import { Playlist, Track } from '../model/MusicModels';
+import { toThumbUrl } from '../utils/TextUtil';
+import { NavStackHolder } from '../service/NavStackHolder';
+import {
+  CONTENT_END_OFFSET,
+  STORE_LIBRARY_REV,
+  STORE_PL_BAR_ALL_SELECTED,
+  STORE_PL_BAR_CAN_SELECT,
+  STORE_PL_BAR_BOTTOM_HEIGHT,
+  STORE_PL_BAR_RECENT_COUNT,
+  STORE_PL_BAR_SELECTED_COUNT,
+  STORE_PL_BAR_SELECTING,
+  STORE_SAFE_BOTTOM,
+  STORE_SAFE_TOP
+} from '../common/Constants';
+import { showAppToast } from '../components/AppToast';
+import { showAppAlertDialog, showAppMenuDialog } from '../components/AppAlertDialog';
+import { CoverImage } from '../components/CoverImage';
+import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
+import { TabScrollerHolder } from '../service/TabScrollerHolder';
+import {
+  DownloadManager,
+  DownloadSource,
+  DownloadStartResult,
+  WIFI_ONLY_BLOCKED
+} from '../service/DownloadManager';
+import { BUTTON_RADIUS_VP, SELECT_SLOT_VP, SELECT_TOGGLE_MS } from '../common/constants/InteractionConstants';
+
+/**
+ * 歌单批量入队的**每首间隔**（ms）。
+ *
+ * 不是为了「让用户等得久」，而是必须：`requestDownload` 对每首都会发一次 view 请求
+ * （`expandVideoParts` 用来识别分 P），密集请求会被 B 站限流 ——
+ * 实测同一接口连打 8 次 0/8 成功（见 BILI-API.md「空间类接口的匿名风控」）。
+ * 350ms 是「不至于触发限流」与「100 首不至于等到失去耐心」之间的折中。
+ */
+const PLAYLIST_ENQUEUE_GAP_MS: number = 350;
+
+/** 合并歌单预填名字的最大长度（超出截断加「…」，用户仍可自己改） */
+const MAX_MERGE_NAME_CHARS: number = 18;
+
+/** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout((): void => {
+      resolve();
+    }, ms);
+  });
+}
+
+/**
+ * 歌单编辑弹窗的用途：新建 / 重命名 / 合并（合并多出汇总与「删除原歌单」开关）。
+ *
+ * 刻意用「数字常量」而不是 `enum`：在 .ets 里声明 enum 会让静态检查连带报
+ * SDK 声明文件的解析错误，用常量最稳。
+ */
+const EDITOR_MODE_CREATE: number = 0;
+const EDITOR_MODE_RENAME: number = 1;
+const EDITOR_MODE_MERGE: number = 2;
+
+@Component
+export struct PlaylistsPage {
+  @State playlists: Playlist[] = [];
+  /** 最近播放条数，用于固定栏入口卡片展示（切回本页 / 返回时刷新） */
+  @State recentCount: number = 0;
+  /**
+   * 根栏第二行实测高度（vp，不含标题行/安全区）：多选工具条 44 ⇄ 最近播放
+   * 卡片行（随内容浮动），由根栏 bottomBuilder 内层根节点 onAreaChange 回写
+   * （components/PlaylistsTabBar.ets，批 4 顶栏迁根容器后页面测不到栏高）。
+   * ⚠️ 初值必须为 0（2026-10-08，与 RecentPage 同款修复）：contentStartOffset 只在
+   * 列表内容首次布局时生效，更新不会重排已有内容——歌单来自本地缓存，列表带着
+   * 条目与初值一起挂载会固化不含 safeTop 的估计值。列表挂载门控在本值 > 0。
+   */
+  @StorageProp(STORE_PL_BAR_BOTTOM_HEIGHT) plBarBottomHeight: number = 0;
+  /** 名称编辑弹窗：editingId 为空表示新建，非空表示重命名 */
+  @State showEditor: boolean = false;
+  @State editingId: string = '';
+  @State editorName: string = '';
+  /** 编辑弹窗用途（新建 / 重命名 / 合并） */
+  @State editorMode: number = EDITOR_MODE_CREATE;
+  /**
+   * 多选模式开关（批 4 状态迁移）：顶栏迁根容器后，栏内「选择/完成」按钮
+   * （components/PlaylistsTabBar.ets）要读它 —— 直接挂 AppStorage 单向镜像给根栏。
+   */
+  @StorageLink(STORE_PL_BAR_SELECTING) selecting: boolean = false;
+  /**
+   * 已选中的歌单 id。@Watch 同步顶栏派生镜像（选中数 / 全选态），根栏工具条据此刷新。
+   */
+  @State @Watch('syncBarState') selectedIds: string[] = [];
+  /** 合并预览（弹窗里的汇总与风险提示；合并动作前由 LibraryStore.previewPlaylistMerge 填充） */
+  @State mergeSourceCount: number = 0;
+  @State mergeRawTotal: number = 0;
+  @State mergeTotal: number = 0;
+  @State mergeDropped: number = 0;
+  @State mergeSubscriptions: number = 0;
+  /** 合并后是否删除源歌单（默认开：合并即归一） */
+  @State mergeDeleteSources: boolean = true;
+  /**
+   * 媒体库变更信号。Tabs 的 TabContent 是常驻的，aboutToAppear 只在首次触发：
+   * 搜索页加完歌单切回来、详情页改完返回，都必须靠它重新读数据。
+   */
+  @StorageLink(STORE_LIBRARY_REV) @Watch('onLibraryChanged') libraryRev: number = 0;
+  /** 底部安全区高度（vp）：根容器不再统一避让，列表末尾让位要自己叠上这一份 */
+  @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
+  /**
+   * 状态栏高度（vp）：根 HdsNavigation 标题栏的材质从 y=0 铺起覆盖状态栏
+   * （avoidLayoutSafeArea 覆盖式渲染）；本页让位量由 barTotalHeight() 显式叠加。
+   */
+  @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
+  /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
+  @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /**
+   * 列表滚动控制器：注册进 TabScrollerHolder，由根 HdsNavigation
+   * bindToScrollable 绑定驱动顶栏滚动模糊（批 4 起模糊由 HDS 承担）。
+   */
+  private listScroller: Scroller = new Scroller();
+
+  aboutToAppear(): void {
+    // 批 4：顶栏迁根容器 —— scroller 与栏内按钮动作注册进持有器
+    TabScrollerHolder.playlists = this.listScroller;
+    TabScrollerHolder.plToggleSelecting = (): void => {
+      this.toggleSelecting();
+    };
+    TabScrollerHolder.plOpenCreate = (): void => {
+      this.openCreate();
+    };
+    TabScrollerHolder.plToggleSelectAll = (): void => {
+      this.toggleSelectAll();
+    };
+    TabScrollerHolder.plOpenMergeEditor = (): void => {
+      this.openMergeEditor();
+    };
+    // 首次 refresh 是冷启动同步读（getSync + JSON.parse ×2：歌单 + 最近播放），
+    // 延后一拍执行别卡首帧（做法同 SettingsPage 的缓存统计）。跑完缓存即热，
+    // onPageShow / onLibraryChanged 的后续 refresh 全走内存快照，无 IO；
+    // 首帧歌单列表短暂空态可接受，换的是首屏零磁盘读。
+    setTimeout((): void => {
+      this.refresh();
+    }, 0);
+  }
+
+  /** 切回本 Tab / 从子页返回时刷新（Tabs 的 TabContent 常驻，aboutToAppear 只触发一次） */
+  onPageShow(): void {
+    this.refresh();
+  }
+
+  onLibraryChanged(): void {
+    this.refresh();
+  }
+
+  private refresh(): void {
+    this.playlists = LibraryStore.getPlaylists();
+    this.recentCount = LibraryStore.getRecentTracks().length;
+    this.syncBarState();
+  }
+
+  /**
+   * 顶栏派生镜像唯一写入口（批 4 状态迁移）：把根栏渲染所需的派生状态
+   * （可否多选 / 选中数 / 全选态 / 最近播放条数）推到 AppStorage，根栏侧组件
+   * （components/PlaylistsTabBar.ets）@StorageProp 订阅。
+   * 触发点：refresh（歌单/最近播放变化）+ selectedIds @Watch。
+   */
+  private syncBarState(): void {
+    AppStorage.setOrCreate(STORE_PL_BAR_CAN_SELECT, this.playlists.length >= 2);
+    AppStorage.setOrCreate(STORE_PL_BAR_RECENT_COUNT, this.recentCount);
+    AppStorage.setOrCreate(STORE_PL_BAR_SELECTED_COUNT, this.selectedIds.length);
+    AppStorage.setOrCreate(STORE_PL_BAR_ALL_SELECTED, this.allSelected());
+  }
+
+  /**
+   * 根栏整栏让位量（vp）：safeTop + 标题行 56 + 第二行实测高。
+   * 批 4 前由 GlassTopBar onAreaChange 实测（含 safeTop）；顶栏迁根容器后
+   * 页面测不到栏高，改为读根栏 bottomBuilder 内层实测镜像拼装。
+   */
+  private barTotalHeight(): number {
+    return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.plBarBottomHeight;
+  }
+
+  private toast(message: string, duration: number): void {
+    showAppToast(message, duration);
+  }
+
+  private openCreate(): void {
+    this.editingId = '';
+    this.editorName = '';
+    this.editorMode = EDITOR_MODE_CREATE;
+    this.showEditor = true;
+  }
+
+  private openRename(p: Playlist): void {
+    this.editingId = p.id;
+    this.editorName = p.name;
+    this.editorMode = EDITOR_MODE_RENAME;
+    this.showEditor = true;
+  }
+
+  /** 关闭编辑弹窗并复位全部模式字段（三种模式共用一个弹窗，不复位会串状态） */
+  private cancelEditor(): void {
+    this.showEditor = false;
+    this.editingId = '';
+    this.editorMode = EDITOR_MODE_CREATE;
+    this.mergeDeleteSources = true;
+    this.mergeSourceCount = 0;
+    this.mergeRawTotal = 0;
+    this.mergeTotal = 0;
+    this.mergeDropped = 0;
+    this.mergeSubscriptions = 0;
+  }
+
+  /** 编辑弹窗标题：合并 / 重命名 / 新建 */
+  private editorTitle(): string {
+    if (this.editorMode === EDITOR_MODE_MERGE) {
+      return '合并歌单';
+    }
+    return this.editingId.length > 0 ? '重命名歌单' : '新建歌单';
+  }
+
+  /** 编辑弹窗确认键文案：合并 / 保存 / 创建 */
+  private editorConfirmText(): string {
+    if (this.editorMode === EDITOR_MODE_MERGE) {
+      return '合并';
+    }
+    return this.editingId.length > 0 ? '保存' : '创建';
+  }
+
+  private submitEditor(): void {
+    const name: string = this.editorName.trim();
+    if (name.length === 0) {
+      this.toast('请输入歌单名称', 1500);
+      return;
+    }
+    if (this.editorMode === EDITOR_MODE_MERGE) {
+      this.submitMerge(name);
+      return;
+    }
+    if (this.editingId.length === 0) {
+      LibraryStore.createPlaylist({ name: name });
+      this.toast('歌单已创建', 1500);
+    } else {
+      LibraryStore.renamePlaylist(this.editingId, name);
+      this.toast('已重命名', 1500);
+    }
+    this.cancelEditor();
+    this.refresh();
+  }
+
+  // ===== 多选与合并 =====
+
+  private toggleSelecting(): void {
+    this.selecting = !this.selecting;
+    this.selectedIds = [];
+  }
+
+  private isSelected(id: string): boolean {
+    return this.selectedIds.indexOf(id) >= 0;
+  }
+
+  private toggleSelected(id: string): void {
+    if (this.isSelected(id)) {
+      this.selectedIds = this.selectedIds.filter((x: string): boolean => x !== id);
+    } else {
+      this.selectedIds = [...this.selectedIds, id];
+    }
+  }
+
+  private allSelected(): boolean {
+    return this.playlists.length > 0 && this.selectedIds.length >= this.playlists.length;
+  }
+
+  private toggleSelectAll(): void {
+    if (this.allSelected()) {
+      this.selectedIds = [];
+      return;
+    }
+    this.selectedIds = this.playlists.map((p: Playlist): string => p.id);
+  }
+
+  /** 合并弹窗预填名字：选中歌单名用「 + 」连接，过长截断（用户可改） */
+  private defaultMergeName(): string {
+    const names: string[] = [];
+    for (let i = 0; i < this.playlists.length; i++) {
+      if (this.isSelected(this.playlists[i].id)) {
+        names.push(this.playlists[i].name);
+      }
+    }
+    const joined: string = names.join(' + ');
+    return joined.length > MAX_MERGE_NAME_CHARS ? `${joined.slice(0, MAX_MERGE_NAME_CHARS)}…` : joined;
+  }
+
+  /** 打开合并弹窗：先算预览（条数 / 去重 / 超限 / 订阅数），再预填名字 */
+  private openMergeEditor(): void {
+    if (this.selectedIds.length < 2) {
+      this.toast('请至少选择两个歌单', 1500);
+      return;
+    }
+    const preview = LibraryStore.previewPlaylistMerge(this.selectedIds);
+    if (preview.sources < 2) {
+      this.toast('选中的歌单已不足两个', 1500);
+      return;
+    }
+    this.mergeSourceCount = preview.sources;
+    this.mergeRawTotal = preview.rawTotal;
+    this.mergeTotal = preview.total;
+    this.mergeDropped = preview.dropped;
+    this.mergeSubscriptions = preview.subscriptionCount;
+    this.mergeDeleteSources = true;
+    this.editingId = '';
+    this.editorName = this.defaultMergeName();
+    this.editorMode = EDITOR_MODE_MERGE;
+    this.showEditor = true;
+  }
+
+  private submitMerge(name: string): void {
+    const result = LibraryStore.mergePlaylists(this.selectedIds, name, this.mergeDeleteSources);
+    if (result === null) {
+      this.toast('合并失败：没有足够的有效歌单', 1800);
+      this.cancelEditor();
+      return;
+    }
+    const parts: string[] = [`已合并 ${result.sources} 个歌单，共 ${result.total} 首`];
+    if (result.deduped > 0) {
+      parts.push(`去重 ${result.deduped} 首`);
+    }
+    if (result.dropped > 0) {
+      parts.push(`超出 ${PLAYLIST_MAX_ITEMS} 首上限丢弃 ${result.dropped} 首`);
+    }
+    this.toast(parts.join('，'), 2000);
+    this.cancelEditor();
+    this.selecting = false;
+    this.selectedIds = [];
+    this.refresh();
+  }
+
+  private showPlaylistMenu(p: Playlist): void {
+    // 「下载整个歌单」放在这里而不是行内按钮：行内已有封面 / 歌名 / 首数 / ⋮，
+    // 再塞一个图标会让热区挤在一起（触达铁律要求相邻不同语义热区间留 8vp 缓冲）。
+    const busy: boolean = this.downloadingPlaylistId === p.id;
+    showAppMenuDialog(this.getUIContext(), {
+      title: p.name,
+      message: `${p.tracks.length} 首`,
+      buttons: [
+        {
+          text: '重命名',
+          action: (): void => {
+            this.openRename(p);
+          }
+        },
+        {
+          // 入队进行中：置灰并说明在做什么，避免用户以为点了没反应又点一遍
+          text: busy ? '正在入队…' : '下载整个歌单',
+          disabled: busy,
+          action: (): void => {
+            this.confirmDownloadPlaylist(p);
+          }
+        },
+        {
+          text: '删除歌单',
+          action: (): void => {
+            this.confirmDelete(p);
+          }
+        }
+      ]
+    });
+  }
+
+  /**
+   * 下载整个歌单：先确认，再逐首入队。
+   *
+   * 为什么要「逐首 + 节流」而不是一次交给 DownloadManager：
+   * `requestDownload` 内部会对每首调 `expandVideoParts`（一次 view 请求）来识别分 P），
+   * 100 首连着发就是 100 次密集请求 ——
+   * B 站对匿名访问的密集请求**直接限流**
+   * （实测连打 8 次 0/8 成功，见 BILI-API.md），表现为「下载到一半全失败」。
+   * 所以串行 + 每首之间留间隔，与播放内核「展开合集后延后 1.2s」是同一条经验。
+   */
+  private confirmDownloadPlaylist(p: Playlist): void {
+    if (p.tracks.length === 0) {
+      this.toast('歌单是空的', 1500);
+      return;
+    }
+    showAppAlertDialog(this.getUIContext(), {
+      title: '下载整个歌单',
+      message: `将把「${p.name}」的 ${p.tracks.length} 首加入下载队列。\n已下载的会自动跳过。`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '开始下载',
+        action: (): void => {
+          this.enqueuePlaylist(p);
+        }
+      }
+    });
+  }
+
+  /**
+   * 来源标记：整单下载的曲目在下载管理里聚成一张歌单卡片（展开才见单曲）。
+   *
+   * 只带**歌单 id + 名字**、不带曲目列表 —— 曲目本来就在歌单里，
+   * 落库两份会在「歌单改名 / 删曲目」后对不上（任务表是历史快照，歌单是活的）。
+   */
+  private playlistSource(p: Playlist): DownloadSource {
+    return { playlistId: p.id, playlistName: p.name };
+  }
+
+  /** 正在入队的歌单 id（非空即「该歌单入队进行中」），用于菜单置灰与防重复点击 */
+  @State downloadingPlaylistId: string = '';
+
+  /** 串行入队 + 每首节流；结束后一次性汇报排队结果 */
+  private async enqueuePlaylist(p: Playlist): Promise<void> {
+    if (this.downloadingPlaylistId.length > 0) {
+      this.toast('已有歌单正在入队，请稍候', 1800);
+      return;
+    }
+    const tracks: Track[] = p.tracks;
+    this.downloadingPlaylistId = p.id;
+    this.toast(`正在加入下载队列（0/${tracks.length}）`, 1200);
+
+    let queued: number = 0;
+    let skipped: number = 0;
+    // 「仅 WiFi 下载」的闸门在 requestDownload 入口，只会在**第一次**返回 blockedReason。
+    // 用第一条做探测 → 最多问一次「是否用流量继续」，之后整批放行（与合集同一套逻辑）。
+    let ignoreWifiLimit: boolean = false;
+    for (let i = 0; i < tracks.length; i++) {
+      if (this.downloadingPlaylistId !== p.id) {
+        // 歌单在入队过程中被删除 / 用户改了主意：干净收尾，别继续发请求
+        return;
+      }
+      const r: DownloadStartResult = await DownloadManager.getInstance()
+        .requestDownload(tracks[i], ignoreWifiLimit, this.playlistSource(p));
+      if (r.blockedReason.length > 0) {
+        // 第一条就被拦：问一次，用户同意后本批全部放行
+        this.confirmCellularBatch(p, tracks, i, queued, skipped);
+        return;
+      }
+      ignoreWifiLimit = true;
+      queued += r.queued;
+      skipped += r.skipped;
+      if ((i + 1) % 5 === 0) {
+        this.toast(`正在加入下载队列（${i + 1}/${tracks.length}）`, 800);
+      }
+      if (i < tracks.length - 1) {
+        await delay(PLAYLIST_ENQUEUE_GAP_MS);
+      }
+    }
+    this.downloadingPlaylistId = '';
+    this.toast(this.enqueueResultText(queued, skipped), 2500);
+  }
+
+  /**
+   * 被「仅 WiFi 下载」拦下时的批量询问。
+   *
+   * 刻意**不续跑剩余曲目**而是让用户重新点一次：这一趟已经把前 i 首处理过了，
+   * 续跑逻辑会散在两个地方、容易漏掉「跳过计数」的合并。重新点一次的结果完全相同
+   * （已入队的会被 `skipped` 计数跳过），代价只是多点一下。
+   */
+  private confirmCellularBatch(p: Playlist, tracks: Track[], doneCount: number,
+    queued: number, skipped: number): void {
+    this.downloadingPlaylistId = '';
+    showAppAlertDialog(this.getUIContext(), {
+      title: '仅 WiFi 下载',
+      message: `${WIFI_ONLY_BLOCKED}\n「${p.name}」前 ${doneCount} 首已入队，继续会下载剩余 ${tracks.length - doneCount} 首。`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+          this.toast(this.enqueueResultText(queued, skipped), 2000);
+        }
+      },
+      secondaryButton: {
+        value: '继续下载',
+        action: (): void => {
+          // 整批放行：重跑一遍，已入队的会被跳过计数覆盖，幂等
+          this.enqueueWithWifiOverride(p);
+        }
+      }
+    });
+  }
+
+  /** 用户确认用流量后：整批以 ignoreWifiLimit=true 重跑（已下载/已入队的会跳过） */
+  private async enqueueWithWifiOverride(p: Playlist): Promise<void> {
+    const tracks: Track[] = p.tracks;
+    this.downloadingPlaylistId = p.id;
+    let queued: number = 0;
+    let skipped: number = 0;
+    for (let i = 0; i < tracks.length; i++) {
+      const r: DownloadStartResult = await DownloadManager.getInstance()
+        .requestDownload(tracks[i], true, this.playlistSource(p));
+      queued += r.queued;
+      skipped += r.skipped;
+      if (i < tracks.length - 1) {
+        await delay(PLAYLIST_ENQUEUE_GAP_MS);
+      }
+    }
+    this.downloadingPlaylistId = '';
+    this.toast(this.enqueueResultText(queued, skipped), 2500);
+  }
+
+  /** 排队结果要分「排上 / 跳过」两种说法，否则用户不知道有多少真进了队列 */
+  private enqueueResultText(queued: number, skipped: number): string {
+    if (queued === 0 && skipped === 0) {
+      return '没有可下载的曲目';
+    }
+    if (queued === 0) {
+      return `全部已在下载队列中（${skipped} 首）`;
+    }
+    const tail: string = skipped > 0 ? `，跳过 ${skipped} 首已在队列/已下载` : '';
+    return `已加入下载队列 ${queued} 首${tail}`;
+  }
+
+  private confirmDelete(p: Playlist): void {
+    showAppAlertDialog(this.getUIContext(), {
+      title: '删除歌单',
+      message: `确定删除「${p.name}」？删除后不可恢复。`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+          // 取消：不做任何事
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        action: (): void => {
+          LibraryStore.deletePlaylist(p.id);
+          this.refresh();
+          this.toast('已删除歌单', 1500);
+        }
+      }
+    });
+  }
+
+  /**
+   * 顶栏已迁根容器（批 4）：标题行「选择/新建」按钮 + 第二行（多选工具条 /
+   * 最近播放入口卡片）由根 HdsNavigation titleBar 承载（components/PlaylistsTabBar.ets），
+   * 本页只留列表与状态逻辑；滚动模糊由根栏 bindToScrollable(TabScrollerHolder.playlists) 驱动。
+   */
+  build() {
+    Stack() {
+      // 内容层：顶部让出固定标题栏高度，内容整体滚动
+      Column() {
+        if (this.playlists.length === 0) {
+          Column() {
+            Column() {
+              Text('还没有歌单')
+                .fontColor($r('app.color.text_secondary'))
+                .fontSize(16)
+              Text('点击右上角“新建”创建')
+                .fontColor($r('app.color.text_tertiary'))
+                .fontSize(13)
+                .margin({ top: 8 })
+            }
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          }
+          .width('100%')
+          .height('100%')
+          // 内容列不再整体 padding top（列表穿透需要），空态自己补栏高避让
+          .padding({ top: this.barTotalHeight() })
+          // 列表挂载门控（见 plBarBottomHeight 注释）：等根栏第二行首次实测完成再挂载
+          } else if (this.plBarBottomHeight > 0) {
+            List({ scroller: this.listScroller }) {
+              ForEach(
+                this.playlists,
+              (p: Playlist): void => {
+                ListItem() {
+                  Row() {
+                    // 常驻勾选槽位：进出多选用「槽位宽度 0↔SELECT_SLOT_VP + 勾选圈位移动画」表达，
+                    // 绝不能用 if(selecting) 条件挂载 —— 节点增删没有过渡，行内容会跳变。
+                    Row() {
+                      Text(this.isSelected(p.id) ? '✓' : '')
+                        .width(20)
+                        .height(20)
+                        .borderRadius(10)
+                        .textAlign(TextAlign.Center)
+                        .fontSize(13)
+                        .fontColor(Color.White)
+                        .backgroundColor(this.isSelected(p.id) ? $r('app.color.bili_pink') : Color.Transparent)
+                        .border({
+                          width: 1.5,
+                          color: this.isSelected(p.id) ? $r('app.color.bili_pink') : $r('app.color.text_disabled')
+                        })
+                        .translate({ x: this.selecting ? 0 : SELECT_SLOT_VP })
+                        .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
+                        // 选中态是装饰：切换入口是整行点击，别占读屏焦点
+                        .accessibilityLevel('no')
+                    }
+                    .width(this.selecting ? SELECT_SLOT_VP : 0)
+                    .height(20)
+                    .clip(true)
+                    .justifyContent(FlexAlign.Center)
+                    .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
+
+                    // 56vp 显示位按 2x 请求图床缩略图；加载中 / 失败由 CoverImage 兜浅粉占位
+                    CoverImage({
+                      url: toThumbUrl(p.coverUrl, 112),
+                      imgWidth: 56,
+                      imgHeight: 56,
+                      imgRadius: 8,
+                      altText: p.name
+                    })
+                    Column() {
+                      Text(p.name)
+                        .fontSize(16)
+                        .fontColor($r('app.color.text_primary'))
+                        .maxLines(1)
+                      Text(`${p.tracks.length} 首`)
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_secondary'))
+                        .margin({ top: 4 })
+                    }
+                    .layoutWeight(1)
+                    .alignItems(HorizontalAlign.Start)
+                    .margin({ left: 12 })
+                    // 更多操作：重命名 / 删除（父 Row 的 onClick 进详情，这里单独拦截）
+                    // 触达铁律：视觉是 22px 的字，命中区必须撑到 44×44；
+                    // 父 Row 的 onClick 会进详情，热区不够时极易误触。
+                    Text('⋮')
+                      .fontSize(22)
+                      .fontColor($r('app.color.text_tertiary'))
+                      .width(44)
+                      .height(44)
+                      .borderRadius(22)
+                      .textAlign(TextAlign.Center)
+                      .visibility(this.selecting ? Visibility.None : Visibility.Visible)
+                      .stateStyles({
+                        pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                        normal: { .backgroundColor(Color.Transparent) }
+                      })
+                      .accessibilityText('更多操作')
+                      .accessibilityLevel('yes')
+                      .onClick((): void => {
+                        this.showPlaylistMenu(p);
+                      })
+                  }
+                  .width('100%')
+                  .padding({ left: 16, right: 4, top: 10, bottom: 10 })
+                  .stateStyles({
+                    pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                    normal: { .backgroundColor(Color.Transparent) }
+                  })
+                  .onClick((): void => {
+                    // 多选模式下整行 = 勾选/取消，而不是进详情 / UP 主页
+                    if (this.selecting) {
+                      this.toggleSelected(p.id);
+                      return;
+                    }
+                    // 订阅歌单（upMid 非空）→ 进 UP 主页：订阅流的核心对象是 UP 本身，
+                    // 拉新投稿 / 播放全部在 UpSpacePage 都有；详情页不再对订阅歌单开放
+                    if (p.upMid.length > 0) {
+                      NavStackHolder.upMid = p.upMid;
+                      // getUserCard 失败时的兜底名
+                      NavStackHolder.upName = p.upName;
+                      // ⚠️ 必须显式清空：静态字段会残留上一个 UP 的头像；歌单行只有
+                      // 视频封面（非 UP 头像）不能当占位，空串由 CoverImage 兜占位图
+                      NavStackHolder.upFace = '';
+                      NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+                      return;
+                    }
+                    NavStackHolder.selectedPlaylistId = p.id;
+                    NavStackHolder.stack.pushPath({ name: 'PlaylistDetail' });
+                  })
+                }
+              },
+              // key 含渲染字段：重命名（name）与订阅拉新（tracks.length）后 key 变化，
+              // 行才会销毁重建；只含 p.id 时复用旧行导致改名后仍显示旧名（重启才刷新）
+              (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
+            )
+          }
+          .layoutWeight(1)
+          // 边界回弹（2026-10-08）：到顶/到底的反馈动效
+          .edgeEffect(EdgeEffect.Spring)
+          // 顶部根标题栏让位（Sumy 式穿透）：列表视口铺满全屏，首项从栏底起排，
+          // 滚动时条目从模糊板下方穿过（safeTop + 56 + 第二行实测高，见 barTotalHeight）
+          .contentStartOffset(this.barTotalHeight())
+          // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
+          // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
+          .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+        }
+      }
+      .width('100%')
+      .height('100%')
+      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（contentStartOffset 负责让出栏高），
+      // 否则条目在栏底被裁掉、永远滑不进模糊板下方。空态区自己补 topBarHeight。
+      // 大屏适配：内容列收窄居中（根 Stack 默认居中对齐，挂上限即可）
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+
+      if (this.showEditor) {
+        Column() {
+          // 遮罩：点击空白处关闭（ArkUI 中透明容器仍参与命中测试，正好用来吞掉点击）
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor($r('app.color.scrim'))
+        .onClick((): void => {
+          this.cancelEditor();
+        })
+        .justifyContent(FlexAlign.Center)
+
+        Column() {
+          Text(this.editorTitle())
+            .fontSize(18)
+            .fontColor($r('app.color.text_primary'))
+            .margin({ bottom: 14 })
+
+          // 合并模式：先摆清楚「合并了什么、会丢什么」，再让用户决定名字与是否删源
+          if (this.editorMode === EDITOR_MODE_MERGE) {
+            Text(`已选 ${this.mergeSourceCount} 个歌单 · ${this.mergeRawTotal} 首 → 去重后 ${this.mergeTotal} 首`)
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+              .margin({ bottom: 6 })
+            if (this.mergeDropped > 0) {
+              Text(`超出 ${PLAYLIST_MAX_ITEMS} 首上限，只保留前 ${PLAYLIST_MAX_ITEMS} 首（丢弃 ${this.mergeDropped} 首）`)
+                .fontSize(12)
+                .fontColor($r('app.color.state_error'))
+                .width('100%')
+                .margin({ bottom: 6 })
+            }
+            if (this.mergeDeleteSources && this.mergeSubscriptions > 0) {
+              Text(`含 ${this.mergeSubscriptions} 个 UP 订阅歌单，删除原歌单后将失去「拉取新投稿」`)
+                .fontSize(12)
+                .fontColor($r('app.color.state_error'))
+                .width('100%')
+                .margin({ bottom: 6 })
+            }
+          }
+
+          TextInput({ placeholder: '歌单名称', text: this.editorName })
+            .width('100%')
+            .onChange((v: string): void => {
+              this.editorName = v;
+            })
+
+          if (this.editorMode === EDITOR_MODE_MERGE) {
+            Row() {
+              Text('合并后删除原歌单')
+                .fontSize(15)
+                .fontColor($r('app.color.text_primary'))
+              Blank()
+                .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.mergeDeleteSources })
+                .selectedColor($r('app.color.bili_pink'))
+                .onChange((v: boolean): void => {
+                  this.mergeDeleteSources = v;
+                })
+            }
+            .width('100%')
+            .margin({ top: 12 })
+            .alignItems(VerticalAlign.Center)
+          }
+
+          Row() {
+            Button('取消', { type: ButtonType.Normal })
+              .layoutWeight(1)
+              .height(44)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor($r('app.color.bg_divider'))
+              .fontColor($r('app.color.text_primary'))
+              .onClick((): void => {
+                this.cancelEditor();
+              })
+            Button(this.editorConfirmText(), { type: ButtonType.Normal })
+              .layoutWeight(1)
+              .height(44)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor($r('app.color.bili_pink'))
+              .fontColor($r('app.color.brand_on'))
+              .margin({ left: 12 })
+              .onClick((): void => {
+                this.submitEditor();
+              })
+          }
+          .margin({ top: 16 })
+        }
+        .padding(20)
+        .width('80%')
+        .backgroundColor($r('app.color.bg_card'))
+        .borderRadius(12)
+      }
+    }
+  }
+}

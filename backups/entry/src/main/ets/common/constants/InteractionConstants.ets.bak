@@ -1,0 +1,136 @@
+/**
+ * 按压缩放交互参数（TrackItem 首创，各列表条目推广共用）。
+ *
+ * 按下收到 0.9 的收缩确认，抬起/取消回弹 1.0：只做形变，
+ * 不改底色、不加按压蒙层/高亮。150ms + EaseOut 落在 120~180ms
+ * 手感区间，收尾轻快不拖沓。
+ *
+ * 集中放一处的原因：各页面各写一份 0.9 / 150 迟早漂移不一致，
+ * 按压手感应当全局统一。
+ */
+export const PRESS_SCALE: number = 0.9;
+
+/** 按压/回弹动画时长（ms） */
+export const PRESS_ANIM_MS: number = 150;
+
+/**
+ * ══════════ 统一按钮圆角 ══════════
+ * 所有按钮（含弹层 44 高大按钮）与搜索页滑块选段统一 8vp 圆角（用户指定）：
+ * 原 Capsule 全圆（32 高 = 16）药丸感过强，收小到 8 保留圆润又不至于全圆。
+ */
+export const BUTTON_RADIUS_VP: number = 8;
+
+/**
+ * ══════════ 播放页分层入场（点迷你条 → 播放页）══════════
+ *
+ * 进场总时长 300ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
+ * 否则会出现「封面已停住、整页还在飘」的错位）。各层按信息优先级依次浮现：
+ * 顶栏 → 歌名/进度 → 控制区。
+ *
+ * ⚠️ **封面（CoverDiscComponent）刻意不参与分层**：它的形变由 `geometryTransition` 独占
+ * （那个 `Image` 节点上还挂着 `rotate`）。若给它的父容器再叠 scale/translate，
+ * 转场目标框会按「动画中途的缩放值」计算 → 封面落位后还会再弹一下。
+ *
+ * 位移与单层时长复用上面的 `ENTRANCE_OFFSET_VP` / `ENTRANCE_DURATION_MS`；
+ * 只有「各层延迟」是这里特有的，集中定义便于真机微调（某层抢戏就把它的延迟调 0 或摘掉）。
+ * 完整方案与真机验证清单见 design/播放页进场动效方案.md。
+ */
+/** 顶栏（投播 / 状态）：与页面同批出现，只淡入不位移（顶栏上下动会像「掉下来」） */
+export const LAYER_DELAY_TOP: number = 0;
+/** 歌名 / 歌手 / 进度条：封面落位后才动，留出「先看封面、再看歌名」的顺序 */
+export const LAYER_DELAY_INFO: number = 90;
+/** 控制区：最后落位，也是离封面最远的一层 */
+export const LAYER_DELAY_CONTROL: number = 210;
+
+/**
+ * ══════════ 列表入场错峰（位移 + 淡入）══════════
+ *
+ * 单条：下移 10vp + 透明度 0 → 1，normal(250ms) EaseOut；
+ * 全部条目按「下标 × 35ms」的延迟依次入场，形成整体错峰的节奏感。
+ * 集中放此处的原因与按压参数相同：入场节奏应当全局统一，各页面各写一份迟早漂移。
+ */
+/** 入场起始位移（vp，动效规格 8~12） */
+export const ENTRANCE_OFFSET_VP: number = 10;
+/** 单条入场动画时长（ms，normal 档） */
+export const ENTRANCE_DURATION_MS: number = 250;
+/** 相邻条目入场延迟（ms，规格 30~40，所有条目按自身下标叠加） */
+export const ENTRANCE_STAGGER_MS: number = 35;
+/**
+ * 参加入场错峰的最大下标（约首屏条数）：下标 ≥ 它的条目直接显示，不排队不淡入。
+ * 闸门存在的原因：延迟按下标无限累加，滚动到第 30 条要等 30×35ms 才淡入 ——
+ * 长列表滚动时新条目拖动期间一直透明、松手才出现，观感严重不跟手。
+ */
+export const ENTRANCE_INDEX_MAX: number = 12;
+
+/**
+ * ══════════ 子页转场（push / pop）══════════
+ *
+ * PlaylistDetail / Recent / About 的 pushPath 转场：从右滑入 slow(400ms) EaseOut，
+ * 返回时反向滑出，与侧滑返回手势自然衔接（见各页 NavDestination.customTransition）。
+ */
+export const NAV_TRANSITION_MS: number = 400;
+
+/**
+ * ══════════ 全局 Toast（AppToast → HdsSnackBar）══════════
+ *
+ * 阶段 4 起视觉/动效/避让由 HDS 标准组件提供（见 AppToast.ets），本处只保留
+ * 业务停留时长：连续调用**替换**当前气泡（单实例重复 show），绝不排队连播
+ * —— 批量删 5 首只弹最后一条。
+ */
+/** 默认停留时长（ms，即 HdsSnackBar 的 duration） */
+export const TOAST_HOLD_MS: number = 1200;
+
+/**
+ * ══════════ 下载页多选模式切换 ══════════
+ *
+ * 进出多选：复选框槽位 0 ↔ 44vp 展开/收起（行内容随之右移/回位），
+ * 复选框本体叠 translate 从右侧滑入，normal(250ms) EaseOut。
+ */
+/** 复选框槽位宽度（vp）＝ 行内容右移量，与最小触达边长对齐 */
+export const SELECT_SLOT_VP: number = 44;
+/** 多选进出动画时长（ms） */
+export const SELECT_TOGGLE_MS: number = 250;
+
+/**
+ * ══════════ 下载页数值平滑 ══════════
+ *
+ * 快照到达时用 animateTo fast Linear 把进度条平滑推到新值；
+ * 重定目标从当前视觉值起算，快照连发时进度条连续滑动不跳变。
+ *
+ * 2026-10-08 卡顿优化：150 → 250。快照节流从 200ms 放宽到 300ms 后
+ * （见 DownloadManager.UI_NOTIFY_INTERVAL），150ms 的动画窗口只覆盖两份
+ * 快照间隔的一半，进度条会「滑一段、停一拍」；250ms 覆盖 83%，
+ * 观感连续且动画总开销反而更低（重定目标频率降了 40%）。
+ */
+export const DOWNLOAD_SMOOTH_MS: number = 250;
+
+/**
+ * ══════════ iOS 式大标题收拢 ══════════
+ *
+ * PlaylistDetail / Playlists / Downloads / Settings 的列表头部大标题随内容滚出，
+ * 固定栏小标题在下方距离内随滚动淡入（collapseProgress 0→1），
+ * 滚回顶部再淡出。集中定义避免各页各写一份 72 迟早漂移不一致。
+ */
+/** 大标题收拢动画距离（vp）：列表滚过该距离时固定栏小标题完全显现 */
+export const LARGE_TITLE_COLLAPSE_DIST: number = 72;
+
+/**
+ * ══════════ 搜索页下拉刷新（方案三 · 骨架接管）══════════
+ *
+ * 刷新指示器复用 SkeletonTrackItem，不新增任何视觉元素：下拉时骨架行从
+ * 上方 12vp 落位 + 按下拉进度淡入（onOffsetChange 跟手映射，不套 animateTo）；
+ * 松手触发后骨架停在原位保持纯静态（扫光带已全局删除）；Done 后 250ms 淡出上移退场。
+ * 触发阈值 72vp 同时是淡入进度的分母：拉满 = 不透明 = 「松手即刷」。
+ */
+/** 触发刷新的下拉偏移量（vp）＝ 骨架淡入进度的分母 */
+export const PULL_REFRESH_OFFSET_VP: number = 72;
+/** 下拉跟手系数（0 不跟手，1 完全跟手；55% = 跟手但带阻尼） */
+export const PULL_REFRESH_RATIO: number = 0.55;
+/** 最大下拉距离（vp）：封顶，防大力下拉把页面拽出半屏 */
+export const PULL_MAX_DISTANCE_VP: number = 120;
+/** 骨架跟手落位起始位移（vp）：进度 0 时停在上方 12vp 处 */
+export const PULL_SKELETON_SETTLE_VP: number = 12;
+/** Done 后骨架退场上移量（vp，负值向上） */
+export const PULL_SKELETON_EXIT_VP: number = -6;
+/** Done 后骨架淡出时长（ms，normal 档） */
+export const PULL_SKELETON_FADE_MS: number = 250;

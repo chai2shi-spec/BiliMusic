@@ -1,0 +1,29 @@
+# Build outputs
+/build/
+/entry/build/
+**/build/
+**/src/ohosTest/build/
+**/src/test/build/
+
+# Dependencies
+node_modules/
+oh_modules/
+
+# Hvigor / DevEco caches
+/.hvigor/
+/.cache/
+/.appanalyzer/
+/.workbuddy/
+/.codegenie/
+.cxx/
+
+# IDE
+/.idea/
+
+# Logs
+*.log
+build_stdout.log
+
+# Misc
+*.class
+.DS_Store

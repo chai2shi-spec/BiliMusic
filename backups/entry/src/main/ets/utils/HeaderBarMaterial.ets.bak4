@@ -1,0 +1,90 @@
+/**
+ * 标题栏毛玻璃的共享属性修饰器（各 Tab 页 / 子页固定标题栏通用）。
+ *
+ * 顶栏通路（HeaderBarMaterialModifier）：固定 backgroundEffect 真高斯模糊。
+ * systemMaterial 在设备不支持沉浸材质（模拟器常见）或材质档为 SMOOTH 时
+ * **静默不渲染**——曾是「API 已到 26 却看不到毛玻璃」的直接原因，故弃用。
+ *
+ * 另有按钮通路（ButtonMaterialModifier）：给搜索 / 新建 / 选择等胶囊按钮用。
+ * 按钮自带链式实色底作为兜底，修饰器低版本 no-op 即可，不需要塞 backgroundColor。
+ *
+ * ⚠️ 属性优先级：ArkUI 链式属性优先级高于 attributeModifier，挂本修饰器的 Row
+ * 上不要再链式设置 background / backgroundEffect，否则会被链式值覆盖。
+ *
+ * 按钮材质工厂走 MaterialCompat 的版本门控（sdkApiVersion ≥ 26 + typeof 运行时探测），
+ * 调用方只需 `makeButtonMaterialModifier()`，无需再关心兼容分支。
+ */
+
+// uiMaterial 模块 26.0.0 才有（API 23/24 上静态 import 崩溃），必须 lazy；
+// 本文件只在类型位置引用它，运行时经 MaterialCompat 的版本门控访问。
+import lazy { uiMaterial } from '@kit.ArkUI';
+import { MaterialCompat, MaterialCompatStyle } from './MaterialCompat';
+
+/**
+ * 标题栏毛玻璃（真高斯模糊）的属性修饰器：
+ * 固定走 backgroundEffect（radius 40 + 现有 header_glass_tint 蒙版）——
+ * systemMaterial 在「设备上报不支持沉浸材质 / 材质档为 SMOOTH」时会静默不渲染
+ * （模拟器正中此坑，肉眼只见半透明底、毫无磨砂感），而 backgroundEffect 是
+ * API 11+ 的真高斯模糊，全环境一致可见；异常时落 bg_page 实底，栏始终可读。
+ * 分支有 info 日志，设备上一眼确认走的是哪条通路。
+ */
+export class HeaderBarMaterialModifier implements AttributeModifier<RowAttribute> {
+  applyNormalAttribute(instance: RowAttribute): void {
+    try {
+      console.info('[HeaderBarMaterial] apply -> backgroundEffect frost (radius 40)');
+      instance.backgroundEffect({
+        radius: 40,
+        saturation: 1.3,
+        brightness: 1.0,
+        color: $r('app.color.header_glass_tint')
+      });
+    } catch (e) {
+      console.error(`apply header backgroundEffect failed: ${JSON.stringify(e)}`);
+      instance.backgroundColor($r('app.color.bg_page'));
+    }
+  }
+}
+
+/**
+ * 生成毛玻璃标题栏修饰器：
+ * PlaylistDetail / Playlists / Downloads / Settings / Search / Recent 的固定标题栏统一走这里。
+ */
+export function makeHeaderBarModifier(): HeaderBarMaterialModifier {
+  return new HeaderBarMaterialModifier();
+}
+
+/**
+ * 按钮沉浸光感材质的属性修饰器：仅当材质对象存在（API 26+ 且运行时支持）时
+ * 才调用 systemMaterial（THIN + interactive + lightEffect，小控件靠光效出玻璃感）；
+ * 低版本 no-op —— 按钮自带的链式实色底（bili_pink / brand_surface）即兜底，
+ * 用户在 API 23/24 设备上看到的就是这些实色。
+ */
+export class ButtonMaterialModifier implements AttributeModifier<ButtonAttribute> {
+  private material: uiMaterial.ImmersiveMaterial | undefined;
+
+  constructor(material: uiMaterial.ImmersiveMaterial | undefined) {
+    this.material = material;
+  }
+
+  applyNormalAttribute(instance: ButtonAttribute): void {
+    const m: uiMaterial.ImmersiveMaterial | undefined = this.material;
+    if (m === undefined) {
+      return;
+    }
+    try {
+      instance.systemMaterial(m);
+    } catch (e) {
+      console.error(`apply button systemMaterial failed: ${JSON.stringify(e)}`);
+    }
+  }
+}
+
+/**
+ * 生成按钮用 THIN 档交互材质修饰器：
+ * 搜索页（视频切换 / 搜索）、歌单页（新建）、下载页（选择）等胶囊按钮统一走这里。
+ */
+export function makeButtonMaterialModifier(): ButtonMaterialModifier {
+  return new ButtonMaterialModifier(
+    MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
+  );
+}

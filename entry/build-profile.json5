@@ -1,0 +1,27 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {},
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false
+          },
+          "consumerFiles": []
+        }
+      }
+    }
+  ],
+  "targets": [
+    {
+      "name": "default"
+    },
+    // ohosTest：Instrument Test（hypium 单元测试）编译目标，源码在 entry/src/ohosTest。
+    // hvigor 按 entry@ohosTest 单独出测试 HAP，不影响 default 目标产物。
+    {
+      "name": "ohosTest"
+    }
+  ]
+}

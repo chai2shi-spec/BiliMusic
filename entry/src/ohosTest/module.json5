@@ -1,0 +1,35 @@
+{
+  "module": {
+    // entry_test：单元测试 feature 模块（hypium Instrument Test 宿主）。
+    // 随包安装（deliveryWithInstall），只在 `aa test` 时由 TestRunner 拉起 TestAbility。
+    "name": "entry_test",
+    "type": "feature",
+    "description": "$string:module_test_desc",
+    "mainElement": "TestAbility",
+    "deviceTypes": [
+      "phone"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:test_pages",
+    "abilities": [
+      {
+        "name": "TestAbility",
+        "srcEntry": "./ets/testability/TestAbility.ets",
+        "description": "$string:TestAbility_desc",
+        "icon": "$media:icon",
+        "label": "$string:TestAbility_label",
+        "exported": true,
+        "startWindowIcon": "$media:icon",
+        "startWindowBackground": "$color:start_window_background"
+      }
+    ],
+    // aa test 通过这里的 testRunner 声明找到 OpenHarmonyTestRunner，
+    // 由它拉起 TestAbility 后在 onCreate 里执行 hypium 用例。
+    // （本版工具链 schema 用 srcPath 而非 srcEntry。）
+    "testRunner": {
+      "name": "OpenHarmonyTestRunner",
+      "srcPath": "./ets/testrunner/OpenHarmonyTestRunner.ets"
+    }
+  }
+}

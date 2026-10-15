@@ -1,0 +1,126 @@
+/**
+ * 歌单页顶栏内容件（HarmonyX 根栏移植，2026-10-10）。
+ *
+ * - 标题行按钮（PlTitleActions）：根栏 stackBuilder 行 1 歌单页分支右侧槽入
+ *   （Index.tabTitleRow）；
+ * - 多选工具条（PlSelectToolbar）：根栏 stackBuilder 行 2（Index 侧 position
+ *   溢出渲染到标题栏下方，plSelecting 镜像门控），纯内容件——磨砂统一归根栏
+ *   HDS（仅覆盖标题栏区，本行无背板，HarmonyX 页签行同款行为）。
+ *
+ * - 状态：@StorageProp 订阅 PlaylistsPage 推到 AppStorage 的镜像键
+ *   （STORE_PL_BAR_*，唯一写入口 PlaylistsPage.syncBarState / refresh）。
+ * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法（页面注册）。
+ * - 视觉：工具条内容与原 bottomBuilder / 页面钉顶版逐字一致，保证「换容器不换观感」。
+ */
+
+import { TabScrollerHolder } from '../service/TabScrollerHolder';
+import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { ButtonMaterialModifier, makeButtonMaterialModifier } from '../utils/HeaderBarMaterial';
+import {
+  STORE_PL_BAR_SELECTING,
+  STORE_PL_BAR_CAN_SELECT,
+  STORE_PL_BAR_ALL_SELECTED,
+  STORE_PL_BAR_SELECTED_COUNT
+} from '../common/Constants';
+
+/**
+ * 标题行右侧按钮组（Index.tabTitleRow 歌单页分支槽入）。
+ * 多选模式：完成；常规模式：选择（歌单 ≥2 才出现）+ 新建。
+ */
+@Component
+export struct PlTitleActions {
+  @StorageProp(STORE_PL_BAR_SELECTING) selecting: boolean = false;
+  /** 歌单数 ≥2 才有可合并对象，「选择」才出现（镜像派生，页面 syncBarState 推送） */
+  @StorageProp(STORE_PL_BAR_CAN_SELECT) canSelect: boolean = false;
+  private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
+
+  build() {
+    if (this.selecting) {
+      Button('完成', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        // 2026-10-11 真机要求：标题行按钮统一「浅粉底 + 粉字」（原粉底 + 深枣红字）
+        .backgroundColor($r('app.color.brand_surface'))
+        .fontColor($r('app.color.bili_pink'))
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.plToggleSelecting();
+        })
+    } else {
+      if (this.canSelect) {
+        // 「选择」原为 bg_divider + text_primary 且**不带光感材质**，
+        // 与同排其它按钮观感不一致（真机反馈）——统一到同一套语言。
+        Button('选择', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor($r('app.color.brand_surface'))
+          .fontColor($r('app.color.bili_pink'))
+          .attributeModifier(this.buttonMaterial)
+          .margin({ right: 8 })
+          .onClick((): void => {
+            TabScrollerHolder.plToggleSelecting();
+          })
+      }
+      Button('新建', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor($r('app.color.brand_surface'))
+        .fontColor($r('app.color.bili_pink'))
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.plOpenCreate();
+        })
+    }
+  }
+}
+
+/**
+ * 多选工具条（根栏 stackBuilder 行 2：Index 侧 position 于标题行下方，
+ * plSelecting 态渲染，全宽不随内容列收窄）。
+ * 纯内容件：磨砂由根栏 HDS 统一负责（仅覆盖标题栏区，本行无背板）。
+ * 内容与原 bottomBuilder 版逐字平移（全选 / 合并选中）。
+ */
+@Component
+export struct PlSelectToolbar {
+  @StorageProp(STORE_PL_BAR_ALL_SELECTED) allSelected: boolean = false;
+  @StorageProp(STORE_PL_BAR_SELECTED_COUNT) selectedCount: number = 0;
+
+  build() {
+    Row() {
+      Text(this.allSelected ? '取消全选' : '全选')
+        .fontSize(13)
+        .fontColor($r('app.color.brand_deep'))
+        .height(44)
+        .padding({ left: 20, right: 12 })
+        .borderRadius(8)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .onClick((): void => {
+          TabScrollerHolder.plToggleSelectAll();
+        })
+      Blank()
+      // 少于两个无法合并：置灰，点了只给一句提示（openMergeEditor 里兜）
+      Text(this.selectedCount > 0 ? `合并选中(${this.selectedCount})` : '合并选中')
+        .fontSize(13)
+        .fontColor(this.selectedCount >= 2 ? $r('app.color.brand_deep') : $r('app.color.text_disabled'))
+        .height(44)
+        .padding({ left: 12, right: 20 })
+        .borderRadius(8)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .onClick((): void => {
+          TabScrollerHolder.plOpenMergeEditor();
+        })
+    }
+    .width('100%')
+    .height(44)
+    .alignItems(VerticalAlign.Center)
+  }
+}

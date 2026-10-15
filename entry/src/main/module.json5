@@ -1,0 +1,73 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    // 开启 ArkUI 系统材质能力（uiMaterial 与 HDS 的 IMMERSIVE 沉浸材质都靠它）。
+    // ⚠️ 缺这一项时 .systemMaterial() / HdsTabs 的 systemMaterialEffect **静默不渲染材质**
+    //    —— 不报错、不告警，只是底栏退化成一块纯色，极难排查。
+    // 移植自 Sumy-Music 的 entry/src/main/module.json5。
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
+        // 「仅 WiFi 下载」开关需要判断当前默认网络是 Wi-Fi 还是蜂窝。
+        // normal 级权限，声明即可用；去掉它 → getDefaultNetSync 抛 201 →
+        // NetworkUtil 会一律放行，开关静默失效。
+        "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "reason": "$string:permission_bg_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        }
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ts",
+        "description": "$string:EntryAbility_desc",
+        // 2026-10-08 图标分层（应用市场审核要求）：应用图标必须为前景/背景两层、
+        // 各 1024×1024、不自裁圆角、不加内间距。icon 改指分层描述 layered_image.json
+        // （前景 app_icon_fg / 背景 app_icon_bg，圆角形状由系统遮罩统一处理）。
+        // startWindowIcon（启动页）与页面内占位图无分层要求，继续用平面图 app_icon。
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:app_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        // 2026-10-08 增加 dataTransfer：下载队列在退后台/锁屏后继续跑，
+        // 需要 DATA_TRANSFER 长时任务保活（BackgroundPlayback 协调器按需申请）。
+        // 系统硬约束：同一应用同一时刻只能持有一个长时任务，与 audioPlayback
+        // 的互斥/切换由 BackgroundPlayback 内部对账逻辑处理。
+        "backgroundModes": [
+          "audioPlayback",
+          "dataTransfer"
+        ],
+        "skills": [
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["action.system.home"]
+          }
+        ]
+      }
+    ]
+  }
+}
