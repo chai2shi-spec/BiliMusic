@@ -52,8 +52,7 @@ export class HdsTitleBarStyle {
    *   （官方 bottomBuilder 示例同款：其值 = bottomBuilder 高度；默认 32
    *   罩不住较高的第二行）。不传 / ≤0 = HDS 默认 32。
    *
-   * （历史记录：曾有过第三/四参 coffsetComp 让位量负补偿，已真机证伪删除——
-   * 机制记录见 design/顶栏模糊对齐关于页-其余页面任务书.md §2/§5。）
+ * （历史记录：曾有过第三/四参 coffsetComp 让位量负补偿，已真机证伪删除。）
    */
   static styleOptions(blurStartVp?: number, blurEndVp?: number, maskExtraVp?: number): TitleBarStyleOptions {
     const immersive: boolean = MaterialCompat.supportsImmersiveMaterial();

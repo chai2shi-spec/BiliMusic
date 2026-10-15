@@ -33,7 +33,6 @@ export const BUTTON_RADIUS_VP: number = 8;
  *
  * 位移与单层时长复用上面的 `ENTRANCE_OFFSET_VP` / `ENTRANCE_DURATION_MS`；
  * 只有「各层延迟」是这里特有的，集中定义便于真机微调（某层抢戏就把它的延迟调 0 或摘掉）。
- * 完整方案与真机验证清单见 design/播放页进场动效方案.md。
  */
 /** 顶栏（投播 / 状态）：与页面同批出现，只淡入不位移（顶栏上下动会像「掉下来」） */
 export const LAYER_DELAY_TOP: number = 0;

@@ -52,7 +52,7 @@ import { showAppAlertDialog } from '../components/AppAlertDialog';
 const RECENT_ACTIONS_ROW_HEIGHT: number = 44;
 
 /**
- * 顶栏滚动模糊时机（基准口径 = 关于页，见 design/顶栏模糊对齐关于页-其余页面任务书.md §2）：
+ * 顶栏滚动模糊时机（基准口径 = 关于页）：
  * 首条内容自静止位上移 30vp 起雾 → 80vp 满显影。
  * 本页让位已改为内容侧 padding（回退 B，F = raw），两参直接生效，无需补偿。
  */

@@ -1,7 +1,7 @@
 /**
  * 全局底部播放栏（PlayBar）—— HDS 悬浮底栏 miniBar 槽位内容（与页签胶囊融合）。
  *
- * 架构（2026-10-14 重构：内容侧全面动画驱动，参照副本 ImmersiveMiniBar 已验证设计）：
+ * 架构（2026-10-14 重构：内容侧全面动画驱动）：
  *   本组件**不再自带定位与背景**，作为 Index.ets 里 barFloatingStyle.miniBar 的
  *   builder 内容渲染 —— HDS 把它和页签项排进**同一个悬浮胶囊**
  *   （barLayoutMode: HdsBarLayoutMode.HORIZONTAL：播放栏在左、页签在右，一行融合），
@@ -30,7 +30,7 @@
  * HDS 槽位几何动画为**内建固定时长**（d.ets 确认 applyMiniBarStyle 无时长参数、
  * SDK 不开放配置），本组件只通过已上线的相位回调同步**内容侧**动画的起止，
  * 不试图驱动槽位几何本身。CONTENT_FADE_MS 刻意略长于 HDS 形变（约 250~300ms），
- * 留一点柔和余韵（ImmersiveMiniBar 同款取舍）。
+ * 留一点柔和余韵。
  *
  * 点击语义（onEntryTap 统一，两种布局一致）：
  *   收起态（水平圆盘 / 垂直收起行）点按 → 先经 onExpandRequest 展开；
@@ -136,7 +136,7 @@ const MINI_BAR_DISC_ANIM_MS: number = 300;
 /**
  * 内容体（Body）/ 直线进度 与 圆环进度 交叉淡入淡出的时长（ms）。
  * 刻意略长于 HDS 槽位形变（内建约 250~300ms，不可配）—— 收放结束后留一点
- * 柔和余韵（ImmersiveMiniBar 同款取舍）；观感拖沓只调这一处。
+ * 柔和余韵；观感拖沓只调这一处。
  */
 const CONTENT_FADE_MS: number = 400;
 

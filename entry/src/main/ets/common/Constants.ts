@@ -43,11 +43,8 @@ export const TABLE_DOWNLOAD: string = 'download_task';
 export const DEFAULT_PLAYLIST_NAME: string = '我的歌单';
 
 /**
- * 沉浸光感参数（底栏胶囊与顶栏共用，取值来自 Sumy 的 getBarFloatingStyle）。
- *
- * 提到这里是因为**两处必须同源**：底栏胶囊走 HDS 的 `lightColor`，顶栏走
- * `GlassTopBar` 的光晕层。两边各写一份魔数的话，改一次强度只改一处，
- * 就会出现「底栏泛粉、顶栏泛灰」的不一致。
+ * 沉浸光感参数（底栏悬浮胶囊用，取值来自 Sumy 的 getBarFloatingStyle）。
+ * GLOW_ALPHA 对应 HDS `lightColor` 的主题色光晕 alpha，集中定义避免魔数漂移。
  */
 /** 主题色光晕透明度（HDS 侧对应 `lightColor: withAlpha(themePrimary, 0.12)`） */
 export const GLOW_ALPHA: number = 0.12;

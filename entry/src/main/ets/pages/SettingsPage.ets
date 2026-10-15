@@ -1430,8 +1430,7 @@ export struct SettingsPage {
       // 否则条目在栏底被裁掉、滑不进模糊板下方。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
       .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-      // ⚠️ 自绘钉顶整栏（GlassTopBar + reveal 机制）已于批 3 移除：
-      // 顶栏改由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），
+      // 顶栏由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），
       // 本页只负责把 listScroller 注册给根容器驱动滚动模糊。
     }
     .width('100%')
