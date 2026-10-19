@@ -206,24 +206,30 @@ function describeError(e: Object): string {
  * 或 JSON 错误页**。此时下载流程「顺利」走完，文件也是一段合法字节，只是永远播不出来。
  * DASH 音频是 fMP4 容器，前 12 字节里第 4~7 字节恒为 ASCII `ftyp`，用它做魔数校验。
  */
-function isValidAudioFile(path: string): boolean {
+async function isValidAudioFile(path: string): Promise<boolean> {
+  // （2026-10-16 AppFreeze 加固）探测改异步 fs：不再在主线程 statSync/openSync/readSync。
+  let probe: fs.File | null = null;
   try {
-    const stat: fs.Stat = fs.statSync(path);
+    const stat: fs.Stat = await fs.stat(path);
     if (stat.size < MIN_VALID_AUDIO_BYTES) {
       return false;
     }
-    const probe: fs.File = fs.openSync(path, fs.OpenMode.READ_ONLY);
-    try {
-      const buf: ArrayBuffer = new ArrayBuffer(12);
-      fs.readSync(probe.fd, buf);
-      const bytes: Uint8Array = new Uint8Array(buf);
-      const tag: string = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
-      return tag === 'ftyp';
-    } finally {
-      fs.closeSync(probe.fd);
-    }
+    probe = await fs.open(path, fs.OpenMode.READ_ONLY);
+    const buf: ArrayBuffer = new ArrayBuffer(12);
+    await fs.read(probe.fd, buf);
+    const bytes: Uint8Array = new Uint8Array(buf);
+    const tag: string = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
+    return tag === 'ftyp';
   } catch (e) {
     return false;
+  } finally {
+    if (probe !== null) {
+      try {
+        await fs.close(probe.fd);
+      } catch (e) {
+        // 关闭失败不影响校验结果
+      }
+    }
   }
 }
 
@@ -348,11 +354,10 @@ export class DownloadManager {
           // 上次进程被杀留下的中间态，文件多半不完整，标为失败以免永远停在“下载中”。
           // 半截文件一并删掉：既占沙箱空间，又可能被误当成可播的本地缓存。
           if (t.localFilePath.length > 0) {
-            try {
-              fs.unlinkSync(t.localFilePath);
-            } catch (e) {
+            // （2026-10-16 AppFreeze 加固）删半截文件改异步，不阻塞主线程
+            fs.unlink(t.localFilePath).catch((): void => {
               // 文件可能不存在，忽略
-            }
+            });
           }
           await updateDownloadStatus(t.id, DownloadStatus.ERROR);
           t.status = DownloadStatus.ERROR;
@@ -558,8 +563,9 @@ export class DownloadManager {
       return null;
     }
     const dir: string = `${this.context.filesDir}/downloads`;
+    // （2026-10-16 AppFreeze 加固）建目录改异步；已存在时报错直接吞掉
     try {
-      fs.mkdirSync(dir, true);
+      await fs.mkdir(dir, true);
     } catch (e) {
       // 目录已存在时忽略
     }
@@ -926,7 +932,7 @@ export class DownloadManager {
      */
     let resumeFrom: number = 0;
     try {
-      const pre: fs.Stat = fs.statSync(destPath);
+      const pre: fs.Stat = await fs.stat(destPath);
       if (pre.size > MIN_VALID_AUDIO_BYTES) {
         resumeFrom = pre.size;
       }
@@ -934,15 +940,17 @@ export class DownloadManager {
       // 文件不存在 = 全新下载
     }
     try {
-      const file: fs.File = fs.openSync(
+      const file: fs.File = await fs.open(
         destPath,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.APPEND
+        // （2026-10-16 AppFreeze 加固）去掉 APPEND：写入位置已由 write 的显式
+        // offset 指定，不再依赖「追加到末尾」语义（APPEND 下显式偏移行为未定义）。
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE
       );
       fd = file.fd;
       if (resumeFrom === 0) {
         // 不以 TRUNC 打开是为了能续传，但「不续传」时又必须把旧内容清干净 ——
         // APPEND 会把新数据接在旧垃圾后面，拼出一个头部正确、中间乱掉的文件。
-        fs.truncateSync(fd, 0);
+        await fs.truncate(fd, 0);
       }
     } catch (e) {
       console.error(`open download file failed: ${describeError(e)}`);
@@ -971,6 +979,18 @@ export class DownloadManager {
     let writeReady: boolean = false;
     /** 进度显示用的基准：真续传时是 resumeFrom，走「清空重下」时是 0 */
     let baseBytes: number = resumeFrom;
+    /**
+     * （2026-10-16 AppFreeze 加固）异步写链：dataReceive 原来逐块 fs.writeSync 在
+     * 主线程落盘，快网络 / 大文件时主线程累计阻塞明显。现改为每个数据块按**显式
+     * position** 走异步 fs.write，用 writeChain 串行排队 —— 写入位置由 position
+     * 显式给出，正确性与链的完成顺序无关。
+     * ⚠️ 不变量：任何触碰 fd 的路径（截断 / 回滚 / 关闭 / 校验）必须发生在
+     * `await writeChain` 之后，否则会与在途写入竞争。
+     */
+    let writeOffset: number = baseBytes;
+    let writeChain: Promise<void> = Promise.resolve();
+    /** 写链上是否发生过失败（失败详情已在链内记日志，这里只做完成后的判定） */
+    let writeFailed: boolean = false;
 
     // 解析 Content-Length：B 站音频流常为分块传输，dataReceiveProgress 的 totalSize 恒为 0，
     // 进度条因此永远停在 0%。优先从响应头拿 Content-Length 作为总大小。
@@ -1069,17 +1089,24 @@ export class DownloadManager {
             // 服务端不认 Range（回了 200 全量）：把断点前的旧字节清掉再从头写。
             // 这是**安全方向**的降级 —— 最坏只是白下一次，绝不会把两段数据首尾相接，
             // 拼出一个「能播但内容是错的」文件（那种问题几乎无法从现象反推）。
+            // （2026-10-16 AppFreeze 加固）截断进写链排队，保证先于后续所有数据写入执行。
             baseBytes = 0;
-            try {
-              fs.truncateSync(fd, 0);
-            } catch (e) {
-              console.error(`reset partial download failed: ${describeError(e)}`);
-            }
+            writeOffset = 0;
+            writeChain = writeChain.then((): Promise<void> => fs.truncate(fd, 0));
           }
         }
-        fs.writeSync(fd, data);
+        // （2026-10-16 AppFreeze 加固）显式 offset + 异步写：主线程只记账、不落盘。
+        const offset: number = writeOffset;
+        writeOffset += data.byteLength;
+        writeChain = writeChain
+          .then((): Promise<number> => fs.write(fd, data, { offset: offset }))
+          .then((_: number): void => {})
+          .catch((e: Error): void => {
+            writeFailed = true;
+            console.error(`write download chunk failed: ${describeError(e)}`);
+          });
       } catch (e) {
-        console.error(`write download chunk failed: ${describeError(e)}`);
+        console.error(`queue download chunk failed: ${describeError(e)}`);
       }
     });
 
@@ -1146,11 +1173,27 @@ export class DownloadManager {
         await sleep(STREAM_POLL_INTERVAL_MS);
       }
 
+      // （2026-10-16 AppFreeze 加固）先等写链上全部数据块落盘再校验 / 收尾，
+      // 否则魔数探测可能读到还没写完的文件。
+      await writeChain;
+      if (writeFailed) {
+        // 某个数据块写失败：文件里已经出现「空洞」（后续块按显式 position 写在了
+        // 各自正确的位置上），这份半截文件**不能**用于续传 —— 交给下面 catch 回滚。
+        throw new Error('Write download chunk failed');
+      }
+
       // 校验确实是音频（fMP4 的 ftyp 魔数）：拦住「200 + HTML 错误页」这种假成功
-      if (!isValidAudioFile(destPath)) {
+      if (!await isValidAudioFile(destPath)) {
         throw new Error('Downloaded file is not valid audio');
       }
     } catch (e) {
+      // （2026-10-16 AppFreeze 加固）暂停 / 取消 / 失败从轮询循环抛出时，写链上
+      // 可能还有在途的数据块 —— 必须等链落定再动文件（关闭 / 回滚），否则与写入竞争。
+      try {
+        await writeChain;
+      } catch (e1) {
+        // 链内失败已记入 writeFailed，这里只保证时序
+      }
       const errMessage: string = e instanceof Error ? e.message : '';
       const pausing: boolean = errMessage === PAUSE_SENTINEL;
       if (pausing) {
@@ -1162,30 +1205,32 @@ export class DownloadManager {
         // 半截文件去留（为「失败自动重试 + Range 续传」服务，见文件头注释⑥）：
         //   · 停滞 / 网络中断 —— 本次响应已通过 200/206 校验，落盘字节全部有效，
         //     **保留**半截文件，上层重试时从断点续传，弱网下不浪费已下载的流量；
-        //   · HTTP 状态码不对 —— 错误页正文可能已经通过 dataReceive 追加进了文件，
-        //     必须**回滚到续传起点**（保住此前验证过的前缀）；没有续传起点就整个删掉；
+        //   · HTTP 状态码不对 / 数据块写失败 —— 错误页正文可能已经写进了文件，
+        //     或文件里已经出现空洞，必须**回滚到续传起点**（保住此前验证过的前缀）；
+        //     没有续传起点就整个删掉；
         //   · 校验不是音频 / 用户删除 —— 文件内容不可信 / 任务已不存在，删干净。
         const badStatus: boolean = errMessage.indexOf('Download HTTP') === 0;
+        const writeError: boolean = errMessage === 'Write download chunk failed';
         const discardAll: boolean = errMessage === 'Download cancelled'
           || errMessage === 'Downloaded file is not valid audio';
         try {
           if (fd >= 0) {
-            fs.closeSync(fd);
+            await fs.close(fd);
           }
           fd = -1;
-          if (badStatus) {
+          if (badStatus || writeError) {
             if (resumeFrom > 0) {
-              const rollback: fs.File = fs.openSync(destPath, fs.OpenMode.READ_WRITE);
+              const rollback: fs.File = await fs.open(destPath, fs.OpenMode.READ_WRITE);
               try {
-                fs.truncateSync(rollback.fd, resumeFrom);
+                await fs.truncate(rollback.fd, resumeFrom);
               } finally {
-                fs.closeSync(rollback.fd);
+                await fs.close(rollback.fd);
               }
             } else {
-              fs.unlinkSync(destPath);
+              await fs.unlink(destPath);
             }
           } else if (discardAll) {
-            fs.unlinkSync(destPath);
+            await fs.unlink(destPath);
           }
         } catch (e2) {
           // 文件可能还没创建，忽略
@@ -1193,8 +1238,9 @@ export class DownloadManager {
       }
       throw e;
     } finally {
-      // ⚠️ 顺序不能变：先摘监听（此后不会再有回调触碰文件）→ 再关文件 → 最后销毁请求。
-      // 反过来就是「向已关闭的 fd 写入 / 销毁进行中的流」那条 native 崩溃路径。
+      // ⚠️ 顺序不能变：先摘监听（此后不会再有回调往写链里排新写入）→ 等写链落定
+      // → 再关文件 → 最后销毁请求。反过来就是「向已关闭的 fd 写入 / 销毁进行中的流」
+      // 那条 native 崩溃路径。
       try {
         request.off('dataReceive');
         request.off('dataReceiveProgress');
@@ -1204,8 +1250,13 @@ export class DownloadManager {
         console.error(`detach download events failed: ${describeError(e)}`);
       }
       try {
+        await writeChain;
+      } catch (e1) {
+        // 链内失败已记入 writeFailed，这里只保证时序
+      }
+      try {
         if (fd >= 0) {
-          fs.closeSync(fd);
+          await fs.close(fd);
         }
       } catch (e) {
         console.error(`close download file failed: ${describeError(e)}`);
@@ -1225,7 +1276,7 @@ export class DownloadManager {
         // 拿它当总大小会把界面伪造成 100%（用户会以为下完了，其实只是被暂停了）。
         if (task.totalBytes <= 0 && dataEnded) {
           try {
-            const stat: fs.Stat = fs.statSync(destPath);
+            const stat: fs.Stat = await fs.stat(destPath);
             if (stat.size > 0) {
               task.totalBytes = stat.size;
               task.downloadedBytes = stat.size;

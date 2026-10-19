@@ -1,10 +1,15 @@
 /**
  * 依赖装配（替代原 Hilt / 手动 DI）。
- * 应用启动时统一初始化 Preferences、RDB、buvid Cookie 与播放器单例。
+ *
+ * 2026-10-17 启动优化拆分：本类不再负责 initPreferences —— 它已上移到
+ * EntryAbility 的首帧前链路（loadContent 之前完成，供主题色 / 底栏布局
+ * 首帧就位）。initRest 承载其余全部初始化（RDB / 下载表 / 播放器 / Cookie），
+ * 由 EntryAbility 与 loadContent **并行**触发，不再阻塞首页加载。
  */
 
 import common from '@ohos.app.ability.common';
-import { initPreferences } from '../preferences/AppPreferences';
+import { abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { initRdb } from '../database/RdbHelper';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { DownloadManager } from './DownloadManager';
@@ -17,11 +22,18 @@ import { initUpSpaceCache } from './UpSpaceCacheStore';
 export class AppContainer {
   private static initialized: boolean = false;
 
-  static async init(context: common.Context): Promise<void> {
+  /**
+   * 非关键初始化链（与首页加载并行执行）。
+   * 前置条件：initPreferences 已由 EntryAbility 在首帧前完成。
+   */
+  static async initRest(context: common.Context): Promise<void> {
     if (AppContainer.initialized) {
       return;
     }
-    await initPreferences(context);
+    // 后台保活权限（normal 级 system_grant，不弹窗）：原在启动关键路径上，
+    // 移到这里减少首页加载瞬间的 IPC 竞争。
+    AppContainer.requestKeepBackgroundPermission(context);
+
     await initRdb(context);
     // UP 主页缓存目录（2026-10-09）：文件型存储，进页直接用缓存不联网；
     // 同步建目录，毫秒级，不拖慢启动
@@ -52,8 +64,8 @@ export class AppContainer {
     // 2026-10-08 本地优先播放：启动即把下载任务表装填进内存 ——
     // MusicPlayer.loadAndPlay 切歌时同步查 completedLocalPath(musicId)，
     // 内存表为空的话已下载曲目会静默回落在线流（功能失效但不报错）。
-    // EntryAbility 对 AppContainer.init 是 fire-and-forget，这里多 await 一次
-    // RDB 读不阻塞首帧。loadFromDb 顺带把上次进程被杀的中间态标为失败并清半截文件，
+    // 本链与 loadContent 并行执行，这里多 await 一次 RDB 读不影响首帧。
+    // loadFromDb 顺带把上次进程被杀的中间态标为失败并清半截文件，
     // 提前到启动做只有好处（原先要等首次进下载页才清理）。
     await DownloadManager.getInstance().ensureLoaded();
     await MusicPlayer.getInstance().init(context);
@@ -61,5 +73,23 @@ export class AppContainer {
     // 后台换取官方 buvid（不 await：本地兜底值已足够过 412，不能拖慢启动）
     upgradeBuvidCookie();
     AppContainer.initialized = true;
+  }
+
+  private static requestKeepBackgroundPermission(context: common.Context): void {
+    try {
+      const atManager = abilityAccessCtrl.createAtManager();
+      const permissions: Array<Permissions> = [
+        'ohos.permission.KEEP_BACKGROUND_RUNNING'
+      ];
+      atManager.requestPermissionsFromUser(context, permissions, (err: BusinessError, data: object): void => {
+        if (err) {
+          console.error(`requestPermissionsFromUser failed: ${err.code} ${err.message}`);
+        } else {
+          console.info(`permissions result: ${JSON.stringify(data)}`);
+        }
+      });
+    } catch (e) {
+      console.error(`requestNeededPermissions exception: ${JSON.stringify(e)}`);
+    }
   }
 }

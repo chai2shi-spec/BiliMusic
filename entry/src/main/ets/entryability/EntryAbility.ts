@@ -5,20 +5,19 @@
 
 import {
   UIAbility,
-  abilityAccessCtrl,
-  Permissions,
   Configuration,
   ConfigurationConstant
 } from '@kit.AbilityKit';
 import window from '@ohos.window';
 import display from '@ohos.display';
+import hiAppEvent from '@ohos.hiviewdfx.hiAppEvent';
 import { BusinessError } from '@ohos.base';
 import { AppContainer } from '../service/AppContainer';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_MINI_BAR_PROGRESS } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
@@ -26,6 +25,34 @@ export default class EntryAbility extends UIAbility {
     // 页面用色全部走 $r('app.color.*') 语义 token，深色值在 resources/dark/element/color.json
     // 中覆盖（未覆盖的品牌色 / 播放页白色系自动回落 base）；$r('sys.color.*') 系统资源
     // 本身随系统深浅切换，无需代码干预。
+    this.registerAppFreezeWatcher();
+  }
+
+  /**
+   * （2026-10-16 AppFreeze 加固）订阅系统 APP_FREEZE 事件。
+   *
+   * 背景：应用市场审核驳回的 THREAD_BLOCK_6S 在送审真机上没有留下可拉取的 faultlog，
+   * 只能靠应用侧 watcher 兜底 —— 下次冻结真正发生时把事件参数打进 error 日志，
+   * 复测 / 回归时用 hdc 日志即可反推卡顿点（主线程当时卡在哪个调用栈）。
+   * 注册失败不影响应用运行。
+   */
+  private registerAppFreezeWatcher(): void {
+    try {
+      const filter: hiAppEvent.AppEventFilter = {
+        domain: hiAppEvent.domain.OS,
+        names: [hiAppEvent.event.APP_FREEZE]
+      };
+      const watcher: hiAppEvent.Watcher = {
+        name: 'appFreezeWatcher',
+        appEventFilters: [filter],
+        onReceive: (domain: string, appEventGroups: Array<hiAppEvent.AppEventGroup>): void => {
+          console.error(`[AppFreeze] domain=${domain} events=${JSON.stringify(appEventGroups)}`);
+        }
+      };
+      hiAppEvent.addWatcher(watcher);
+    } catch (e) {
+      console.error(`register appFreezeWatcher failed: ${JSON.stringify(e)}`);
+    }
   }
 
   onDestroy(): void {
@@ -66,7 +93,6 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    this.requestNeededPermissions();
     // ① 窗口级全屏布局：把页面的布局范围从「安全区」扩展为「整个窗口」（含状态栏 / 导航栏），
     //    这是「内容能绘制到底部手势条下方」的前提。开启后系统不再帮忙避让，
     //    避让改由 Index 的根容器 / 页签层按避让区高度手动补 padding。
@@ -74,9 +100,10 @@ export default class EntryAbility extends UIAbility {
     // ② 必须在 loadContent 之前把避让区尺寸写进 AppStorage：首页 build 的首帧就要用它
     //    算「根容器底部让位 / 页签层顶部让位」，晚一拍会看到内容先贴边再弹回来。
     this.publishSafeArea(windowStage);
-    // 必须在页面加载前完成全局依赖（Preferences / RDB / 播放器）初始化，
-    // 否则页面 aboutToAppear 时读取偏好或数据库会抛 “未初始化”。
-      AppContainer.init(this.context)
+    // ③ 2026-10-17 启动优化：只等 Preferences（首帧必须就位的主题模式 / 主题色 /
+    //    底栏布局都只依赖它），RDB / 下载表 / AVSession 等重初始化与页面加载并行。
+    //    原实现把 AppContainer 全量 init 串在 loadContent 之前，是启动超时的主因。
+    AppPreferences.initPreferences(this.context)
       .then((): void => {
         // 偏好就绪后、首帧加载前恢复持久化的主题模式（浅色 / 深色 / 跟随系统）。
         // setColorMode 是运行时设置不落盘，每次启动都要重放，否则会退回跟随系统；
@@ -92,6 +119,25 @@ export default class EntryAbility extends UIAbility {
         // 底部导航布局（设置页可切）：首帧前首发 AppStorage 镜像，
         // Index 的 @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_BAR_LAYOUT, settings.barLayout);
+        // 迷你栏进度指示开关（设置页可切）同批首发：PlayBar 的 @StorageProp
+        // 初值只是占位，真值必须首帧 build 前就位，否则关开关的用户启动时
+        // 会先看到进度条再消失。
+        AppStorage.setOrCreate(STORE_MINI_BAR_PROGRESS, settings.miniBarProgress);
+        // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
+        //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
+        AppContainer.initRest(this.context)
+          .then((): void => {
+            // 启动时自动播放（设置页开关，默认关）：播放器恢复完成后才触发，
+            // 无播放快照时 play() 内部静默 no-op，
+            // 初始化失败的 catch 分支不经过这里，天然不触发。
+            if (settings.autoPlayOnStart) {
+              MusicPlayer.getInstance().play();
+            }
+          })
+          .catch((e: Error): void => {
+            console.error(`AppContainer initRest failed: ${JSON.stringify(e)}`);
+          });
+        // ⑤ 立即加载首页（不再等 initRest）
         windowStage.loadContent('pages/Index', (err: BusinessError): void => {
           if (err.code) {
             console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
@@ -99,7 +145,8 @@ export default class EntryAbility extends UIAbility {
         });
       })
       .catch((e: Error): void => {
-        console.error(`AppContainer init failed: ${JSON.stringify(e)}`);
+        console.error(`initPreferences failed: ${JSON.stringify(e)}`);
+        // Preferences 初始化失败也要让应用可进入（页面内读偏好有各自兜底）
         windowStage.loadContent('pages/Index', (err: BusinessError): void => {
           if (err.code) {
             console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
@@ -180,25 +227,6 @@ export default class EntryAbility extends UIAbility {
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`writeSafeArea failed: ${msg}`);
-    }
-  }
-
-
-  private requestNeededPermissions(): void {
-    try {
-      const atManager = abilityAccessCtrl.createAtManager();
-      const permissions: Array<Permissions> = [
-        'ohos.permission.KEEP_BACKGROUND_RUNNING'
-      ];
-      atManager.requestPermissionsFromUser(this.context, permissions, (err: BusinessError, data: object): void => {
-        if (err) {
-          console.error(`requestPermissionsFromUser failed: ${err.code} ${err.message}`);
-        } else {
-          console.info(`permissions result: ${JSON.stringify(data)}`);
-        }
-      });
-    } catch (e) {
-      console.error(`requestNeededPermissions exception: ${JSON.stringify(e)}`);
     }
   }
 }

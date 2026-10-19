@@ -26,6 +26,11 @@ export interface HttpRequestOptions {
   skipCookie?: boolean;
   /** 跳过自动附加的 Referer 头（passport 轮询同样不需要）。 */
   skipReferer?: boolean;
+  /**
+   * 覆盖引擎默认的最大重定向次数。`0` = **禁用重定向**（用于读 3xx 的 Location，
+   * 解析分享短链必需，见 probeRedirectLocation）；不传 = 引擎默认（自动跟随）。
+   */
+  maxRedirects?: number;
 }
 
 export interface HttpTextResult {
@@ -141,6 +146,58 @@ export class HttpUtil {
   static async requestJson<T>(url: string, options?: HttpRequestOptions): Promise<T> {
     const text: string = await HttpUtil.requestText(url, options);
     return JSON.parse(text) as T;
+  }
+
+  /**
+   * 探测重定向目标（**不跟随**）：发一次 `maxRedirects: 0` 的 GET，读 3xx 响应的
+   * `Location` 头。用于解析分享短链 —— QQ 音乐 `c6.y.qq.com/base/fcgi-bin/u?__=xxx`
+   * 这类 URL 里**不含**歌单 ID，只能靠 302 反查（2026-10-16 实测：Location 与 UA 无关，
+   * 稳定给出 `…playlist.html?…&id=9725916480`）。
+   *
+   * **绝不抛错**：引擎对 maxRedirects 的支持程度、响应头键名大小写、服务器是否直接
+   * 返回 2xx 都可能变，任何异常一律降级为空串，由调用方决定怎么提示用户
+   * （不向上抛看不懂的错，方案 §2B）。
+   */
+  static async probeRedirectLocation(url: string, options?: HttpRequestOptions): Promise<string> {
+    const req: http.HttpRequest = http.createHttp();
+    try {
+      const resp: http.HttpResponse = await req.request(url, {
+        method: http.RequestMethod.GET,
+        header: HttpUtil.buildHeader(options),
+        connectTimeout: 15000,
+        readTimeout: 15000,
+        maxRedirects: 0
+      });
+      const location: string = HttpUtil.readHeader(resp, 'location');
+      hilog.info(0x0000, 'BiliMusicHttp', 'probe %{public}s code=%{public}d location=%{public}s',
+        url, resp.responseCode, location);
+      return location;
+    } catch (e) {
+      const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      hilog.warn(0x0000, 'BiliMusicHttp', 'probe failed %{public}s: %{public}s', url, detail);
+      return '';
+    } finally {
+      req.destroy();
+    }
+  }
+
+  /**
+   * 按**不区分大小写**的键名从响应头取值（值非字符串、或键不存在时返回空串）。
+   * ohos 对响应头键名的大小写不保证（`Location` / `location` 都见过），故必须归一化比较。
+   */
+  private static readHeader(resp: http.HttpResponse, lowerName: string): string {
+    const header: Record<string, string> = resp.header as Record<string, string>;
+    const keys: string[] = Object.keys(header);
+    for (let i: number = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() === lowerName) {
+        const value: Object = header[keys[i]] as Object;
+        if (typeof value === 'string') {
+          return value as string;
+        }
+        return '';
+      }
+    }
+    return '';
   }
 
   /**

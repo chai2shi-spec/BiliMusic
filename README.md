@@ -10,7 +10,7 @@
 
 ![Language](https://img.shields.io/badge/language-ArkTS%20%2F%20ArkUI-orange)
 
-![Version](https://img.shields.io/badge/version-1.1.2-green)
+![Version](https://img.shields.io/badge/version-1.1.3-green)
 
 ---
 

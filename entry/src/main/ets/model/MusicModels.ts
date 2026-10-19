@@ -322,8 +322,8 @@ export interface AppSettings {
   downloadQuality: string;
   downloadDir: string;
   autoPlay: boolean;
-  showLyrics: boolean;
-  /** 仅 WiFi 下载：开启后移动网络下下载前先询问，避免偷跑流量 */
+  /** 启动时自动播放：开启后应用冷启动时从上次播放的曲目/进度继续播放（默认关 —— 无交互不出声） */
+  autoPlayOnStart: boolean;
   wifiOnlyDownload: boolean;
   /** 仅 WiFi 播放：开启后移动网络下不播放在线歌曲（本地已下载曲目不受限） */
   wifiOnlyPlay: boolean;
@@ -332,6 +332,8 @@ export interface AppSettings {
   themeColor: string;
   /** 底部导航布局：BAR_LAYOUT_HORIZONTAL（水平融合）/ BAR_LAYOUT_VERTICAL（垂直两层） */
   barLayout: string;
+  /** 迷你播放栏进度指示显示开关（底部直线 + 收起态圆环；设置 → 外观；默认开） */
+  miniBarProgress: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -340,12 +342,13 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   downloadQuality: '高品质',
   downloadDir: '',
   autoPlay: true,
-  showLyrics: true,
+  autoPlayOnStart: false,
   wifiOnlyDownload: DEFAULT_WIFI_ONLY_DOWNLOAD,
   wifiOnlyPlay: false,
   themeMode: ThemeMode.SYSTEM,
   themeColor: 'pink',
-  barLayout: BAR_LAYOUT_HORIZONTAL
+  barLayout: BAR_LAYOUT_HORIZONTAL,
+  miniBarProgress: true
 };
 
 export interface LyricLine {

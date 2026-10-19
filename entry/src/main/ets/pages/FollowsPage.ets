@@ -43,7 +43,11 @@ import {
   STORE_THEME_ON
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
-import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import {
+  NAV_TRANSITION_MS,
+  BUTTON_RADIUS_VP,
+  LIST_FOOTER_HEIGHT_VP
+} from '../common/constants/InteractionConstants';
 
 /** 失败后「重试」的冷却（ms）：followings 接口按 IP 风控限流，连点只会继续被拒（与 UpSpacePage 同口径） */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -107,7 +111,7 @@ export struct FollowsPage {
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 计数行 28（有关注时）。
    * 标题行与 bottomBuilder 计数行高度均为定值，无需实测——
-   * contentStartOffset 挂载即拿到正确让位量（旧 onAreaChange 实测机制已废弃）。
+   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值（旧 onAreaChange 实测机制已废弃）。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
@@ -216,10 +220,26 @@ export struct FollowsPage {
       const data: FollowingsData = await getFollowings(user.mid, next);
       // 成功才推进 page：失败时下次 onReachEnd 仍从当前页重试
       this.page = next;
-      const merged: FollowedUp[] = [...this.ups, ...data.list];
-      this.ups = merged;
-      this.upSource.reload(merged);
-      this.hasMore = data.list.length > 0 && merged.length < this.total;
+      // 增量追加（2026-10-19 修「加载第二页列表整体跳一下」）：
+      // 不再整表 reload（onDataReloaded 会让可视区节点失效重建、锚点重算），
+      // 改为按 mid 去重后 push 进镜像数组 + upSource.append 只发 onDataAdd。
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.ups.length; i++) {
+        seen.add(String(this.ups[i].mid));
+      }
+      const fresh: FollowedUp[] = [];
+      for (let i = 0; i < data.list.length; i++) {
+        const up: FollowedUp = data.list[i];
+        if (!seen.has(String(up.mid))) {
+          fresh.push(up);
+          seen.add(String(up.mid));
+        }
+      }
+      for (let i = 0; i < fresh.length; i++) {
+        this.ups.push(fresh[i]);
+      }
+      this.upSource.append(fresh);
+      this.hasMore = data.list.length > 0 && this.ups.length < this.total;
     } catch (err) {
       // 翻页失败不切失败态（首屏数据还在可看），提示一句即可
       console.warn(`follows page load more failed: ${JSON.stringify(err)}`);
@@ -514,6 +534,16 @@ export struct FollowsPage {
             // 列表挂载门控：让位量为定值计算（safeTop 启动即有），挂载即正确
           } else if (this.barTotalHeight() > 0) {
             List({ scroller: this.listScroller }) {
+              // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+              // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
+              // safeTop + 56 + 计数行 28），首个真实条目恰从栏底起排（静置位与旧
+              // contentStartOffset 等值），滚动时占位与条目一起从沉浸材质下方穿过。
+              ListItem() {
+                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+                Row()
+                  .width('100%')
+                  .height(this.barTotalHeight())
+              }
               LazyForEach(
                 this.upSource,
                 (up: FollowedUp): void => {
@@ -523,9 +553,11 @@ export struct FollowsPage {
                 },
                 (up: FollowedUp): string => String(up.mid)
               )
-              if (this.loadingMore) {
-                ListItem() {
-                  Row() {
+              // 尾部状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
+              // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
+              ListItem() {
+                Row() {
+                  if (this.loadingMore) {
                     LoadingProgress()
                       .width(18)
                       .height(18)
@@ -534,28 +566,26 @@ export struct FollowsPage {
                       .fontSize(12)
                       .fontColor($r('app.color.text_tertiary'))
                       .margin({ left: 8 })
+                  } else if (!this.hasMore) {
+                    Text('没有更多了')
+                      .fontSize(11)
+                      .fontColor($r('app.color.text_tertiary'))
+                  } else {
+                    Text('上拉加载更多')
+                      .fontSize(11)
+                      .fontColor($r('app.color.text_tertiary'))
                   }
-                  .width('100%')
-                  .justifyContent(FlexAlign.Center)
-                  .padding({ top: 12, bottom: 12 })
                 }
-              } else if (!this.hasMore) {
-                ListItem() {
-                  Text('没有更多了')
-                    .fontSize(11)
-                    .fontColor($r('app.color.text_tertiary'))
-                    .width('100%')
-                    .textAlign(TextAlign.Center)
-                    .padding({ top: 12, bottom: 12 })
-                }
+                .width('100%')
+                .height(LIST_FOOTER_HEIGHT_VP)
+                .justifyContent(FlexAlign.Center)
               }
             }
             .layoutWeight(1)
             // 边界回弹（2026-10-08）：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
-            // 顶部让位（Sumy 式穿透）：列表视口铺满全屏，首行从 HDS 标题栏底部起排，
-            // 滚动时行从沉浸材质下穿过；让位量 = safeTop + 56 + 计数行 28（定值）
-            .contentStartOffset(this.barTotalHeight())
+            // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
+            //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
             .onReachEnd((): void => {
               this.loadMore();
             })
@@ -601,7 +631,22 @@ export struct FollowsPage {
     })
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
-    // 并接管组件级 safeAreaPadding。内容层避让由 contentStartOffset / plain padding 自理。
+    // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
+
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function FollowsPageBuilder(): void {
+  FollowsPage()
+}
+
+
+/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const FollowsPageWrapped: WrappedBuilder<[]> = wrapBuilder(FollowsPageBuilder);
+

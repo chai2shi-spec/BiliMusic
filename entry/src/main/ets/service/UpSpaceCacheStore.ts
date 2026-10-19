@@ -7,8 +7,9 @@
  * `{filesDir}/up_space_cache/{upMid}.json`，最多保留 MAX_CACHED_UPS 个，超出按
  * 文件 mtime 淘汰最旧（按 mtime 而非 cachedAtMs：不用逐个解析文件内容）。
  *
- * 读写均为同步（openSync / readTextSync / writeSync）：单文件 15~50KB，毫秒级，
- * 分别发生在进页（aboutToAppear）与请求成功回调里，用户无感；实测若出现卡顿再改异步。
+ * 读写均为异步（2026-10-16 AppFreeze 加固：原先 readTextSync/writeSync/listFileSync
+ * 全在主线程同步执行，是进页路径上的卡顿点）：单文件 15~50KB，毫秒级，
+ * 分别发生在进页（aboutToAppear）与请求成功回调里，用户无感。
  *
  * 损坏即弃：读文件 / JSON.parse / 字段校验任何一步异常都返回 null —— 缓存坏了
  * 就当作没有缓存，页面照常联网拉取，绝不把脏数据甩进 UI（SearchHistoryStore 的
@@ -60,14 +61,15 @@ export function initUpSpaceCache(context: common.Context): void {
 }
 
 /** 读缓存：命中返回归一化条目，无缓存 / 损坏 / 未初始化一律返回 null。 */
-export function getUpSpaceCache(upMid: string): UpSpaceCacheEntry | null {
+export async function getUpSpaceCache(upMid: string): Promise<UpSpaceCacheEntry | null> {
   if (cacheDir.length === 0 || upMid.length === 0) {
     return null;
   }
   const path: string = `${cacheDir}/${upMid}.json`;
   let raw: string = '';
   try {
-    raw = fs.readTextSync(path);
+    // （2026-10-16 AppFreeze 加固）readTextSync → 异步 readText
+    raw = await fs.readText(path);
   } catch (e) {
     // 文件不存在（首次进入）属常态；读失败一律当作无缓存
     return null;
@@ -117,27 +119,28 @@ export function getUpSpaceCache(upMid: string): UpSpaceCacheEntry | null {
 }
 
 /**
- * 写缓存：同步整文件覆写（TRUNC），失败只打日志不影响页面。
+ * 写缓存：异步整文件覆写（TRUNC），失败只打日志不影响页面。
  * 顺带执行淘汰：超出 MAX_CACHED_UPS 个文件时删最旧。
  */
-export function saveUpSpaceCache(entry: UpSpaceCacheEntry): void {
+export async function saveUpSpaceCache(entry: UpSpaceCacheEntry): Promise<void> {
   if (cacheDir.length === 0 || entry.upMid.length === 0 || entry.tracks.length === 0) {
     return;
   }
   const path: string = `${cacheDir}/${entry.upMid}.json`;
   try {
     const json: string = JSON.stringify(entry);
-    const file: fs.File = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    // （2026-10-16 AppFreeze 加固）openSync/writeSync/closeSync → 异步版
+    const file: fs.File = await fs.open(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     try {
-      fs.writeSync(file.fd, json);
+      await fs.write(file.fd, json);
     } finally {
-      fs.closeSync(file);
+      await fs.close(file);
     }
   } catch (e) {
     console.error(`saveUpSpaceCache failed (upMid=${entry.upMid}): ${JSON.stringify(e)}`);
     return;
   }
-  evictOverCapacity();
+  await evictOverCapacity();
 }
 
 /** 缓存文件时间戳（淘汰排序用；ArkTS 不支持元组，用显式接口） */
@@ -147,9 +150,10 @@ interface CacheFileStamp {
 }
 
 /** 淘汰：缓存文件数超出上限时按 mtime 删最旧（本次刚写的文件 mtime 最新，不会被删）。 */
-function evictOverCapacity(): void {
+async function evictOverCapacity(): Promise<void> {
   try {
-    const names: string[] = fs.listFileSync(cacheDir);
+    // （2026-10-16 AppFreeze 加固）listFileSync/statSync/unlinkSync → 异步版
+    const names: string[] = await fs.listFile(cacheDir);
     const jsonNames: string[] = names.filter((n: string): boolean => n.endsWith('.json'));
     if (jsonNames.length <= MAX_CACHED_UPS) {
       return;
@@ -157,7 +161,7 @@ function evictOverCapacity(): void {
     const stamps: CacheFileStamp[] = [];
     for (let i = 0; i < jsonNames.length; i++) {
       try {
-        const stat: fs.Stat = fs.statSync(`${cacheDir}/${jsonNames[i]}`);
+        const stat: fs.Stat = await fs.stat(`${cacheDir}/${jsonNames[i]}`);
         // SDK 的 Stat 只有 mtime（秒），没有 mtimeMs —— 秒级精度对「删最旧」足够
         const stamp: CacheFileStamp = { name: jsonNames[i], mtimeMs: stat.mtime };
         stamps.push(stamp);
@@ -169,7 +173,7 @@ function evictOverCapacity(): void {
     const toDelete: number = stamps.length - MAX_CACHED_UPS;
     for (let i = 0; i < toDelete; i++) {
       try {
-        fs.unlinkSync(`${cacheDir}/${stamps[i].name}`);
+        await fs.unlink(`${cacheDir}/${stamps[i].name}`);
       } catch (e) {
         console.error(`evict up space cache failed (${stamps[i].name}): ${JSON.stringify(e)}`);
       }

@@ -118,20 +118,25 @@
 归一化：全角→半角、大小写统一、去空格、借助 `cleanTitle` 思路去括号噪声段。  
 取分最高的一条判断档位；同分时优先播放量（`play`）高的。
 
-### 3.3 风控与串行队列
+### 3.3 风控与串行队列（⚠️ 2026-10-16 已推翻 → 见 §9.7）
 
-- **串行**：一次只跑一首（照抄 DownloadManager 的 `queue` + `pump` 模式）。
-- **间隔**：每首 1.0~~1.5s（可加随机抖动）——100 首 ≈ 2~~3 分钟。
-- **风控即停**：命中搜索接口风控码（-412 / -352 / -509 / -799 口径）→ 立即停 + 提示「B 站限流，请稍后再继续」，**保留已完成进度**。
+> 本节原结论已废弃：实测单请求 rt ≈ 430ms，并发 2 / 5 / 8 各 16 首**全部零风控**，
+> 原「串行 + 每首硬等 1.0~1.5s」纯属自缚（同一个 100 首歌单：旧 168s → 新 **19.5s**，**8.6x**）。
+> 现行为「**并发 4 + 全局最小间隔 200ms**（≈5 QPS）+ 轮内同曲去重 + 每首取 30 条候选」，
+> 「风控即停 + 保留进度可 resume」的语义保持不变，「不预取详情」仍然有效。
+
+- **并发 + 节流**：4 个 worker 共享取号游标（取走即自增），全局保证相邻两次「请求发起」间隔 ≥200ms。
+- **风控即停**：命中搜索接口风控码（-412 / -352 / -509 / -799 口径）→ 立即停 + 提示「B 站限流，请稍后再继续」，
+  **保留已完成进度**；游标回退到「所有在飞条目的最小下标」，被中断的条目保持 PENDING，resume **不跳曲**。
 - **不预取详情**：只搜列表、不进视频详情页、不解析音源直链——音源解析留给播放时惰性调用（与现有设计一致）。
 
-### 3.4 规模与耗时估算
+### 3.4 规模与耗时估算（⚠️ 下表的「串行估算」已作废，右侧是新版实测）
 
-| 歌单规模      | 搜索请求数 | 预计耗时     |
-| --------- | ----- | -------- |
-| 30 首      | 30    | ≈ 1 分钟   |
-| 100 首     | 100   | ≈ 2.5 分钟 |
-| 500 首（上限） | 500   | ≈ 12 分钟  |
+| 歌单规模      | 旧串行估算 | **新版实测/推算** |
+| --------- | -------- | ---------- |
+| 30 首      | ≈ 1 分钟   | ≈ 6 秒      |
+| 100 首     | ≈ 2.5 分钟 | **19.5 秒**（实测，见 §9.7） |
+| 500 首（上限） | ≈ 12 分钟  | ≈ 100 秒    |
 
 > 超过 500 首的导入源：先提示「超出单歌单上限，只保留前 500 首」（不静默）。
 
@@ -341,3 +346,195 @@ curl -s "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&
 - 文件型存储先例：`UpSpaceCacheStore`（`{filesDir}/up_space_cache/{upMid}.json`）。
 - 路由：`Index.pageMap` 分发 + `NavStackHolder.stack.pushPath({ name })` 入栈。
 - 色 token 现状（10-12 复核）：`state_success` / `state_error` 已有，**无 `state_warning`**（报告态「待确认」档需新增 base+dark 两份）。
+
+---
+
+## 9. 落地上线后复核：两个平台「均显示未找到」的根因（2026-10-16 实测）
+
+> 用户反馈：导入网易云与 QQ 音乐歌单，「均显示未找到」。本节为实测复盘，**全部结论都有可复现命令**。
+
+### 9.1 先定性：「未找到」出现在哪一步
+
+`未找到` 只出现在**报告页统计行**（`PlaylistImportPage:744` `reportStatRow('未找到', importState.missing, ...)`），
+即流程已经走完「识别 → 匹配」。反推：
+
+- **拉取失败** → 停在输入态 + toast「歌单拉取失败，请改用文本粘贴」，**根本到不了报告页** ⇒ 排除「接口挂了 / 风控」；
+- 识别成功且是**正常歌曲条目** → 打分实测能出强匹配（见 9.3）⇒ 排除「匹配管线整体失效」。
+
+### 9.2 实测三条（2026-10-16 18:1x，本机 curl + 复刻工程 WBI 签名）
+
+| 检查项 | 实测结果 |
+| --- | --- |
+| 网易云 `/api/v6/playlist/detail?id=24381616` | HTTP 200 · `code:200` · `playlist.trackIds` **1267 条**（代码依赖字段仍在）· 响应 231KB |
+| 网易云 `/api/v3/song/detail?c=[{"id":347230}]` | HTTP 200 · `songs[]` 正常（name / ar / dt 齐全） |
+| QQ `fcg_ucc_getcdinfo_byids_cp.fcg?...&disstid=7346601611` | HTTP 200 · `code:0` · 60KB · **纯 JSON 无 JSONP 壳**（`json=1` 仍生效） |
+| B 站 WBI 搜索（复刻 `WbiSign.ts` + `searchVideo`） | `稻香 周杰伦` → 20 条；`起风了 买辣椒也用券` → 20 条；打分最高 **7 分 ⇒ 强匹配**（19~20/20 条过标题门槛） |
+
+⇒ **两平台接口、B 站搜索、打分链路全部正常。**
+
+### 9.3 根因：两条链接正则只认 PC 网页版，App 分享链接全部漏网，且失败后静默降级
+
+`PlaylistImporter.ts` 的识别正则（逐字复制到 node 跑了 12 种真实链接）：
+
+| 粘贴内容 | 网易云正则 | QQ 正则 | 结果 |
+| --- | --- | --- | --- |
+| `music.163.com/#/playlist?id=`（PC） | ✅ 命中 | — | 正常直连 |
+| `music.163.com/playlist?id=`（PC） | ✅ 命中 | — | 正常直连 |
+| `y.music.163.com/m/playlist?id=…`（**App 分享**） | ❌ | ❌ | **降级成文本解析** |
+| `163cn.tv/xxx`（App 短链） | ❌ | ❌ | 同上 |
+| `music.163.com/m/playlist?id=` | ❌ | ❌ | 同上 |
+| `y.qq.com/n/ryqq/playlist/<id>`（PC） | — | ✅ 命中 | 正常直连 |
+| `i.y.qq.com/n2/m/share/details/taoge.html?id=…`（**App 分享**） | ❌ | ❌ | **降级成文本解析** |
+| `c6.y.qq.com/base/fcgi-bin/u?__=xxx`（App 短链） | ❌ | ❌ | 同上 |
+
+网易云正则要求 `music.163.com/` 后**紧跟** `playlist`，App 分享链接中间多了 `/m/` 这一段 → 直接断掉。
+
+**降级链条（三个缺陷叠加，缺一不可）：**
+
+1. 正则不覆盖 App 分享链接 / 短链；
+2. `recognize()` **没有**「看起来像链接但不支持」的分支（方案 §2B 要求的「提示用户复制完整链接」从未实现）→ 静默落到 `parseSongListText()`；
+3. `parseSongListText()` 不排除 URL 行 → **整条分享文本变成 1 首歌名**（实测：`分享歌单《我喜欢的音乐》: https://y.music.163.com/m/playlist?id=…` → 1 首，title = 整行 90+ 字符）。
+
+于是 `matchOne` 拿这条「歌名」去搜 B 站：**模糊搜索确实会返回 20 条**（所以走不到「没有搜到相关视频」），
+但 `scoreCandidate` 要求 `视频标题.includes(歌名)`，90 字的分享文本不可能被包含 → 全部 `SCORE_OUT`
+→ `scored.length === 0` → `failReason = '没有找到足够相似的版本'` → **报告页「未找到」**。
+
+两个平台走的是同一对正则、同一个降级分支 ⇒ **「均显示未找到」**。
+
+### 9.4 修复建议（按优先级）
+
+- **A（必须）扩宽两条正则**：网易云加 `(?:#\/|m\/)?`（覆盖 `y.music.163.com/m/playlist`）；QQ 增加
+  `taoge\.html\?[^#]*[?&]?id=(\d+)` / `[?&]disstid=(\d+)` 形态（覆盖 App 分享页）。
+- **B（必须）禁止静默降级**：`recognize()` 增加「疑似链接」判定 —— 文本含 `music.163.com|163cn.tv|qq.com`
+  但未提取到 ID 时，明确提示「这是短链/移动端链接，请改用歌曲列表文本」或「在浏览器打开后复制完整链接」。
+- **C（应该）`parseSongListText` 跳过 URL 行**（`/^\s*https?:\/\//`），从根上杜绝「URL 变歌名」。
+- **D（可选）短链跟随跳转**：`163cn.tv` / `c6.y.qq.com/...?__=` 取重定向后的最终 URL 再提 ID。
+
+### 9.5 排查方法论（可复用）
+
+- 环形日志缓冲 + 落盘归档都会**丢掉 App 自身 hilog**（`hilog.111.*.gz` 里 `bilimusic` 只有系统侧记录、
+  `BiliMusicHttp` 0 行）⇒ 别指望事后从设备日志还原用户操作，**要现场复现或加持久化留痕**。
+- 判定「第三方接口是否失效」用**本机 curl**（方案 §6 已给命令）最快，10 秒出结论。
+- 判定「打分链路是否失效」把 `cleanTitle/cleanSeg/scoreCandidate` **逐字搬到 node** 打真实接口最省事，
+  比在真机上盲试快得多（本次 30 行脚本即定性）。
+
+---
+
+## 9.6 修复实施（2026-10-16 当日完成，A/B/C/D 全做）
+
+### 用户提供的两条**真实分享原文**（本次修复的验收样本）
+
+```
+分享歌单 《暴露年龄！90后MP3里的经典老歌》https://c6.y.qq.com/base/fcgi-bin/u?__=5Atx6oMdqE5N @//qq/ 音乐
+分享请叫我快乐冠军创建的歌单: 经典老歌『神仙打架年代』100首华语金曲: https://music.163.com/m/playlist?id=17747519380&creatorId=8557921139&uiPlaylistType=UGC (来自@网易云音乐)
+```
+
+两条都是 **App「分享 → 复制链接」**（非浏览器地址栏），正好落在旧正则的盲区里。
+
+### 实测证据（本机 curl，2026-10-16）
+
+| 项 | 结果 |
+| --- | --- |
+| QQ 短链 302 | `Location: https://i2.y.qq.com/n3/other/pages/details/playlist.html?ADTAG=cbshare&…&id=9725916480&…`，**与 UA 无关**（移动 UA / PC UA / 无 UA 三者完全一致） |
+| 网易云 v6（`id=17747519380`） | `code=200`、`name=经典老歌『神仙打架年代』100首华语金曲`、`trackIds` **100 条**（`tracks` 只给前 10 → 再次印证「不能用 tracks 当全量」） |
+| QQ（`disstid=9725916480`） | `code=0`、`dissname=暴露年龄！90后MP3里的经典老歌`、`songlist` **619 首**（>500 上限，落库按既有截断提示） |
+| QQ 落点页 HTML | 含 3 处歌单 ID（`og:url` / `<link rel=canonical>` 均为 `y.qq.com/n/ryqq_v2/playlist/9725916480`，另有 `window.__INITIAL_DATA__`）→ 可作短链解析兜底 |
+
+### 代码改动（4 处文件）
+
+1. **`utils/HttpUtil.ts`** — `HttpRequestOptions` 新增 `maxRedirects?: number`；新增
+   `probeRedirectLocation(url, options)`：发一次 `maxRedirects: 0` 的 GET 读 3xx 的 `Location`
+   （键名大小写不敏感，`readHeader` 归一化比较），**任何异常一律降级为空串**不向上抛。
+2. **`service/PlaylistImporter.ts`** — 识别改为「**先认平台域名、再提 ID**」两段式：
+   - 网易云 `NETEASE_HOST_RE` + `[?&#]id=` / `/playlist/<id>`；覆盖 `/#/playlist`、`/playlist`、
+     **`/m/playlist`**（App 分享）、旧路径
+   - QQ `QQ_HOST_RE` + `[?&#]id=` / `[?&#]disstid=` / `/(ryqq|ryqq_v2)/playlist/<id>`；覆盖 PC、
+     **`taoge.html?id=`**、**短链落点页 `playlist.html?…&id=`**
+   - 新增 `detectShareShortLink()` / `resolveShareShortLink()`：短链先读 302 Location，失败再
+     跟随取落点页 HTML 提 `/playlist/<id>`（**两级兜底**）
+   - 新增 `isExternalPlaylistLink()`：显式区分「粘了链接但提不出 ID」与「粘了歌曲列表」
+   - `parseSongListText()` 新增 `URL_LINE_RE` → **含链接的行整行丢弃**（C 项）
+   - ⚠️ `[?&#]id=` 的**紧邻约束是必需的**：宽松写法 `[\s\S]*?id=` 会把 `&creatorId=8557921139`
+     的值当成歌单 ID
+   - ⚠️ host 正则加 `(?:^|[^a-z0-9.-])` 边界，避免 `xxxy.qq.com` 这类子串误判
+3. **`pages/PlaylistImportPage.ets`** — `recognize()` 分支重排：网易云 ID → QQ ID →
+   **分享短链（302 反查）** → 「命中平台域名但无 ID」**明确 toast** → 文本解析。
+   彻底堵死「整串分享文本被当成一首歌名去搜」这条降级路径。
+
+### 回归验证（node 逐字复刻新逻辑，14 个用例全过）
+
+| 样本 | 路由结果 |
+| --- | --- |
+| QQ 真实原文 | `shortlink(qq)` → `c6.y.qq.com/base/fcgi-bin/u?__=5Atx6oMdqE5N` |
+| 网易云真实原文 | `netease-direct` → `id=17747519380` |
+| `music.163.com/#/playlist?id=` / `/playlist?id=` / `/playlist/24381616` / `y.music.163.com/m/playlist?id=` | 全部 `netease-direct` |
+| `y.qq.com/n/ryqq/playlist/<id>` / 落点页 `…&id=` / `taoge.html?id=` / `[?&]disstid=` | 全部 `qq-direct` |
+| 纯歌曲列表（含一行链接混入） | URL 行被跳过，正常解析出歌曲 |
+| 非平台链接（B 站视频） | 落文本解析 → 0 首 → 「没有识别到歌曲」提示 |
+
+⚠️ **真机待验**：`maxRedirects: 0` 在 HarmonyOS 引擎上的实际行为（能否正常返回 302 + `Location` 头）
+无法离线验证，已用「跟随取 HTML 提 ID」做第二级兜底。若真机上 QQ 短链仍失败，看
+`[BiliMusicHttp] probe … code=… location=…` 这行 hilog 即可定位（code 是否 302、location 是否为空）。
+
+---
+
+## 9.7 匹配提速：串行 → 并发（2026-10-16 当日完成）
+
+### 瓶颈定性
+
+旧实现是**严格串行 + 每首硬等 1.0~1.5s**（`MATCH_INTERVAL_MS`/`MATCH_JITTER_MS`）。
+按此推算 100 首要 **168 秒**、500 首要 **14 分钟**，其中 90% 以上时间在「睡」而非在请求。
+
+### 实测依据一：单请求 rt 与并发容忍度（本机 node 复刻工程 WBI + PC UA + buvid，打 `/x/web-interface/wbi/search/type`）
+
+| 调度方式 | 样本 | 结果 | 等效耗时 |
+| --- | --- | --- | --- |
+| 串行 + 每首间隔 1s（旧实现） | 5 首 | 5/5 成功，rt 均值 **422ms**（381~455） | ≈1670ms/首 |
+| 并发 2，无间隔 | 16 首 | **16/16 成功，0 风控** | 221ms/首 |
+| 并发 3，无间隔 | 16 首 | **16/16 成功，0 风控** | 169ms/首 |
+| 并发 5，无间隔 | 16 首 | **16/16 成功，0 风控** | 115ms/首 |
+| 并发 8，无间隔 | 16 首 | **16/16 成功，0 风控** | 61ms/首 |
+
+补充：`page_size` **20 / 30 / 50 的 rt 完全一致**（415 / 406 / 405ms）→ 取 30 条候选是白捡的命中率。
+
+**结论：rt ≈ 420ms 全是网络往返，接口并不要求慢。原 1.25s/首的等待纯属自缚。**
+
+### 实测依据二：端到端仿真（真实歌单，非构造样本）
+
+以用户提供的网易云歌单 `id=17747519380`（《经典老歌『神仙打架年代』100首华语金曲》，**100 首，去重后 95 首**）
+为准，按新版调度实打 B 站搜索：
+
+```
+总耗时 19.5s   完成 100/100
+请求 96 次（含降级重搜 1）   拿到结果 95   空结果 0   风控 0
+单请求 rt 均值 431ms   实际吞吐 4.9 请求/秒   等效 195ms/首
+旧版同曲目理论耗时 ≈168s  →  提速 8.6x
+```
+
+### 落地参数
+
+| 常量 | 值 | 说明 |
+| --- | --- | --- |
+| `MATCH_CONCURRENCY` | `4` | worker 数（实测 8 都稳，取 4 留量级余量给真机弱网） |
+| `MATCH_MIN_GAP_MS` | `200` | 全局节流：相邻两次「请求发起」间隔下限 → 稳态上限 **5 QPS** |
+| `MATCH_PAGE_SIZE` | `30` | 单次候选数（20→30 免费提升命中率、减少手工复核） |
+| `IMPORT_NOTIFY_MS` | `120` | 进度广播节流（并发后每秒近 20 次 notify × 全量 items 快照会拖累向导页） |
+
+> **调参口**：真机若出现限流，只需调小 `MATCH_CONCURRENCY` / 调大 `MATCH_MIN_GAP_MS`，其余逻辑无需动。
+
+### 代码结构（`service/PlaylistImporter.ts`，全部为纯改，未动对外 API）
+
+- `run()`：由「while + sleep」改为**起 N 个 worker 共享取号游标**（`cursor` 取走即自增，单线程天然无锁）；`Promise.all` 后统一收尾。
+- `workerLoop()`：取号 → `matchItem` → 计数；风控命中走 `hitRisk` 后退出。
+- `hitRisk(idx)`：**游标回退水位 `riskFloor` = 所有在飞条目的最小下标**；被中断的条目保持 `PENDING`，故 resume **不跳曲**（与旧版语义一致）。
+- `throttle()`：全局最小间隔（单线程下取号与写时间戳之间无 await，无竞态）。
+- `matchItem()`：**轮内同曲去重**（`归一化歌名|歌手` → 复用结果，零请求；本次 100 首省了 5 次）。
+- `processed` 由 `cursor` 改为**独立计数器 `done`**：并发下 `cursor` 是「已取走」而非「已完成」。
+- `publishCurrent()`：并发下「正在匹配」文案取最近 3 首 + 「等 N 首」。
+- `notifyThrottled()`：worker 路径节流广播；`start / stop / resume / 用户操作` 仍走 `notify()` 立即推，状态切换不掉帧。
+
+### 不可离线验证项
+
+- 真机网络（移动/Wi-Fi）下的实际 rt 与并发容忍度 —— 本机实测是家宽，真机可能更慢，但**并发不会比串行更差**（`throttle` 保底）。
+- 若真机触发限流：相位会停在 `RISK`，提示保留进度，`resume` 从回退水位继续，**逐字与旧版一致**。
+

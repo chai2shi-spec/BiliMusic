@@ -714,3 +714,18 @@ export struct FavSyncPage {
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
+
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function FavSyncPageBuilder(): void {
+  FavSyncPage()
+}
+
+
+/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const FavSyncPageWrapped: WrappedBuilder<[]> = wrapBuilder(FavSyncPageBuilder);
+

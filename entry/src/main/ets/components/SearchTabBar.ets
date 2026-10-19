@@ -29,9 +29,7 @@
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import {
-  ButtonMaterialModifier,
   makeBiliSegmentColors,
-  makeButtonMaterialModifier,
   SegmentColors
 } from '../utils/HeaderBarMaterial';
 import { SearchStateHolder } from '../service/SearchStateHolder';
@@ -45,13 +43,14 @@ import {
   STORE_SEARCH_KIND,
   STORE_SEARCH_TAB,
   STORE_SEARCH_TABS_HEIGHT,
-  STORE_THEME_PRIMARY,
-  STORE_THEME_SURFACE
+  STORE_THEME_PRIMARY
 } from '../common/Constants';
 
 /**
  * 搜索行（根栏 stackBuilder 行 1，垂直居中在 56vp 行内）：
- * Search 搜索框 + 类型分段按钮（视频 / UP主）+ 搜索按钮。
+ * Search 搜索框 + 类型分段按钮（视频 / UP主）。
+ * 搜索按钮 2026-10-16 删除（用户：「看着多余」）：提交搜索走键盘 onSubmit，
+ * 搜索框不损失任何能力。
  */
 @Component
 export struct SearchInputBar {
@@ -59,11 +58,6 @@ export struct SearchInputBar {
   @StorageLink(STORE_SEARCH_KEYWORD) keyword: string = SearchStateHolder.keyword;
   /** 双向：分段按钮选段 ↔ 页面（doSearch / 占位文案都读它） */
   @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
-  /** 搜索按钮沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
-  private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
-  /** 主题色运行时值（切色后「搜索」按钮底 / 字跟随刷新） */
-  @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
-  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   /** 「视频/UP主」分段按钮条目：静态一次构造 */
   private kindItems: SegmentButtonV2Items = new SegmentButtonV2Items([
     { text: '视频' },
@@ -138,19 +132,7 @@ export struct SearchInputBar {
         // 真机回归：搜索框消失）。显式 108vp = 背板 padding 4×2 + 两段
         // （最长文案 UP主约 31 + itemPadding 8×2），与旧自绘 102vp 同密度。
         .width(108)
-        // 与搜索按钮同款 left 8：搜索框↔分段按钮↔搜索按钮 三段间距一致
-        .margin({ left: 8 })
-      Button('搜索', { type: ButtonType.Normal })
-        .fontSize(13)
-        .height(32)
-        .borderRadius(BUTTON_RADIUS_VP)
-        // 2026-10-11 真机要求：与「播放全部」同款 —— 浅粉底 + 粉字（原粉底 + 深枣红字）
-        .backgroundColor(this.themeSurface)
-        .fontColor(this.themePrimary)
-        .attributeModifier(this.buttonMaterial)
-        .onClick((): void => {
-          TabScrollerHolder.searchSubmit();
-        })
+        // 与搜索框拉开 8vp 间距（搜索按钮删除前的三段等距口径保留）
         .margin({ left: 8 })
     }
     .width('100%')
@@ -162,10 +144,12 @@ export struct SearchInputBar {
  * 内容页签行（搜索 / 推荐 / 排行榜 / 音乐中心，根栏 stackBuilder 行 2）。
  * 2026-10-11 组件标准化迁移：自绘滑块选段换 CapsuleSegmentButtonV2，与行 1
  * 「视频/UP主」同一套标准组件与 B 站粉配色（2026-10-10 同款约定保持）。
- * 行高 44 + 顶部下移 0.4×44（17.6vp，用户 2026-10-10）：与上方搜索行拉开
- * 呼吸间距；下移量计入组件实测高（onAreaChange 量出 61.6 回写
- * searchTabsHeight）→ 页面首条让位（barTotalHeight，100→117.6）与历史面板
- * 定位读镜像自动跟随，页面侧零改动。
+ * 行高 49.6 = 胶囊 32 + 顶部下移 17.6（用户 2026-10-15：行高自 61.6 减 12）：
+ * 与上方搜索行拉开呼吸间距；胶囊恰好填满内容盒（17.6~49.6），行下沿即胶囊底。
+ * 实测高（onAreaChange 量出 49.6 回写 searchTabsHeight）→ 历史面板定位
+ * （barTotalHeight）读镜像自动跟随。页面首条让位已与本行解耦（2026-10-15：
+ * SearchPage 用独立定值 SEARCH_LIST_START_EXTRA_VP，不读本行实测高），
+ * 调本行高度不再影响条目起始位。
  * 行级 onClick：历史面板展开时点分段按钮外空白处照常收起（段自身点击不
  * 冒泡到行 —— 切换页签不收历史面板，与原行为一致）。
  */
@@ -216,7 +200,7 @@ export struct SearchTabsBar {
         .layoutWeight(1)
         .height(32)
     }
-    .height(61.6)
+    .height(49.6)
     .padding({ top: 17.6, left: 12, right: 12 })
     .onClick((): void => {
       TabScrollerHolder.searchCloseHistory();

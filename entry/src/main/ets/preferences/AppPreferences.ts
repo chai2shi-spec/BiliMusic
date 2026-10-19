@@ -95,12 +95,13 @@ export function getSettings(): AppSettings {
     downloadQuality: stored?.downloadQuality ?? DEFAULT_APP_SETTINGS.downloadQuality,
     downloadDir: stored?.downloadDir ?? DEFAULT_APP_SETTINGS.downloadDir,
     autoPlay: stored?.autoPlay ?? DEFAULT_APP_SETTINGS.autoPlay,
-    showLyrics: stored?.showLyrics ?? DEFAULT_APP_SETTINGS.showLyrics,
+    autoPlayOnStart: stored?.autoPlayOnStart ?? DEFAULT_APP_SETTINGS.autoPlayOnStart,
     wifiOnlyDownload: stored?.wifiOnlyDownload ?? DEFAULT_APP_SETTINGS.wifiOnlyDownload,
     wifiOnlyPlay: stored?.wifiOnlyPlay ?? DEFAULT_APP_SETTINGS.wifiOnlyPlay,
     themeMode: stored?.themeMode ?? DEFAULT_APP_SETTINGS.themeMode,
     themeColor: stored?.themeColor ?? DEFAULT_APP_SETTINGS.themeColor,
-    barLayout: stored?.barLayout ?? DEFAULT_APP_SETTINGS.barLayout
+    barLayout: stored?.barLayout ?? DEFAULT_APP_SETTINGS.barLayout,
+    miniBarProgress: stored?.miniBarProgress ?? DEFAULT_APP_SETTINGS.miniBarProgress
   };
 }
 

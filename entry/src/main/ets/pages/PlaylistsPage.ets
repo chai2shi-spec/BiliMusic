@@ -175,6 +175,9 @@ export struct PlaylistsPage {
     TabScrollerHolder.plOpenMergeEditor = (): void => {
       this.openMergeEditor();
     };
+    TabScrollerHolder.plDeleteSelected = (): void => {
+      this.confirmDeleteSelected();
+    };
     // 歌单编辑弹窗（阶段 3）：三模式各建一个 CustomContentDialog controller
     this.editorCreateController = this.buildEditorDialog('新建歌单');
     this.editorRenameController = this.buildEditorDialog('重命名歌单');
@@ -319,6 +322,76 @@ export struct PlaylistsPage {
   }
 
   // ===== 多选与合并 =====
+
+  /**
+   * 批量删除选中的歌单（多选工具条「删除选中」，2026-10-16）。
+   *
+   * 与单删（confirmDelete）的关键差别：**一律只删本地**。
+   * 收藏夹镜像的「同时清空 B 站」是逐夹两步确认 + 服务端全集拉取的重流程，
+   * 批量场景刻意不复制；镜像被删时同步丢弃该夹待推送意图 —— 与单删「只删本地」
+   * 同款纪律，否则残留的 del 意图会在下次推送时误删用户并不想动的收藏。
+   * 确认框里明说「B 站收藏夹保留」，用户预期与行为一致。
+   */
+  private confirmDeleteSelected(): void {
+    if (this.selectedIds.length === 0) {
+      this.toast('请先选择歌单', 1500);
+      return;
+    }
+    let favMirrorCount: number = 0;
+    for (let i = 0; i < this.playlists.length; i++) {
+      if (this.isSelected(this.playlists[i].id) && LibraryStore.isFavMirror(this.playlists[i])) {
+        favMirrorCount += 1;
+      }
+    }
+    const parts: string[] = [`确定删除选中的 ${this.selectedIds.length} 个歌单？删除后不可恢复。`];
+    if (favMirrorCount > 0) {
+      parts.push(`其中 ${favMirrorCount} 个是收藏夹镜像，仅删除本地，B 站收藏夹保留（下次同步会重新拉回）。`);
+    }
+    showAppAlertDialog(this.getUIContext(), {
+      title: '删除选中歌单',
+      message: parts.join('\n'),
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+          // 取消：不做任何事
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        action: (): void => {
+          this.deleteSelectedPlaylists();
+        }
+      }
+    });
+  }
+
+  /** 确认后执行批量删除：镜像清待推送意图 → 逐个删本地 → 退出多选并汇报 */
+  private deleteSelectedPlaylists(): void {
+    const ids: string[] = [...this.selectedIds];
+    let removed: number = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const id: string = ids[i];
+      let target: Playlist | undefined = undefined;
+      for (let j = 0; j < this.playlists.length; j++) {
+        if (this.playlists[j].id === id) {
+          target = this.playlists[j];
+          break;
+        }
+      }
+      if (target === undefined) {
+        continue;
+      }
+      if (LibraryStore.isFavMirror(target)) {
+        clearFavOpsForMedia(LibraryStore.favMediaIdOf(target));
+      }
+      LibraryStore.deletePlaylist(id);
+      removed += 1;
+    }
+    this.selecting = false;
+    this.selectedIds = [];
+    this.refresh();
+    this.toast(`已删除 ${removed} 个歌单`, 1500);
+  }
 
   private toggleSelecting(): void {
     this.selecting = !this.selecting;
@@ -816,6 +889,16 @@ export struct PlaylistsPage {
           // 让位为常量公式（见 barTotalHeight），首帧即正确，无需挂载门控
           } else {
             List({ scroller: TabScrollerHolder.playlists }) {
+              // 顶部空白占位条目：列表视口铺满全屏，条目起始位置在屏幕顶端（y=0）。
+              // 占位高度 = 根标题栏（barTotalHeight：safeTop + 56），首个真实条目恰
+              // 从栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目
+              // 一起从模糊板下方穿过（与下载页同款改造）。
+              ListItem() {
+                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+                Row()
+                  .width('100%')
+                  .height(this.barTotalHeight())
+              }
               ForEach(
                 this.playlists,
               (p: Playlist): void => {
@@ -933,9 +1016,8 @@ export struct PlaylistsPage {
           .layoutWeight(1)
           // 边界回弹（2026-10-08）：到顶/到底的反馈动效
           .edgeEffect(EdgeEffect.Spring)
-          // 顶部根标题栏让位（Sumy 式穿透）：列表视口铺满全屏，首项从栏底起排，
-          // 滚动时条目从模糊板下方穿过（safeTop + 56 常量公式，见 barTotalHeight）
-          .contentStartOffset(this.barTotalHeight())
+          // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
+          //（见上方占位注释），不再使用 contentStartOffset。
           // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
           // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
           .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
@@ -943,8 +1025,9 @@ export struct PlaylistsPage {
       }
       .width('100%')
       .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（contentStartOffset 负责让出栏高），
-      // 否则条目在栏底被裁掉、永远滑不进模糊板下方。空态区自己补 topBarHeight。
+      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
+      // 负责让出标题栏 barTotalHeight），否则条目在栏底被裁掉、永远滑不进模糊板下方。
+      // 空态区自己补 topBarHeight。
       // 大屏适配：内容列收窄居中（根 Stack 默认居中对齐，挂上限即可）
       .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
     }

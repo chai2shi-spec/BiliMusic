@@ -88,6 +88,7 @@ import {
   MINI_BAR_ANIM_TO_EXPAND,
   MINI_BAR_ANIM_TO_COLLAPSE,
   STORE_BAR_LAYOUT,
+  STORE_MINI_BAR_PROGRESS,
   STORE_PROGRESS,
   STORE_DURATION,
   STORE_THEME_PRIMARY,
@@ -190,6 +191,12 @@ export struct PlayBar {
   @StorageProp(STORE_DURATION) durationSec: number = 0;
   /** 主题色主色（hex 字符串，ThemeColors 发布）：进度指示用色，切主题即时跟随 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 迷你栏进度指示开关（设置 → 外观「迷你栏进度条」，AppSettings.miniBarProgress
+   * 的运行时镜像，EntryAbility 首帧前首发真值）：关闭后底部直线进度条与水平
+   * 收起态圆环进度均不渲染（两处渲染条件都挂它）。纯显示层开关，不影响播放状态。
+   */
+  @StorageProp(STORE_MINI_BAR_PROGRESS) miniBarProgress: boolean = true;
 
   /** 唱片当前旋转角度（°）：animator 每帧回写，暂停时冻结在当前值 */
   @State rotateAngle: number = 0;
@@ -371,8 +378,6 @@ export struct PlayBar {
   private ringVisible(): boolean {
     return !this.bodyVisible();
   }
-
-  /** 迷你播放键点击回弹：一次快速缩小回弹（一次性关键帧，无持续动画无定时器） */
   private bounceMiniPlay(): void {
     this.getUIContext().keyframeAnimateTo({ iterations: 1 }, [
       {
@@ -433,18 +438,21 @@ export struct PlayBar {
 
   /**
    * 整条 miniBar 的统一点击语义（2026-10-14 与内容侧动画驱动重构同步统一）：
-   *   收起态（水平融合圆盘 / 垂直两层收起行）→ 先经 onExpandRequest 展开；
-   *   展开态 → 进播放页。
+   *   水平融合收起态（SM 圆盘）→ 先经 onExpandRequest 展开；
+   *   其余（展开态 / 垂直两层任意态 / 宽屏）→ 进播放页。
    *
-   * 两种布局语义一致：收起态若直接跳播放页，就永远无法主动展开（2026-10-14
-   * 修过的 bug：用户反馈「点收起的迷你栏直接进入播放页面」）；对齐水平融合
-   * 收起圆盘「先展开」的旧语义。宽屏（非 SM）HDS 强制展开、全局展开态已被
-   * Index 同步为 true → 收起分支走不到，直接进播放页（无「点了没反应」死胡同）。
+   * 垂直两层收起态直接跳播放页（2026-10-19 用户要求）：该布局下收起与展开
+   * 内容一致（同为整行，见 bodyVisible），点按无「看全内容」诉求；主动展开
+   * 走全屏上滑手势（Index 的 parallelGesture），不依赖点按。水平融合保持
+   * 「先展开」旧语义 —— HDS 收起时槽位缩成圆盘，点按是唯一主动展开入口。
+   * 宽屏（非 SM）HDS 强制展开、全局展开态已被 Index 同步为 true → 收起分支
+   * 走不到，直接进播放页（无「点了没反应」死胡同）。
    */
   private onEntryTap(): void {
-    if (!this.expanded && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
+    if (!this.expanded && this.barLayout === BAR_LAYOUT_HORIZONTAL
+      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
       && this.onExpandRequest !== undefined) {
-      // 诊断日志：确认收起态点击走了「先展开」分支
+      // 诊断日志：确认水平融合收起态点击走了「先展开」分支
       console.info(`[PlayBar] collapsed tap -> expand: layout=${this.barLayout}, bp=${this.currentBreakpoint}`);
       this.onExpandRequest();
       return;
@@ -490,8 +498,9 @@ export struct PlayBar {
       // → 描边画在组件边界内侧、贴圆盘边缘，不触发 enableMiniBarClip 裁剪；
       // 不随唱片旋转（rotate 只挂在 CoverImage 上），也不参与 geometryTransition
       // （转场时环留在槽位内，无跳变）。挂 OPACITY transition 与 Body 交叉淡入淡出。
-      // 底轨透明：封面不被灰圈压住，只显示主题色弧线。duration<=0（加载中）不渲染。
-      if (this.ringVisible() && this.durationSec > 0) {
+      // 底轨透明：封面不被灰圈压住，只显示主题色弧线。duration<=0（加载中）不渲染；
+      // 迷你栏进度条开关（miniBarProgress）关闭时同样不渲染。
+      if (this.ringVisible() && this.miniBarProgress && this.durationSec > 0) {
         Progress({ value: Math.min(this.progressSec, this.durationSec), total: this.durationSec, type: ProgressType.Ring })
           .width(this.discSizeVp)
           .height(this.discSizeVp)
@@ -514,19 +523,21 @@ export struct PlayBar {
   @Builder
   Body(): void {
     Row({ space: CTRL_SPACING }) {
+      // 歌名 / 歌手同规则：播放中超长文本跑马灯滚动（TextOverflow.Marquee），
+      // 暂停 / 未播放回省略号截断（Ellipsis 静态显示开头）。
       Column() {
         Text(this.currentTrack !== null ? this.currentTrack.title : '')
           .fontSize(12)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('sys.color.font_primary'))
           .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textOverflow({ overflow: this.isPlaying ? TextOverflow.MARQUEE : TextOverflow.Ellipsis })
           .width('100%')
         Text(this.currentTrack !== null ? this.currentTrack.artist : '')
           .fontSize(10)
           .fontColor($r('sys.color.font_secondary'))
           .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textOverflow({ overflow: this.isPlaying ? TextOverflow.MARQUEE : TextOverflow.Ellipsis })
           .width('100%')
       }
       .alignItems(HorizontalAlign.Start)
@@ -584,8 +595,9 @@ export struct PlayBar {
         // 只铺播放栏槽位 —— HDS enableMiniBarClip 把 miniBar 内容裁在槽位内，
         // 延伸不到右侧页签段。底轨 = 淡主题色，进度 = 实主题色，左右内缩避开
         // 胶囊圆角；hitTest 透传：2vp 细条不截胡整行的「点击进播放页」。
-        // duration<=0（加载中）不渲染。
-        if (this.bodyVisible() && this.durationSec > 0) {
+        // duration<=0（加载中）不渲染；迷你栏进度条开关（miniBarProgress）
+        // 关闭时同样不渲染。
+        if (this.bodyVisible() && this.miniBarProgress && this.durationSec > 0) {
           Row() {
             Row()
               .width(`${(this.progressPct() * 100).toFixed(1)}%`)

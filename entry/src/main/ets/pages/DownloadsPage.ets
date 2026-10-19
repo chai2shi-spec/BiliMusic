@@ -113,8 +113,6 @@ interface DownloadGroup {
   counts: GroupCounts;
   /** 是否合集（多 P）组（判定逻辑见 isCollectionGroup，归组时一次算好） */
   isCollection: boolean;
-  /** 分 P 总数（knownPartTotal 的缓存值；老任务无标记时 = 组内任务数） */
-  partTotal: number;
 }
 
 /** 合组的各状态计数，供组头文案与 ForEach key 共用 */
@@ -563,21 +561,6 @@ export struct DownloadsPage {
   }
 
   /**
-   * 组的分 P 总数（2026-10-08）：取组内最大 partTotal（显式标记，删剩 1 条也不失真）；
-   * 老任务无标记时回退组内任务数。
-   * 2026-10-08 卡顿优化：只允许 buildGroups 归组时调用（结果缓存进 g.partTotal）。
-   */
-  private knownPartTotal(g: DownloadGroup): number {
-    let max: number = 0;
-    for (let i = 0; i < g.tasks.length; i++) {
-      if (g.tasks[i].partTotal > max) {
-        max = g.tasks[i].partTotal;
-      }
-    }
-    return max > 0 ? max : g.tasks.length;
-  }
-
-  /**
    * 把扁平任务表归成分组视图。
    * 组内按创建时间升序（= 分 P 排队顺序）；组间按组内最新任务的创建时间降序，
    * 与原列表「新在前」的观感保持一致。
@@ -589,16 +572,15 @@ export struct DownloadsPage {
       const key: string = this.groupKeyOf(t);
       let g: DownloadGroup | undefined = map.get(key);
       if (g === undefined) {
-        // 占位派生字段（counts/isCollection/partTotal）：map.forEach 里逐组重算覆盖。
-        // 对象字面量必须补全这三个字段 —— DownloadGroup 已把它们改成必填。
+        // 占位派生字段（counts/isCollection）：map.forEach 里逐组重算覆盖。
+        // 对象字面量必须补全这两个字段 —— DownloadGroup 已把它们改成必填。
         const created: DownloadGroup = {
           key: key,
           title: '',
           coverUrl: '',
           tasks: [],
           counts: { done: 0, downloading: 0, pending: 0, paused: 0, failed: 0 },
-          isCollection: false,
-          partTotal: 0
+          isCollection: false
         };
         map.set(key, created);
         g = created;
@@ -619,10 +601,9 @@ export struct DownloadsPage {
       g.coverUrl = head.coverUrl;
       // 派生字段缓存（2026-10-08 卡顿优化）：每份快照每组各算一次，
       // 渲染热路径（组头文案 / key 生成 / 渲染分支）全部改读缓存，O(组大小) → O(1)。
-      // 值与旧实现（countGroup/isCollectionGroup/knownPartTotal 逐次现算）完全一致。
+      // 值与旧实现（countGroup/isCollectionGroup 逐次现算）完全一致。
       g.counts = this.countGroup(g);
       g.isCollection = this.isCollectionGroup(g);
-      g.partTotal = this.knownPartTotal(g);
       groups.push(g);
     });
     groups.sort((a: DownloadGroup, b: DownloadGroup): number => {
@@ -700,13 +681,15 @@ export struct DownloadsPage {
   }
 
   private groupStatusText(g: DownloadGroup): string {
-    // 2026-10-08 卡顿优化：counts / isCollection / partTotal 全部读 buildGroups
+    // 2026-10-08 卡顿优化：counts / isCollection 全部读 buildGroups
     // 归组时的缓存值（与旧实现逐次现算的输出一致），组头文案不再全组遍历。
     const c: GroupCounts = g.counts;
     const total: number = g.tasks.length;
-    // 合集组前缀「N 个分P」（2026-10-08）：与单视频条目拉开区分，折叠态一眼可见规模；
-    // 分 P 数用 partTotal 缓存（显式标记），组内删剩几条都不会把总数显示错
-    const prefix: string = g.isCollection ? `${g.partTotal} 个分P  ·  ` : '';
+    // 合集组前缀「N 个分P」（2026-10-08）：与单视频条目拉开区分，折叠态一眼可见规模。
+    // N = 组内剩余任务数（2026-10-19）：此前用 partTotal（任务携带的合集原始分 P 数），
+    // 删除 1P / 多P 后永远显示原值，「剩余 P 数」不刷新；改用组内任务数后与下方
+    // 「已下载 x/N」的 N 同源，删除后随快照立刻变小（tasks.length 在 groupRowKey 里）。
+    const prefix: string = g.isCollection ? `${total} 个分P  ·  ` : '';
     if (c.done === total) {
       return `${prefix}已完成 · 共 ${total} 首`;
     }
@@ -829,11 +812,10 @@ export struct DownloadsPage {
 
   private deleteFile(t: DownloadTask): void {
     if (t.localFilePath && t.localFilePath.length > 0) {
-      try {
-        fs.unlinkSync(t.localFilePath);
-      } catch (e) {
+      // （2026-10-16 AppFreeze 加固）unlinkSync → 异步 unlink，不阻塞主线程
+      fs.unlink(t.localFilePath).catch((): void => {
         // 文件可能已不存在，忽略
-      }
+      });
     }
   }
 
@@ -1508,6 +1490,15 @@ export struct DownloadsPage {
           .padding({ top: this.safeTop + NAV_TITLE_BAR_HEIGHT })
         } else {
           List({ scroller: TabScrollerHolder.downloads }) {
+            // 顶部空白占位条目：列表视口铺满全屏，条目起始位置在屏幕顶端（y=0）。
+            // 占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底起排（静置位
+            // 与旧 contentStartOffset 等值），滚动时占位与条目一起从模糊板下方穿过。
+            ListItem() {
+              // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+              Row()
+                .width('100%')
+                .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
+            }
             ForEach(
               this.groups,
               (g: DownloadGroup): void => {
@@ -1540,12 +1531,11 @@ export struct DownloadsPage {
           .layoutWeight(1)
           // 边界回弹（2026-10-08）：到顶/到底的反馈动效
           .edgeEffect(EdgeEffect.Spring)
-          // 顶部根标题栏让位（Sumy 式穿透）：列表视口铺满全屏，首项从栏底起排，
-          // 滚动时条目从模糊板下方穿过（safeTop + 56 常量公式，与歌单页同节奏）。
+          // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
+          //（见上方占位注释），不再使用 contentStartOffset。
           // 留白整改：常规态队列控制迁标题行（DlQueueActions），不再常驻行 2；
-          // 多选工具条（行 2）为瞬时覆盖层 —— contentStartOffset 只在首次布局
-          // 生效，多选时覆盖首项（歌单页同款已接受的行为局限）。
-          .contentStartOffset(this.safeTop + NAV_TITLE_BAR_HEIGHT)
+          // 多选工具条（行 2）为瞬时覆盖层 —— 占位条目高度恒定（safeTop + 56），
+          // 多选时覆盖首项（歌单页同款已接受的行为局限）。
           // 列表末端常规留白（2026-10-09：不再叠加 safeBottom —— 底部不做避让，
           // 视口直接扩展进安全区，末行可滚到悬浮胶囊与手势条下）
           .contentEndOffset(CONTENT_END_OFFSET)
@@ -1553,8 +1543,8 @@ export struct DownloadsPage {
       }
       .width('100%')
       .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（contentStartOffset 负责让出
-      // 标题行 + 工具条的动态栏高），否则条目在栏底被裁掉、滑不进模糊板下方。
+      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
+      // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
       .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
     }

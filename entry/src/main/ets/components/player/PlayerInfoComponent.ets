@@ -38,6 +38,9 @@ import {
   BILI_REFERER
 } from '../../common/Constants';
 
+/** blur 偶发失败的单次重试延迟（ms） */
+const BLUR_RETRY_DELAY_MS: number = 300;
+
 @Component
 export struct PlayerInfoComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
@@ -85,6 +88,9 @@ export struct PlayerInfoComponent {
   private coverCacheId: string = '';
   /** 取色令牌：切歌后，在途的旧取色结果必须丢弃 */
   private colorToken: number = 0;
+  /** 当前背景/配色已应用（或正在应用）的曲目 id；'' = 无。
+   *  同曲对象重建（merge/点赞/重试/暂停→播放重载/单曲环绕）据此跳过重铺 */
+  private themedId: string = '';
   private foldCallback: Callback<display.FoldDisplayMode> = (data: display.FoldDisplayMode): void => {
     this.isFoldFull = data === display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL;
     AppStorage.setOrCreate(STORE_PLAYER_FOLD_FULL, this.isFoldFull);
@@ -118,12 +124,20 @@ export struct PlayerInfoComponent {
     const track: Track | null = this.currentTrack;
     if (track === null || track.coverUrl.length === 0) {
       this.colorToken++;
+      this.themedId = '';
       this.bgCover = '';
       this.imageColor = 'rgba(0, 0, 2, 1.00)';
       AppStorage.setOrCreate(STORE_PLAYER_BG_DARK, true);
       this.applyStatusBar(true);
       return;
     }
+    // 同曲对象重建（merge/点赞/重试/暂停→播放重载/单曲环绕）：
+    // 背景已就绪，直接跳过 —— 不重铺原图、不重跑取色+blur，
+    // 消除「闪未模糊」窗口和 blur 偶发失败导致的持久消失。
+    if (track.id === this.themedId && this.bgCover !== '') {
+      return;
+    }
+    this.themedId = track.id;
     // 先立刻铺原图，取色完成后再换成「主色底 + 模糊图」
     this.bgCover = track.coverUrl;
     this.applyTheme(track);
@@ -166,6 +180,15 @@ export struct PlayerInfoComponent {
         console.error(`createColorPicker failed: ${e.code} ${e.message}`);
       });
 
+    this.tryBlur(pixel, token, false);
+  }
+
+  /**
+   * 生成模糊背景并换上。blur 链路（createEffect/getEffectPixelMap）偶发失败
+   * （GPU 繁忙/内存压力）：首次失败延迟重试一次（令牌校验防跨歌串台）；
+   * 重试仍失败只留日志，保持当前显示（原图 URL 仍在屏上，换歌即自愈）。
+   */
+  private tryBlur(pixel: image.PixelMap, token: number, isRetry: boolean): void {
     const headFilter: effectKit.Filter | null = effectKit.createEffect(pixel);
     if (headFilter !== null) {
       headFilter.blur(PlayerConstants.IMAGE_BLUR);
@@ -178,8 +201,25 @@ export struct PlayerInfoComponent {
         })
         .catch((e: BusinessError): void => {
           console.error(`blur cover failed: ${e.code} ${e.message}`);
+          if (!isRetry) {
+            this.delayBlurRetry(pixel, token);
+          }
         });
+      return;
     }
+    console.error('blur cover failed: createEffect returned null');
+    if (!isRetry) {
+      this.delayBlurRetry(pixel, token);
+    }
+  }
+
+  /** blur 失败后的单次延迟重试（令牌失效即放弃） */
+  private delayBlurRetry(pixel: image.PixelMap, token: number): void {
+    setTimeout((): void => {
+      if (token === this.colorToken) {
+        this.tryBlur(pixel, token, true);
+      }
+    }, BLUR_RETRY_DELAY_MS);
   }
 
   /** 网络封面 → PixelMap（B 站图床要带 Referer，同 MusicPlayer 的实现） */
@@ -226,9 +266,14 @@ export struct PlayerInfoComponent {
           .height(StyleConstants.FULL_HEIGHT)
           .objectFit(ImageFit.Cover)
           .opacity(0.5)
-          // 背景图加载失败：摘掉自己，露出主题色底 + 渐变 + 噪点，不留白块
+          // 背景图加载失败：摘掉自己，露出主题色底 + 渐变 + 噪点，不留白块。
+          // 只在当前源仍是 URL 时清：blur 已就绪（bgCover 为 PixelMap）后，
+          // 迟到的旧 URL 加载失败不允许把模糊背景整体抹掉（偶发消失的竞态面）。
           .onError((err: ImageError): void => {
-            this.bgCover = '';
+            if (typeof this.bgCover === 'string') {
+              this.bgCover = '';
+              this.themedId = '';
+            }
           })
       }
       // 缓慢渐变底色：主色底上自上而下压深，底部最暗 —— 静态渐变不产生每帧开销

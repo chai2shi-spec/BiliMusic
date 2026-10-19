@@ -1,5 +1,5 @@
 /**
- * 设置页：账户（含登录后能力）/ 播放（自动播放、歌词、仅 WiFi 播放、播放音质、累计听歌、
+ * 设置页：账户（含登录后能力）/ 播放（自动播放、仅 WiFi 播放、播放音质、累计听歌、
  * 最近播放、定时停止播放）/ 下载（仅 WiFi 下载、下载音质、缓存占用与清理）/ 外观 / 歌单备份 / 关于。
  * 2026-10-08 分区整理：登录后能力改为分组卡片样式与其它模块统一，孤儿「定时」「存储」
  * 小节分别并入播放 / 下载卡，错位在下载卡里的播放音质行移回播放卡。
@@ -21,9 +21,10 @@
  * （aboutToAppear 只触发一次）。
  */
 
-import fs from '@ohos.file.fs';
 import common from '@ohos.app.ability.common';
 import { bundleManager, ConfigurationConstant } from '@kit.AbilityKit';
+import { taskpool } from '@kit.ArkTS';
+import { dirSizeTask, clearDirContentsTask } from '../utils/CacheFsTasks';
 import { SelectDialog, Chip, ChipSize } from '@kit.ArkUI';
 import { BusinessError } from '@ohos.base';
 import { AudioQuality, AppSettings, ThemeMode, DEFAULT_APP_SETTINGS, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
@@ -45,7 +46,8 @@ import {
   STORE_THEME_DEEP,
   STORE_THEME_SURFACE,
   STORE_THEME_ON,
-  STORE_BAR_LAYOUT
+  STORE_BAR_LAYOUT,
+  STORE_MINI_BAR_PROGRESS
 } from '../common/Constants';
 import {
   THEME_PALETTES,
@@ -152,61 +154,95 @@ function formatListenDuration(totalSeconds: number): string {
 }
 
 /**
- * 递归统计目录占用（字节）。目录不存在 / 单项读不动时按 0 计，绝不抛。
- * 统计是**同步 IO**，调用方负责放到 setTimeout 里跑，别阻塞首屏。
+ * 剪贴板导入授权弹窗（2026-10-16，用户选择的折中方案）。
+ *
+ * 为什么需要：真机两次复现 —— 普通行点击后静默读剪贴板被系统拦截（getData 只
+ * 拿到空串），HarmonyOS 要求读取剪贴板内容必须经系统安全控件 PasteButton 显式
+ * 授权，普通 onClick 绕不过去。同时要保留「点击『从剪贴板导入歌单』条目触发」
+ * 的入口习惯，于是折中：行点击弹本窗，窗内放系统粘贴按钮，点它完成授权 + 读取。
+ *
+ * 为什么不塞进 AppAlertDialog：那是「纯文本 + 双按钮」的固定版式（20+ 调用点
+ * 共用），安全控件需要专属回调与样式约束，混入会把公共组件改得面目全非。
+ * controller 声明与注入遵循 AppAlertDialog.ets 注释里的官方口径
+ * （@CustomDialog 结构体必须声明 controller? 属性；真正开关由宿主页的
+ * CustomDialogController 成员持有 —— 在 @Component 内部定义时赋值才有效）。
+ *
+ * 视觉与 AppAlertDialogRoot 同语言：bg_card 底 + 24 圆角 + 主题色文字。
  */
-function dirSize(path: string): number {
-  if (path.length === 0) {
-    return 0;
-  }
-  let total: number = 0;
-  try {
-    const names: string[] = fs.listFileSync(path);
-    for (let i = 0; i < names.length; i++) {
-      const child: string = `${path}/${names[i]}`;
-      try {
-        const st: fs.Stat = fs.statSync(child);
-        total += st.isDirectory() ? dirSize(child) : st.size;
-      } catch (e) {
-        // 单个条目统计失败（被占用 / 刚被删）跳过
-      }
-    }
-  } catch (e) {
-    // 目录不存在
-  }
-  return total;
-}
+@CustomDialog
+struct PasteImportDialog {
+  /** 编译器硬性要求（10905211）：@CustomDialog 结构体必须声明 controller 属性；实际开关走宿主页的 controller */
+  controller?: CustomDialogController;
+  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
+  /** 授权成功回调：宿主页注入（关弹窗 → confirmImportPlaylists 读剪贴板） */
+  onPasteGranted: () => void = (): void => {};
 
-/**
- * 清空目录内容，**保留目录自身**（cacheDir 是系统目录，不能删）。
- * @returns 删除的文件个数
- */
-function clearDirContents(path: string): number {
-  if (path.length === 0) {
-    return 0;
-  }
-  let removed: number = 0;
-  try {
-    const names: string[] = fs.listFileSync(path);
-    for (let i = 0; i < names.length; i++) {
-      const child: string = `${path}/${names[i]}`;
-      try {
-        const st: fs.Stat = fs.statSync(child);
-        if (st.isDirectory()) {
-          removed += clearDirContents(child);
-          fs.rmdirSync(child);
-        } else {
-          fs.unlinkSync(child);
-          removed += 1;
+  build() {
+    Column() {
+      Column() {
+        Text('从剪贴板导入歌单')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.themePrimary)
+          .textAlign(TextAlign.Center)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text('系统要求先授权才能读取剪贴板，点击下方「粘贴」继续')
+          .fontSize(13)
+          .fontColor(this.themePrimary)
+          .textAlign(TextAlign.Center)
+          .margin({ top: 8 })
+          .width('100%')
+        // 系统粘贴按钮（安全控件，全局组件无需 import）：
+        // ⚠️ 不能对安全控件挂 .margin()，用包装 Row 承载间距；
+        // 授权校验红线：文字必须完整显示、前景与背景对比度不能过低
+        // （themePrimary 底 + themeOn 字 ≈ 6.4:1，满足）。
+        Row() {
+          PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
+            .fontSize(14)
+            .iconSize(16)
+            .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+            .backgroundColor(this.themePrimary)
+            .fontColor(this.themeOn)
+            .iconColor(this.themeOn)
+            .onClick((event: ClickEvent, result: PasteButtonOnClickResult): void => {
+              // 先关弹窗再走业务：confirmImportPlaylists 里的确认弹窗 / toast
+              // 不会被本弹层盖住。授权令牌不受弹窗关闭影响（授权在点击瞬间生效）。
+              this.controller?.close();
+              if (result === PasteButtonOnClickResult.SUCCESS) {
+                this.onPasteGranted();
+              } else {
+                showAppToast('剪贴板授权失败，请重试', 1800);
+              }
+            })
         }
-      } catch (e) {
-        // 被占用的文件删不掉，跳过；不要因为一个文件中断整次清理
+        .width('100%')
+        .margin({ top: 24 })
+        .justifyContent(FlexAlign.Center)
       }
+      .width('100%')
+      .padding({ left: 24, right: 24, top: 24, bottom: 20 })
+
+      Divider()
+        .color($r('app.color.bg_divider'))
+
+      Text('取消')
+        .fontSize(16)
+        .fontColor(this.themePrimary)
+        .textAlign(TextAlign.Center)
+        .height(48)
+        .width('100%')
+        .onClick((): void => {
+          this.controller?.close();
+        })
     }
-  } catch (e) {
-    // 目录不存在
+    .width('86%')
+    .backgroundColor($r('app.color.bg_card'))
+    .borderRadius(24)
+    .clip(true)
   }
-  return removed;
 }
 
 @Component
@@ -275,6 +311,13 @@ export struct SettingsPage {
   /** 应用级缓存目录（…/base/cache），与模块级 cacheDirPath 一起统计 */
   private appCacheDirPath: string = '';
   private downloadDirPath: string = '';
+  /**
+   * 缓存统计轮次令牌（2026-10-16 AppFreeze 加固）：统计改异步后，
+   * 快速进出设置页会有多轮统计在飞，旧轮结果不得覆盖新轮（对比 seq 丢弃）。
+   */
+  private cacheSizeSeq: number = 0;
+  /** 清理进行中（防重入 + 文案「清理中…」）：清理改 TaskPool 异步后必要 */
+  @State clearing: boolean = false;
 
   /** 应用版本号（如「v1.0.2」）：从 bundleManager 读，跟着 app.json5 走，不在页面里写死 */
   @State appVersion: string = '';
@@ -362,7 +405,7 @@ export struct SettingsPage {
    * 解析沙箱目录（只做一次）。
    *
    * 刻意不放在 aboutToAppear 里取 `getUIContext()`：那时 UIContext 未必已就绪。
-   * 改在 refreshCacheSize 的 setTimeout 回调里获取，拿不到就下次再试（显示「不可用」，不崩）。
+   * 改在 refreshCacheSize 里获取，拿不到就下次再试（显示「不可用」，不崩）。
    */
   private resolveDirs(): boolean {
     if (this.cacheDirPath.length > 0) {
@@ -399,12 +442,13 @@ export struct SettingsPage {
       downloadQuality: s.downloadQuality,
       downloadDir: s.downloadDir,
       autoPlay: s.autoPlay,
-      showLyrics: s.showLyrics,
+      autoPlayOnStart: s.autoPlayOnStart,
       wifiOnlyDownload: s.wifiOnlyDownload,
       wifiOnlyPlay: s.wifiOnlyPlay,
       themeMode: s.themeMode,
       themeColor: s.themeColor,
-      barLayout: s.barLayout
+      barLayout: s.barLayout,
+      miniBarProgress: s.miniBarProgress
     };
   }
 
@@ -628,22 +672,40 @@ export struct SettingsPage {
 
   private refreshCacheSize(): void {
     this.cacheText = '计算中…';
-    // 递归统计是同步 IO，延后一拍再跑，避免拖住页签切换
-    setTimeout((): void => {
-      if (!this.resolveDirs()) {
+    // 目录解析失败（UIContext 未就绪等）：显示不可用，下次进页再试
+    if (!this.resolveDirs()) {
+      this.cacheText = '不可用';
+      return;
+    }
+    // 递归统计已迁 TaskPool（2026-10-16 AppFreeze 加固，修审核 THREAD_BLOCK_6S）：
+    // 原实现在主线程跑 listFileSync/statSync 递归，image_file_cache 等目录文件数
+    // 无上界，主线程可被阻塞 6s+。现主线程只拿最终字节数。
+    const seq: number = ++this.cacheSizeSeq;
+    const cacheP: Promise<number> = taskpool.execute(dirSizeTask, this.cacheDirPath) as Promise<number>;
+    const appCacheP: Promise<number> = taskpool.execute(dirSizeTask, this.appCacheDirPath) as Promise<number>;
+    const downloadP: Promise<number> = taskpool.execute(dirSizeTask, this.downloadDirPath) as Promise<number>;
+    Promise.all([cacheP, appCacheP, downloadP])
+      .then((sizes: number[]): void => {
+        if (seq !== this.cacheSizeSeq) {
+          // 已被更新一轮统计取代：丢弃过期结果，防止旧值覆盖新值
+          return;
+        }
+        // 两层缓存目录都统计：模块级（应用自己的）+ 应用级（ArkUI 框架的 shader / preload 等）
+        const cacheBytes: number = sizes[0] + sizes[1];
+        this.cacheText = formatBytes(cacheBytes);
+        // 存储提示词（2026-10-14 作「缓存」行副标题，与标题同行展示，精简到一行）：
+        // 点击本行清理临时缓存；有已下载歌曲时前置「不受影响」说明
+        this.storageFooterText = sizes[2] > 0
+          ? '已下载歌曲不受影响，点击清理临时缓存'
+          : '点击清理临时缓存';
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.cacheSizeSeq) {
+          return;
+        }
+        console.error(`refresh cache size failed: ${e.message}`);
         this.cacheText = '不可用';
-        return;
-      }
-      // 两层缓存目录都统计：模块级（应用自己的）+ 应用级（ArkUI 框架的 shader / preload 等）
-      const cacheBytes: number = dirSize(this.cacheDirPath) + dirSize(this.appCacheDirPath);
-      const downloadBytes: number = dirSize(this.downloadDirPath);
-      this.cacheText = formatBytes(cacheBytes);
-      // 存储提示词（2026-10-14 作「缓存」行副标题，与标题同行展示，精简到一行）：
-      // 点击本行清理临时缓存；有已下载歌曲时前置「不受影响」说明
-      this.storageFooterText = downloadBytes > 0
-        ? '已下载歌曲不受影响，点击清理临时缓存'
-        : '点击清理临时缓存';
-    }, 30);
+      });
   }
 
   private confirmClearCache(): void {
@@ -663,10 +725,36 @@ export struct SettingsPage {
   }
 
   private doClearCache(): void {
-    // 两层缓存目录都清（只清内容、保留目录本身），清理后再刷新占用展示
-    const removed: number = clearDirContents(this.cacheDirPath) + clearDirContents(this.appCacheDirPath);
-    this.toast(removed > 0 ? `已清理 ${removed} 个缓存文件` : '没有需要清理的缓存', 1800);
-    this.refreshCacheSize();
+    // 防重入：上一轮清理还在 TaskPool 里跑时，重复点击直接忽略
+    if (this.clearing) {
+      return;
+    }
+    if (!this.resolveDirs()) {
+      this.toast('存储信息不可用，请稍后重试', 1800);
+      return;
+    }
+    this.clearing = true;
+    this.cacheText = '清理中…';
+    // 递归删除已迁 TaskPool（2026-10-16 AppFreeze 加固）：原实现在主线程同步
+    // unlinkSync 整个缓存目录，文件多时阻塞 6s+（审核 THREAD_BLOCK_6S 根因候选）。
+    const cacheClearP: Promise<number> =
+      taskpool.execute(clearDirContentsTask, this.cacheDirPath) as Promise<number>;
+    const appCacheClearP: Promise<number> =
+      taskpool.execute(clearDirContentsTask, this.appCacheDirPath) as Promise<number>;
+    Promise.all([cacheClearP, appCacheClearP])
+      .then((removedArr: number[]): void => {
+        this.clearing = false;
+        // 两层缓存目录都清（只清内容、保留目录本身），清理后再刷新占用展示
+        const removed: number = removedArr[0] + removedArr[1];
+        this.toast(removed > 0 ? `已清理 ${removed} 个缓存文件` : '没有需要清理的缓存', 1800);
+        this.refreshCacheSize();
+      })
+      .catch((e: Error): void => {
+        this.clearing = false;
+        console.error(`clear cache failed: ${e.message}`);
+        this.toast('清理失败，请稍后重试', 1800);
+        this.refreshCacheSize();
+      });
   }
 
   /** 已登录时点击账户行：确认退出（本地凭据 + B 站服务端会话一并撤销） */
@@ -914,6 +1002,23 @@ export struct SettingsPage {
   }
 
   /**
+   * 剪贴板授权弹窗 controller（2026-10-16）：⚠️ 必须在 @Component 内部定义时
+   * 赋值才有效（官方约束，模块级定义会「编译过、open 不显示」的静默失效），
+   * 且一经创建不能重新赋值（会导致旧弹窗关不掉）。
+   * 授权成功回调链：PasteButton SUCCESS → 关弹窗 → confirmImportPlaylists。
+   */
+  private pasteDialogCtrl: CustomDialogController = new CustomDialogController({
+    builder: PasteImportDialog({
+      onPasteGranted: (): void => {
+        this.confirmImportPlaylists();
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true
+  });
+
+  /**
    * 导入：先读剪贴板看有没有像歌单数据，有则二次确认再落库。
    *
    * 为什么要确认：剪贴板里可能**完全不是**歌单数据（用户刚复制了段文字），
@@ -1032,6 +1137,16 @@ export struct SettingsPage {
       // 内容层：设置分组列表（标题常驻固定栏，内容滚动即可）
       Column() {
         List({ scroller: TabScrollerHolder.settings }) {
+          // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在屏幕
+          // 顶端（y=0）。占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底
+          // 起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目一起从
+          // 模糊板下方穿过。
+          ListItem() {
+            // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+            Row()
+              .width('100%')
+              .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
+          }
           // ── 账户（扫码登录）──
           ListItem() {
             SectionHeader({ headerText: '账户' })
@@ -1154,15 +1269,20 @@ export struct SettingsPage {
 
               CardDivider()
 
+              // 启动时自动播放：冷启动从上次播放的曲目/进度续播（走 MusicPlayer.play()
+              // 消费 restoreState 登记的 pendingResumePosition）。默认关 —— 无交互不出声。
               HdsListItemCard({
-                textItem: { primaryText: { text: '显示歌词' } },
+                textItem: { primaryText: { text: '启动时自动播放' } },
                  suffixItem: new SuffixSwitch({
-                   isCheck: this.settings.showLyrics,
+                   isCheck: this.settings.autoPlayOnStart,
                    selectColor: this.themePrimary,
                   onChange: (v: boolean): void => {
                     this.update((s: AppSettings): void => {
-                      s.showLyrics = v;
+                      s.autoPlayOnStart = v;
                     });
+                    if (v) {
+                      this.toast('已开启：启动应用时将从上次播放的曲目继续', 1800);
+                    }
                   }
                 }),
                 cardBackgroundColor: Color.Transparent,
@@ -1365,6 +1485,31 @@ export struct SettingsPage {
                   this.cycleBarLayout();
                 }
               })
+
+              CardDivider()
+
+              // 迷你栏进度条：底部 2vp 直线进度条与水平收起态圆环进度的总开关。
+              // 关闭后两处进度指示均不再渲染（纯 UI 层，不影响播放页进度条）；
+              // 写偏好 + AppStorage 镜像（STORE_MINI_BAR_PROGRESS）即时生效。
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: '迷你栏进度条' },
+                  secondaryText: { text: '迷你栏底边直线与收起态圆环进度' }
+                },
+                suffixItem: new SuffixSwitch({
+                  isCheck: this.settings.miniBarProgress,
+                  selectColor: this.themePrimary,
+                  onChange: (v: boolean): void => {
+                    this.update((s: AppSettings): void => {
+                      s.miniBarProgress = v;
+                    });
+                    AppStorage.setOrCreate(STORE_MINI_BAR_PROGRESS, v);
+                  }
+                }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0
+              })
             }
           }
 
@@ -1380,9 +1525,32 @@ export struct SettingsPage {
                 this.exportPlaylists();
               })
               CardDivider()
+              // 2026-10-16（真机两次复现）：普通行点击后静默读剪贴板被系统拦截
+              // （getData 只拿到空串），HarmonyOS 强制要求经安全控件 PasteButton
+              // 授权。改为：点击本行 → 弹 PasteImportDialog（窗内系统粘贴按钮）→
+              // 点「粘贴」授权 → confirmImportPlaylists 读剪贴板并二次确认落库。
               this.SettingsRow('从剪贴板导入歌单', (): void => {
-                this.confirmImportPlaylists();
+                this.pasteDialogCtrl.open();
               })
+              CardDivider()
+              // 跨平台导入（网易云 / QQ 音乐）：本 App 自产自销的 JSON 备份管不了
+              // 「歌在别的平台」的场景，这条链路负责搜 B 站音源并建单（方案见 design/
+              // 歌单导入方案-网易云与QQ音乐.md）。
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: '从网易云 / QQ 音乐导入' },
+                  secondaryText: { text: '粘贴歌单链接或歌曲列表' }
+                },
+                suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  NavStackHolder.stack.pushPath({ name: 'PlaylistImport' });
+                }
+              })
+                .accessibilityText('从网易云 / QQ 音乐导入')
+                .accessibilityLevel('yes')
             }
           }
           ListItem() {
@@ -1415,19 +1583,16 @@ export struct SettingsPage {
         .layoutWeight(1)
         // 边界回弹（2026-10-08）：到顶/到底的反馈动效
         .edgeEffect(EdgeEffect.Spring)
-        // 顶部固定栏让位（Sumy 式穿透）：列表视口铺满全屏，首项从栏底起排，
-        // 滚动时条目从模糊板下方穿过。让位量直接用常量计算（2026-10-08，与
-        // DownloadsPage 同款）：本栏只有一行 NAV_TITLE_BAR_HEIGHT 标题，无需实测；
-        // 且 contentStartOffset 只在内容首次布局时生效，测量回写来不及，常量即正确值。
-        .contentStartOffset(this.safeTop + NAV_TITLE_BAR_HEIGHT)
+        // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
+        //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
         // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
         // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
         .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
       }
       .width('100%')
       .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（contentStartOffset 负责让出栏高），
-      // 否则条目在栏底被裁掉、滑不进模糊板下方。
+      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
+      // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
       .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
       // 顶栏由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），

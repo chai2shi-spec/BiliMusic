@@ -277,6 +277,13 @@ export class MusicPlayer {
    */
   private playerRebuildChain: Promise<void> = Promise.resolve();
 
+  /**
+   * init() 是否已完成（2026-10-17 启动优化）。
+   * initRest 与 loadContent 并行后，恢复链完成前用户可能已退后台 ——
+   * 此时 savePlayerStateNow 必须静默跳过，否则会把空队列快照覆盖磁盘续播记录。
+   */
+  private initCompleted: boolean = false;
+
   static getInstance(): MusicPlayer {
     if (!MusicPlayer.instance) {
       MusicPlayer.instance = new MusicPlayer();
@@ -326,6 +333,7 @@ export class MusicPlayer {
     this.startAudioRouteWatch();
 
     this.restoreState();
+    this.initCompleted = true;
   }
 
   /**
@@ -365,6 +373,10 @@ export class MusicPlayer {
    * 2026-10-08（B4）：private 提为 public——EntryAbility.onBackground 的退出兜底也要调。
    */
   savePlayerStateNow(progressOverride?: number): void {
+    if (!this.initCompleted) {
+      // 播放器尚未恢复完成：禁止用空状态覆盖磁盘上的续播快照
+      return;
+    }
     const cur: Track | null = (AppStorage.get(STORE_CURRENT_TRACK) as Track) ?? null;
     const liveProgress: number = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
     const snapshot: PlayerStateSnapshot = {
@@ -1148,9 +1160,14 @@ export class MusicPlayer {
     }
     let size: number = 0;
     try {
-      size = fs.statSync(path).size;
+      // （2026-10-16 AppFreeze 加固）statSync → 异步 stat，不阻塞主线程
+      size = (await fs.stat(path)).size;
     } catch (e) {
       console.error(`stat local audio failed: ${JSON.stringify(e)}`);
+    }
+    if (token !== this.loadToken) {
+      // 异步 stat 期间被更新的点歌取代（本次加固新增的 await 点）：静默作废
+      return false;
     }
     if (!(size > 0)) {
       this.failLoad('本地文件不存在，请重新下载');
@@ -1158,12 +1175,22 @@ export class MusicPlayer {
     }
     let file: fs.File | null = null;
     try {
-      file = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      // （2026-10-16 AppFreeze 加固）openSync → 异步 open
+      file = await fs.open(path, fs.OpenMode.READ_ONLY);
     } catch (e) {
       console.error(`open local audio failed: ${JSON.stringify(e)}`);
     }
     if (!file) {
       this.failLoad('本地文件无法打开，请重新下载');
+      return false;
+    }
+    if (token !== this.loadToken) {
+      // 异步 open 期间被取代：句柄没交出去，自己关掉别漏 fd，再静默作废
+      try {
+        await fs.close(file.fd);
+      } catch (e) {
+        console.error(`close stale local fd failed: ${JSON.stringify(e)}`);
+      }
       return false;
     }
     let source: media.MediaSource | undefined = undefined;
@@ -1175,7 +1202,7 @@ export class MusicPlayer {
     if (!source) {
       // 建 MediaSource 失败：句柄没交出去，自己关掉，别漏 fd
       try {
-        fs.closeSync(file.fd);
+        await fs.close(file.fd);
       } catch (e) {
         console.error(`close unused local fd failed: ${JSON.stringify(e)}`);
       }
@@ -1274,11 +1301,10 @@ export class MusicPlayer {
     if (!file) {
       return;
     }
-    try {
-      fs.closeSync(file.fd);
-    } catch (e) {
+    // （2026-10-16 AppFreeze 加固）closeSync → 异步 close：先摘引用再关，重复调用安全
+    fs.close(file.fd).catch((e: object): void => {
       console.error(`close local audio failed: ${JSON.stringify(e)}`);
-    }
+    });
   }
 
   /**

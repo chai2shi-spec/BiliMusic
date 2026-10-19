@@ -36,8 +36,8 @@ import {
   ButtonMaterialModifier,
   makeButtonMaterialModifier
 } from '../utils/HeaderBarMaterial';
-import { ArrayDataSource } from '../utils/ArrayDataSource';
 import {
+  CONTENT_END_OFFSET,
   STORE_DOWNLOAD_TASKS,
   STORE_LIBRARY_REV,
   STORE_SAFE_TOP,
@@ -55,6 +55,13 @@ import { FavSyncManager } from '../service/FavSyncManager';
  * ⚠️ 放在 import 之后 —— ArkTS 不允许 import 出现在其它语句之后（arkts-no-misplaced-imports）。
  */
 const UP_REFRESH_MAX_ITEMS: number = 60;
+
+/**
+ * 曲目分批揭示的每批条数（SearchPage 排行榜页签同款的前端切片模式）：
+ * 歌单数据本就全量在本地（playlist.tracks），不发请求，
+ * onReachEnd 每次多放一批，首屏只建第一批的行。
+ */
+const PD_REVEAL_PAGE_SIZE: number = 20;
 
 /**
  * 歌单头部区（bottomBuilder 承载）实测前的估计高度：封面行 + 元信息 + 简介 + padding。
@@ -85,10 +92,10 @@ export struct PlaylistDetail {
   @State upRefreshing: boolean = false;
   /**
    * 歌单头部区实测高（vp，bottomBuilder 内层根节点 onAreaChange 回写，随简介行数浮动）。
-   * ⚠️ 初值必须为 0（2026-10-08 修复首项被钉顶栏遮挡）：contentStartOffset 只在
-   * 列表内容首次布局时生效，更新不会重排已有内容——歌单数据来自本地缓存，
-   * 列表带着条目与初值一起挂载会固化不含 safeTop 的估计值。列表挂载门控直接判
-   * headerAreaHeight > 0（见 build 里的 if）——barTotalHeight() 恒 > 0 不能当门控。
+   * ⚠️ 初值必须为 0（2026-10-08 修复首项被钉顶栏遮挡）：歌单数据来自本地缓存，
+   * 列表带着条目与初值一起挂载会让占位条目先按不含头部区的让位量排布、实测回来
+   * 再整体下移（内容跳变）。列表挂载门控直接判 headerAreaHeight > 0（见 build 里的
+   * if）——barTotalHeight() 恒 > 0 不能当门控。
    */
   @State headerAreaHeight: number = 0;
 
@@ -125,10 +132,12 @@ export struct PlaylistDetail {
   @State downloadedIds: string[] = [];
 
   /**
-   * 列表数据源：歌单可能积累上百首，LazyForEach 只构建可视区 + 缓存区节点，
-   * 首屏不再一次性建全部行。整表替换走 reload()（load() 内）。
+   * 列表已揭示的曲目切片（SearchPage 排行榜页签同款前端分页）：
+   * 全量在 this.playlist.tracks（本地数据，不发请求），onReachEnd 每次多放
+   * PD_REVEAL_PAGE_SIZE 条；load() 重载时保留已揭示的条数（至少一批），
+   * 删曲目 / 合并新投稿后列表不跳回第一批。
    */
-  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  @State tracks: Track[] = [];
 
   /**
    * 子页转场的横移量（相对页面自身宽度）：常驻 '0%'，
@@ -228,7 +237,32 @@ export struct PlaylistDetail {
     this.coverUrl = p ? p.coverUrl : '';
     this.descText = p && p.description.length > 0 ? p.description : '';
     this.metaText = this.buildMetaText(p);
-    this.trackSource.reload(p ? p.tracks : []);
+    // 揭示切片：保留已看过的条数（删曲目 / 拉新投稿重载后列表不跳回第一批），至少一批
+    const all: Track[] = p ? p.tracks : [];
+    const keep: number = Math.max(this.tracks.length, PD_REVEAL_PAGE_SIZE);
+    this.tracks = all.slice(0, Math.min(keep, all.length));
+  }
+
+  /** 是否还有未揭示的曲目（底部状态行与 onReachEnd 闸门共用） */
+  private hasMoreTracks(): boolean {
+    return this.playlist !== null && this.tracks.length < this.playlist.tracks.length;
+  }
+
+  /**
+   * List 的 onReachEnd（SearchPage 排行榜页签同款，纯前端切片不发请求）：
+   * 每次多放一批；没有下一批时直接返回（短列表首帧布局触发的空回调不做事）。
+   */
+  private onReachEnd(): void {
+    const p: Playlist | null = this.playlist;
+    if (p === null) {
+      return;
+    }
+    const all: Track[] = p.tracks;
+    if (this.tracks.length >= all.length) {
+      return;
+    }
+    const next: number = Math.min(this.tracks.length + PD_REVEAL_PAGE_SIZE, all.length);
+    this.tracks = all.slice(0, next);
   }
 
   /**
@@ -636,10 +670,22 @@ export struct PlaylistDetail {
           // （首项被封面压住，真机复现）；必须直接判 headerAreaHeight > 0。
           if (this.playlist && this.playlist.tracks.length > 0 && this.headerAreaHeight > 0) {
             List({ scroller: this.listScroller }) {
-              // 头部区已钉顶（固定栏），列表只装曲目行：LazyForEach 的 index 是
-              // 数据源内下标（0 起，对应第一首曲目），TrackItem.entranceIndex 不受影响。
-              LazyForEach(
-                this.trackSource,
+              // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+              // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
+              // safeTop + 56 + 头部区实测高，随简介行数浮动），首个真实条目恰从
+              // 栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目
+              // 一起从沉浸材质下方穿过。
+              // 头部区已钉顶（固定栏），占位后的列表只装曲目行：ForEach 的
+              // index 是已揭示切片内下标（0 起，对应第一首曲目），TrackItem.entranceIndex 不受影响。
+              ListItem() {
+                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+                Row()
+                  .width('100%')
+                  .height(this.barTotalHeight())
+              }
+              // 条目渲染（SearchPage 同款）：@State tracks 切片数组直接驱动 ForEach。
+              ForEach(
+                this.tracks,
                 (t: Track, index: number): void => {
                   ListItem() {
                     TrackItem({
@@ -658,14 +704,37 @@ export struct PlaylistDetail {
                 },
                 (t: Track): string => t.id
               )
+              // 加载更多状态条（SearchPage 同款）：本地切片即时揭示，没有加载中态，
+              // 只区分「上拉加载更多」与「已经到底啦」。
+              if (this.tracks.length > 0) {
+                ListItem() {
+                  Column() {
+                    if (!this.hasMoreTracks()) {
+                      Text('已经到底啦')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else {
+                      Text('上拉加载更多')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    }
+                  }
+                  .width('100%')
+                  .padding({ top: 14, bottom: 14 })
+                  .justifyContent(FlexAlign.Center)
+                }
+              }
             }
             .layoutWeight(1)
             // 边界回弹（2026-10-08）：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
-            // 顶部让位（Sumy 式穿透）：列表视口铺满全屏，首项从 HDS 标题栏底部起排，
-            // 滚动时曲目从沉浸材质下穿过；
-            // 让位量 = safeTop + 56 + 头部区实测高（随简介行数浮动）
-            .contentStartOffset(this.barTotalHeight())
+            // 列表末端常规留白 + 前端切片上拉加载（SearchPage 排行榜页签同款）。
+            .contentEndOffset(CONTENT_END_OFFSET)
+            .onReachEnd((): void => {
+              this.onReachEnd();
+            })
+            // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
+            //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
           } else if (!this.playlist || this.playlist.tracks.length === 0) {
             Column() {
               Text('歌单还是空的')
@@ -687,9 +756,9 @@ export struct PlaylistDetail {
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
         // ⚠️ 不再整体 padding top / safeAreaPadding top：列表视口要铺满全屏
-        // （contentStartOffset 负责让出「状态栏+原生栏+头部条带」），滚动时曲目
-        // 从头部材质下穿过；底部不做避让，沉浸到底（2026-10-14 与关注/最近页
-        // 同口径，见目的地链上的 ignoreLayoutSafeArea 声明）。
+        // （List 首个空白占位 ListItem 负责让出「状态栏+原生栏+头部条带」），
+        // 滚动时曲目从头部材质下穿过；底部不做避让，沉浸到底（2026-10-14 与
+        // 关注/最近页同口径，见目的地链上的 ignoreLayoutSafeArea 声明）。
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp），
         // 根 Stack 默认居中对齐，直接给内容列挂上限即可。
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
@@ -727,7 +796,22 @@ export struct PlaylistDetail {
     })
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
-    // 并接管组件级 safeAreaPadding。内容层避让由 contentStartOffset / plain padding 自理。
+    // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
+
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function PlaylistDetailBuilder(): void {
+  PlaylistDetail()
+}
+
+
+/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const PlaylistDetailWrapped: WrappedBuilder<[]> = wrapBuilder(PlaylistDetailBuilder);
+

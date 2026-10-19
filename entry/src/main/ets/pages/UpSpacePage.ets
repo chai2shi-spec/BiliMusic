@@ -17,9 +17,9 @@
  * 布局与 **PlaylistDetail 完全同款**（2026-10-06 对齐）：
  *  · 头部区「96vp 头像 + 28fp 大标题 + 元信息 + 播放全部/订阅按钮」整体在栏内，
  *    UP 昵称只在头部区显示一次，返回行仅一颗返回键；
- *  · 列表走 `contentStartOffset` **穿透模式**——视口铺满全屏，首项从标题栏底部起排，
- *    滚动时条目从沉浸材质下穿过，滚动模糊由 HDS scrollEffectOpts 接管；
- *  · 非列表分支（骨架 / 失败 / 空态）没有 contentStartOffset，各自补 padding top。
+ *  · 列表走「首个空白占位 ListItem」**穿透模式**（下载页同款）——视口铺满全屏，
+ *    首项从标题栏底部起排，滚动时条目从沉浸材质下穿过，滚动模糊由 HDS scrollEffectOpts 接管；
+ *  · 非列表分支（骨架 / 失败 / 空态）没有占位条目，各自补 padding top。
  *
  * 缓存策略（2026-10-09）：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
  * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有两个显式动作才联网：
@@ -41,7 +41,6 @@ import { TrackItem } from '../components/TrackItem';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { CoverImage } from '../components/CoverImage';
 import { toHttpsUrl, toThumbUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
-import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { HttpUtil } from '../utils/HttpUtil';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
@@ -53,7 +52,11 @@ import {
 import { common } from '@kit.AbilityKit';
 import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
-import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import {
+  NAV_TRANSITION_MS,
+  BUTTON_RADIUS_VP,
+  LIST_FOOTER_HEIGHT_VP
+} from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 
@@ -168,10 +171,10 @@ export struct UpSpacePage {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /**
    * UP 资料头部区实测高（vp，bottomBuilder 内层根节点 onAreaChange 回写，随元信息行数浮动）。
-   * ⚠️ 初值必须为 0（2026-10-08 同款教训）：contentStartOffset 只在列表内容首次
-   * 布局时生效，更新不会重排已有内容——列表挂载门控直接判 headerAreaHeight > 0
-   * （barTotalHeight() 恒 > 0 不能当门控），即头部区首次实测完成后才挂载列表，
-   * 保证让位量含头部实测高。
+   * ⚠️ 初值必须为 0（2026-10-08 同款教训）：列表带着初值一起挂载会让占位条目先按
+   * 不含头部区的让位量排布、实测回来再整体下移（内容跳变）——列表挂载门控直接判
+   * headerAreaHeight > 0（barTotalHeight() 恒 > 0 不能当门控），即头部区首次实测
+   * 完成后才挂载列表，保证让位量含头部实测高。
    */
   @State headerAreaHeight: number = 0;
   /** 投稿列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
@@ -188,7 +191,6 @@ export struct UpSpacePage {
   }
 
   private player: MusicPlayer = MusicPlayer.getInstance();
-  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
   /** 子页转场横移量：常驻 '0%'，转场代理按 push/pop 临时改写 */
   @State navTransX: string = '0%';
 
@@ -204,10 +206,23 @@ export struct UpSpacePage {
       return;
     }
     this.refreshSubscriptionState();
-    // 缓存命中（2026-10-09）：直接恢复，不打任何接口 —— loadCard / loadPage 都跳过，
-    // 刷新只留两个显式出口：头部「拉取新投稿」按钮、列表下拉刷新（forceRefresh）。
-    // 头像用缓存真图（歌单入口传的是空串占位）；上拉翻页从缓存 page+1 续拉。
-    const cached: UpSpaceCacheEntry | null = getUpSpaceCache(mid);
+    // （2026-10-16 AppFreeze 加固）缓存读取改异步（getUpSpaceCache 返回 Promise）：
+    // 恢复逻辑挪进 async 方法，aboutToAppear 不再同步读文件，页面挂载零阻塞。
+    this.restoreFromCache().catch((): void => {
+      // 读缓存异常按无缓存兜底：直接联网拉取
+      this.loadCard();
+      this.loadPage(1);
+    });
+  }
+
+  /**
+   * 缓存命中（2026-10-09）：直接恢复，不打任何接口 —— loadCard / loadPage 都跳过，
+   * 刷新只留两个显式出口：头部「拉取新投稿」按钮、列表下拉刷新（forceRefresh）。
+   * 头像用缓存真图（歌单入口传的是空串占位）；上拉翻页从缓存 page+1 续拉。
+   * （2026-10-16 AppFreeze 加固）readText 移到异步任务里执行，读完再决定恢复 / 联网。
+   */
+  private async restoreFromCache(): Promise<void> {
+    const cached: UpSpaceCacheEntry | null = await getUpSpaceCache(this.upMid);
     if (cached !== null) {
       if (cached.upName.length > 0) {
         this.upName = cached.upName;
@@ -217,7 +232,6 @@ export struct UpSpacePage {
       }
       this.fans = cached.fans;
       this.tracks = cached.tracks;
-      this.trackSource.reload(this.tracks);
       this.page = cached.page;
       this.hasMore = cached.hasMore;
       this.sourceVia = cached.sourceVia;
@@ -247,9 +261,11 @@ export struct UpSpacePage {
   // ===== 数据加载 =====
 
   /**
-   * 写缓存：当前列表 + 资料 + 分页游标整表落盘（同步覆写，毫秒级）。
+   * 写缓存：当前列表 + 资料 + 分页游标整表落盘。
    * tracks / upMid 为空时 no-op（loadCard 先于列表返回时不够一格完整缓存，
    * 等列表成功后由 loadFirstMultiSource 写全量）。
+   * （2026-10-16 AppFreeze 加固）落盘已改异步，失败在 saveUpSpaceCache 内部记日志，
+   * 调用方不等待、不受影响。
    */
   private saveToCache(): void {
     if (this.upMid.length === 0 || this.tracks.length === 0) {
@@ -265,6 +281,8 @@ export struct UpSpacePage {
       hasMore: this.hasMore,
       sourceVia: this.sourceVia,
       cachedAtMs: Date.now()
+    }).catch((): void => {
+      // 内部已记日志，这里只兜住 rejection 防止未处理异常
     });
   }
 
@@ -363,7 +381,6 @@ export struct UpSpacePage {
       return;
     }
     this.tracks = this.mapAll(res.list);
-    this.trackSource.reload(this.tracks);
     this.page = 1;
     // 只有空间接口能真分页；搜索 / related 拿到的就是这一批
     this.hasMore = res.via === BilibiliApi.UP_VIA_SPACE && res.list.length >= this.pageSize();
@@ -401,8 +418,15 @@ export struct UpSpacePage {
       // hasMore 按原始返回长度判定：去重后变短只说明页界有重叠，不代表没有下一页；
       // page 即使本页全被去重也要推进，否则会在同一页上死循环。
       this.hasMore = vlist.length >= this.pageSize();
-      this.tracks = pn === 1 ? mapped : [...this.tracks, ...fresh];
-      this.trackSource.reload(this.tracks);
+      // 增量追加（2026-10-19 修「加载第二页列表整体跳一下」）：翻页不再整表
+      // 重新赋值，fresh 逐条 push，ForEach 只 diff 新增 key，既有行零重渲染。
+      if (pn === 1) {
+        this.tracks = mapped;
+      } else {
+        for (let i = 0; i < fresh.length; i++) {
+          this.tracks.push(fresh[i]);
+        }
+      }
       this.loadFailed = false;
       this.failReason = '';
       // 翻页追加后整表落盘：再次进页能带着已翻页内容恢复，并从 page+1 续拉
@@ -480,7 +504,6 @@ export struct UpSpacePage {
     this.hasMore = true;
     this.page = 1;
     this.tracks = [];
-    this.trackSource.reload(this.tracks);
     this.loadCard();
     this.loadPage(1);
   }
@@ -654,7 +677,6 @@ export struct UpSpacePage {
         // ——「已是最新」分支同样执行，列表与缓存都换成本次真实返回；
         // collectTracks 内已写 sourceVia，据此恢复 hasMore（与 loadFirstMultiSource 同式）
         this.tracks = collected;
-        this.trackSource.reload(this.tracks);
         this.page = 1;
         this.hasMore = this.sourceVia === BilibiliApi.UP_VIA_SPACE
           && collected.length >= this.pageSize();
@@ -960,7 +982,7 @@ export struct UpSpacePage {
         Column() {
           // UP 资料头已移进钉顶固定栏（UpHeader），这里直接是列表内容 ——
           // 与 PlaylistDetail 同结构：列表视口铺满全屏，首项从整栏底部起排，
-          // 滚动时条目从毛玻璃下穿过（contentStartOffset 负责让位）。
+          // 滚动时条目从毛玻璃下穿过（顶部占位条目负责让位）。
           if (this.loading && this.tracks.length === 0) {
             // 首屏骨架：同款条目占位，不用「转圈 + 加载中」
             Column() {
@@ -969,7 +991,7 @@ export struct UpSpacePage {
               }, (_i: number): string => `up_skel_${_i}`)
             }
             .width('100%')
-            // 非列表分支没有 contentStartOffset，自己补让位（标题栏总让位量）
+            // 非列表分支没有占位条目，自己补让位（标题栏总让位量）
             .padding({ top: this.barTotalHeight() })
           } else if (this.loadFailed && this.tracks.length === 0) {
             Column() {
@@ -1024,7 +1046,7 @@ export struct UpSpacePage {
             .layoutWeight(1)
             .width('100%')
             .justifyContent(FlexAlign.Center)
-            // 非列表分支没有 contentStartOffset，自己补让位（标题栏总让位量）
+            // 非列表分支没有占位条目，自己补让位（标题栏总让位量）
             .padding({ top: this.barTotalHeight() })
           } else if (this.tracks.length === 0) {
             Column() {
@@ -1047,8 +1069,21 @@ export struct UpSpacePage {
             // 系统默认刷新头即可；layoutWeight 移交 Refresh，内层 List 补 height('100%')。
             Refresh({ refreshing: $$this.refreshing }) {
               List({ scroller: this.listScroller }) {
-                LazyForEach(
-                  this.trackSource,
+                // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+                // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
+                // safeTop + 56 + 头部区实测高，随元信息行数浮动），首个真实条目恰
+                // 从栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与
+                // 条目一起从沉浸材质下方穿过。
+                ListItem() {
+                  // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+                  Row()
+                    .width('100%')
+                    .height(this.barTotalHeight())
+                }
+                // 条目渲染（SearchPage 同款）：@State tracks 数组直接驱动 ForEach，
+                // 追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
+                ForEach(
+                  this.tracks,
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
@@ -1063,26 +1098,33 @@ export struct UpSpacePage {
                   },
                   (t: Track): string => t.id
                 )
-                if (this.loadingMore) {
-                  ListItem() {
-                    Column() {
-                      ForEach([0, 1], (_i: number): void => {
-                        SkeletonTrackItem({ index: -1 })
-                      }, (_i: number): string => `up_more_${_i}`)
+                // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
+                // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
+                // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏骨架不动。
+                ListItem() {
+                  Row() {
+                    if (this.loadingMore) {
+                      LoadingProgress()
+                        .width(18)
+                        .height(18)
+                        .color($r('app.color.text_tertiary'))
+                      Text('加载中…')
+                        .fontSize(12)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .margin({ left: 8 })
+                    } else if (!this.hasMore) {
+                      Text(this.subscribed ? '订阅已开启，可随时拉取新投稿' : '订阅该 UP 可持续获取新投稿')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else {
+                      Text('上拉加载更多')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
                     }
-                    .width('100%')
                   }
-                } else if (!this.hasMore) {
-                  ListItem() {
-                    // 搜索反查拿不到「下一页」，所以这里不写「已经到底啦」——
-                    // 那会让用户以为这个 UP 就这点投稿。订阅才是拿全量的方式。
-                    Text(this.subscribed ? '订阅已开启，可随时拉取新投稿' : '订阅该 UP 可持续获取新投稿')
-                      .fontSize(13)
-                      .fontColor($r('app.color.text_tertiary'))
-                      .width('100%')
-                      .textAlign(TextAlign.Center)
-                      .padding({ top: 14, bottom: 14 })
-                  }
+                  .width('100%')
+                  .height(LIST_FOOTER_HEIGHT_VP)
+                  .justifyContent(FlexAlign.Center)
                 }
               }
               .width('100%')
@@ -1092,10 +1134,9 @@ export struct UpSpacePage {
               .clip(false)
               // 边界回弹（2026-10-08）：到顶/到底的反馈动效；顶部下拉由 Refresh 刷新动画接管
               .edgeEffect(EdgeEffect.Spring)
-              // 顶部让位（Sumy 式穿透，与 PlaylistDetail 同款）：列表视口铺满全屏，
-              // 首项从 HDS 标题栏底部起排，滚动时条目从沉浸材质下穿过；
-              // 让位量 = safeTop + 56 + 头部区实测高（随元信息行数浮动）
-              .contentStartOffset(this.barTotalHeight())
+              // 顶部 HDS 标题栏让位（Sumy 式穿透，与 PlaylistDetail 同款）：由 List
+              // 首个空白占位 ListItem 负责（见上方占位注释，下载页同款），不再使用
+              // contentStartOffset。
               // 列表末端常规留白（2026-10-09：不再叠加 safeBottom —— 底部不做避让，
               // 视口直接扩展进安全区，末行可滚到手势条下）
               .contentEndOffset(CONTENT_END_OFFSET)
@@ -1150,7 +1191,22 @@ export struct UpSpacePage {
     })
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
-    // 并接管组件级 safeAreaPadding。内容层避让由 contentStartOffset / plain padding 自理。
+    // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
+
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function UpSpacePageBuilder(): void {
+  UpSpacePage()
+}
+
+
+/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const UpSpacePageWrapped: WrappedBuilder<[]> = wrapBuilder(UpSpacePageBuilder);
+

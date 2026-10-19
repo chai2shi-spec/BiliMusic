@@ -131,6 +131,14 @@ export const DOWNLOAD_SMOOTH_MS: number = 250;
 export const LARGE_TITLE_COLLAPSE_DIST: number = 72;
 
 /**
+ * ══════════ 列表尾部加载状态条 ══════════
+ * 常驻 + 固定高度：列表有内容时尾部条不插拔，只换内容（转圈 / 到底文案 / 上拉提示）。
+ * 数据落地帧尾部 extent 只增不减（新条目追加），底部弹簧过滚动不被收缩强制解析
+ * —— 修「加载第二页完成时列表整体跳一下」（2026-10-19，四页统一）。
+ */
+export const LIST_FOOTER_HEIGHT_VP: number = 48;
+
+/**
  * ══════════ 搜索页下拉刷新（方案三 · 骨架接管）══════════
  *
  * 刷新指示器复用 SkeletonTrackItem，不新增任何视觉元素：下拉时骨架行从

@@ -10,7 +10,8 @@
  * - 状态：@StorageProp 订阅 PlaylistsPage 推到 AppStorage 的镜像键
  *   （STORE_PL_BAR_*，唯一写入口 PlaylistsPage.syncBarState / refresh）。
  * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法（页面注册）。
- * - 视觉：工具条内容与原 bottomBuilder / 页面钉顶版逐字一致，保证「换容器不换观感」。
+ * - 视觉：工具条内容与原 bottomBuilder / 页面钉顶版逐字一致，保证「换容器不换观感」
+ *   （2026-10-16 增补：合并选中左侧新增「删除选中」，批量删歌单入口）。
  */
 
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
@@ -112,6 +113,21 @@ export struct PlSelectToolbar {
           TabScrollerHolder.plToggleSelectAll();
         })
       Blank()
+      // 删除选中（合并左侧，2026-10-16）：破坏性操作，用错误色与合并区分；
+      // 一个都没选时置灰，点了由页面兜底提示。
+      Text(this.selectedCount > 0 ? `删除选中(${this.selectedCount})` : '删除选中')
+        .fontSize(13)
+        .fontColor(this.selectedCount > 0 ? $r('app.color.state_error') : $r('app.color.text_disabled'))
+        .height(44)
+        .padding({ left: 12, right: 12 })
+        .borderRadius(8)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .onClick((): void => {
+          TabScrollerHolder.plDeleteSelected();
+        })
       // 少于两个无法合并：置灰，点了只给一句提示（openMergeEditor 里兜）
       Text(this.selectedCount > 0 ? `合并选中(${this.selectedCount})` : '合并选中')
         .fontSize(13)

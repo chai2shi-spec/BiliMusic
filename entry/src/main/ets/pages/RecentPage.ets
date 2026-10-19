@@ -1,16 +1,20 @@
 ﻿/**
  * 最近播放页：展示**本机播放记录**。
  *
- * 条数上限 50（LibraryStore 分片存储，2026-10-12 扩容改造后为真实上限；
+ * 条数上限 100（LibraryStore 分片存储后为真实上限，2026-10-16 自 50 扩容；
  * 旧实现被 Preferences 单值字节预算截到约 11 条，重启即丢），超出挤掉最旧的；
  * 只保留最近 7 天（LibraryStore.RECENT_KEEP_MS，按 playedAt 过滤）。
  * 页面上用 「最近 7 天 · N 首」显示真实条数。
+ * 条目加载（2026-10-16，PlaylistDetail 同款前端切片）：全量在 allTracks
+ * （本地数据，不发请求），@State tracks 只装已揭示切片，onReachEnd 每次多放
+ * RECENT_REVEAL_PAGE_SIZE 条；refresh() 重载保留已揭示条数（至少一批），
+ * 移除 / 新增记录后列表不跳回第一批。
  * 历史由 MusicPlayer.loadAndPlay → LibraryStore.addRecentTrack 自动写入，
  * 这里只负责展示与回放：播放全部 / 单曲播放 / 加入队列 / 单条移除 / 清空。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
  * 返回行 + 标题 + 按钮行，批 1 样板同款）：avoidLayoutSafeArea 挡状态栏重叠，
- * 列表穿透让位（contentStartOffset），滚动模糊由 HDS scrollEffectOpts 接管；
+ * 列表穿透让位（下载页同款顶部占位条目），滚动模糊由 HDS scrollEffectOpts 接管；
  * 侧滑返回是 Navigation 级能力，不受影响。
  *
  * 钉顶按钮行：「播放全部 / 清空」（仅在有播放记录时渲染）接在返回行下，
@@ -29,13 +33,13 @@ import {
 } from '../utils/HeaderBarMaterial';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
-import { ArrayDataSource } from '../utils/ArrayDataSource';
 import {
   STORE_LIBRARY_REV,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   RESUME_MIN_SEC,
   RESUME_TAIL_SEC,
+  CONTENT_END_OFFSET,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
   STORE_THEME_DEEP
@@ -54,10 +58,17 @@ const RECENT_ACTIONS_ROW_HEIGHT: number = 44;
 /**
  * 顶栏滚动模糊时机（基准口径 = 关于页）：
  * 首条内容自静止位上移 30vp 起雾 → 80vp 满显影。
- * 本页让位已改为内容侧 padding（回退 B，F = raw），两参直接生效，无需补偿。
+ * 本页让位由顶部占位条目承担（不占滚动量，F = raw），两参直接生效，无需补偿。
  */
 const RECENT_BLUR_START_VP: number = 30;
 const RECENT_BLUR_END_VP: number = 80;
+
+/**
+ * 前端切片每批揭示条数（PlaylistDetail.PD_REVEAL_PAGE_SIZE 同款）：
+ * 全量在 allTracks（本地数据），@State tracks 只装切片，onReachEnd 多放一批。
+ * 20 与歌单详情 / 排行榜页签口径一致。
+ */
+const RECENT_REVEAL_PAGE_SIZE: number = 20;
 
 /**
  * 秒 → `m:ss`（超一小时 `h:mm:ss`）。
@@ -79,15 +90,23 @@ function formatSecToClock(seconds: number): string {
 
 @Component
 export struct RecentPage {
+  /**
+   * 列表已揭示的曲目切片（PlaylistDetail 同款前端分页）：
+   * 全量在 allTracks（LibraryStore 本地数据，不发请求），onReachEnd 每次多放
+   * RECENT_REVEAL_PAGE_SIZE 条；refresh() 重载时保留已揭示的条数（至少一批），
+   * 移除 / 新增记录后列表不跳回第一批。
+   */
   @State tracks: Track[] = [];
+  /** 最近播放全量（读取真源）：播放全部 / 条数文案 / 空态判断都按全量算 */
+  private allTracks: Track[] = [];
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 按钮行 44（有记录时）。
    * 标题行与 bottomBuilder 按钮行高度均为定值，无需实测——
-   * contentStartOffset 挂载即拿到正确让位量（旧 onAreaChange 实测机制已废弃）。
+   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值（旧 onAreaChange 实测机制已废弃）。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
-      + (this.tracks.length > 0 ? RECENT_ACTIONS_ROW_HEIGHT : 0);
+      + (this.allTracks.length > 0 ? RECENT_ACTIONS_ROW_HEIGHT : 0);
   }
 
   /**
@@ -113,12 +132,6 @@ export struct RecentPage {
   private listScroller: Scroller = new Scroller();
   /** 按钮（播放全部 / 清空）沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
   private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
-
-  /**
-   * 列表数据源：与 @State tracks 同步（refresh() 内一起写）。
-   * LazyForEach 只构建可视区 + 缓存区节点；所有数据变更统一走 refresh() 整表重载。
-   */
-  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
 
   /**
    * 子页转场的横移量（相对页面自身宽度）：常驻 '0%'，
@@ -173,8 +186,29 @@ export struct RecentPage {
   private refresh(): void {
     const list: Track[] = LibraryStore.getRecentTracks();
     console.info(`recent page refresh: ${list.length} tracks`);
-    this.tracks = list;
-    this.trackSource.reload(list);
+    this.allTracks = list;
+    // 揭示切片：保留已看过的条数（移除 / 清空 / 新增记录重载后列表不跳回第一批），
+    // 至少一批；清空时 list.length = 0，切片自然归零
+    const keep: number = Math.max(this.tracks.length, RECENT_REVEAL_PAGE_SIZE);
+    this.tracks = list.slice(0, Math.min(keep, list.length));
+  }
+
+  /** 是否还有未揭示的记录（底部状态行与 onReachEnd 闸门共用） */
+  private hasMoreTracks(): boolean {
+    return this.tracks.length < this.allTracks.length;
+  }
+
+  /**
+   * List 的 onReachEnd（PlaylistDetail 同款，纯前端切片不发请求）：
+   * 每次多放一批；没有下一批时直接返回（短列表首帧布局触发的空回调不做事）。
+   */
+  private onReachEnd(): void {
+    if (this.tracks.length >= this.allTracks.length) {
+      return;
+    }
+    const next: number = Math.min(this.tracks.length + RECENT_REVEAL_PAGE_SIZE,
+      this.allTracks.length);
+    this.tracks = this.allTracks.slice(0, next);
   }
 
   /**
@@ -213,8 +247,8 @@ export struct RecentPage {
         value: '从记录移除',
         action: (): void => {
           LibraryStore.removeRecentTrack(track.id);
-          // 统一走 refresh()：@State 与 LazyForEach 数据源必须一起换，
-          // 只改 this.tracks 会出现「空态判断已更新、列表还停着旧数据」
+          // 统一走 refresh()：全量与揭示切片必须一起换，
+          // 只改 allTracks 会出现「空态判断已更新、列表还停着旧数据」
           this.refresh();
         }
       }
@@ -302,7 +336,8 @@ export struct RecentPage {
         .fontColor(this.themePrimary)
         .attributeModifier(this.buttonMaterial)
         .onClick((): void => {
-          this.player.playAll(this.tracks);
+          // 播放全部按全量（allTracks）算，不受前端切片影响
+          this.player.playAll(this.allTracks);
         })
       Button('清空', { type: ButtonType.Normal })
         .fontSize(13)
@@ -318,8 +353,8 @@ export struct RecentPage {
       Blank()
         .layoutWeight(1)
       // 保留窗口是「最近 7 天」（LibraryStore.getRecentTracks 按 playedAt 过滤），
-      // 把窗口和实际条数直接写出来，避免用户按「50 条」的预期去核对。
-      Text(`最近 7 天 · ${this.tracks.length} 首`)
+      // 把窗口和实际条数直接写出来（条数按全量 allTracks 算，与切片无关）。
+      Text(`最近 7 天 · ${this.allTracks.length} 首`)
         .fontSize(11)
         .fontColor($r('app.color.text_tertiary'))
     }
@@ -335,10 +370,22 @@ export struct RecentPage {
         // 内容层：播放全部 / 清空 钉在标题栏下方自定义区（bottomBuilder），列表只装曲目行
         Column() {
           // 列表挂载门控：让位量为定值计算（safeTop 启动即有），挂载即正确
-          if (this.tracks.length > 0 && this.barTotalHeight() > 0) {
+          if (this.allTracks.length > 0 && this.barTotalHeight() > 0) {
             List({ scroller: this.listScroller }) {
-              LazyForEach(
-                this.trackSource,
+              // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+              // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
+              // safeTop + 56 + 按钮行 44），首个真实条目恰从栏底起排（静置位与旧
+              // padding 让位等值），滚动时占位与条目一起从沉浸材质下方穿过。
+              ListItem() {
+                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+                Row()
+                  .width('100%')
+                  .height(this.barTotalHeight())
+              }
+              // 条目渲染（PlaylistDetail 同款）：@State tracks 揭示切片直接驱动
+              // ForEach，追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
+              ForEach(
+                this.tracks,
                 (t: Track, index: number): void => {
                   ListItem() {
                     TrackItem({
@@ -356,16 +403,39 @@ export struct RecentPage {
                 },
                 (t: Track): string => t.id
               )
+              // 加载更多状态条（PlaylistDetail 同款）：本地切片即时揭示，没有
+              // 加载中态，只区分「上拉加载更多」与「已经到底啦」。
+              if (this.tracks.length > 0) {
+                ListItem() {
+                  Column() {
+                    if (!this.hasMoreTracks()) {
+                      Text('已经到底啦')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else {
+                      Text('上拉加载更多')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    }
+                  }
+                  .width('100%')
+                  .padding({ top: 14, bottom: 14 })
+                  .justifyContent(FlexAlign.Center)
+                }
+              }
             }
             .layoutWeight(1)
             // 边界回弹（2026-10-08）：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
-            // 顶部让位（2026-10-09 结构性迁移回退 B，任务书 §5）：contentStartOffset
-            // 让位会被 HDS 判定滚动量整体推后 C，负补偿又被 HDS 钳制（真机签名②），
-            // 改为关于页同款内容侧 padding 让位——F = raw，(30, 80) 直接生效。
-            // ⚠️ 单页验证中：确认 List + padding 下条目仍从栏下穿过（不被裁剪、不吃点击）。
-            .padding({ top: this.barTotalHeight() })
-          } else if (this.tracks.length === 0) {
+            // 列表末端常规留白 + 前端切片上拉加载（PlaylistDetail 同款）。
+            .contentEndOffset(CONTENT_END_OFFSET)
+            .onReachEnd((): void => {
+              this.onReachEnd();
+            })
+            // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem
+            // 负责（见上方占位注释，下载页同款）——占位条目不占滚动量，F = raw，
+            // (30, 80) 模糊参数直接生效；不再使用 contentStartOffset / 整体 padding。
+          } else if (this.allTracks.length === 0) {
             Column() {
               Text('最近 7 天还没有播放记录')
                 .fontColor($r('app.color.text_secondary'))
@@ -406,7 +476,7 @@ export struct RecentPage {
         // 标题行下方自定义区：「播放全部 / 清空」按钮行（仅有记录时配置）。
         // ⚠️ 第二行不能塞进 stackBuilder（会溢出 56vp 标题行、与列表内容重叠，
         // 真机复现），必须走 bottomBuilder 显式高度。
-        bottomBuilder: this.tracks.length > 0 ? {
+        bottomBuilder: this.allTracks.length > 0 ? {
           builder: (): void => {
             this.recentActions();
           },
@@ -424,7 +494,22 @@ export struct RecentPage {
     })
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
-    // 并接管组件级 safeAreaPadding。内容层避让由 contentStartOffset / plain padding 自理。
+    // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
+
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function RecentPageBuilder(): void {
+  RecentPage()
+}
+
+
+/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const RecentPageWrapped: WrappedBuilder<[]> = wrapBuilder(RecentPageBuilder);
+

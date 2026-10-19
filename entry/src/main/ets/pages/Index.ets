@@ -88,16 +88,13 @@ import { SearchPage } from './SearchPage';
 import { PlaylistsPage } from './PlaylistsPage';
 import { DownloadsPage } from './DownloadsPage';
 import { SettingsPage } from './SettingsPage';
-import { PlayerPage } from './PlayerPage';
-import { PlaylistDetail } from './PlaylistDetail';
-import { RecentPage } from './RecentPage';
-import { FollowsPage } from './FollowsPage';
-import { UpSpacePage } from './UpSpacePage';
-import { WatchHistoryPage } from './WatchHistoryPage';
-import { FavSyncPage } from './FavSyncPage';
-import { AboutPage } from './AboutPage';
-import { LoginPage } from './LoginPage';
-import { SmsLoginPage } from './SmsLoginPage';
+// 2026-10-17 启动优化：以下 11 个导航子页面（PlayerPage / PlaylistDetail / RecentPage /
+// FollowsPage / UpSpacePage / WatchHistoryPage / FavSyncPage / PlaylistImportPage /
+// AboutPage / LoginPage / SmsLoginPage）已从静态 import 改为懒加载 ——
+// 它们只在 pageMap 被路由触达时才需要，静态引用会拖整棵子树（含 lyric/*、
+// components/player/*）在冷启动首帧前解析，直接拉长「应用启动加载完成」。
+// 现统一走 service/LazyPageRegistry 动态 import，首帧后 1.5s 低优先级预热。
+import { LazyDest, preloadAllLazyPages } from '../service/LazyPageRegistry';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { PlayBar } from '../components/PlayBar';
 import { AppToast, showAppToast } from '../components/AppToast';
@@ -172,6 +169,18 @@ const FALLBACK_MASK_EXTRA_VP: number = 52;
  * 太灵敏就调大这里（24/32）。
  */
 const SCREEN_PAN_TRIGGER_VP: number = 12;
+/**
+ * 切页内容动画时长（2026-10-19 修「远距切页过快」）：HdsTabs 定长 300ms 滑动，
+ * 跨 2~3 页时距离翻倍 → 速度 2~3 倍，观感「嗖一下」。改为按跨度缩放：
+ * 相邻 300ms（与 Tabs.animationDuration 默认值一致，观感不变），
+ * 每多跨一页 +120ms，封顶 540ms —— 速度仍随距离略增（纯匀速的 600/900ms
+ * 太拖沓），但远距不再突兀。真机观感可在 STEP/MAX 单点微调。
+ * ⚠️ 仅影响**点击页签**切页（Tabs.animationDuration 语义如此）；内容区
+ * 滑动翻页走 interpolatingSpring(-1,1,228,30) 弹簧曲线，不受此属性控制。
+ */
+const TAB_SWITCH_BASE_MS: number = 300;
+const TAB_SWITCH_STEP_MS: number = 120;
+const TAB_SWITCH_MAX_MS: number = 540;
 
 @Entry
 @Component
@@ -267,6 +276,15 @@ struct Index {
    * 的话切走页签后重算照跑，拖慢全局）。onChange 的回写语句无需任何改动。
    */
   @StorageLink(STORE_ACTIVE_TAB) activeTab: number = 0;
+
+  /**
+   * 点击切页的内容动画时长（ms），喂给 HdsTabs.animationDuration（2026-10-19
+   * 修「远距切页过快」）：HDS 定长 300ms，跨多页时速度翻倍。改为 tabItem
+   * onTouch(DOWN) 时按 |目标 - activeTab| 预置缩放时长 —— 按下与点击识别
+   * 之间至少隔一帧（人手按压普遍 50ms+），重渲染必然先于 HDS 起播生效。
+   * 相邻 = BASE(300) 与默认一致；滑动翻页不受影响（见常量注释）。
+   */
+  @State tabSwitchDuration: number = TAB_SWITCH_BASE_MS;
 
   /**
    * 歌单页多选态镜像：驱动根栏 stackBuilder 第二行（PlSelectToolbar）的
@@ -373,7 +391,7 @@ struct Index {
     setTimeout((): void => {
       if (!this.miniBarApplied) {
         this.miniBarApplied = true;
-        // 补初始样式（部分版本上 miniBarStyle 初始值不生效，参考 Sumy：挂载后
+        // 补初始样式（部分版本上 miniBarStyle 初始值不生效，
         // 100ms 由控制器按实际态补一次）：仅手机宽度补折叠
         //（≥600vp 时 applyMiniBarStyle 无效——HDS 固定展开，全局状态也在上面置过 true 了）。
         if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
@@ -386,6 +404,11 @@ struct Index {
         }
       }
     }, 100);
+    // 2026-10-17 启动优化：首帧后 1.5s 低优先级预热懒加载子页面
+    //（播放页 / 歌单详情优先，其余串行），正常跳转时模块早已就绪、无感知。
+    setTimeout((): void => {
+      preloadAllLazyPages();
+    }, 1500);
   }
 
   /**
@@ -699,34 +722,38 @@ struct Index {
     .alignItems(HorizontalAlign.Center)
     .justifyContent(FlexAlign.Center)
     .height('100%')
+    // 按下即预置切页动画时长（2026-10-19 修「远距切页过快」）：DOWN 发生在
+    // 点击识别前一帧以上，重渲染先把缩放后的 animationDuration 落到 HdsTabs，
+    // HDS 处理点击起播时读到的就是新值。index 是字面量参数，闭包捕获安全。
+    .onTouch((event: TouchEvent): void => {
+      if (event.type === TouchType.Down) {
+        this.presetTabSwitchDuration(index);
+      }
+    })
+  }
+
+  /**
+   * 按点击目标预置切页动画时长：跨度 ≤1 → BASE(300，与默认一致)；
+   * 跨度 n → BASE + (n-1)*STEP，封顶 MAX。点当前页签（跨度 0）不切页，
+   * 预置 BASE 只是保持基线。快速连点时 activeTab 尚未回写（onChange 在
+   * 动画完成后才触发），距离按旧起点算，误差最多一档时长，可接受。
+   */
+  private presetTabSwitchDuration(target: number): void {
+    const distance: number = Math.abs(target - this.activeTab);
+    if (distance <= 1) {
+      this.tabSwitchDuration = TAB_SWITCH_BASE_MS;
+      return;
+    }
+    this.tabSwitchDuration = Math.min(
+      TAB_SWITCH_BASE_MS + (distance - 1) * TAB_SWITCH_STEP_MS,
+      TAB_SWITCH_MAX_MS);
   }
 
   @Builder
   pageMap(name: string, param: Object): void {
-    if (name === 'Player') {
-      PlayerPage();
-    } else if (name === 'PlaylistDetail') {
-      PlaylistDetail();
-    } else if (name === 'Recent') {
-      RecentPage();
-    } else if (name === 'Follows') {
-      // 「设置 → 账户 → 我的关注」：登录用户的关注列表（行点击进 UP 主页订阅）
-      FollowsPage();
-    } else if (name === 'UpSpace') {
-      UpSpacePage();
-    } else if (name === 'WatchHistory') {
-      // 「设置 → 账户 → 观看历史与稍后再看」：B 站真实观看记录与稍后再看
-      WatchHistoryPage();
-    } else if (name === 'CloudSync') {
-      // 「设置 → 账户 → 收藏夹同步」：B 站收藏夹 → 本地歌单镜像（路由名沿用 'CloudSync'）
-      FavSyncPage();
-    } else if (name === 'About') {
-      AboutPage();
-    } else if (name === 'Login') {
-      LoginPage();
-    } else if (name === 'SmsLogin') {
-      SmsLoginPage();
-    }
+    // 2026-10-17 启动优化：11 个子页面统一经 LazyDest 按路由名动态 import 渲染
+    //（注册表见 service/LazyPageRegistry；预热后基本无加载等待）。
+    LazyDest({ name: name })
   }
 
   /**
@@ -811,6 +838,7 @@ struct Index {
    * 逐像素一致（换容器不换几何）。
    * 外层 Stack：clip(false) 让行 2 画出容器边界；hitTestBehavior(Transparent)
    * 让行 2 未覆盖的空白区点击穿透到下方列表（HarmonyX 同款行为）。
+   * （2026-10-19 顶栏切换动画方案 B + C2 已按用户要求回退为 if/else 硬切。）
    */
   @Builder
   immersiveTitleBarContent() {
@@ -886,7 +914,7 @@ struct Index {
           HdsTabs({ controller: this.tabController }) {
             TabContent() {
               SearchPage()
-            }.tabBar(this.tabItem(0, '搜索', $r('sys.symbol.magnifyingglass')))
+            }.tabBar(this.tabItem(0, '首页', $r('sys.symbol.house')))
 
             TabContent() {
               PlaylistsPage()
@@ -903,6 +931,10 @@ struct Index {
           .vertical(false)
           .barPosition(BarPosition.End)
           .barMode(BarMode.Fixed)
+          // 切页动画时长按跨度缩放（2026-10-19 修「远距切页过快」）：值由
+          // tabItem onTouch(DOWN) 预置（见 tabSwitchDuration 注释），相邻 300ms
+          // 与默认一致，远距 420/540ms 封顶；仅管点击切页，滑动翻页走弹簧曲线。
+          .animationDuration(this.tabSwitchDuration)
           // 内容延伸到页签栏下方：列表滚动时从悬浮胶囊的材质下透出
           .barOverlap(true)
           // 非受控 index（2026-10-14 修「切页签迷你栏闪烁/唱片重置」）：旧实现

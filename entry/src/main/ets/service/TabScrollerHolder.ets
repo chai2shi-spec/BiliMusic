@@ -50,6 +50,8 @@ export class TabScrollerHolder {
   static plToggleSelectAll: () => void = (): void => {};
   /** 「合并选中」：选中不足两个时页面内兜底提示 */
   static plOpenMergeEditor: () => void = (): void => {};
+  /** 「删除选中」：确认后批量删除选中的歌单（收藏夹镜像仅删本地） */
+  static plDeleteSelected: () => void = (): void => {};
 
   /** 搜索页列表控制器（SearchPage 的 List 直挂此实例） */
   static search: Scroller = new Scroller();

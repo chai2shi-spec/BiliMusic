@@ -21,14 +21,16 @@ function createId(): string {
 }
 
 /**
- * 最近播放的条数上限（2026-10-12 分片存储改造后即为**真实**上限）。
+ * 最近播放的条数上限（分片存储后即为**真实**上限）。
  *
  * 历史：旧实现把整份列表塞进 `PREF_RECENT` 单键，被
  * `fitByByteBudget(PREF_VALUE_BUDGET_BYTES=6000)` 截到约 11 条 ——
- * `RECENT_MAX_ITEMS=50` 只是碰不到的名义值。分片存储（每片 8 条 × 最多 7 片，
- * 同歌单 `pl_tracks_*` 模式）后单值上限不再约束总量，50 即真实封顶。
+ * `RECENT_MAX_ITEMS` 只是碰不到的名义值。分片存储（每片 8 条 × 最多 13 片，
+ * 同歌单 `pl_tracks_*` 模式）后单值上限不再约束总量，100 即真实封顶。
+ * 2026-10-16：50 → 100（用户需求）；存量数据零迁移 —— 读侧按
+ * ceil(RECENT_MAX_ITEMS/8) 探测分片，扩容后自然读满。
  */
-const RECENT_MAX_ITEMS: number = 50;
+const RECENT_MAX_ITEMS: number = 100;
 
 /**
  * 最近播放**分片存储**：曲目按每片 8 条拆到 `recent_tracks_{n}` 独立 key。
@@ -37,7 +39,7 @@ const RECENT_MAX_ITEMS: number = 50;
  * value 有 8192 字节硬上限。slimTrack 后一条实测约 560 字节（含
  * pubdate / playedAt / lastPosSec）→ 整份列表塞一个 key 时超过约 11 条就
  * 写不进去，表现为「播得越多、重启后只剩 11 条」。8 × 560 ≈ 4.5KB，
- * 离 6000 字节预算有余量；最多 ceil(50/8)=7 片。
+ * 离 6000 字节预算有余量；最多 ceil(100/8)=13 片。
  */
 const RECENT_CHUNK_ITEMS: number = 8;
 const RECENT_CHUNK_PREFIX: string = 'recent_tracks_';
@@ -69,7 +71,7 @@ function isWithinRecentWindow(t: Track): boolean {
  *  1) `AppPreferences` 落盘是异步（put + flush），而读取走同步 `getSync`，
  *     写完立刻读会拿到旧值 —— 表现为「刚播完的歌进「最近播放」看不到」。
  *     与 `playlistCache` 同源问题，处理方式保持一致：缓存即真源，写操作先换缓存再异步落盘。
- *  2) Preferences 单值有 8192 字节上限，50 首曲目序列化后必然超限 ——
+ *  2) Preferences 单值有 8192 字节上限，上百首曲目序列化后必然超限 ——
  *     落盘前统一 slimTrack + 分片存储（每片 8 条，见 RECENT_CHUNK_ITEMS）。
  */
 let recentCache: Track[] | null = null;
@@ -99,7 +101,7 @@ function sanitizeTracks(raw: Track[]): Track[] {
 }
 
 /**
- * 从分片 key 读回最近播放（读到 miss 为止，最多探测 ceil(50/8) 片）。
+ * 从分片 key 读回最近播放（读到 miss 为止，最多探测 ceil(RECENT_MAX_ITEMS/8) 片）。
  *
  * 无 meta 键（最近播放没有歌单 PREF_PLAYLISTS 那样的元信息载体）：
  * 第 0 片 miss 即视为「无分片数据」返回 null，调用方回落旧格式；
@@ -156,7 +158,7 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
   try {
     // 分片落盘（2026-10-12 扩容改造，同歌单 pl_tracks_* 模式）：
     // 每片 8 条 slimTrack 后的曲目 ≈ 4.5KB，单值 8192 上限不再约束总量，
-    // 50 条全部可持久化（旧实现被 fitByByteBudget 截到约 11 条，重启即丢）。
+    // 100 条全部可持久化（旧实现被 fitByByteBudget 截到约 11 条，重启即丢）。
     const slim: Track[] = capped.map((t: Track): Track => slimTrack(t));
     const chunkCount: number = Math.ceil(slim.length / RECENT_CHUNK_ITEMS);
     for (let c = 0; c < chunkCount; c++) {

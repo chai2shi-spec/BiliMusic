@@ -43,4 +43,27 @@ export class ArrayDataSource<T> implements IDataSource {
       this.listener.onDataReloaded();
     }
   }
+
+  /**
+   * 尾部增量追加（上拉加载更多专用，2026-10-19）：
+   * 只通知 LazyForEach「新增了下标 start..start+n-1 的数据」（onDataAdd），
+   * 可视区已建节点不重建、缓存区不丢弃、滚动锚点不重算 —— 区别于 reload 的
+   * 整表重载（onDataReloaded 会让可视区节点失效重建，列表在底部过滚动 /
+   * 惯性动画在途时表现为「整体跳一下」）。
+   * 调用方自行去重（按业务 id），本方法不判重；空数组直接 no-op。
+   */
+  append(items: Array<T>): void {
+    if (items.length === 0) {
+      return;
+    }
+    const start: number = this.items.length;
+    for (let i = 0; i < items.length; i++) {
+      this.items.push(items[i]);
+    }
+    if (this.listener !== undefined) {
+      for (let i = 0; i < items.length; i++) {
+        this.listener.onDataAdd(start + i);
+      }
+    }
+  }
 }

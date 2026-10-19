@@ -163,6 +163,13 @@ export const MINI_BAR_ANIM_TO_COLLAPSE: number = 2;
 export const STORE_BAR_LAYOUT: string = 'barLayoutMode';
 
 /**
+ * 迷你栏进度指示开关镜像（AppSettings.miniBarProgress 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，PlayBar @StorageProp 订阅 ——
+ * 控制迷你栏底部 2vp 直线进度条与水平收起态圆环进度是否渲染（默认开）。
+ */
+export const STORE_MINI_BAR_PROGRESS: string = 'miniBarProgressShown';
+
+/**
  * 播放页沉浸背景是否偏暗（封面主色明度判断）。
  * 由 PlayerInfoComponent 取色后写入；TopAreaComponent（投播按钮图标黑白）、
  * 状态栏内容色按它切换。离开播放页时由 PlayerPage 复位为浅色状态栏。
@@ -283,6 +290,13 @@ export const STORE_LOGIN_EVENT: string = 'loginEvent';
  * 写入：service/FavSyncManager.ts；消费：同步页 @StorageLink + @Watch 刷新状态。
  */
 export const STORE_FAV_SYNC_REV: string = 'favSyncRev';
+
+/**
+ * 歌单导入任务状态（`ImportState`，见 service/PlaylistImporter.ts）。
+ * 写入：ImportTaskManager 单例（每处理一首广播一次新快照对象）；
+ * 消费：导入向导页 @StorageLink + @Watch 刷新进度与阶段流转。
+ */
+export const STORE_IMPORT_STATE: string = 'playlistImportState';
 
 /**
  * 收藏夹同步状态（`FavFolderSyncState[]`，见 service/FavSyncStore.ts）。

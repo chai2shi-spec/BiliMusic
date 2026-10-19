@@ -73,7 +73,8 @@ import {
   PULL_SKELETON_SETTLE_VP,
   PULL_SKELETON_EXIT_VP,
   PULL_SKELETON_FADE_MS,
-  BUTTON_RADIUS_VP
+  BUTTON_RADIUS_VP,
+  LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
 
 function parseDur(s: string | number | undefined): number {
@@ -228,38 +229,12 @@ function mapMusicCenterList(list: MusicCenterItem[]): Track[] {
 }
 
 /**
- * 追加合并并去重。
+ * 追加合并并去重（首屏双源合成仍在用，如 settleCenter）。
  *
  * 必须去重：ForEach 的 keyGenerator 用的是 track.id，重复 id 会让 ArkUI 复用错节点
  * （表现为滚动时条目跳动 / 部分行空白）。推荐位尤其明显——首屏两个源
  * （popular 与 rcmd）实测重叠约 8/10。
  */
-/**
- * 翻页追加 UP 主结果，按 mid 去重。
- *
- * 去重的理由与 `mergeTracks` 一样：B 站搜索翻页时同一条可能换位置，
- * 直接 push 会出现两个一模一样的 UP 行（连 mid 都一样）。
- */
-function mergeUsers(base: UserSearchResult[], add: UserSearchResult[]): UserSearchResult[] {
-  const seen: Set<string> = new Set<string>();
-  const out: UserSearchResult[] = [];
-  for (let i = 0; i < base.length; i++) {
-    const key: string = String(base[i].mid);
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(base[i]);
-    }
-  }
-  for (let i = 0; i < add.length; i++) {
-    const key: string = String(add[i].mid);
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(add[i]);
-    }
-  }
-  return out;
-}
-
 function mergeTracks(base: Track[], add: Track[]): Track[] {
   const seen: Set<string> = new Set<string>();
   const out: Track[] = [];
@@ -310,13 +285,18 @@ const RANKING_PAGE_SIZE: number = 20;
 /** 搜索历史面板最大高度（vp）：20 条一屏放不下，超出部分在面板内滚动 */
 const HISTORY_PANEL_MAX_HEIGHT: number = 320;
 const HISTORY_PANEL_GAP: number = 4;
+/**
+ * 列表首条独立让位定值（vp）：与页签行实测高（searchTabsHeight）解耦
+ * （用户 2026-10-15）—— 条目起始位与页签栏位置分别单独调。
+ * 56（标题行）+ 此值 = List 首个空白占位条目高度（不含 safeTop）。
+ */
+const SEARCH_LIST_START_EXTRA_VP: number = 37.6;
 
 /**
  * 骨架屏占位行：首屏整页用 8 行（贴合首屏可见条数），上拉加载更多用 3 行。
  * 只作 ForEach 的数据源，渲染时忽略内容。
  */
 const SKELETON_ROW_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7];
-const SKELETON_MORE_INDEXES: number[] = [0, 1, 2];
 
 @Component
 export struct SearchPage {
@@ -505,10 +485,19 @@ export struct SearchPage {
 
   /**
    * 根栏整栏让位量（vp）：safeTop + 标题行 56（搜索行垂直居中其中）+ 页签行实测高。
-   * contentStartOffset / 骨架 / 空态 / 历史面板定位统一读它。
+   * 历史面板定位统一读它（贴根栏下沿弹出）；列表内容让位已解耦，读 listStartOffset()。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.searchTabsHeight;
+  }
+
+  /**
+   * 列表内容起始让位量（vp）：safeTop + 标题行 56 + 独立定值
+   * （SEARCH_LIST_START_EXTRA_VP，不读页签行实测高）。
+   * List 首个空白占位 / 骨架 / 空态读它 —— 条目位置与页签栏解耦，各自单独调。
+   */
+  private listStartOffset(): number {
+    return this.safeTop + NAV_TITLE_BAR_HEIGHT + SEARCH_LIST_START_EXTRA_VP;
   }
 
   aboutToDisappear(): void {
@@ -905,8 +894,21 @@ export struct SearchPage {
         const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, next, SEARCH_PAGE_SIZE);
         const list: UserSearchResult[] = resp.result || [];
         this.searchPage = next;
-        // 按 mid 去重追加：翻页时 B 站可能把同一条挪位置，直接 push 会重复
-        this.userResults = mergeUsers(this.userResults, list);
+        // 按 mid 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
+        // 翻页时 B 站可能把同一条挪位置，不去重会重复；整表重新赋值会让 ForEach
+        // 全量 diff，push 只把 diff 限制在新增 key，既有行零重渲染。
+        const seen: Set<string> = new Set<string>();
+        for (let i = 0; i < this.userResults.length; i++) {
+          seen.add(String(this.userResults[i].mid));
+        }
+        for (let i = 0; i < list.length; i++) {
+          const u: UserSearchResult = list[i];
+          const key: string = String(u.mid);
+          if (!seen.has(key)) {
+            seen.add(key);
+            this.userResults.push(u);
+          }
+        }
         if (list.length === 0) {
           this.searchTotalPages = next;
         } else if (resp.numPages > 0) {
@@ -917,7 +919,18 @@ export struct SearchPage {
       const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, next, SEARCH_PAGE_SIZE);
       const list: Track[] = (resp.result || []).map(mapSearch);
       this.searchPage = next;
-      this.results = mergeTracks(this.results, list);
+      // 按 id 去重后增量 push（理由同上 user 分支）
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.results.length; i++) {
+        seen.add(this.results[i].id);
+      }
+      for (let i = 0; i < list.length; i++) {
+        const t: Track = list[i];
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          this.results.push(t);
+        }
+      }
       SearchStateHolder.save(kw, this.results);
       if (list.length === 0) {
         // 空页 = 到底：把总页数对齐到当前页，hasMore() 自然返回 false
@@ -940,7 +953,19 @@ export struct SearchPage {
       const feed: PopularVideo[] = await BilibiliApi.getRecommendedFeed(idx, RECOMMEND_FEED_PS);
       this.recommendFreshIdx = idx;
       const before: number = this.recommend.length;
-      this.recommend = mergeTracks(this.recommend, feed.map(mapPopular));
+      // 按 id 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
+      // 整表重新赋值会让 ForEach 全量 diff，push 只把 diff 限制在新增 key。
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.recommend.length; i++) {
+        seen.add(this.recommend[i].id);
+      }
+      for (let i = 0; i < feed.length; i++) {
+        const t: Track = mapPopular(feed[i]);
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          this.recommend.push(t);
+        }
+      }
       if (feed.length === 0) {
         this.recommendHasMore = false;
       } else if (this.recommend.length === before) {
@@ -957,8 +982,13 @@ export struct SearchPage {
 
   /** 排行榜：接口已经一次给全，这里只是多放一屏，不发请求 */
   private revealMoreRanking(): void {
-    const next: number = Math.min(this.ranking.length + RANKING_PAGE_SIZE, this.rankingAll.length);
-    this.ranking = this.rankingAll.slice(0, next);
+    // 增量揭示（2026-10-19 修「加载第二页列表整体跳一下」）：push 揭示区间，
+    // 不再 slice 整表重新赋值，ForEach 只 diff 新增 key。
+    const from: number = this.ranking.length;
+    const next: number = Math.min(from + RANKING_PAGE_SIZE, this.rankingAll.length);
+    for (let i = from; i < next; i++) {
+      this.ranking.push(this.rankingAll[i]);
+    }
   }
 
   private async loadMoreCenter(): Promise<void> {
@@ -968,7 +998,20 @@ export struct SearchPage {
       const list: MusicCenterItem[] =
         await BilibiliApi.getMusicComprehensiveRank(CENTER_PAGE_SIZE, next);
       const before: number = this.center.length;
-      this.center = mergeTracks(this.center, mapMusicCenterList(list));
+      // 按 id 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
+      // 整表重新赋值会让 ForEach 全量 diff，push 只把 diff 限制在新增 key。
+      const fresh: Track[] = mapMusicCenterList(list);
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.center.length; i++) {
+        seen.add(this.center[i].id);
+      }
+      for (let i = 0; i < fresh.length; i++) {
+        const t: Track = fresh[i];
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          this.center.push(t);
+        }
+      }
       this.centerPage = next;
       if (list.length === 0 || this.center.length === before) {
         this.centerHasMore = false;
@@ -1012,7 +1055,7 @@ export struct SearchPage {
             })
         }
       }
-      .margin({ top: this.barTotalHeight() + 48 })
+      .margin({ top: this.listStartOffset() + 48 })
     }
   }
 
@@ -1028,8 +1071,8 @@ export struct SearchPage {
       }, (_i: number): string => `sk_${_i}`)
     }
     .width('100%')
-    // 内容列不再整体 padding top（列表穿透需要），骨架区自己补栏高避让
-    .padding({ top: this.barTotalHeight() })
+    // 内容列不再整体 padding top（列表穿透需要），骨架区自己补内容起始让位
+    .padding({ top: this.listStartOffset() })
   }
 
   /**
@@ -1579,6 +1622,18 @@ export struct SearchPage {
           refreshingContent: this.refreshPlaceholder !== null ? this.refreshPlaceholder : undefined
         }) {
           List({ scroller: TabScrollerHolder.search }) {
+            // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+            // 屏幕顶端（y=0）。占位高度 = 列表内容起始让位量（listStartOffset：
+            // safeTop + 56 + 独立定值 SEARCH_LIST_START_EXTRA_VP，与页签行实测高
+            // 解耦 —— 条目位置与页签栏分别单独调），滚动时占位与条目一起从模糊板
+            // 下方穿过。
+            ListItem() {
+              // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
+              Row()
+                .width('100%')
+                .height(this.listStartOffset())
+            }
+
             // 下拉刷新头（方案三 · 骨架接管）：刷新指示复用骨架行本身，不新增视觉元素。
             // 刻意放 List 首行而非 refreshingContent：ComponentContent 的内容不随页面
             // @State 刷新（要变只能显式 update），逐帧跟手做不到；普通组件树里才能被
@@ -1671,16 +1726,22 @@ export struct SearchPage {
               )
             }
 
-            // 加载更多状态条：只在这一屏有内容时出现，避免空列表底部多出一条空白
+            // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只在这一屏有内容时出现；
+            // 只换内容不插拔、高度恒定，数据落地帧尾部 extent 只增不减，底部弹簧
+            // 过滚动不被收缩强制解析（修「加载第二页列表整体跳一下」）。
+            // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏/下拉刷新骨架不动。
             if (this.currentListLength() > 0) {
               ListItem() {
-                Column() {
+                Row() {
                   if (this.loadingMore) {
-                    // 加载更多：3 行同构骨架占位替代「转圈 + 加载中…」，
-                    // 与首屏骨架同一套视觉语言；新内容到达后骨架被真实条目顶替。
-                    ForEach(SKELETON_MORE_INDEXES, (_i: number): void => {
-                      SkeletonTrackItem({ index: _i })
-                    }, (_i: number): string => `more_sk_${_i}`)
+                    LoadingProgress()
+                      .width(18)
+                      .height(18)
+                      .color($r('app.color.text_tertiary'))
+                    Text('加载中…')
+                      .fontSize(12)
+                      .fontColor($r('app.color.text_tertiary'))
+                      .margin({ left: 8 })
                   } else if (!this.hasMore()) {
                     Text('已经到底啦')
                       .fontSize(13)
@@ -1692,7 +1753,7 @@ export struct SearchPage {
                   }
                 }
                 .width('100%')
-                .padding({ top: 14, bottom: 14 })
+                .height(LIST_FOOTER_HEIGHT_VP)
                 .justifyContent(FlexAlign.Center)
               }
             }
@@ -1701,9 +1762,9 @@ export struct SearchPage {
           .height('100%')
           // 边界回弹（2026-10-08）：到底的反馈动效；顶部下拉由 Refresh 刷新动画接管。
           .edgeEffect(EdgeEffect.Spring)
-          // Sumy 式穿透：列表视口铺满全屏，contentStartOffset 让内容静止时从栏底排起，
-          // 上滑时条目从模糊板下穿过并在 y=0 裁掉 —— 材质层有内容可模糊（浮出效果才可见）。
-          .contentStartOffset(this.barTotalHeight())
+          // Sumy 式穿透：顶部根栏让位由 List 首个空白占位 ListItem 负责（见上方
+          // 占位注释，下载页同款迁移），不再使用 contentStartOffset —— 材质层有
+          // 内容可模糊（浮出效果才可见）。
           // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡。
           // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多，
           // 否则最后一项会被页签栏 / 迷你条压住。
