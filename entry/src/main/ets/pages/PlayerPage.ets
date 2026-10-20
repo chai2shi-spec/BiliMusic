@@ -8,8 +8,10 @@
  * 保留的原有机制：
  *   - 'Player' 路由（Index 的 pageMap）与 geometryTransition 封面一镜到底
  *     （大封面在 MusicInfoComponent 里，与 PlayBar 迷你封面同 id）；
- *   - 进场动效：点击迷你播放条进入时，整页自迷你条所在高度（ENTER_RISE）升起并淡入
- *     （NavDestination.customTransition 驱动）；
+ *   - 进场动效（2026-10-20 改版）：点击迷你播放条进入时，**背景面从迷你栏那一小块
+ *     矩形长到全屏**（PlayerInfoComponent 的 surfaceProgress），内容层错峰淡入，
+ *     封面 geometryTransition 同时一镜到底。本页的 customTransition 只负责
+ *     顶替系统默认 push 转场（等时长空转场）；没有起点矩形时退回整页淡入。
  *   - 返回拦截：onBackPressed 里 animateTo + pop(false)，只做封面一镜到底形变；
  *   - 全屏布局避让（safeTop / safeBottom 在 PlayerInfoComponent 内部消费）；
  *   - 离开页面时把状态栏内容色复原为黑（首页是浅色背景）。
@@ -53,9 +55,15 @@ export struct PlayerPage {
   /** 共享元素转场进行中：进入时由本页在转场结束后复位（PlayBar 置位） */
   @StorageLink(STORE_PLAYER_TRANSITIONING) playerTransitioning: boolean = false;
 
-  /** 进场动效：整页起始位移与透明度（初始为「下方 + 透明」），由 customTransition 改到终态 */
+  /**
+   * 进场动效：整页起始位移与透明度。
+   *
+   * 默认值改为「不位移 + 全不透明」：进场视觉已交给 PlayerInfoComponent 的
+   * 「迷你栏 → 全屏」生长动画（背景面长大 + 内容层错峰淡入）。
+   * 只有**没有起点矩形**的兜底路径才会在这里把它改成「透明 → 不透明」的整页淡入。
+   */
   @State enterShift: number = ENTER_RISE;
-  @State enterOpacity: number = 0;
+  @State enterOpacity: number = 1;
 
   private transitionEndTimer: number = -1;
 
@@ -70,6 +78,9 @@ export struct PlayerPage {
       clearTimeout(this.transitionEndTimer);
       this.transitionEndTimer = -1;
     }
+    // 转场起点矩形的一次性语义由本页收尾（PlayerInfoComponent 只读不清，
+    // 因为两边读取顺序无保证）：页面销毁即作废，下次点击迷你栏会重新实测。
+    NavStackHolder.playerEntranceRect = null;
     // 状态栏内容色复原为黑图标：沉浸页里按背景明暗切换过，首页是浅色背景
     const ctx: common.Context | undefined = this.getUIContext().getHostContext();
     if (ctx !== undefined) {
@@ -125,6 +136,25 @@ export struct PlayerPage {
       }
       if (operation !== NavigationOperation.PUSH) {
         return undefined;
+      }
+      // 进场（PUSH）分两条路：
+      //
+      // ① 从迷你栏进来（PlayBar 已在点击时实测写入起点矩形）→ 视觉全部交给
+      //    PlayerInfoComponent 的「容器长大」（背景面从迷你栏矩形长到全屏 +
+      //    内容层错峰淡入）。这里只返回一个**等时长的空转场**，作用是顶替
+      //    系统默认的 push 转场 —— 返回 undefined 会走默认右滑，和生长动画打架。
+      //
+      // ② 兜底（没有起点矩形：测量失败 / 将来出现别的入口）→ 保留原来的
+      //    「整页升起 + 淡入」。
+      if (NavStackHolder.playerEntranceRect !== null) {
+        const holdOpen: NavDestinationTransition = {
+          duration: ENTER_DURATION,
+          delay: 0,
+          curve: Curve.EaseInOut,
+          event: (): void => {
+          }
+        };
+        return [holdOpen];
       }
       this.enterShift = ENTER_RISE;
       this.enterOpacity = 0;

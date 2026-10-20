@@ -47,7 +47,10 @@ import {
   STORE_THEME_SURFACE,
   STORE_THEME_ON,
   STORE_BAR_LAYOUT,
-  STORE_MINI_BAR_PROGRESS
+  STORE_MINI_BAR_PROGRESS,
+  STORE_MINI_BAR_AUTO_EXPAND,
+  STORE_PLAYBACK_SPEED_ENABLED,
+  STORE_PLAYBACK_SPEED
 } from '../common/Constants';
 import {
   THEME_PALETTES,
@@ -448,7 +451,10 @@ export struct SettingsPage {
       themeMode: s.themeMode,
       themeColor: s.themeColor,
       barLayout: s.barLayout,
-      miniBarProgress: s.miniBarProgress
+      miniBarProgress: s.miniBarProgress,
+      miniBarAutoExpand: s.miniBarAutoExpand,
+      speedEnabled: s.speedEnabled,
+      playbackSpeed: s.playbackSpeed
     };
   }
 
@@ -1298,12 +1304,46 @@ export struct SettingsPage {
                    isCheck: this.settings.wifiOnlyPlay,
                    selectColor: this.themePrimary,
                   onChange: (v: boolean): void => {
+                     this.update((s: AppSettings): void => {
+                       s.wifiOnlyPlay = v;
+                     });
+                     if (v) {
+                       this.toast('已开启：移动网络下将不播放在线歌曲', 1800);
+                     }
+                   }
+                 }),
+                 cardBackgroundColor: Color.Transparent,
+                 cardPrefixMargin: 0,
+                 cardSuffixMargin: 0
+               })
+
+              CardDivider()
+
+              // 倍速播放总开关：开启后播放页功能行出现倍速入口（ControlAreaComponent）。
+              // 关闭时立即恢复 1.0x —— update 一次写两个字段（含 playbackSpeed=1.0），
+              // 运行时归位走 setPlaybackSpeed(1.0, false)（persist=false：偏好已由
+              // update 写好，双写会因 put 未落内存产生读-改-写覆盖竞态）。
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: '倍速播放' },
+                  secondaryText: { text: '开启后可在播放页选择播放倍速' }
+                },
+                suffixItem: new SuffixSwitch({
+                  isCheck: this.settings.speedEnabled,
+                  selectColor: this.themePrimary,
+                  onChange: (v: boolean): void => {
                     this.update((s: AppSettings): void => {
-                      s.wifiOnlyPlay = v;
+                      s.speedEnabled = v;
+                      if (!v) {
+                        s.playbackSpeed = 1.0;
+                      }
                     });
-                    if (v) {
-                      this.toast('已开启：移动网络下将不播放在线歌曲', 1800);
+                    AppStorage.setOrCreate(STORE_PLAYBACK_SPEED_ENABLED, v);
+                    if (!v) {
+                      AppStorage.setOrCreate(STORE_PLAYBACK_SPEED, 1.0);
+                      MusicPlayer.getInstance().setPlaybackSpeed(1.0, false);
                     }
+                    this.toast(v ? '已开启：播放页可选择倍速' : '已关闭倍速播放', 1500);
                   }
                 }),
                 cardBackgroundColor: Color.Transparent,
@@ -1475,18 +1515,22 @@ export struct SettingsPage {
 
               // 底部导航布局：水平融合（播放栏与页签同一行）/ 垂直两层（播放栏上、页签下）。
               // 点击循环切换，写偏好 + AppStorage 镜像即时生效（Index 受控样式重建）。
-              HdsListItemCard({
-                textItem: { primaryText: { text: '底部导航布局' } },
-                suffixItem: new SuffixText({ text: this.barLayoutLabel() }),
-                cardBackgroundColor: Color.Transparent,
-                cardPrefixMargin: 0,
-                cardSuffixMargin: 0,
-                onClick: (): void => {
-                  this.cycleBarLayout();
-                }
-              })
+              // A12（2026-10-20 平板功能对齐）：HDS 底部页签栏只在手机形态（SM）渲染，
+              // md/lg 是 NavRail + 浮岛，本项在平板上点了没有任何可见效果 → 非 SM 整卡隐藏。
+              if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+                HdsListItemCard({
+                  textItem: { primaryText: { text: '底部导航布局' } },
+                  suffixItem: new SuffixText({ text: this.barLayoutLabel() }),
+                  cardBackgroundColor: Color.Transparent,
+                  cardPrefixMargin: 0,
+                  cardSuffixMargin: 0,
+                  onClick: (): void => {
+                    this.cycleBarLayout();
+                  }
+                })
 
-              CardDivider()
+                CardDivider()
+              }
 
               // 迷你栏进度条：底部 2vp 直线进度条与水平收起态圆环进度的总开关。
               // 关闭后两处进度指示均不再渲染（纯 UI 层，不影响播放页进度条）；
@@ -1510,6 +1554,37 @@ export struct SettingsPage {
                 cardPrefixMargin: 0,
                 cardSuffixMargin: 0
               })
+
+              // 迷你栏自动展开收起：全屏滑动手势（上滑展开、下滑收起）的总开关。
+              // 关闭后浏览列表的竖向滑动不再触发迷你栏收放，仅保留点按圆盘等
+              // 显式交互；写偏好 + AppStorage 镜像（STORE_MINI_BAR_AUTO_EXPAND），
+              // Index 的 @StorageProp 订阅即时生效，无需重启。
+              // A12（2026-10-20 平板功能对齐）：屏幕滑动收放只在手机形态（SM）接线，
+              // md/lg 浮岛不参与手势展开 → 非 SM 整卡隐藏。
+              if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+                CardDivider()
+
+                HdsListItemCard({
+                  textItem: {
+                    primaryText: { text: '自动展开收起' },
+                    secondaryText: { text: '屏幕上滑展开、下滑收起迷你栏' }
+                  },
+                  suffixItem: new SuffixSwitch({
+                    isCheck: this.settings.miniBarAutoExpand,
+                    selectColor: this.themePrimary,
+                    onChange: (v: boolean): void => {
+                      this.update((s: AppSettings): void => {
+                        s.miniBarAutoExpand = v;
+                      });
+                      AppStorage.setOrCreate(STORE_MINI_BAR_AUTO_EXPAND, v);
+                      this.toast(v ? '滑动收放已开启' : '滑动收放已关闭', 1500);
+                    }
+                  }),
+                  cardBackgroundColor: Color.Transparent,
+                  cardPrefixMargin: 0,
+                  cardSuffixMargin: 0
+                })
+              }
             }
           }
 

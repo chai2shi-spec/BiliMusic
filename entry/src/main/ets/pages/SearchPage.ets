@@ -298,6 +298,9 @@ const SEARCH_LIST_START_EXTRA_VP: number = 37.6;
  */
 const SKELETON_ROW_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7];
 
+/** 诊断：SearchPage 实例号（排查「平板下 searchSubmit 绑到旧实例」） */
+let searchPageInstanceSeq: number = 0;
+
 @Component
 export struct SearchPage {
   /**
@@ -318,6 +321,8 @@ export struct SearchPage {
   @State loading: boolean = false;
   /** 是否已执行过一次搜索：用于区分「还没搜」和「搜了但没结果」，避免空态文案误导。 */
   @State searched: boolean = false;
+  /** 诊断用实例号（aboutToAppear 分配） */
+  private pageId: number = 0;
   /** 推荐位待完成的数据源数量（热门 + 推荐两个源并行，互不影响） */
   @State recommendPending: number = 0;
   @State loadingRanking: boolean = false;
@@ -462,9 +467,8 @@ export struct SearchPage {
     this.loadHomeData();
     // 栏内动作（提交搜索 / 开关历史 / 切类型 / 切页签）经持有器转回本页私有方法；
     // scroller 不再注册替换——List 直挂 Holder.search 唯一真源（2026-10-11）
-    TabScrollerHolder.searchSubmit = (): void => {
-      this.doSearch();
-    };
+    this.pageId = ++searchPageInstanceSeq;
+    console.info(`[Search] appear id=${this.pageId} bp=${this.currentBreakpoint}`);
     TabScrollerHolder.searchOpenHistory = (): void => {
       this.openHistory();
     };
@@ -501,6 +505,7 @@ export struct SearchPage {
   }
 
   aboutToDisappear(): void {
+    console.info(`[Search] disappear id=${this.pageId}`);
     if (this.pullFadeTimer !== -1) {
       clearTimeout(this.pullFadeTimer);
       this.pullFadeTimer = -1;
@@ -1261,6 +1266,7 @@ export struct SearchPage {
       return;
     }
     const seq: number = ++this.searchSeq;
+    console.info(`[Search] doSearch id=${this.pageId} kw=${kw} kind=${this.searchKind} seq=${seq}`);
     this.loading = true;
     this.tab = 'search';
     this.showHistory = false;
@@ -1280,6 +1286,7 @@ export struct SearchPage {
         this.results = [];
         this.searched = true;
         this.resetResultScroll();
+        console.info(`[Search] user done id=${this.pageId} n=${this.userResults.length} searched=${this.searched}`);
         if (this.userResults.length === 0) {
           this.toast('没有搜到相关 UP 主，换个关键词试试', 2000);
         }
@@ -1932,6 +1939,26 @@ export struct SearchPage {
     }
     .width('100%')
     .height('100%')
+    // ⚠️ 顶栏动作必须在 **onAppear**（真正挂载）里接管，不能放 aboutToAppear：
+    // 平板分支下 HdsNavigation 会先创建一个**临时实例**再销毁它（实测
+    // appear id=1 → appear id=2 → disappear id=2），若在 aboutToAppear 里绑静态
+    // 回调，就会被这个已销毁的临时实例抢走 —— 表现是「搜索请求发出去了、界面不动」。
+    .onAppear((): void => {
+      TabScrollerHolder.searchSubmitOwner = this.pageId;
+      TabScrollerHolder.searchSubmit = (): void => {
+        this.doSearch();
+      };
+      console.info(`[Search] bind id=${this.pageId}`);
+    })
+    .onDisAppear((): void => {
+      // 只清自己的绑定：否则临时实例销毁时会把可见实例的绑定一起清掉
+      if (TabScrollerHolder.searchSubmitOwner === this.pageId) {
+        TabScrollerHolder.searchSubmitOwner = -1;
+        TabScrollerHolder.searchSubmit = (): void => {
+        };
+        console.info(`[Search] unbind id=${this.pageId}`);
+      }
+    })
   }
 
   /** 点搜索框：有历史才展开（没有历史弹一个空面板没意义） */

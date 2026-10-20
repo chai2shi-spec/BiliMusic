@@ -123,6 +123,11 @@ export class HttpUtil {
   static async requestText(url: string, options?: HttpRequestOptions): Promise<string> {
     const req: http.HttpRequest = http.createHttp();
     try {
+      // 请求侧留痕（er/ 播放失败诊断报告的整改项）：resp 只打基础 URL，
+      // queryParams 走独立通道不进日志，参数错了（如 view 的 bvid 为空 → -400）
+      // 之前完全无从分辨。参数序列化开销可忽略，仅在 requestText 出口打一条。
+      const paramsText: string = options && options.params ? JSON.stringify(options.params) : '';
+      hilog.info(0x0000, 'BiliMusicHttp', 'req %{public}s params=%{public}s', url, paramsText);
       const resp: http.HttpResponse = await req.request(url, {
         method: options?.method ?? http.RequestMethod.GET,
         header: HttpUtil.buildHeader(options),

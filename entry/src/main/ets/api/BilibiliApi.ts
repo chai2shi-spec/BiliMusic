@@ -58,9 +58,23 @@ interface BiliEnvelope<T> {
 }
 
 async function biliFetch<T>(path: string, params?: Record<string, string | number>): Promise<T> {
-  const data: BiliEnvelope<T> = await HttpUtil.requestJson<BiliEnvelope<T>>(`${BILI_API}${path}`, {
-    params: params
-  });
+  // ⚠️ 2026-10-20 真机/平板实测：走 `params`（ohos 的 queryParams）时，
+  // `/x/web-interface/view` 拿到的仍是「没有 bvid」的空请求 → `-400 请求错误`
+  //（同一 bvid 用 curl 直连是 code=0）。工程里本来能用的 GET（搜索 / 推荐）
+  // 全是把 query 直接拼进 URL 的，这里统一成同一口径：
+  // **参数内联到 URL**，不再依赖 queryParams。
+  let url: string = `${BILI_API}${path}`;
+  if (params) {
+    const parts: string[] = [];
+    const keys: string[] = Object.keys(params);
+    for (let i = 0; i < keys.length; i++) {
+      parts.push(`${encodeURIComponent(keys[i])}=${encodeURIComponent(String(params[keys[i]]))}`);
+    }
+    if (parts.length > 0) {
+      url = `${url}?${parts.join('&')}`;
+    }
+  }
+  const data: BiliEnvelope<T> = await HttpUtil.requestJson<BiliEnvelope<T>>(url);
   if (data.code !== 0) {
     throw new BiliApiError(data.code, data.message, path);
   }
@@ -1135,6 +1149,10 @@ function buildTrackSource(
     coverUrl: toHttpsUrl(detail.pic),
     duration: duration,
     audioUrl: best.baseUrl,
+    // 备用直链只取前 3 条：主直链挂死 / 被拒时的快速回退用不了那么多，
+    // 多了只是白占 sourceCache 的内存。normalizeAudioStream 在 quality>0 的
+    // 早退分支里不补 backupUrl，这里必须真值判断，否则 slice 直接抛 undefined。
+    audioBackupUrls: Array.isArray(best.backupUrl) ? best.backupUrl.slice(0, 3) : [],
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
     audioBandwidth: best.bandwidth
@@ -2126,6 +2144,8 @@ async function extractAudioByAvidCid(
     coverUrl: '',
     duration: 0,
     audioUrl: best.baseUrl,
+    // 与 buildTrackSource 同款：真值判断兜 normalizeAudioStream 的 quality>0 早退分支
+    audioBackupUrls: Array.isArray(best.backupUrl) ? best.backupUrl.slice(0, 3) : [],
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
     audioBandwidth: best.bandwidth
@@ -2367,20 +2387,41 @@ export async function fetchSmsCaptchaToken(): Promise<SmsCaptchaInfo> {
 export async function sendSmsLoginCode(tel: string, cid: string, token: string,
   challenge: string, validate: string, seccode: string): Promise<SmsSendResult> {
   const path: string = '/x/passport-login/web/sms/send';
-  const resp: SmsSendEnvelope = await HttpUtil.requestJson<SmsSendEnvelope>(
-    `${BILI_PASSPORT}${path}`, {
-      method: http.RequestMethod.POST,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': BILI_APP_UA,
-        Origin: 'https://www.bilibili.com'
-      },
-      skipCookie: true,
-      body: `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
-        `&source=main_mini_login&token=${encodeURIComponent(token)}` +
-        `&challenge=${encodeURIComponent(challenge)}&validate=${encodeURIComponent(validate)}` +
-        `&seccode=${encodeURIComponent(seccode)}`
-    });
+  if (tel.length === 0 || cid.length === 0) {
+    // 服务端对空 tel / 空 cid 只回一句「-400 请求错误」，看不出是哪个字段，
+    // 这里先本地拦下给一句能看懂的（2026-10-20 实测：-400 等价于「表单为空/缺字段」）
+    throw new BiliApiError(-400, '手机号缺失，请返回上一步重新输入', path);
+  }
+  const body: string = `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
+    `&source=main_mini_login&token=${encodeURIComponent(token)}` +
+    `&challenge=${encodeURIComponent(challenge)}&validate=${encodeURIComponent(validate)}` +
+    `&seccode=${encodeURIComponent(seccode)}`;
+  const url: string = `${BILI_PASSPORT}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': BILI_APP_UA,
+    Origin: 'https://www.bilibili.com'
+  };
+  // ⚠️ 2026-10-20 真机实测（三路对照）：同一条 POST，
+  //   · 字符串 `extraData` 表单体 → 服务端读不到 → `-400 请求错误`
+  //   · 同样的字段走 **query** → `code=0` + captcha_key（正常发短信）
+  // 所以 passport 这两个接口一律**参数走 query**（B 站接受），不走表单体。
+  const resp: SmsSendEnvelope = await HttpUtil.requestJson<SmsSendEnvelope>(url, {
+    method: http.RequestMethod.POST,
+    headers: headers,
+    skipCookie: true,
+    params: {
+      cid: cid,
+      tel: tel,
+      source: 'main_mini_login',
+      token: token,
+      challenge: challenge,
+      validate: validate,
+      seccode: seccode
+    }
+  });
+  console.info(`sms send: code=${resp.code}, bodyLen=${body.length}, telLen=${tel.length}, ` +
+    `tokenLen=${token.length}, vLen=${validate.length}`);
   if (resp.code !== 0) {
     throw new BiliApiError(resp.code, resp.message, path);
   }
@@ -2395,19 +2436,42 @@ export async function sendSmsLoginCode(tel: string, cid: string, token: string,
 export async function loginWithSmsCode(tel: string, cid: string, code: string,
   captchaKey: string): Promise<SmsLoginResult> {
   const path: string = '/x/passport-login/web/login/sms';
-  const raw: HttpTextResult = await HttpUtil.requestTextWithCookies(`${BILI_PASSPORT}${path}`, {
+  const url: string = `${BILI_PASSPORT}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': BILI_APP_UA,
+    Origin: 'https://www.bilibili.com'
+  };
+  // 同 sendSmsLoginCode（2026-10-20 实测）：passport POST 的**表单体**在本机引擎上
+  // 会被吞，服务端只回 `-400 请求错误`；同样的字段走 **query** 才通。
+  let raw: HttpTextResult = await HttpUtil.requestTextWithCookies(url, {
     method: http.RequestMethod.POST,
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': BILI_APP_UA,
-      Origin: 'https://www.bilibili.com'
-    },
+    headers: headers,
     skipCookie: true,
-    body: `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
-      `&code=${encodeURIComponent(code)}&source=main_mini_login` +
-      `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`
+    params: {
+      cid: cid,
+      tel: tel,
+      code: code,
+      source: 'main_mini_login',
+      captcha_key: captchaKey,
+      keep: 1
+    }
   });
-  const resp: SmsLoginEnvelope = JSON.parse(raw.text) as SmsLoginEnvelope;
+  let resp: SmsLoginEnvelope = JSON.parse(raw.text) as SmsLoginEnvelope;
+  if (resp.code === -400) {
+    // 兜底：个别引擎只认表单体（与主路径二选一，正常只走一条）
+    raw = await HttpUtil.requestTextWithCookies(url, {
+      method: http.RequestMethod.POST,
+      headers: headers,
+      skipCookie: true,
+      body: `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
+        `&code=${encodeURIComponent(code)}&source=main_mini_login` +
+        `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`
+    });
+    resp = JSON.parse(raw.text) as SmsLoginEnvelope;
+    console.warn(`sms login: body fallback -> code=${resp.code}`);
+  }
+  console.info(`sms login: code=${resp.code}, cookiesLen=${raw.responseCookies.length}`);
   if (resp.code !== 0) {
     throw new BiliApiError(resp.code, resp.message, path);
   }

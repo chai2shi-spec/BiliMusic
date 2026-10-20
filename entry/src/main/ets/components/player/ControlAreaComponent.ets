@@ -15,7 +15,7 @@
  * 更新，由 dragging + dragValue 隔离，插值动画在拖动中暂停。
  */
 
-import { Track, RepeatMode } from '../../model/MusicModels';
+import { Track, RepeatMode, PLAYBACK_SPEED_OPTIONS, speedLabelOf } from '../../model/MusicModels';
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { QueueSheet, repeatLabelOf, modeIconOf, nextRepeatMode } from '../QueueSheet';
 import { StyleConstants } from '../../common/constants/StyleConstants';
@@ -37,7 +37,9 @@ import {
   STORE_CURRENT_TRACK,
   STORE_PROGRESS,
   STORE_DURATION,
-  STORE_REPEAT_MODE
+  STORE_REPEAT_MODE,
+  STORE_PLAYBACK_SPEED_ENABLED,
+  STORE_PLAYBACK_SPEED
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
@@ -62,6 +64,12 @@ const FUNC_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 
 const FUNC_BUTTON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 40, md: 40, lg: 46 });
 /** 右组三个功能键之间的间距（视觉间距；各按钮自身命中区已由 BounceIconButton 保证） */
 const FUNC_GAP: number = 8;
+/** 倍速片字号：视觉体量对齐功能键图标（FUNC_ICON_SIZE 22/26），文字略小一档防喧宾夺主 */
+const SPEED_FONT_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 18, md: 18, lg: 20 });
+/** 倍速片行高 = 功能键图标字号（SymbolGlyph 的 em 盒高）：图标列与文字列同高同起点，垂直自然对齐 */
+const SPEED_LINE_HEIGHT: BreakpointType<string> = new BreakpointType<string>({ sm: '22vp', md: '22vp', lg: '26vp' });
+/** 倍速片宽度：比图标按钮宽一档容纳 "0.75x" 等长标签；高度仍取 FUNC_BUTTON_SIZE 保持行内对齐 */
+const SPEED_CHIP_WIDTH: BreakpointType<number> = new BreakpointType<number>({ sm: 56, md: 56, lg: 62 });
 /**
  * 「加入歌单」弹层最多列几个歌单。
  * 超出的不静默截断，而是多给一条「还有 N 个…去歌单页选」——
@@ -98,6 +106,12 @@ export struct ControlAreaComponent {
   @State playlistMenuVersion: number = 0;
   /** 「加入歌单」按钮按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
   @State menuButtonScale: number = 1;
+  /** 倍速总开关（设置页镜像）：关 = 功能行不渲染倍速片 */
+  @StorageProp(STORE_PLAYBACK_SPEED_ENABLED) speedEnabled: boolean = false;
+  /** 当前倍速（MusicPlayer.setStore 写回 → 倍速片标签与菜单 ✓ 实时刷新） */
+  @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
+  /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
+  @State speedButtonScale: number = 1;
 
   private player: MusicPlayer = MusicPlayer.getInstance();
 
@@ -334,17 +348,64 @@ export struct ControlAreaComponent {
     this.playlistMenuVersion += 1;
   }
 
+  /** 倍速档位菜单：9 档全列，当前档尾部加 ✓（MenuElement 无选中态，文本标记最简） */
+  private speedMenuItems(): MenuElement[] {
+    const items: MenuElement[] = [];
+    for (const v of PLAYBACK_SPEED_OPTIONS) {
+      const label: string = speedLabelOf(v);
+      items.push({
+        value: v === this.playbackSpeed ? `${label} ✓` : label,
+        action: (): void => {
+          this.player.setPlaybackSpeed(v);
+          this.toast(`倍速：${label}`);
+        }
+      });
+    }
+    return items;
+  }
+
   build() {
     Column() {
       Row() {
-        BounceIconButton({
-          icon: modeIconOf(this.repeatMode),
-          iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-          buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
-          onTap: (): void => {
-            this.cycleRepeat();
+        // 左组：播放模式 + 倍速（开关开启时）。包一层 Row 保持 SpaceBetween
+        // 两端布局 —— 左组 2 键、右组 3 键，中间空隙自然居中。
+        Row({ space: FUNC_GAP }) {
+          BounceIconButton({
+            icon: modeIconOf(this.repeatMode),
+            iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
+            buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+            onTap: (): void => {
+              this.cycleRepeat();
+            }
+          })
+
+          // 倍速片：复用「加入歌单」的内联节点配方 —— bindMenu 必须挂点击落点的
+          // 最深层节点（挂外层包装会被内部手势竞争吃掉，见右组加入歌单的注释），
+          // 按压反馈用 onTouch 缩放（只回写状态不消费事件，不与菜单手势竞争）。
+          if (this.speedEnabled) {
+            Column() {
+              Text(speedLabelOf(this.playbackSpeed))
+                .fontSize(SPEED_FONT_SIZE.getValue(this.currentBreakpoint))
+                .lineHeight(SPEED_LINE_HEIGHT.getValue(this.currentBreakpoint))
+                .fontColor(Color.White)
+                .opacity(0.86)
+                .fontWeight(FontWeight.Medium)
+            }
+            .width(SPEED_CHIP_WIDTH.getValue(this.currentBreakpoint))
+            .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
+            .scale({ x: this.speedButtonScale, y: this.speedButtonScale })
+            .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
+            .onTouch((event: TouchEvent): void => {
+              if (event.type === TouchType.Down) {
+                this.speedButtonScale = PRESS_SCALE;
+              } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+                this.speedButtonScale = 1;
+              }
+            })
+            .bindMenu(this.speedMenuItems())
+            .accessibilityText('播放倍速')
           }
-        })
+        }
 
         // 右组三个：下载 / 加入歌单 / 队列。
         // 刻意包一层 Row 而不是往 SpaceBetween 里塞四个 —— 四个散开会把中间的

@@ -63,6 +63,21 @@
  *
  * 子页面通过 Navigation + NavPathStack 管理（播放页 / 歌单详情 / 最近播放 / 登录页）。
  * 登录页（'Login' 路由）随扫码登录功能恢复重建（2026-10），入口在设置页「账户」分组。
+ *
+ * ══════════ 平板形态（md/lg，2026-10-20 平板适配档 1+2）══════════
+ * deviceTypes 加 tablet 后平板可安装；build() 按 currentBreakpoint 双分支
+ * **互斥挂载**（同一时刻只有一棵 HdsNavigation / 一组页签页实例）：
+ *   · SM   —— 手机形态原样：phoneShell()（HdsTabs 悬浮胶囊底栏 + miniBar
+ *     融合播放栏，2026-10-20 从原 build() 原样抽出，行为零变化）；
+ *   · md/lg —— tabletShell()：左侧自绘 NavRail（components/NavRail.ets，
+ *     点击直写 STORE_ACTIVE_TAB）+ 内容列（四页常驻 Stack、visibility 切换，
+ *     保住搜索词 / 滚动位置等页内状态）+ 底部浮一条 64vp 常驻播放条
+ *     （tabletPlayBar：PlayBar 独立挂载 —— 非 SM 下 bodyVisible 恒 true、
+ *     点按直达播放页；队列空不渲染；推入的 NavDestination 盖住整块内容列）。
+ * 两分支共用 NavStackHolder 单例路由栈与播放内核 —— 跨断点切换（折叠屏
+ * 开合）单树重挂，路由栈 / 播放存活；页内瞬时状态会丢（已知取舍）。
+ * tabController / applyMiniBarStyle / 屏幕滑动收放等 HDS 联动只在 SM 分支
+ * 有效，md/lg 分支不触碰它们（控制器无宿主 HdsTabs，调用只会报错）。
  */
 
 import { UIContext } from '@kit.ArkUI';
@@ -88,15 +103,16 @@ import { SearchPage } from './SearchPage';
 import { PlaylistsPage } from './PlaylistsPage';
 import { DownloadsPage } from './DownloadsPage';
 import { SettingsPage } from './SettingsPage';
-// 2026-10-17 启动优化：以下 11 个导航子页面（PlayerPage / PlaylistDetail / RecentPage /
+// 2026-10-17 启动优化：以下 10 个导航子页面（PlayerPage / PlaylistDetail / RecentPage /
 // FollowsPage / UpSpacePage / WatchHistoryPage / FavSyncPage / PlaylistImportPage /
-// AboutPage / LoginPage / SmsLoginPage）已从静态 import 改为懒加载 ——
+// AboutPage / LoginPage，短信登录已并入 LoginPage）已从静态 import 改为懒加载 ——
 // 它们只在 pageMap 被路由触达时才需要，静态引用会拖整棵子树（含 lyric/*、
 // components/player/*）在冷启动首帧前解析，直接拉长「应用启动加载完成」。
 // 现统一走 service/LazyPageRegistry 动态 import，首帧后 1.5s 低优先级预热。
 import { LazyDest, preloadAllLazyPages } from '../service/LazyPageRegistry';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { PlayBar } from '../components/PlayBar';
+import { NavRail } from '../components/NavRail';
 import { AppToast, showAppToast } from '../components/AppToast';
 import { AppDialogHost } from '../components/AppAlertDialog';
 import { MaterialCompat } from '../utils/MaterialCompat';
@@ -121,7 +137,8 @@ import {
   STORE_MINI_BAR_ANIM_PHASE,
   MINI_BAR_ANIM_IDLE,
   MINI_BAR_ANIM_TO_EXPAND,
-  MINI_BAR_ANIM_TO_COLLAPSE
+  MINI_BAR_ANIM_TO_COLLAPSE,
+  STORE_MINI_BAR_AUTO_EXPAND
 } from '../common/Constants';
 import { getLoginUser } from '../service/LoginStore';
 import { FavSyncManager } from '../service/FavSyncManager';
@@ -139,6 +156,15 @@ import { SearchInputBar, SearchTabsBar } from '../components/SearchTabBar';
 const BAR_BOTTOM_MARGIN: number = 6;
 /** 页签栏微透明 —— 移植自 Sumy 的 barOpacity: 0.9 */
 const BAR_OPACITY: number = 0.9;
+/** A3 平板切页转场：内容列淡入位移时长（ms）与滑入偏移（vp） */
+const TABLET_TAB_FADE_MS: number = 220;
+const TABLET_TAB_FADE_OFFSET_VP: number = 16;
+/**
+ * A3 起点帧先行渲染的等待（ms）：animateTo 的插值起点是**上一帧已渲染值**，
+ * 若在同一 tick 里先写「淡出 + 偏移」再 animateTo 收敛，两笔写会被合批、
+ * 起点永远是 1/0 → 动画无声消失。先让起点帧画出来再起播（一帧 ≈ 16ms）。
+ */
+const TABLET_TAB_FADE_START_DELAY_MS: number = 20;
 
 /**
  * 根 HdsNavigation 统一标题栏（HarmonyX 移植，2026-10-10）：
@@ -181,6 +207,12 @@ const SCREEN_PAN_TRIGGER_VP: number = 12;
 const TAB_SWITCH_BASE_MS: number = 300;
 const TAB_SWITCH_STEP_MS: number = 120;
 const TAB_SWITCH_MAX_MS: number = 540;
+/**
+ * 平板形态（md/lg）底部常驻播放条高度（vp，2026-10-20 平板适配档 2）：
+ * PlayBar 整行内容（40vp 唱片 + 上下留白）独立挂载的容器高。
+ * 底部离屏间距复用手机悬浮胶囊的折算公式（8 + safeBottom / 三键全额避让）。
+ */
+const TABLET_PLAYBAR_HEIGHT_VP: number = 64;
 
 @Entry
 @Component
@@ -267,6 +299,14 @@ struct Index {
   @StorageProp(STORE_BAR_LAYOUT) barLayout: string = BAR_LAYOUT_HORIZONTAL;
 
   /**
+   * 迷你栏自动展开收起开关（设置 → 外观「自动展开收起」，AppSettings.miniBarAutoExpand
+   * 的运行时镜像，EntryAbility 首帧前首发真值）：关闭后屏幕上滑/下滑手势不再触发
+   * 迷你栏收放（onScreenPanDirection 入口门控），点按圆盘 / onExpandRequest 等
+   * 显式交互不受影响。默认开（保持手势上线以来的既有行为）。
+   */
+  @StorageProp(STORE_MINI_BAR_AUTO_EXPAND) miniBarAutoExpand: boolean = true;
+
+  /**
    * 当前页签下标。HdsTabs 用**非受控 index**（2026-10-14 修「切页签迷你栏闪烁/
    * 唱片重置」改版）：切页签由 HDS 内部状态驱动，onChange 只负责回写本字段，
    * 驱动页签标题 / 下载页优化 / 冷启动恢复，**不再回灌进 HdsTabs 属性**。
@@ -275,7 +315,52 @@ struct Index {
    * 下载页据此在非活动页签时跳过下载快照的全量重算（TabContent 常驻，不看这个
    * 的话切走页签后重算照跑，拖慢全局）。onChange 的回写语句无需任何改动。
    */
-  @StorageLink(STORE_ACTIVE_TAB) activeTab: number = 0;
+  @StorageLink(STORE_ACTIVE_TAB) @Watch('onTabSwitchedForFade') activeTab: number = 0;
+
+  /**
+   * A3（2026-10-20 平板功能对齐）：NavRail 切页转场 —— 内容列淡入 + 横向位移。
+   * 手机形态 HdsTabs 自带滑动转场，本组状态恒 1/0（属性无感）。
+   */
+  @State tabFadeOpacity: number = 1;
+  @State tabFadeOffsetX: number = 0;
+  /** 上一次切页的页签下标（@Watch 回调里比较出滑入方向）；-1 = 尚未发生过切页 */
+  private lastTabForFade: number = -1;
+  /** 起点帧先行渲染的定时器句柄（快速连点时清掉旧定时器，方向立即翻转） */
+  private tabFadeTimer: number = -1;
+
+  /**
+   * A3：NavRail 切页转场（@Watch on activeTab，仅平板形态起播）。
+   * 手机形态（SM）HdsTabs 自带转场，这里先记录方向再早退，双端互不干扰。
+   * 方向感：沿 rail 前进（下标增大）内容从右侧滑入，后退从左侧。
+   */
+  private onTabSwitchedForFade(): void {
+    const prev: number = this.lastTabForFade;
+    this.lastTabForFade = this.activeTab;
+    if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+      return;
+    }
+    if (prev < 0 || prev === this.activeTab) {
+      return;
+    }
+    if (this.tabFadeTimer >= 0) {
+      clearTimeout(this.tabFadeTimer);
+      this.tabFadeTimer = -1;
+    }
+    const dir: number = this.activeTab > prev ? 1 : -1;
+    this.tabFadeOpacity = 0;
+    this.tabFadeOffsetX = TABLET_TAB_FADE_OFFSET_VP * dir;
+    // 见 TABLET_TAB_FADE_START_DELAY_MS 的注释：起点帧必须先渲染一帧再起播。
+    this.tabFadeTimer = setTimeout((): void => {
+      this.tabFadeTimer = -1;
+      this.getUIContext().animateTo(
+        { duration: TABLET_TAB_FADE_MS, curve: Curve.EaseOut },
+        (): void => {
+          this.tabFadeOpacity = 1;
+          this.tabFadeOffsetX = 0;
+        }
+      );
+    }, TABLET_TAB_FADE_START_DELAY_MS);
+  }
 
   /**
    * 点击切页的内容动画时长（ms），喂给 HdsTabs.animationDuration（2026-10-19
@@ -399,7 +484,10 @@ struct Index {
         }
         // 非受控 index（见 activeTab 注释）的代价 = 冷启动不再自动落回上次页签，
         // 这里一次性恢复（activeTab 未持久化时恒为 0，守卫跳过；持久化过则恢复）。
-        if (this.activeTab !== 0) {
+        // 2026-10-20 平板适配：md/lg 冷启动走 NavRail 分支，没有 HdsTabs ——
+        // 控制器不可用也无需恢复，页面 visibility 直接消费 activeTab。
+        if (this.activeTab !== 0
+          && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
           this.tabController.changeIndex(this.activeTab);
         }
       }
@@ -431,11 +519,13 @@ struct Index {
    * 断点切换（折叠屏开合 / 进出平板）：重新对齐 miniBar 的「可控态」与全局展开态。
    *
    * ≥600vp 时 HDS 强制展开、手动控制失效（见 currentBreakpoint 注释），因此：
-   *   · 进入宽屏 → 全局展开态同步为 true（PlayBar 渲染展开态内容），控制器补一次
-   *     EXPAND（宽屏下等效无动效，只为让 onBarStyleChange 的上报与状态一致）；
+   *   · 进入宽屏 → 全局展开态同步为 true（PlayBar 渲染展开态内容）；
    *   · 回到手机宽度 → 恢复手动控制，把记录的手动态重放一遍。
    * 冷启动阶段（miniBarApplied 尚未置位）只同步状态、不碰控制器 —— 那时 HdsTabs
    * 还没挂载，applyMiniBarStyle 可能抛异常；初始样式由 barFloatingStyle 提供。
+   * 2026-10-20 平板适配：非 SM 改走 NavRail 分支（没有 HdsTabs），控制器调用
+   * 从宽屏路径整体移除 —— 只同步全局展开态（PlayBar 非 SM 下 bodyVisible
+   * 恒 true，不依赖 miniBar 槽位语义）。
    */
   private onBreakpointChanged(): void {
     // 诊断日志（折叠屏「点 miniBar 不跳转」排查）：断点切换与状态对齐的完整现场
@@ -448,9 +538,6 @@ struct Index {
       return;
     }
     AppStorage.setOrCreate(STORE_MINI_BAR_EXPANDED, true);
-    if (this.miniBarApplied) {
-      this.tabController.applyMiniBarStyle(HdsBarStyle.EXPAND);
-    }
   }
 
   aboutToDisappear(): void {
@@ -668,6 +755,10 @@ struct Index {
    * 已在目标态为无操作。收放走 applyMiniBarStyle 既有相位链，动画零新增。
    */
   private onScreenPanDirection(up: boolean): void {
+    // 设置「自动展开收起」关闭：全屏滑动手势不触发收放（显式交互不受影响）
+    if (!this.miniBarAutoExpand) {
+      return;
+    }
     if (this.queue.length === 0) {
       return;
     }
@@ -892,6 +983,31 @@ struct Index {
   }
 
   /**
+   * 顶栏内容收窄包装（A5，2026-10-20 平板功能对齐）：md/lg 下根标题栏横跨
+   * 整个内容列，而页面内容列实际被 contentMaxWidth 约束（Stack 默认居中）——
+   * 顶栏拉满整列会导致搜索框/标题行与下方内容错位。外层 Row 居中 +
+   * 内层 Column constraintSize(contentMaxWidth)，让顶栏内容与内容列同宽对齐；
+   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击到下方页面
+   * （与内层 Stack 同款行为）。SM 不经过本包装（手机形态 shell
+   * 直用 immersiveTitleBarContent，零改动）。
+   */
+  @Builder
+  immersiveTitleBarNarrow() {
+    Row() {
+      Column() {
+        this.immersiveTitleBarContent()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
    * 当前页签的标题文案（歌单 / 下载 / 设置；搜索页签行 1 是搜索行，不取文案）。
    */
   private tabTitleText(): string {
@@ -906,7 +1022,38 @@ struct Index {
 
   build() {
     Stack() {
-      Column() {
+      // 2026-10-20 平板适配：按断点双分支互斥挂载（见文件头「平板形态」节）。
+      // AppToast / AppDialogHost 全局宿主挂分支外，两种形态共用。
+      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+        this.phoneShell()
+      } else {
+        this.tabletShell()
+      }
+
+      // 全局轻提示宿主：驱动系统标准 toast（openToast / closeToast）
+      //（单实例 + 「替换不排队」语义，见 components/AppToast.ets）
+      AppToast()
+
+      // 全局弹窗宿主：本身不渲染任何内容，只承载两个 CustomDialogController
+      //（controller 必须在 @Component 内定义才有效，见 components/AppAlertDialog.ets）
+      AppDialogHost()
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.bg_page'))
+    // ⚠️ 根容器**不加** padding-bottom。加了会把 Tabs 内容区整体截短 safeBottom，
+    // 首页（搜索页）的列表就铺不到屏幕最底 —— 与「布局区域延伸到底部手势条下方」矛盾。
+    // 底部避让改由悬浮页签栏（barBottomMargin）、迷你条（padding-bottom）、
+    // NavDestination 子页（safeAreaPadding）各自承担，互不重叠。
+  }
+
+  /**
+   * 手机形态（SM）：HdsTabs 沉浸光感悬浮胶囊底栏 + miniBar 融合播放栏。
+   * 2026-10-20 平板适配从原 build() 原样抽出为 phoneShell，行为零变化。
+   */
+  @Builder
+  phoneShell(): void {
+    Column() {
         // 批 3：根容器 Navigation → HdsNavigation（同签名平替），Tab 页顶栏改为
         // Navigation 级统一 titleBar（任务书问题 1 方案 B）——只有设置页签显示，
         // 其余页签由 hideTitleBar 门控继续用各自自绘顶栏。
@@ -1008,21 +1155,140 @@ struct Index {
       }
       .width('100%')
       .height('100%')
+  }
 
-      // 全局轻提示宿主：驱动系统标准 toast（openToast / closeToast）
-      //（单实例 + 「替换不排队」语义，见 components/AppToast.ets）
-      AppToast()
+  /**
+   * 平板形态（md/lg，2026-10-20 平板适配档 2）：左侧自绘 NavRail + 内容列。
+   *
+   * 内容列 = HdsNavigation（顶栏配置与手机形态一致，仅作用于内容列 —— rail
+   * 常驻在 Navigation 外）+ 四页常驻 Stack（visibility 切换：切页不销毁页面，
+   * 搜索词 / 滚动位置 / 下载页快照全保留，等价 HdsTabs 的多页共存语义）+
+   * 底部浮岛常驻播放条（tabletPlayBar，队列空不渲染）。
+   * 推入的 NavDestination（播放页等）盖住整块内容列 —— 与手机形态
+   * 「push 页盖住底栏」行为一致；rail 不在 Navigation 内，全程保持常驻。
+   * activeTab 在本分支由 NavRail 点击直写（无 HdsTabs / tabController），
+   * 顶栏（stackBuilder）、页面 visibility、bindToScrollable 换绑全部经
+   * STORE_ACTIVE_TAB 跟随。
+   */
+  @Builder
+  tabletShell(): void {
+    Row() {
+      // 左侧导航栏：四页签纵向排布，点击直写 STORE_ACTIVE_TAB
+      //（见 components/NavRail.ets）
+      NavRail()
 
-      // 全局弹窗宿主：本身不渲染任何内容，只承载两个 CustomDialogController
-      //（controller 必须在 @Component 内定义才有效，见 components/AppAlertDialog.ets）
-      AppDialogHost()
+      Column() {
+        HdsNavigation(NavStackHolder.stack) {
+          // 内容区：底起始角对齐 Stack —— 四页铺满整列，播放条浮在底部左下角
+          //（⚠️ alignContent 必须用 BottomStart：Alignment.Bottom 会水平居中子节点，
+          // 播放条 width 100% + 左右 margin 会溢出居中、外边距被抵消，实测贴边）
+          //（页面列表 contentEndOffset = 160 + safeBottom，天然避开浮岛）
+          Stack({ alignContent: Alignment.BottomStart }) {
+            Stack() {
+              SearchPage()
+                .visibility(this.activeTab === TAB_SEARCH ? Visibility.Visible : Visibility.Hidden)
+                .hitTestBehavior(this.activeTab === TAB_SEARCH ? HitTestMode.Default : HitTestMode.None)
+              PlaylistsPage()
+                .visibility(this.activeTab === TAB_PLAYLISTS ? Visibility.Visible : Visibility.Hidden)
+                .hitTestBehavior(this.activeTab === TAB_PLAYLISTS ? HitTestMode.Default : HitTestMode.None)
+              DownloadsPage()
+                .visibility(this.activeTab === TAB_DOWNLOADS ? Visibility.Visible : Visibility.Hidden)
+                .hitTestBehavior(this.activeTab === TAB_DOWNLOADS ? HitTestMode.Default : HitTestMode.None)
+              SettingsPage()
+                .visibility(this.activeTab === TAB_SETTINGS ? Visibility.Visible : Visibility.Hidden)
+                .hitTestBehavior(this.activeTab === TAB_SETTINGS ? HitTestMode.Default : HitTestMode.None)
+            }
+            .width('100%')
+            .height('100%')
+            // A3：NavRail 切页转场（淡入 + ±16vp 位移），SM 下恒 1/0 无感
+            .opacity(this.tabFadeOpacity)
+            .translate({ x: this.tabFadeOffsetX })
+
+            // 底部常驻播放条：队列空不渲染（浮岛不占布局位，列表自然铺到底）
+            if (this.queue.length > 0) {
+              this.tabletPlayBar()
+            }
+          }
+          .width('100%')
+          .height('100%')
+        }
+        // 根标题栏：与手机形态同配置（stackBuilder 顶栏内容 / 渐进模糊样式 /
+        // divider OFF）；avoidLayoutSafeArea 让栏顶落在状态栏下方。
+        // A5：平板形态顶栏内容经 immersiveTitleBarNarrow 收窄到 contentMaxWidth
+        // 居中，与内容列对齐（手机形态不受影响）。
+        .titleBar({
+          avoidLayoutSafeArea: true,
+          style: this.titleBarStyle(),
+          content: {
+            stackBuilder: (): void => {
+              this.immersiveTitleBarNarrow();
+            },
+            divider: {
+              showType: DividerShowType.OFF
+            }
+          }
+        })
+        .titleMode(HdsNavigationTitleMode.MINI)
+        .hideBackButton(true)
+        .navDestination(this.pageMap)
+        .mode(NavigationMode.Stack)
+        // 单绑当前页签 scroller（同手机形态）：页面换成常驻 Stack + visibility，
+        // scroller 仍来自 TabScrollerHolder 静态字段，activeTab 变化自动换绑。
+        .bindToScrollable([this.activeTabScroller()])
+      }
+      .layoutWeight(1)
+      .height('100%')
     }
     .width('100%')
     .height('100%')
-    .backgroundColor($r('app.color.bg_page'))
-    // ⚠️ 根容器**不加** padding-bottom。加了会把 Tabs 内容区整体截短 safeBottom，
-    // 首页（搜索页）的列表就铺不到屏幕最底 —— 与「布局区域延伸到底部手势条下方」矛盾。
-    // 底部避让改由悬浮页签栏（barBottomMargin）、迷你条（padding-bottom）、
-    // NavDestination 子页（safeAreaPadding）各自承担，互不重叠。
+  }
+
+  /**
+   * 平板形态底部常驻播放条（md/lg）：PlayBar 独立挂载的浮岛容器 ——
+   * 白底圆角卡 + 柔影，左右各 16vp、底部离屏间距悬浮于内容列底部
+   *（离屏间距复用手机悬浮胶囊的折算：手势导航避开指示条一半，三键全额避让）。
+   *
+   * ⚠️ 左右留白用外层 Column 的 **padding 而非 margin**：岛卡 Row 挂
+   * width('100%')，margin 会叠在 100% 宽之外 → Stack 内溢出（Bottom 居中被
+   * 抵消 / BottomStart 右缘被裁，实测两种都贴边）；padding 收在 100% 框内，
+   * 间距稳定生效。
+   *
+   * PlayBar 在非 SM 断点下 bodyVisible() 恒 true（整行内容）、coverSize 固定
+   * 40、点按直达播放页（onEntryTap 宽屏分支）—— 独立挂载天然成立，无需
+   * onExpandRequest / miniBar 槽位语义；歌名 / 进度 / 旋转全部自订阅 AppStorage。
+   *
+   * A4（2026-10-20 平板功能对齐）：岛卡外面包一层**同形同色**的光晕层
+   * （同 width/height/borderRadius/bg_card，叠画不可见），只为投出
+   * themePrimary 主题色光晕 —— 对齐手机端 HDS 悬浮底栏 lightColor 的观感；
+   * 单 .shadow 不支持链式叠两层（后者覆盖前者），故用双层元素实现。
+   */
+  @Builder
+  tabletPlayBar(): void {
+    Column() {
+      Row() {
+        Row() {
+          PlayBar()
+        }
+        .width('100%')
+        .height(TABLET_PLAYBAR_HEIGHT_VP)
+        .padding({ left: 8, right: 8 })
+        .backgroundColor($r('app.color.bg_card'))
+        .borderRadius(16)
+        .shadow({ radius: 20, color: $r('app.color.scrim_light'), offsetY: 6 })
+      }
+      .width('100%')
+      .height(TABLET_PLAYBAR_HEIGHT_VP)
+      .backgroundColor($r('app.color.bg_card'))
+      .borderRadius(16)
+      .shadow({ radius: 28, color: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA), offsetY: 0 })
+    }
+    .width('100%')
+    .padding({
+      left: 16,
+      right: 16,
+      bottom: this.safeBottom > GESTURE_INDICATOR_MAX_VP
+        ? 8 + this.safeBottom
+        : 8 + this.safeBottom * 0.5
+    })
   }
 }

@@ -131,6 +131,15 @@ export const STORE_SLEEP_TIMER_END: string = 'sleepTimerEnd';
 export const GEOMETRY_ID_PLAYER_DISC: string = 'player_cover';
 /** 转场时长（ms），EaseInOut */
 export const PLAYER_TRANSITION_MS: number = 300;
+/**
+ * 迷你栏内容节点（PlayBar 根 Stack）的组件 id。
+ *
+ * 用途：点击迷你栏进播放页时，用 `getComponentUtils().getRectangleById()` 实测它的
+ * 窗口矩形（px），换算成 vp 后交给播放页 —— 播放页背景面从这块矩形「长」到全屏。
+ * ⚠️ 只用 `.id()` 挂标识，**不挂 onAreaChange**：那会在 HDS 托管的槽位里回写状态，
+ * 把迷你栏内容搞塌（见 PlayBar 头部注释）。
+ */
+export const MINI_BAR_RECT_ID: string = 'mini_bar_rect';
 /** 转场进行中标志：转场期间两边唱片的旋转动画暂停，结束后恢复（跨组件走 AppStorage） */
 export const STORE_PLAYER_TRANSITIONING: string = 'playerTransitioning';
 
@@ -168,6 +177,28 @@ export const STORE_BAR_LAYOUT: string = 'barLayoutMode';
  * 控制迷你栏底部 2vp 直线进度条与水平收起态圆环进度是否渲染（默认开）。
  */
 export const STORE_MINI_BAR_PROGRESS: string = 'miniBarProgressShown';
+
+/**
+ * 迷你栏自动展开收起开关镜像（AppSettings.miniBarAutoExpand 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，Index @StorageProp 订阅 ——
+ * 控制「屏幕上滑展开、下滑收起迷你栏」的全屏手势是否生效（默认开；
+ * 关闭后浏览列表的竖向滑动不再触发迷你栏收放）。
+ */
+export const STORE_MINI_BAR_AUTO_EXPAND: string = 'miniBarAutoExpandOn';
+
+/**
+ * 倍速播放总开关镜像（AppSettings.speedEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行倍速入口是否渲染（默认关）。
+ */
+export const STORE_PLAYBACK_SPEED_ENABLED: string = 'playbackSpeedEnabled';
+
+/**
+ * 当前倍速值镜像（AppSettings.playbackSpeed 的运行时镜像，档位见
+ * MusicModels.PLAYBACK_SPEED_OPTIONS）：MusicPlayer.setPlaybackSpeed 写入，
+ * ControlAreaComponent @StorageProp 订阅驱动倍速片标签与菜单 ✓ 刷新。
+ */
+export const STORE_PLAYBACK_SPEED: string = 'playbackSpeed';
 
 /**
  * 播放页沉浸背景是否偏暗（封面主色明度判断）。

@@ -73,10 +73,10 @@
 
 import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { NavStackHolder } from '../service/NavStackHolder';
+import { NavStackHolder, PlayerEntranceRect } from '../service/NavStackHolder';
 import { toThumbUrl } from '../utils/TextUtil';
 import { CoverImage } from './CoverImage';
-import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
+import { AnimatorOptions, AnimatorResult, componentUtils } from '@kit.ArkUI';
 import {
   STORE_CURRENT_TRACK,
   STORE_IS_PLAYING,
@@ -93,7 +93,8 @@ import {
   STORE_DURATION,
   STORE_THEME_PRIMARY,
   GEOMETRY_ID_PLAYER_DISC,
-  PLAYER_TRANSITION_MS
+  PLAYER_TRANSITION_MS,
+  MINI_BAR_RECT_ID
 } from '../common/Constants';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
@@ -428,12 +429,42 @@ export struct PlayBar {
       return;
     }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
+    // 进播放页前实测迷你栏矩形：播放页的背景面从这块矩形「长」到全屏
+    this.captureEntranceRect();
     this.getUIContext().animateTo(
       { duration: PLAYER_TRANSITION_MS, curve: Curve.EaseInOut },
       (): void => {
         NavStackHolder.stack.pushPath({ name: 'Player' });
       }
     );
+  }
+
+  /**
+   * 实测迷你栏当前窗口矩形，写入 NavStackHolder（播放页据此从这块矩形长到全屏）。
+   *
+   * 为什么用 getRectangleById 而不是 onAreaChange：onAreaChange 是布局回调，
+   * 在 HDS 托管的槽位里回写状态会让内容在 HDS 形变动画中重建（历史真机事故：
+   * 「垂直两层下展开迷你栏直接消失」）。这里只在**点击那一刻主动读一次**，
+   * 零状态写入、零重渲染。
+   * 失败一律置 null —— 播放页会自动退回「整页淡入」的老转场，不会出现半截动画。
+   */
+  private captureEntranceRect(): void {
+    try {
+      const ctx = this.getUIContext();
+      const info: componentUtils.ComponentInfo = ctx.getComponentUtils().getRectangleById(MINI_BAR_RECT_ID);
+      const rect: PlayerEntranceRect = {
+        x: ctx.px2vp(info.windowOffset.x),
+        y: ctx.px2vp(info.windowOffset.y),
+        w: ctx.px2vp(info.size.width),
+        h: ctx.px2vp(info.size.height)
+      };
+      NavStackHolder.playerEntranceRect = rect;
+      console.info(`[PlayBar] entrance rect: x=${rect.x}, y=${rect.y}, w=${rect.w}, h=${rect.h}`);
+    } catch (e) {
+      NavStackHolder.playerEntranceRect = null;
+      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      console.warn(`[PlayBar] captureEntranceRect failed: ${msg}`);
+    }
   }
 
   /**
@@ -614,6 +645,9 @@ export struct PlayBar {
       }
       .width('100%')
       .height('100%')
+      // 组件 id：仅供 gotoPlayer 用 getRectangleById 实测矩形（不做任何布局回调）——
+      // 播放页背景面从这里「长」到全屏，见 captureEntranceRect 与 MINI_BAR_RECT_ID。
+      .id(MINI_BAR_RECT_ID)
       // 按压反馈（原收起态专属，升级为两态通用）：整条按下轻微降透明度
       .stateStyles({
         pressed: { .opacity(0.85) },

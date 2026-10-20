@@ -57,8 +57,16 @@ export class TabScrollerHolder {
   static search: Scroller = new Scroller();
 
   // ---- 搜索页顶栏动作（SearchPage 注册；SearchTabBar 调用） ----
-  /** 提交搜索（搜索按钮 / 输入框回车） */
+  /** 提交搜索（输入框回车）：由 SearchPage 在 **onAppear** 里接管 */
   static searchSubmit: () => void = (): void => {};
+  /**
+   * 当前接管 searchSubmit 的 SearchPage 实例号（-1 = 无人接管）。
+   *
+   * 为什么需要归属：平板分支下 HdsNavigation 会先建一个临时 SearchPage 再销毁它；
+   * 临时实例若在 aboutToAppear 里绑回调，会把静态槽位抢走 → 提交打到已销毁实例，
+   * 「请求发出去了但界面不动」。改在 onAppear 绑定 + 按归属清空即可。
+   */
+  static searchSubmitOwner: number = -1;
   /** 点 / 获焦搜索框：有历史则展开面板（面板本体仍在页面层渲染） */
   static searchOpenHistory: () => void = (): void => {};
   /** 收起历史面板（开始输入 / 点页签行空白处时根栏侧调用） */

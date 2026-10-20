@@ -101,7 +101,10 @@ export function getSettings(): AppSettings {
     themeMode: stored?.themeMode ?? DEFAULT_APP_SETTINGS.themeMode,
     themeColor: stored?.themeColor ?? DEFAULT_APP_SETTINGS.themeColor,
     barLayout: stored?.barLayout ?? DEFAULT_APP_SETTINGS.barLayout,
-    miniBarProgress: stored?.miniBarProgress ?? DEFAULT_APP_SETTINGS.miniBarProgress
+    miniBarProgress: stored?.miniBarProgress ?? DEFAULT_APP_SETTINGS.miniBarProgress,
+    miniBarAutoExpand: stored?.miniBarAutoExpand ?? DEFAULT_APP_SETTINGS.miniBarAutoExpand,
+    speedEnabled: stored?.speedEnabled ?? DEFAULT_APP_SETTINGS.speedEnabled,
+    playbackSpeed: stored?.playbackSpeed ?? DEFAULT_APP_SETTINGS.playbackSpeed
   };
 }
 

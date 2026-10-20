@@ -90,11 +90,6 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.LoginPageWrapped);
       break;
     }
-    case 'SmsLogin': {
-      const m = await import('../pages/SmsLoginPage');
-      builders.set(name, m.SmsLoginPageWrapped);
-      break;
-    }
     default:
       break;
   }
@@ -102,7 +97,7 @@ async function loadByName(name: string): Promise<void> {
 
 /** 预热顺序：最常用的播放页 / 歌单详情优先，其余按导航入口热度排列。 */
 const PRELOAD_ORDER: string[] = ['Player', 'PlaylistDetail', 'Recent', 'Follows',
-  'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'About', 'Login', 'SmsLogin'];
+  'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'About', 'Login'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

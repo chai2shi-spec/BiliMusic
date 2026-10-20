@@ -134,6 +134,14 @@ export interface Track {
   audioBandwidth: number;
   audioMimeType: string;
   /**
+   * B 站下发的备用音频直链（playurl 的 backupUrl，最多 3 条）。
+   * 主直链挂死 / 被拒时的快速回退：直接换源重挂，不发 playurl 请求。
+   * 仅在线播放链路内存中使用：slimTrack / 落盘**不带**（带签名 token 的
+   * 长直链会撑爆 Preferences 字节预算，且过期后无用）。
+   * 空数组 = 无备用链（本地文件 / 旧缓存命中的曲目）。
+   */
+  audioBackupUrls?: string[];
+  /**
    * 已下载到沙箱的本地文件路径（可选）。
    *
    * 非空即代表「这一首不用联网解析音源，直接播本地文件」—— 播放内核据此走
@@ -334,6 +342,16 @@ export interface AppSettings {
   barLayout: string;
   /** 迷你播放栏进度指示显示开关（底部直线 + 收起态圆环；设置 → 外观；默认开） */
   miniBarProgress: boolean;
+  /**
+   * 迷你栏自动展开收起开关（设置 → 外观；默认开）：控制「屏幕上滑展开、
+   * 下滑收起迷你栏」的全屏手势（Index 的 parallelGesture）。关闭后仅保留
+   * 点按收起圆盘 / onExpandRequest 等显式交互，浏览列表的竖向滑动不再触发收放。
+   */
+  miniBarAutoExpand: boolean;
+  /** 倍速播放总开关（设置 → 播放；默认关）：开启后播放页功能行出现倍速选择入口 */
+  speedEnabled: boolean;
+  /** 倍速值（档位见 PLAYBACK_SPEED_OPTIONS；开关关闭时由设置页归 1.0） */
+  playbackSpeed: number;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -348,8 +366,19 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   themeMode: ThemeMode.SYSTEM,
   themeColor: 'pink',
   barLayout: BAR_LAYOUT_HORIZONTAL,
-  miniBarProgress: true
+  miniBarProgress: true,
+  miniBarAutoExpand: true,
+  speedEnabled: false,
+  playbackSpeed: 1.0
 };
+
+/** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
+export const PLAYBACK_SPEED_OPTIONS: number[] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0];
+
+/** 倍速显示标签：1 → "1.0x"，0.25 → "0.25x"，1.5 → "1.5x" */
+export function speedLabelOf(v: number): string {
+  return `${v % 1 === 0 ? v.toFixed(1) : String(v)}x`;
+}
 
 export interface LyricLine {
   time: number;
@@ -568,6 +597,8 @@ export interface TrackSource {
   coverUrl: string;
   duration: number;
   audioUrl: string;
+  /** 备用直链（dash.audio[].backupUrl 取前 3 条）：主直链挂死/被拒时的快速回退。 */
+  audioBackupUrls: string[];
   audioQuality: number;
   audioMimeType: string;
   /** 所选音轨的实测带宽（bps）。见 DownloadTask.audioBandwidth 的说明。 */

@@ -15,6 +15,7 @@ import { audio } from '@kit.AudioKit';
 import { image } from '@kit.ImageKit';
 import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
+import hilog from '@ohos.hilog';
 import common from '@ohos.app.ability.common';
 import { extractAudioFromVideo, expandVideoParts } from '../api/BilibiliApi';
 import { LibraryStore } from '../service/LibraryStore';
@@ -25,8 +26,10 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { isUnmeteredNetwork } from '../utils/NetworkUtil';
 import { BILI_REFERER } from '../common/Constants';
 import {
+  AppSettings,
   downloadQualityId,
   fitByByteBudget,
+  PLAYBACK_SPEED_OPTIONS,
   PREF_VALUE_BUDGET_BYTES,
   RepeatMode,
   slimTrack,
@@ -44,6 +47,8 @@ import {
   STORE_LOADING_AUDIO,
   STORE_VOLUME,
   STORE_MUTED,
+  STORE_PLAYBACK_SPEED,
+  STORE_PLAYBACK_SPEED_ENABLED,
   STORE_TOAST_MSG,
   STORE_TOAST_HOLD_MS,
   STORE_TOAST_SEQ,
@@ -102,6 +107,76 @@ const LISTEN_TICK_MAX_GAP_MS: number = 2000;
 const RECENT_PROGRESS_THROTTLE_MS: number = 10000;
 
 /**
+ * prepare 看门狗超时（毫秒）。
+ *
+ * setMediaSource 的 rejection 在部分系统版本上被静默吞掉（返回 undefined），
+ * 状态机停在 initialized 后**没有任何事件**再上来 —— 既没有 error 也没有
+ * stateChange，表现是「点了歌、封面歌名都切了、一直没声也不报错」。
+ * 正常曲目的 prepare（含首包缓冲）远低于 20s；超时仍停在 initialized
+ * 就认定卡死，由 recoverFromStall 主动换备用直链 / 重解析。
+ */
+const PREPARE_TIMEOUT_MS: number = 20000;
+
+/** 播放内核日志的统一 hilog domain / tag：`hdc shell hilog -x | grep BiliMusic` 即可过滤 */
+const LOG_DOMAIN: number = 0x065B;
+const LOG_TAG: string = 'BiliMusic';
+
+function plogInfo(message: string): void {
+  hilog.info(LOG_DOMAIN, LOG_TAG, '%{public}s', message);
+}
+
+function plogWarn(message: string): void {
+  hilog.warn(LOG_DOMAIN, LOG_TAG, '%{public}s', message);
+}
+
+function plogError(message: string): void {
+  hilog.error(LOG_DOMAIN, LOG_TAG, '%{public}s', message);
+}
+
+/**
+ * 从直链里只取 host，用于日志。
+ * 直链带着 CDN 签名参数（整条可长达 1KB），原样打进日志既刷屏又泄露签名，
+ * host 足以判断「主链 / 备用链 / 哪家 CDN」，也是「假播放中」类问题定位的关键一行。
+ */
+function urlHostOf(url: string): string {
+  const schemeEnd: number = url.indexOf('://');
+  if (schemeEnd < 0) {
+    return 'invalid';
+  }
+  const rest: string = url.substring(schemeEnd + 3);
+  const pathStart: number = rest.indexOf('/');
+  const host: string = pathStart < 0 ? rest : rest.substring(0, pathStart);
+  return host.length > 0 ? host : 'invalid';
+}
+
+/**
+ * 数值倍速 → AVPlayer 的 PlaybackSpeed 枚举。setSpeed 只收枚举成员，
+ * 档位表见 MusicModels.PLAYBACK_SPEED_OPTIONS；1.0 与非法值一律落默认（正常速）。
+ */
+function speedToPlaybackSpeed(v: number): media.PlaybackSpeed {
+  switch (v) {
+    case 0.25:
+      return media.PlaybackSpeed.SPEED_FORWARD_0_25_X;
+    case 0.5:
+      return media.PlaybackSpeed.SPEED_FORWARD_0_50_X;
+    case 0.75:
+      return media.PlaybackSpeed.SPEED_FORWARD_0_75_X;
+    case 1.25:
+      return media.PlaybackSpeed.SPEED_FORWARD_1_25_X;
+    case 1.5:
+      return media.PlaybackSpeed.SPEED_FORWARD_1_50_X;
+    case 1.75:
+      return media.PlaybackSpeed.SPEED_FORWARD_1_75_X;
+    case 2.0:
+      return media.PlaybackSpeed.SPEED_FORWARD_2_00_X;
+    case 3.0:
+      return media.PlaybackSpeed.SPEED_FORWARD_3_00_X;
+    default:
+      return media.PlaybackSpeed.SPEED_FORWARD_1_00_X;
+  }
+}
+
+/**
  * 播放会话快照：用于「重新打开 App 时保留上次播放记录」。
  * 持久化到 PREF_PLAYER_STATE（Preferences JSON），冷启动后由 restoreState() 读回。
  */
@@ -118,7 +193,7 @@ interface PlayerStateSnapshot {
 }
 
 /**
- * 安全地把 MediaSource 挂到 AVPlayer 上并兜住异步失败。
+ * 安全地把 MediaSource 挂到 AVPlayer 上，**等待真正的挂载结果**。
  *
  * ⚠️ 不能直接 `player.setMediaSource(src).catch(...)`：SDK 类型虽声明返回 Promise<void>，
  * 但部分系统版本运行时返回 undefined，直接 .catch 会抛
@@ -126,19 +201,28 @@ interface PlayerStateSnapshot {
  * 这个异常会顺着 switchSource → loadAndPlay 的 catch 一路冒上去，
  * 把「音源其实已经挂上、歌在正常播」误判成加载失败 —— 副作用之一就是
  * recordRecent 被整段跳过，表现为「歌照常播放，最近播放里永远一条记录都没有」。
- * 用 Promise.resolve 归一化：真 Promise 原样透传（reject 照样进 onFail），
- * undefined 则得到一个已 resolved 的 Promise，不再炸调用链。
- * 运行时返回 undefined 时的挂载失败由既有的 player 'error' 事件兜底。
+ * 用 Promise.resolve 归一化：真 Promise 原样透传（rejection 变成 false），
+ * undefined 则得到一个已 resolved 的 Promise（视为挂载成功，返回 true）。
+ *
+ * 返回 true = 挂载请求已被系统接受；false = setMediaSource 明确拒绝。
+ * ⚠️ 2026-10-20 关键修正：旧版只兜异常、不返回结果，调用方（switchSource）
+ * 无法区分「挂上了」与「被拒了」，只能无条件当成功 —— rejection 被静默吞掉后
+ * 状态机停在 idle/initialized，界面却停在假「播放中」，正是「点了歌一直没声、
+ * 也不报错、重试也没用」的根因。
  */
-function attachMediaSourceSafely(
+async function attachMediaSourceSafely(
   player: media.AVPlayer,
-  source: media.MediaSource,
-  onFail: (e: BusinessError) => void
-): void {
-  const task: Promise<void> = Promise.resolve(player.setMediaSource(source));
-  task.catch((e: BusinessError): void => {
-    onFail(e);
-  });
+  source: media.MediaSource
+): Promise<boolean> {
+  try {
+    const task: Promise<void> = Promise.resolve(player.setMediaSource(source));
+    await task;
+    return true;
+  } catch (e) {
+    const err: BusinessError = e as BusinessError;
+    plogError(`setMediaSource rejected: ${err.code} ${err.message}`);
+    return false;
+  }
 }
 
 export class MusicPlayer {
@@ -163,8 +247,14 @@ export class MusicPlayer {
   private isShuffled: boolean = false;
   private volume: number = 80;
   private isMuted: boolean = false;
+  /** 当前播放倍速（档位见 PLAYBACK_SPEED_OPTIONS；换源重建 AVPlayer 后由 applySpeedOnPrepared 重补） */
+  private playbackSpeed: number = 1.0;
   private shouldAutoplay: boolean = false;
   private retryCount: number = 0;
+  /** prepare 看门狗定时器 id（-1 = 未开启）。见 startPrepareWatchdog / recoverFromStall。 */
+  private prepareWatchdogTimer: number = -1;
+  /** 本轮加载已尝试过的备用直链条数（loadAndPlay 每轮归零）。见 recoverFromStall。 */
+  private triedBackupCount: number = 0;
   private playerState: string = 'idle';
   private loadToken: number = 0;
   /**
@@ -325,10 +415,12 @@ export class MusicPlayer {
     }
 
     // 恢复音量 / 静音态。播放器实例在首次换源时才创建，
-    // 这些配置由 ensurePlayer → applyPlayerConfig 统一应用到新实例上
-    //（漏了这步会「切歌后音量变回 100%」）。
+    // 这些配置由状态机在合法时机统一应用到新实例上
+    //（applyVolumeOnPrepared；漏了这步会「切歌后音量变回 100%」）。
     this.volume = (AppStorage.get(STORE_VOLUME) as number) ?? 80;
     this.isMuted = (AppStorage.get(STORE_MUTED) as boolean) ?? false;
+    // 倍速值同批恢复：镜像由 EntryAbility 在 loadContent 前首发，这里读到的一定是真值
+    this.playbackSpeed = (AppStorage.get(STORE_PLAYBACK_SPEED) as number) ?? 1.0;
 
     this.startAudioRouteWatch();
 
@@ -487,15 +579,33 @@ export class MusicPlayer {
   private registerAvPlayerEvents(player: media.AVPlayer): void {
     player.on('stateChange', (state: string): void => {
       this.playerState = state;
+      plogInfo(`avplayer state -> ${state}`);
       if (state === 'initialized') {
+        // audioRendererInfo 的合法设置窗口是 idle/initialized；实测部分系统版本在
+        // idle 态（createAVPlayer 刚返回）直接报 5400102「unsupport to set audio
+        // renderer info」，挪到这里（setMediaSource 已被接受之后）最稳。
+        this.applyRendererInfoInInitialized(player);
+        // prepare 看门狗：setMediaSource 的 rejection 被吞（部分系统版本返回
+        // undefined）后，状态机会永远停在 initialized，**没有任何事件**再上来。
+        // 20s 无进展就主动走 recoverFromStall（换备用直链 / 重解析）。
+        this.startPrepareWatchdog();
         // prepare() 返回 Promise，必须接住：拒绝时若不处理，未处理的 rejection
         // 会让状态机静默停在 initialized，表现为「点了歌一直转圈、永远不出声」。
         player.prepare().catch((e: BusinessError): void => {
-          console.error(`prepare failed: ${e.code} ${e.message}`);
+          plogError(`prepare failed: ${e.code} ${e.message}`);
           this.isPreparing = false;
           this.setStore(STORE_LOADING_AUDIO, false);
+          // 看门狗刻意**不**取消：prepare 拒绝后状态机仍停在 initialized，
+          // 看门狗是这一僵局的唯一自愈出口（超时后走 recoverFromStall）。
         });
       } else if (state === 'prepared') {
+        this.cancelPrepareWatchdog();
+        // setVolume 只在 prepared/playing/paused/completed 合法；旧实现在新播放器的
+        // idle 态设置，部分系统版本直接报 5400102「unsupport volume operation」。
+        // 挪到 prepared：新实例一就绪就把用户当前音量/静默补上。
+        this.applyVolumeOnPrepared(player);
+        // 倍速同款补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
+        this.applySpeedOnPrepared(player);
         if (this.pendingSeekTo >= 0) {
           // 续播 / 切歌后定位：必须在 prepared 之后再 seek，否则 seek 会被丢弃
           const target: number = this.pendingSeekTo;
@@ -618,9 +728,10 @@ export class MusicPlayer {
     });
 
     player.on('error', (err: object): void => {
-      console.error(`AVPlayer error: ${JSON.stringify(err)}`);
+      plogError(`AVPlayer error: ${JSON.stringify(err)}`);
       // 换源时旧实例已 detach + release，它的 error 不会再走到这里，
       // 所以这里收到的必定是**当前音源**的真实错误 —— 不再需要「静默窗口」去猜。
+      this.cancelPrepareWatchdog();
       this.isPreparing = false;
       // 2026-10-08（B2）：续播 seek→play 挂起中出错：取消挂起的 play 与兜底定时器，
       // 否则定时器会对已进入 error 态的实例调 play，错误路径再多绕一圈
@@ -635,16 +746,8 @@ export class MusicPlayer {
       this.syncBackgroundTask(false);
       // 出错属于「不是正常停止」：把已听时长立刻收尾落盘，别等攒满阈值
       this.finalizeListenSegment();
-      if (this.retryCount < 3 && this.currentTrackSnapshot()) {
-        this.retryCount++;
-        this.reloadCurrentSource().catch((e: Error): void => {
-          console.error(`reloadCurrentSource failed: ${e.message}`);
-        });
-      } else {
-        // 重试耗尽：必须给用户一个明确交代。否则界面只是悄悄停在暂停态，
-        // 用户完全不知道发生了什么（表现为「点了没反应」）。
-        this.notifyHint('音频加载失败，请稍后重试');
-      }
+      // 统一恢复入口：备用直链 → 重解析 → 重试耗尽才提示失败
+      this.recoverFromStall();
     });
 
     // seek 真正生效后，解除进度抑制，让 timeUpdate 重新驱动滑块到目标位置
@@ -823,6 +926,25 @@ export class MusicPlayer {
   }
 
   /**
+   * 当前用户「播放音质」偏好对应的档位 id。
+   *
+   * loadAndPlay / reloadCurrentSource / prefetchNextSource 三个音源解析调用点
+   * **必须统一从这取**：sourceCache 的缓存键含档位段（`bvid|cid|quality`），
+   * 任何一处不一致就会分裂缓存 —— 预取永远不命中、恢复重载拿到另一档。
+   *
+   * 2026-10-20 修复「登录后点歌卡住（大会员账号）」排查出的两处档位缺口：
+   *   · reloadCurrentSource 此前硬编码 0（= 按带宽最大取）→ 大会员账号在
+   *     恢复梯度里拿到 flac/杜比音轨：既违背用户音质偏好（设置的是 192K），
+   *     又让「备用直链 → 重解析」整条梯度困在同一坏档位里无法降级到可播档；
+   *   · prefetchNextSource 此前漏传 → 预取缓存键与 loadAndPlay 错位，
+   *     2026-10-08 loadAndPlay 开始传 playQuality 后预取就一直不命中（死代码），
+   *     且大会员账号预取的还是 flac/杜比 URL（白耗流量）。
+   */
+  private currentPlayQualityId(): number {
+    return downloadQualityId(AppPreferences.getSettings().playQuality);
+  }
+
+  /**
    * 音源已挂上后，安排一次「下一首直链」的预取。
    * 每次成功加载都会重新调度（旧的定时器被清掉），预取的永远是**当前曲目的下一首**。
    */
@@ -875,10 +997,12 @@ export class MusicPlayer {
         return;
       }
       this.prefetchedIds.add(track.id);
+      // 档位必须与 loadAndPlay 一致（currentPlayQualityId）：缓存键含档位段，
+      // 错位 = 预取结果永远不被命中，白白发两次请求（2026-10-20 修复）。
       extractAudioFromVideo(track.bvid || track.id, {
         aid: track.aid,
         cid: track.cid
-      }).catch((e: Error): void => {
+      }, this.currentPlayQualityId()).catch((e: Error): void => {
         console.error(`prefetch next source failed: ${e.message}`);
       });
     } catch (e) {
@@ -1013,7 +1137,9 @@ export class MusicPlayer {
       // dash.audio[].bandwidth，若某条链路（缓存命中 / 本地文件切换）给的是 0，
       // 直接搬会把列表侧已解析出的码率抹成 0，播放页就显示不出码率了。
       audioBandwidth: source.audioBandwidth > 0 ? source.audioBandwidth : track.audioBandwidth,
-      audioMimeType: source.audioMimeType
+      audioMimeType: source.audioMimeType,
+      // 备用直链跟着解析结果走（列表侧落盘的曲目不带，取 ?? 兜旧数据）
+      audioBackupUrls: source.audioBackupUrls
     };
   }
 
@@ -1033,10 +1159,13 @@ export class MusicPlayer {
       // refresh=true：走到重试说明播放器报了 error，最常见的原因就是缓存里的
       // 直链已过期（CDN 签名失效）。必须绕过缓存重新解析，否则会拿同一条过期
       // 链接重试三次、次次失败。新结果会回写缓存。
+      // 档位用用户偏好（2026-10-20 修复）：此前硬编码 0 = 按带宽最大取，
+      // 大会员账号会在恢复梯度里拿到 flac/杜比 —— 档位与首播不一致（缓存分裂），
+      // 且若该档直链/解码有问题，梯度永远无法降级到可播的 192K。
       const source = await extractAudioFromVideo(track.bvid || track.id, {
         aid: track.aid,
         cid: track.cid
-      }, 0, true);
+      }, this.currentPlayQualityId(), true);
       if (token !== this.loadToken) {
         return;
       }
@@ -1052,6 +1181,87 @@ export class MusicPlayer {
       console.error(`reload audio failed: ${JSON.stringify(e)}`);
       this.setStore(STORE_LOADING_AUDIO, false);
     }
+  }
+
+  /**
+   * 启动 prepare 看门狗：进入 initialized 后 PREPARE_TIMEOUT_MS 内没走到
+   * prepared / error 就认定「状态机卡死」（setMediaSource rejection 被吞的典型
+   * 后果），主动走 recoverFromStall 自愈。带 loadToken 快照：超时瞬间若已被
+   * 新一次点歌取代则静默作废，绝不误伤新加载。
+   */
+  private startPrepareWatchdog(): void {
+    this.cancelPrepareWatchdog();
+    const token: number = this.loadToken;
+    this.prepareWatchdogTimer = setTimeout((): void => {
+      this.prepareWatchdogTimer = -1;
+      if (token !== this.loadToken) {
+        // 看门狗存续期间已被更新的点歌取代：新加载有自己的看门狗，这里作废
+        return;
+      }
+      if (this.playerState !== 'initialized') {
+        // 状态已推进（prepared / error / 已重建）：正常路径收过场，无需自愈
+        return;
+      }
+      plogWarn(`prepare watchdog fired, stuck at initialized for ${PREPARE_TIMEOUT_MS}ms`);
+      this.recoverFromStall();
+    }, PREPARE_TIMEOUT_MS);
+  }
+
+  private cancelPrepareWatchdog(): void {
+    if (this.prepareWatchdogTimer !== -1) {
+      clearTimeout(this.prepareWatchdogTimer);
+      this.prepareWatchdogTimer = -1;
+    }
+  }
+
+  /**
+   * 统一的「播放卡死 / 出错」恢复入口（error 处理器与 prepare 看门狗共用）。
+   * 恢复梯度由轻到重，每级失败自动降级到下一级：
+   * ① 备用直链：playurl 每条音轨都带 backupUrl（最多用 3 条）。主直链被 CDN
+   *    拒绝 / 挂死时直接换链重挂，**不发任何网络请求**，秒级恢复；
+   * ② 重解析：refresh 直链重走 view + playurl（最常见原因是直链签名过期）；
+   * ③ 重试耗尽：明确提示用户，不再让界面停在假「播放中」。
+   */
+  private recoverFromStall(): void {
+    const track: Track | null = this.currentTrackSnapshot();
+    if (!track) {
+      // 界面上已没有曲目（清空队列等场景）：没有可恢复的对象
+      plogWarn('recoverFromStall skipped: no current track');
+      return;
+    }
+    const token: number = this.loadToken;
+    const backups: string[] = track.audioBackupUrls ?? [];
+    // ① 备用直链：本轮加载还没把 3 条用完，就先试下一条
+    if (this.triedBackupCount < 3 && this.triedBackupCount < backups.length) {
+      const backupUrl: string = backups[this.triedBackupCount];
+      this.triedBackupCount++;
+      plogWarn(`recover via backup url #${this.triedBackupCount}: ${urlHostOf(backupUrl)}`);
+      this.isPreparing = true;
+      this.setStore(STORE_LOADING_AUDIO, true);
+      this.switchSource(backupUrl, token)
+        .then((attached: boolean): void => {
+          if (attached && token === this.loadToken) {
+            this.isPreparing = false;
+          }
+        })
+        .catch((e: Error): void => {
+          console.error(`switch to backup url failed: ${e.message}`);
+        });
+      return;
+    }
+    // ② 重新解析直链（refresh=true，绕过缓存）
+    if (this.retryCount < 3) {
+      this.retryCount++;
+      plogWarn(`recover via reload, attempt ${this.retryCount}/3`);
+      this.reloadCurrentSource().catch((e: Error): void => {
+        console.error(`reloadCurrentSource failed: ${e.message}`);
+      });
+      return;
+    }
+    // ③ 重试耗尽：必须给用户一个明确交代。否则界面只是悄悄停在暂停态，
+    // 用户完全不知道发生了什么（表现为「点了没反应」）。
+    plogWarn('recover exhausted: all backups and reloads failed');
+    this.notifyHint('音频加载失败，请稍后重试');
   }
 
   /**
@@ -1112,17 +1322,25 @@ export class MusicPlayer {
       });
     } catch (e) {
       console.error(`createMediaSourceWithUrl failed: ${JSON.stringify(e)}`);
-      this.isPreparing = false;
-      this.setStore(STORE_LOADING_AUDIO, false);
-      this.setStore(STORE_IS_PLAYING, false);
+      this.failLoad('音频加载失败，请稍后重试');
       return false;
     }
-    attachMediaSourceSafely(player, mediaSource, (e: BusinessError): void => {
-      console.error(`setMediaSource failed: ${e.code} ${e.message}`);
-      this.isPreparing = false;
-      this.setStore(STORE_LOADING_AUDIO, false);
-      this.setStore(STORE_IS_PLAYING, false);
-    });
+    plogInfo(`attach main url: ${urlHostOf(url)}`);
+    // 2026-10-20 关键修正：挂载结果必须**真正等到手**。旧版把 setMediaSource 的
+    // rejection 交给回调就无条件 return true —— rejection 被吞后状态机停在
+    // idle/initialized，调用方却当「挂上了」继续走「播放中」的收尾，
+    // 表现正是「点了歌、封面歌名都换了、一直没声、也不报错」。
+    const attached: boolean = await attachMediaSourceSafely(player, mediaSource);
+    if (token !== this.loadToken) {
+      // 挂载等待期间被更新的点歌取代：结果作废，一切收尾由获胜方负责
+      return attached;
+    }
+    if (!attached) {
+      // setMediaSource 明确拒绝（url 非法 / 头部被拒 / 状态不对）：
+      // failLoad 统一收口（解除准备态、清 loading、停播放态、提示用户）
+      this.failLoad('音频加载失败，请稍后重试');
+      return false;
+    }
     // true = 音源已经交给播放器（音频这一侧已经有着落），
     // 调用方据此区分「真的没挂上音源」与「挂上之后收尾环节才出的岔子」。
     return true;
@@ -1211,12 +1429,17 @@ export class MusicPlayer {
     }
     // ensurePlayer 已经关掉了上一个本地句柄，这里接手新句柄
     this.localFile = file;
-    attachMediaSourceSafely(player, source, (e: BusinessError): void => {
-      console.error(`setMediaSource(local) failed: ${e.code} ${e.message}`);
-      this.isPreparing = false;
-      this.setStore(STORE_LOADING_AUDIO, false);
-      this.setStore(STORE_IS_PLAYING, false);
-    });
+    plogInfo(`attach local file: ${path}`);
+    // 与在线链路同理（见 switchSource）：挂载结果必须等到手，拒绝时明确失败
+    const attached: boolean = await attachMediaSourceSafely(player, source);
+    if (token !== this.loadToken) {
+      // 挂载等待期间被更新的点歌取代：结果作废（句柄已交由 this.localFile 管理）
+      return attached;
+    }
+    if (!attached) {
+      this.failLoad('本地文件无法播放，请重新下载');
+      return false;
+    }
     return true;
   }
 
@@ -1311,7 +1534,8 @@ export class MusicPlayer {
    * 新建一个干净的 AVPlayer。
    * 先把旧实例的监听**全部摘掉**再 release —— 摘监听是关键，否则旧实例在释放过程中
    * 上报的 error 会被当成「新音源加载失败」，弹出一个莫名其妙的提示。
-   * 新实例是全新默认值，必须重新应用音量等配置（见 applyPlayerConfig）。
+   * 新实例是全新默认值，音量 / 音频流类型改由状态机在**合法时机**补上
+   * （见 applyRendererInfoInInitialized / applyVolumeOnPrepared）。
    */
   /**
    * 串行化入口：同一时刻只允许一个「摘监听 → release 旧的 → createAVPlayer 新的」
@@ -1347,7 +1571,6 @@ export class MusicPlayer {
       const player: media.AVPlayer = await media.createAVPlayer();
       this.avPlayer = player;
       this.playerState = 'idle';
-      this.applyPlayerConfig(player);
       this.registerAvPlayerEvents(player);
       return player;
     } catch (e) {
@@ -1357,15 +1580,13 @@ export class MusicPlayer {
   }
 
   /**
-   * 新播放器统一配置：音量 + 音频流类型。
-   * 不补这步会出现「切一首歌，音量自己变回 100%」——createAVPlayer 返回的是全新默认值。
+   * 设置音频流类型（音乐）。合法窗口是 idle/initialized，但**不能**在新播放器的
+   * idle 态调用：部分系统版本直接报 5400102「unsupport to set audio renderer info」
+   * （旧版 applyPlayerConfig 在 createAVPlayer 返回后立即设置，线上日志里
+   * 每次点歌都带着这条错）。改到 stateChange('initialized')（setMediaSource
+   * 已被接受之后）再设，见 registerAvPlayerEvents。
    */
-  private applyPlayerConfig(player: media.AVPlayer): void {
-    try {
-      player.setVolume(this.isMuted ? 0 : this.volume / 100);
-    } catch (e) {
-      console.error(`setVolume on new player failed: ${JSON.stringify(e)}`);
-    }
+  private applyRendererInfoInInitialized(player: media.AVPlayer): void {
     try {
       player.audioRendererInfo = {
         content: audio.ContentType.CONTENT_TYPE_MUSIC,
@@ -1375,6 +1596,39 @@ export class MusicPlayer {
     } catch (e) {
       // 配置音频流类型失败不影响播放，系统会退回默认值
       console.error(`set audioRendererInfo failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
+   * 补应用音量 / 静默到播放器。setVolume 的合法窗口是
+   * prepared/playing/paused/completed —— idle 态调用报 5400102
+   * 「unsupport volume operation」（线上日志同款错误）。
+   * 改到 stateChange('prepared') 再补：新实例一就绪，用户当前音量立刻生效。
+   */
+  private applyVolumeOnPrepared(player: media.AVPlayer): void {
+    try {
+      player.setVolume(this.isMuted ? 0 : this.volume / 100);
+    } catch (e) {
+      console.error(`setVolume on prepared failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
+   * 补应用倍速到播放器。setSpeed 的合法窗口是 prepared/playing/paused/completed
+   * （同 setVolume）。换源每次都重建 AVPlayer，倍速必须在新实例 prepared 时重补，
+   * 否则「切歌后倍速悄悄变回 1.0」（同当年音量丢失 bug 的根因）。
+   * 开关关闭或倍速为 1.0 时不调——1.0 是系统默认，多调一次反而多一条
+   * speedDone 噪音日志；关闭态强制不补，防止异常脏值在重启后复活倍速。
+   */
+  private applySpeedOnPrepared(player: media.AVPlayer): void {
+    const enabled: boolean = (AppStorage.get(STORE_PLAYBACK_SPEED_ENABLED) as boolean) ?? false;
+    if (!enabled || this.playbackSpeed === 1.0) {
+      return;
+    }
+    try {
+      player.setSpeed(speedToPlaybackSpeed(this.playbackSpeed));
+    } catch (e) {
+      console.error(`setSpeed on prepared failed: ${JSON.stringify(e)}`);
     }
   }
 
@@ -1399,6 +1653,9 @@ export class MusicPlayer {
     // 旧实例即将被 release：它握着的音源从此不再可能出声，重建计数 +1
     this.playerRebuildSeq++;
     this.playerState = 'idle';
+    // 旧实例名下的 prepare 看门狗一并取消：不取消的话，它超时触发时面对的
+    // 已是新实例 / 新状态，recoverFromStall 会在错误的时机横插一脚
+    this.cancelPrepareWatchdog();
     // 旧实例从此不再出声，听歌计时游标必须一并复位，
     // 否则换源 / 重建播放器期间的静默空窗会被下一拍误计入时长
     this.lastListenTickAt = -1;
@@ -1465,6 +1722,8 @@ export class MusicPlayer {
     const seqBeforeLoad: number = this.playerRebuildSeq;
     this.shouldAutoplay = autoplay;
     this.retryCount = 0;
+    // 备用直链计数跟着每轮点歌一起归零：新一轮加载重新拥有完整的恢复梯度
+    this.triedBackupCount = 0;
     // 旧歌的进度 / 时长先存一份：下面会立刻清零给新歌腾显示位，
     // 加载失败回滚时靠它把旧歌的显示还原（见 recoverAfterLoadFailure）
     this.preLoadProgress = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
@@ -1524,7 +1783,7 @@ export class MusicPlayer {
       const source = await extractAudioFromVideo(track.bvid || track.id, {
         aid: track.aid,
         cid: track.cid
-      }, downloadQualityId(AppPreferences.getSettings().playQuality));
+      }, this.currentPlayQualityId());
       if (token !== this.loadToken) {
         return;
       }
@@ -2223,7 +2482,10 @@ export class MusicPlayer {
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(100, v));
     this.setStore(STORE_VOLUME, this.volume);
-    if (this.avPlayer) {
+    // setVolume 只在 prepared/playing/paused/completed 合法；idle 态调用报
+    // 5400102「unsupport volume operation」（冷启动先拖音量条就会踩中）。
+    // 值先存进 this.volume，播放器一进 prepared 由 applyVolumeOnPrepared 补上。
+    if (this.avPlayer && this.playerHoldsSource()) {
       this.avPlayer.setVolume(this.isMuted ? 0 : this.volume / 100);
     }
   }
@@ -2231,8 +2493,37 @@ export class MusicPlayer {
   setMuted(muted: boolean): void {
     this.isMuted = muted;
     this.setStore(STORE_MUTED, muted);
-    if (this.avPlayer) {
+    // 同 setVolume：只在合法状态下操作播放器，idle/initialized 态先记账后补
+    if (this.avPlayer && this.playerHoldsSource()) {
       this.avPlayer.setVolume(muted ? 0 : this.volume / 100);
+    }
+  }
+
+  /**
+   * 设置播放倍速（档位见 PLAYBACK_SPEED_OPTIONS，非法值归 1.0）。
+   * persist=false 供设置页关开关时复用运行时归位逻辑——偏好里两个字段由
+   * 设置页的 update 一次性写好，这里再写会因 setObject 的 put 未落内存
+   * 产生读-改-写覆盖竞态；播放页菜单选档走默认 persist=true 自行持久化。
+   */
+  setPlaybackSpeed(speed: number, persist: boolean = true): void {
+    const normalized: number = PLAYBACK_SPEED_OPTIONS.includes(speed) ? speed : 1.0;
+    this.playbackSpeed = normalized;
+    this.setStore(STORE_PLAYBACK_SPEED, normalized);
+    if (persist) {
+      const s: AppSettings = AppPreferences.getSettings();
+      s.playbackSpeed = normalized;
+      AppPreferences.saveSettings(s).catch((e: Error): void => {
+        console.error(`persist playbackSpeed failed: ${e.message}`);
+      });
+    }
+    // setSpeed 只在 prepared/playing/paused/completed 合法（同 setVolume）；
+    // idle/initialized 态先记账，prepared 后由 applySpeedOnPrepared 补上
+    if (this.avPlayer && this.playerHoldsSource()) {
+      try {
+        this.avPlayer.setSpeed(speedToPlaybackSpeed(normalized));
+      } catch (e) {
+        console.error(`setSpeed failed: ${JSON.stringify(e)}`);
+      }
     }
   }
 

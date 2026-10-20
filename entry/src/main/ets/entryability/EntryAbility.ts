@@ -17,7 +17,7 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_MINI_BAR_PROGRESS } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
@@ -123,6 +123,14 @@ export default class EntryAbility extends UIAbility {
         // 初值只是占位，真值必须首帧 build 前就位，否则关开关的用户启动时
         // 会先看到进度条再消失。
         AppStorage.setOrCreate(STORE_MINI_BAR_PROGRESS, settings.miniBarProgress);
+        // 迷你栏自动展开收起开关同批首发：Index 的 @StorageProp 初值只是占位，
+        // 真值必须首帧 build 前就位，否则关掉开关的用户启动后第一下滑动仍会触发收放。
+        AppStorage.setOrCreate(STORE_MINI_BAR_AUTO_EXPAND, settings.miniBarAutoExpand);
+        // 倍速播放开关 + 倍速值（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位；倍速值同时是
+        // MusicPlayer.init 恢复 playbackSpeed 字段的数据源。
+        AppStorage.setOrCreate(STORE_PLAYBACK_SPEED_ENABLED, settings.speedEnabled);
+        AppStorage.setOrCreate(STORE_PLAYBACK_SPEED, settings.playbackSpeed);
         // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
         //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
         AppContainer.initRest(this.context)
