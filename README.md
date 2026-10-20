@@ -10,7 +10,7 @@
 
 ![Language](https://img.shields.io/badge/language-ArkTS%20%2F%20ArkUI-orange)
 
-![Version](https://img.shields.io/badge/version-1.1.4-green)
+![Version](https://img.shields.io/badge/version-1.1.5-green)
 
 ---
 
@@ -23,7 +23,7 @@ BiliMusic 把 B 站上的音频内容（单曲、合集、音乐中心榜单、U
 
 - **作者**：chai
 - **转译自**：[github.com/HanversionOvO/BiliMusic](https://github.com/HanversionOvO/BiliMusic)
-- **运行环境**：HarmonyOS NEXT 7（API 26）手机端，适配折叠屏展开态
+- **运行环境**：HarmonyOS NEXT 7（API 26）手机 / 平板，适配折叠屏展开态与 md/lg 双栏布局
 
 ---
 
@@ -83,7 +83,8 @@ BiliMusic 把 B 站上的音频内容（单曲、合集、音乐中心榜单、U
 - **后台播放**（`KEEP_BACKGROUND_RUNNING` 长时任务保活）
 - **蓝牙断开自动暂停**（音频路由监听 + toast 提示）
 - **分 P 视频**自动展开为多首曲目
-- 播放页功能键：播放模式 / 下载 / 加入歌单
+- **倍速播放**：设置页开关开启后，播放页可选 **0.25x–3.0x 九档倍速**，切歌、重启均保持；关闭开关立即恢复 1.0x
+- 播放页功能键：播放模式 / 倍速 / 下载 / 加入歌单
 
 ### 🎨 界面
 
@@ -91,7 +92,7 @@ BiliMusic 把 B 站上的音频内容（单曲、合集、音乐中心榜单、U
   系统材质 + 主题色光晕，播放栏与页签**融合于同一胶囊**（miniBar 槽位，展开 / 收起两态）
 - **主题色 8 色切换** + 深浅模式跟随，全站组件即时变色
 - 全站顶栏统一**毛玻璃材质**（`backgroundEffect` 真高斯模糊，静止淡显、滚动增强）
-- 适配**折叠屏展开 / 平板**（≥600vp 强制迷你栏展开态，断点响应式布局）
+- 适配**折叠屏展开 / 平板**：平板（md/lg）为**侧边导航栏 + 双栏布局**，≥600vp 强制迷你栏展开态，断点响应式布局
 - 设计了规范化的色彩 / 字阶 / 触达 / 动效体系（见 `design/`）
 
 ---
@@ -116,7 +117,7 @@ BiliMusic 把 B 站上的音频内容（单曲、合集、音乐中心榜单、U
 ### 前置条件
 
 - [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/)（含 HarmonyOS SDK）
-- 一台 HarmonyOS NEXT 7 手机（或模拟器）
+- 一台 HarmonyOS NEXT 7 手机 / 平板（或模拟器）
 
 ### 用 DevEco Studio
 
