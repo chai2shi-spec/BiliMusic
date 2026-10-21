@@ -927,22 +927,33 @@ export struct PlaylistsPage {
                     .justifyContent(FlexAlign.Center)
                     .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-                    // 56vp 显示位按 2x 请求图床缩略图；加载中 / 失败由 CoverImage 兜浅粉占位
+                    // 64vp 显示位按 2x 请求图床缩略图（双行标题改版 2026-10-21 与
+                    // TrackItem 同步：封面 56→64，高度预算 = 歌单名两行
+                    // lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17) = 63 ≤ 64）；
+                    // 加载中 / 失败由 CoverImage 兜浅粉占位
                     CoverImage({
-                      url: toThumbUrl(p.coverUrl, 112),
-                      imgWidth: 56,
-                      imgHeight: 56,
+                      url: toThumbUrl(p.coverUrl, 128),
+                      imgWidth: 64,
+                      imgHeight: 64,
                       imgRadius: 8,
                       altText: p.name
                     })
                     Column() {
+                      // 歌单名双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) +
+                      // 第二行省略号；显式 lineHeight(21) 锁行高（默认行高随字体浮动，
+                      // 会破坏「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
                       Text(p.name)
                         .fontSize(16)
                         .fontColor($r('app.color.text_primary'))
-                        .maxLines(1)
+                        .maxLines(2)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .lineHeight(21)
+                      // 副行行高锁 17（13sp）：与歌单名 lineHeight(21) 一起构成高度
+                      // 预算（2×21 + 4 + 17 = 63 ≤ 封面 64），见封面注释。
                       Text(`${p.tracks.length} 首`)
                         .fontSize(13)
                         .fontColor($r('app.color.text_secondary'))
+                        .lineHeight(17)
                         .margin({ top: 4 })
                     }
                     .layoutWeight(1)

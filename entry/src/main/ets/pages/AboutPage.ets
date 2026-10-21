@@ -24,6 +24,8 @@ import { BusinessError } from '@ohos.base';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
+import { copyText } from '../utils/ClipboardUtil';
+import { showAppToast } from '../components/AppToast';
 
 /** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
 const ABOUT_BLUR_START_VP: number = 30;
@@ -32,6 +34,9 @@ const ABOUT_BLUR_END_VP: number = 80;
 /** App 图标显示边长（vp）与圆角（vp）：圆角比例对齐系统图标遮罩 */
 const APP_ICON_SIZE: number = 88;
 const APP_ICON_RADIUS: number = 22;
+
+/** 反馈 Q 群号：点行即复制到剪贴板 */
+const FEEDBACK_QQ_GROUP: string = '1129926978';
 
 @Component
 export struct AboutPage {
@@ -61,6 +66,13 @@ export struct AboutPage {
         // 拿不到就空着，不影响其它内容展示
         console.error(`getBundleInfoForSelf failed: ${e.code} ${e.message}`);
       });
+  }
+
+  /** 点「反馈Q群」行：群号写入剪贴板 + toast 回执（失败也提示，不静默） */
+  private copyQqGroup(): void {
+    copyText(FEEDBACK_QQ_GROUP).then((ok: boolean): void => {
+      showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
+    });
   }
 
   /**
@@ -225,6 +237,37 @@ export struct AboutPage {
                 .padding({ left: 16, right: 16, top: 14, bottom: 14 })
             }
             SectionFooter({ noteText: '本项目与哔哩哔哩官方无关，音频内容版权归原作者所有，请勿将下载内容用于商业用途。' })
+
+            // ── 反馈与交流 ──
+            SectionHeader({ headerText: '反馈与交流' })
+            InsetCard() {
+              // 整行点按 = 复制群号（Blank 撑开让群号与复制图标靠右）
+              Row() {
+                Text('反馈Q群')
+                  .fontSize(15)
+                  .fontColor($r('app.color.text_primary'))
+                Blank()
+                Text(FEEDBACK_QQ_GROUP)
+                  .fontSize(15)
+                  .fontColor($r('app.color.text_secondary'))
+                SymbolGlyph($r('sys.symbol.doc_filled_on_doc'))
+                  .fontSize(16)
+                  .fontColor([$r('app.color.text_secondary')])
+                  .margin({ left: 8 })
+              }
+              .width('100%')
+              .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+              .alignItems(VerticalAlign.Center)
+              .stateStyles({
+                pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                normal: { .backgroundColor(Color.Transparent) }
+              })
+              .accessibilityText(`复制反馈Q群 ${FEEDBACK_QQ_GROUP}`)
+              .accessibilityLevel('yes')
+              .onClick((): void => {
+                this.copyQqGroup();
+              })
+            }
           }
           .width('100%')
           // 内容末尾让开底部手势区（本页内容到底即结束，不再整屏避让）

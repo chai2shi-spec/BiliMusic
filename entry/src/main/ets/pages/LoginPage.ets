@@ -56,7 +56,9 @@ import {
   SmsLoginResult,
   SmsSendResult
 } from '../api/BilibiliApi';
-import { applyQrSuccess, applySmsLoginCookies, refreshLoginUser } from '../service/LoginStore';
+import { applyQrSuccess, applySmsLoginCookies, getLoginUser, refreshLoginUser, LoginUser } from '../service/LoginStore';
+import { AppPreferences } from '../preferences/AppPreferences';
+import { AudioQuality, AppSettings } from '../model/MusicModels';
 import { HttpUtil } from '../utils/HttpUtil';
 
 /** 二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
@@ -477,13 +479,36 @@ export struct LoginPage {
     }
   }
 
+  /**
+   * 大会员登录福利（2026-10-21）：登录成功后若为大会员/年度大会员（vipStatus===1），
+   * 把播放音质与下载音质自动提升为「无损」。仅登录成功时设置一次；
+   * 用户之后手动调低不再干预（产品决策，见方案确认记录）。
+   * @returns 是否实际修改了设置（用于决定 toast 文案）
+   */
+  private async applyVipLosslessQuality(): Promise<boolean> {
+    const user: LoginUser | null = getLoginUser();
+    if (user === null || user.vipStatus !== 1) {
+      return false;
+    }
+    const settings: AppSettings = AppPreferences.getSettings();
+    if (settings.playQuality === AudioQuality.LOSSLESS &&
+      settings.downloadQuality === AudioQuality.LOSSLESS) {
+      return false;
+    }
+    settings.playQuality = AudioQuality.LOSSLESS;
+    settings.downloadQuality = AudioQuality.LOSSLESS;
+    await AppPreferences.saveSettings(settings);
+    return true;
+  }
+
   /** 扫码成功落库：解析 Cookie → 持久化 → 刷新用户信息 → toast + 返回 */
   private async finishLogin(callbackUrl: string, responseCookies: string, refreshToken: string): Promise<void> {
     this.statusText = '登录成功';
     try {
       await applyQrSuccess(callbackUrl, responseCookies, refreshToken);
       await refreshLoginUser();
-      showAppToast('登录成功', 1800);
+      const upgraded: boolean = await this.applyVipLosslessQuality();
+      showAppToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded ? 2200 : 1800);
       NavStackHolder.stack.pop();
     } catch (e) {
       // 落库失败（两条 Cookie 通道都没拿到身份字段 / 存储异常）：给刷新入口让用户重试。
@@ -616,8 +641,9 @@ export struct LoginPage {
       .then(async (result: SmsLoginResult): Promise<void> => {
         await applySmsLoginCookies(result.responseCookies, result.refreshToken);
         await refreshLoginUser();
+        const upgraded: boolean = await this.applyVipLosslessQuality();
         this.busy = false;
-        this.finishSmsLogin();
+        this.finishSmsLogin(upgraded);
       })
       .catch((e: BusinessError): void => {
         this.busy = false;
@@ -635,11 +661,11 @@ export struct LoginPage {
    * 所以提示延迟到退栈动画之后再发。合并后登录只有一层路由（不再有 'SmsLogin'
    * 子页），pop 一层即回到来源页（设置 / 关注 / 收藏同步等）。
    */
-  private finishSmsLogin(): void {
+  private finishSmsLogin(upgraded: boolean): void {
     console.info(`sms login done: pop nav stack, size=${NavStackHolder.stack.size()}`);
     NavStackHolder.stack.pop();
     setTimeout((): void => {
-      showAppToast('登录成功', 1800);
+      showAppToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded ? 2200 : 1800);
     }, 200);
   }
 

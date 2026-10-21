@@ -27,7 +27,7 @@ import { taskpool } from '@kit.ArkTS';
 import { dirSizeTask, clearDirContentsTask } from '../utils/CacheFsTasks';
 import { SelectDialog, Chip, ChipSize } from '@kit.ArkUI';
 import { BusinessError } from '@ohos.base';
-import { AudioQuality, AppSettings, ThemeMode, DEFAULT_APP_SETTINGS, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
+import { AudioQuality, AppSettings, ThemeMode, DEFAULT_APP_SETTINGS, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL, PROGRESS_STYLE_CLASSIC, PROGRESS_STYLE_SHIMMER, PROGRESS_STYLE_PULSE, PROGRESS_STYLE_WAVE, progressStyleLabelOf } from '../model/MusicModels';
 import { Playlist } from '../model/MusicModels';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { MusicPlayer } from '../player/MusicPlayer';
@@ -47,10 +47,12 @@ import {
   STORE_THEME_SURFACE,
   STORE_THEME_ON,
   STORE_BAR_LAYOUT,
+  STORE_PROGRESS_STYLE,
   STORE_MINI_BAR_PROGRESS,
   STORE_MINI_BAR_AUTO_EXPAND,
   STORE_PLAYBACK_SPEED_ENABLED,
-  STORE_PLAYBACK_SPEED
+  STORE_PLAYBACK_SPEED,
+  STORE_AUDIO_MIX_ENABLED
 } from '../common/Constants';
 import {
   THEME_PALETTES,
@@ -379,6 +381,11 @@ export struct SettingsPage {
   /** 登录/退出/用户信息更新（LoginStore 广播版本号）：重读缓存刷新「账户」分组 */
   onLoginRevChanged(): void {
     this.refreshLoginUi();
+    // 登录成功可能触发大会员自动切无损（LoginPage.applyVipLosslessQuality），
+    // 本页常驻、aboutToAppear 只跑一次，必须在这里重读偏好才能刷新音质行
+    if (this.settingsLoaded) {
+      this.settings = AppPreferences.getSettings();
+    }
   }
 
   /** 媒体库变化（LibraryStore 广播版本号）：刷新「最近播放」行的条数副文案 */
@@ -454,7 +461,11 @@ export struct SettingsPage {
       miniBarProgress: s.miniBarProgress,
       miniBarAutoExpand: s.miniBarAutoExpand,
       speedEnabled: s.speedEnabled,
-      playbackSpeed: s.playbackSpeed
+      playbackSpeed: s.playbackSpeed,
+      audioMixEnabled: s.audioMixEnabled,
+      // 2026-10-21：AppSettings 新增必填字段（播放页进度条样式，见 MusicModels），
+      // copySettings 是逐字段拷贝，漏这里会整包编译失败。
+      progressStyle: s.progressStyle
     };
   }
 
@@ -519,6 +530,25 @@ export struct SettingsPage {
     });
     AppStorage.setOrCreate(STORE_BAR_LAYOUT, next);
     this.toast(`底部导航布局：${this.barLayoutLabel()}`, 1500);
+  }
+
+  /**
+   * 切换播放页进度条样式（点击四档循环）：经典（系统 Slider）→ 流光渐变条 →
+   * 脉冲波点 → 律动频谱条。写偏好 + 写 AppStorage 镜像（STORE_PROGRESS_STYLE）
+   * —— ControlAreaComponent 的 @StorageProp 订阅触发四分支重渲染，即时生效
+   * 无需重启；交互契约（拖动跟随 / 松手 seek / 插值推进）四档完全一致。
+   */
+  private cycleProgressStyle(): void {
+    const order: string[] =
+      [PROGRESS_STYLE_CLASSIC, PROGRESS_STYLE_SHIMMER, PROGRESS_STYLE_PULSE, PROGRESS_STYLE_WAVE];
+    const idx: number = order.indexOf(this.settings.progressStyle);
+    // 未知存量值（旧版本数据异常）从经典档重新开始循环
+    const next: string = order[((idx < 0 ? 0 : idx) + 1) % order.length];
+    this.update((s: AppSettings): void => {
+      s.progressStyle = next;
+    });
+    AppStorage.setOrCreate(STORE_PROGRESS_STYLE, next);
+    this.toast(`进度条样式：${progressStyleLabelOf(next)}`, 1500);
   }
 
   /**
@@ -1319,6 +1349,35 @@ export struct SettingsPage {
 
               CardDivider()
 
+              // 与其他应用同时播放：开启后本 app 播放不再被其他应用音频打断
+              // （AVPlayer audioInterruptMode = INDEPENDENT_MODE），也不抢占对方；
+              // 关闭恢复音频焦点行为（SHARE_MODE，会被打断并自动暂停）。
+              // 运行中切换对当前实例 best-effort 生效（SDK 约束首次 play 前设置
+              // 才完全生效），换源重建后由 prepared 钩子保证必生效。
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: '与其他应用同时播放' },
+                  secondaryText: { text: '开启后播放不会被其他应用的音频打断' }
+                },
+                suffixItem: new SuffixSwitch({
+                  isCheck: this.settings.audioMixEnabled,
+                  selectColor: this.themePrimary,
+                  onChange: (v: boolean): void => {
+                    this.update((s: AppSettings): void => {
+                      s.audioMixEnabled = v;
+                    });
+                    AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, v);
+                    MusicPlayer.getInstance().setAudioMixEnabled(v);
+                    this.toast(v ? '已开启：与其他应用音频共存播放' : '已关闭：恢复音频焦点行为', 1500);
+                  }
+                }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0
+              })
+
+              CardDivider()
+
               // 倍速播放总开关：开启后播放页功能行出现倍速入口（ControlAreaComponent）。
               // 关闭时立即恢复 1.0x —— update 一次写两个字段（含 playbackSpeed=1.0），
               // 运行时归位走 setPlaybackSpeed(1.0, false)（persist=false：偏好已由
@@ -1508,6 +1567,26 @@ export struct SettingsPage {
                 onClick: (): void => {
                   this.sheetKind = SettingsSheetKind.THEME_COLOR;
                   this.showSheet = true;
+                }
+              })
+
+              CardDivider()
+
+              // 播放页进度条样式（四档循环）：经典（系统 Slider）/ 流光渐变条 /
+              // 脉冲波点 / 律动频谱条。写偏好 + AppStorage 镜像
+              // （STORE_PROGRESS_STYLE），ControlAreaComponent 四分支即时重渲染。
+              // 播放页 sm/md/lg 全形态存在 → 本行不做断点隐藏。
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: '播放页进度条样式' },
+                  secondaryText: { text: '经典 / 流光 / 波点 / 频谱' }
+                },
+                suffixItem: new SuffixText({ text: progressStyleLabelOf(this.settings.progressStyle) }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  this.cycleProgressStyle();
                 }
               })
 

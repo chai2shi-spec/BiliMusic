@@ -26,9 +26,14 @@ import {
   STORE_IS_PLAYING,
   STORE_PROGRESS,
   STORE_PLAYER_FOLD_FULL,
+  STORE_PLAYER_OPEN,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE
 } from '../../common/Constants';
+import {
+  ENTRANCE_DURATION_MS,
+  LAYER_DELAY_CONTROL
+} from '../../common/constants/InteractionConstants';
 
 @Component
 export struct LyricsComponent {
@@ -58,8 +63,33 @@ export struct LyricsComponent {
   /** 歌词请求令牌：切歌 / 信息补全后，在途的旧请求结果必须丢弃 */
   private lyricToken: number = 0;
 
+  /**
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
+   * 把歌词层入场状态复位为隐藏 —— 随收起动画一起插值淡出（逆向镜像）。
+   */
+  @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
+  /**
+   * 分层入场（2026-10-21 动效规格第 3 点）：歌词列表主动画期间不可见，
+   * 封面落位后与控制区同批（LAYER_DELAY_CONTROL）淡入，只淡入不位移。
+   */
+  @State enterOpacity: number = 0;
+
+  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  private onPlayerOpenChanged(): void {
+    if (this.playerOpen) {
+      return;
+    }
+    this.enterOpacity = 0;
+  }
+
   aboutToAppear(): void {
     this.onTrackChanged();
+    this.getUIContext().animateTo(
+      { duration: ENTRANCE_DURATION_MS, curve: Curve.EaseOut, delay: LAYER_DELAY_CONTROL },
+      (): void => {
+        this.enterOpacity = 1;
+      }
+    );
   }
 
   /**
@@ -274,5 +304,7 @@ export struct LyricsComponent {
           })
       }
     }
+    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）
+    .opacity(this.enterOpacity)
   }
 }

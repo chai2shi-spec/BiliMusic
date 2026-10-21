@@ -64,20 +64,25 @@
  * 子页面通过 Navigation + NavPathStack 管理（播放页 / 歌单详情 / 最近播放 / 登录页）。
  * 登录页（'Login' 路由）随扫码登录功能恢复重建（2026-10），入口在设置页「账户」分组。
  *
- * ══════════ 平板形态（md/lg，2026-10-20 平板适配档 1+2）══════════
+ * ══════════ 平板形态（lg，2026-10-20 平板适配档 1+2；2026-10-21 折叠屏回归）══════════
  * deviceTypes 加 tablet 后平板可安装；build() 按 currentBreakpoint 双分支
  * **互斥挂载**（同一时刻只有一棵 HdsNavigation / 一组页签页实例）：
- *   · SM   —— 手机形态原样：phoneShell()（HdsTabs 悬浮胶囊底栏 + miniBar
- *     融合播放栏，2026-10-20 从原 build() 原样抽出，行为零变化）；
- *   · md/lg —— tabletShell()：左侧自绘 NavRail（components/NavRail.ets，
+ *   · sm/md —— phoneShell()：HdsTabs 悬浮胶囊底栏 + miniBar 融合播放栏。
+ *     md（折叠屏展开 / 小平板竖屏）2026-10-21 回归本壳（用户指令「折叠展开时
+ *     底部导航栏改为沉浸光感，而不是直接用平板模式」）：HDS ≥600vp 强制
+ *     miniBar 展开态、材质 / 光晕 / 微透明照常 —— 沉浸光感胶囊天然成立；
+ *     顶栏经 immersiveTitleBarNarrow 收窄到 600vp 与内容列对齐（sm 直用
+ *     immersiveTitleBarContent，行为零变化）。折叠屏开合 sm↔md 同壳不重挂，
+ *     HdsTabs 与四页实例存活、页内瞬时状态保留；
+ *   · lg   —— tabletShell()：左侧自绘 NavRail（components/NavRail.ets，
  *     点击直写 STORE_ACTIVE_TAB）+ 内容列（四页常驻 Stack、visibility 切换，
  *     保住搜索词 / 滚动位置等页内状态）+ 底部浮一条 64vp 常驻播放条
  *     （tabletPlayBar：PlayBar 独立挂载 —— 非 SM 下 bodyVisible 恒 true、
  *     点按直达播放页；队列空不渲染；推入的 NavDestination 盖住整块内容列）。
- * 两分支共用 NavStackHolder 单例路由栈与播放内核 —— 跨断点切换（折叠屏
- * 开合）单树重挂，路由栈 / 播放存活；页内瞬时状态会丢（已知取舍）。
- * tabController / applyMiniBarStyle / 屏幕滑动收放等 HDS 联动只在 SM 分支
- * 有效，md/lg 分支不触碰它们（控制器无宿主 HdsTabs，调用只会报错）。
+ * 两分支共用 NavStackHolder 单例路由栈与播放内核 —— 跨断点切换（sm/md↔lg）
+ * 单树重挂，路由栈 / 播放存活；页内瞬时状态会丢（已知取舍）。
+ * tabController / applyMiniBarStyle / 屏幕滑动收放等 HDS 联动只在 phoneShell
+ * 有效，lg 分支不触碰它们（控制器无宿主 HdsTabs，调用只会报错）。
  */
 
 import { UIContext } from '@kit.ArkUI';
@@ -138,7 +143,12 @@ import {
   MINI_BAR_ANIM_IDLE,
   MINI_BAR_ANIM_TO_EXPAND,
   MINI_BAR_ANIM_TO_COLLAPSE,
-  STORE_MINI_BAR_AUTO_EXPAND
+  STORE_MINI_BAR_AUTO_EXPAND,
+  STORE_PLAYER_OPEN,
+  STORE_PLAYER_OVERLAY_MOUNTED,
+  STORE_PLAYER_CLOSE_REQUEST,
+  STORE_PLAYER_TRANSITIONING,
+  PLAYER_TRANSITION_MS
 } from '../common/Constants';
 import { getLoginUser } from '../service/LoginStore';
 import { FavSyncManager } from '../service/FavSyncManager';
@@ -208,7 +218,7 @@ const TAB_SWITCH_BASE_MS: number = 300;
 const TAB_SWITCH_STEP_MS: number = 120;
 const TAB_SWITCH_MAX_MS: number = 540;
 /**
- * 平板形态（md/lg）底部常驻播放条高度（vp，2026-10-20 平板适配档 2）：
+ * 平板壳（lg）底部常驻播放条高度（vp，2026-10-20 平板适配档 2）：
  * PlayBar 整行内容（40vp 唱片 + 上下留白）独立挂载的容器高。
  * 底部离屏间距复用手机悬浮胶囊的折算公式（8 + safeBottom / 三键全额避让）。
  */
@@ -307,6 +317,55 @@ struct Index {
   @StorageProp(STORE_MINI_BAR_AUTO_EXPAND) miniBarAutoExpand: boolean = true;
 
   /**
+   * ══════════ 播放页组件状态切换动画（2026-10-21：去 pushPath 路由）══════════
+   *
+   * 迷你栏 → 全屏播放页不再是 NavDestination 路由：PlayBar.openPlayer 写
+   * STORE_PLAYER_OVERLAY_MOUNTED → 本页根 Stack 条件挂载 LazyDest('Player')
+   * （复用懒加载注册 + 1.5s 预热）→ PlayerInfoComponent 单个 animateTo(450ms,
+   * fastOutSlowIn) 驱动：容器从迷你栏向四周扩大 + 封面 geometryTransition 页内配对飞行 +
+   * 页签图标淡出（playerOpen）+ 内容分层入场（LAYER_DELAY_*）。
+   * 收起逆向镜像：TopArea 收起按钮（STORE_PLAYER_CLOSE_REQUEST seq）或
+   * onBackPress → closePlayer。
+   */
+  /** 播放页 overlay 是否挂载（根 Stack 条件渲染，打开置 true / 收起动画结束回 false） */
+  @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) playerOverlayMounted: boolean = false;
+  /** 播放页展开态：驱动页签图标淡出（tabItem opacity 绑定） */
+  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
+  /** 收起请求信号（TopArea 收起按钮 seq 递增写入，@Watch 消费 → closePlayer） */
+  @StorageProp(STORE_PLAYER_CLOSE_REQUEST) @Watch('onCloseRequest') playerCloseRequest: number = 0;
+
+  /**
+   * 收起播放页（逆向镜像，2026-10-21 组件状态切换动画）：
+   * 单个 animateTo(450ms, fastOutSlowIn) 写 STORE_PLAYER_OPEN=false —— 同帧驱动：
+   *   · PlayerInfoComponent @Watch：生长面收回起始矩形（surfaceProgress→0）；
+   *   · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
+   *   · 各子层 @Watch 复位入场状态 → 内容随动画淡出；
+   *   · 页签图标 opacity 恢复。
+   * 450ms 后卸载 overlay 并复位连点防护标志。
+   */
+  private closePlayer(): void {
+    if (!this.playerOpen) {
+      return;
+    }
+    AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
+    this.getUIContext().animateTo(
+      { duration: PLAYER_TRANSITION_MS, curve: Curve.FastOutSlowIn },
+      (): void => {
+        AppStorage.setOrCreate(STORE_PLAYER_OPEN, false);
+      }
+    );
+    setTimeout((): void => {
+      AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, false);
+      AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
+    }, PLAYER_TRANSITION_MS);
+  }
+
+  /** TopArea 收起按钮的跨层信号（seq 递增） */
+  private onCloseRequest(): void {
+    this.closePlayer();
+  }
+
+  /**
    * 当前页签下标。HdsTabs 用**非受控 index**（2026-10-14 修「切页签迷你栏闪烁/
    * 唱片重置」改版）：切页签由 HDS 内部状态驱动，onChange 只负责回写本字段，
    * 驱动页签标题 / 下载页优化 / 冷启动恢复，**不再回灌进 HdsTabs 属性**。
@@ -329,14 +388,17 @@ struct Index {
   private tabFadeTimer: number = -1;
 
   /**
-   * A3：NavRail 切页转场（@Watch on activeTab，仅平板形态起播）。
-   * 手机形态（SM）HdsTabs 自带转场，这里先记录方向再早退，双端互不干扰。
+   * A3：NavRail 切页转场（@Watch on activeTab，仅 lg 平板形态起播）。
+   * sm/md 均走 HdsTabs（自带转场），本组状态恒 1/0（属性无感）；
+   * 2026-10-21 折叠屏回归：md 回到 phoneShell，早退条件从仅 SM 扩到 SM+MD，
+   * 只剩 lg（NavRail 壳）需要自绘淡入 + 位移。先记录方向再早退，双端互不干扰。
    * 方向感：沿 rail 前进（下标增大）内容从右侧滑入，后退从左侧。
    */
   private onTabSwitchedForFade(): void {
     const prev: number = this.lastTabForFade;
     this.lastTabForFade = this.activeTab;
-    if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+    if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
+      || this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD) {
       return;
     }
     if (prev < 0 || prev === this.activeTab) {
@@ -484,10 +546,12 @@ struct Index {
         }
         // 非受控 index（见 activeTab 注释）的代价 = 冷启动不再自动落回上次页签，
         // 这里一次性恢复（activeTab 未持久化时恒为 0，守卫跳过；持久化过则恢复）。
-        // 2026-10-20 平板适配：md/lg 冷启动走 NavRail 分支，没有 HdsTabs ——
-        // 控制器不可用也无需恢复，页面 visibility 直接消费 activeTab。
+        // 2026-10-21 折叠屏回归：sm/md 均走 phoneShell（有 HdsTabs / tabController），
+        // changeIndex 不受 HDS ≥600vp 锁定影响（锁的只是 miniBarStyle）→ 守卫放宽
+        // 为非 lg；lg 冷启动走 NavRail 分支，没有 HdsTabs —— 控制器不可用也无需
+        // 恢复，页面 visibility 直接消费 activeTab。
         if (this.activeTab !== 0
-          && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
+          && this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_LG) {
           this.tabController.changeIndex(this.activeTab);
         }
       }
@@ -549,6 +613,19 @@ struct Index {
       this.unregisterNetWatch();
       this.unregisterNetWatch = null;
     }
+  }
+
+  /**
+   * 系统返回拦截（2026-10-21 组件状态切换动画）：播放页 overlay 开启时返回 =
+   * 收起播放页（逆向镜像），不再走路由栈（播放页不是 NavDestination）。
+   * 收起进行中（mounted 但未 open）也吞掉返回 —— closePlayer 内部幂等。
+   */
+  onBackPress(): boolean {
+    if (this.playerOpen || this.playerOverlayMounted) {
+      this.closePlayer();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -813,6 +890,10 @@ struct Index {
     .alignItems(HorizontalAlign.Center)
     .justifyContent(FlexAlign.Center)
     .height('100%')
+     // 播放页展开时页签图标淡出（2026-10-21 动效规格第 1 点）：与容器向四周扩大
+    // 同一条 450ms animateTo（playerOpen 在打开/收起主动画闭包内翻转）——
+    // HdsTabs 底座不销毁，只是图标逐步衰减。
+    .opacity(this.playerOpen ? 0 : 1)
     // 按下即预置切页动画时长（2026-10-19 修「远距切页过快」）：DOWN 发生在
     // 点击识别前一帧以上，重渲染先把缩放后的 animationDuration 落到 HdsTabs，
     // HDS 处理点击起播时读到的就是新值。index 是字面量参数，闭包捕获安全。
@@ -983,13 +1064,15 @@ struct Index {
   }
 
   /**
-   * 顶栏内容收窄包装（A5，2026-10-20 平板功能对齐）：md/lg 下根标题栏横跨
+   * 顶栏内容收窄包装（A5，2026-10-20 平板功能对齐）：根标题栏横跨
    * 整个内容列，而页面内容列实际被 contentMaxWidth 约束（Stack 默认居中）——
    * 顶栏拉满整列会导致搜索框/标题行与下方内容错位。外层 Row 居中 +
    * 内层 Column constraintSize(contentMaxWidth)，让顶栏内容与内容列同宽对齐；
    * 两侧空白区 hitTestBehavior(Transparent) 穿透点击到下方页面
-   * （与内层 Stack 同款行为）。SM 不经过本包装（手机形态 shell
-   * 直用 immersiveTitleBarContent，零改动）。
+   * （与内层 Stack 同款行为）。
+   * 2026-10-21 折叠屏回归：md（phoneShell）顶栏也经本包装（contentMaxWidth(md)
+   * =600 与内容列对齐）；仅 sm 直用 immersiveTitleBarContent（shell 的
+   * stackBuilder 内按断点分流，sm 行为零变化）。
    */
   @Builder
   immersiveTitleBarNarrow() {
@@ -1023,11 +1106,25 @@ struct Index {
   build() {
     Stack() {
       // 2026-10-20 平板适配：按断点双分支互斥挂载（见文件头「平板形态」节）。
+      // 2026-10-21 折叠屏回归（用户指令「折叠展开时底部导航栏改为沉浸光感，
+      // 而不是直接用平板模式」）：md 不再进 tabletShell —— sm/md 同走 phoneShell
+      // （HdsTabs 沉浸光感胶囊，HDS ≥600vp 强制 miniBar 展开、材质照常），
+      // 仅 lg（真平板）保留 NavRail 平板壳。附带收益：折叠屏开合 sm↔md 同壳，
+      // 不再整树重挂，HdsTabs 与四页实例存活、页内瞬时状态保留。
       // AppToast / AppDialogHost 全局宿主挂分支外，两种形态共用。
-      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
-        this.phoneShell()
-      } else {
+      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
         this.tabletShell()
+      } else {
+        this.phoneShell()
+      }
+
+      // 播放页 overlay（2026-10-21 组件状态切换动画）：PlayBar.openPlayer 挂载、
+      // closePlayer 收起动画结束后卸载。盖住整个壳（胶囊页签在其下，图标已随
+      // playerOpen 淡出），复用 LazyDest 懒加载注册 + 1.5s 预热（首开即就绪）。
+      if (this.playerOverlayMounted) {
+        LazyDest({ name: 'Player' })
+          .width('100%')
+          .height('100%')
       }
 
       // 全局轻提示宿主：驱动系统标准 toast（openToast / closeToast）
@@ -1048,8 +1145,13 @@ struct Index {
   }
 
   /**
-   * 手机形态（SM）：HdsTabs 沉浸光感悬浮胶囊底栏 + miniBar 融合播放栏。
-   * 2026-10-20 平板适配从原 build() 原样抽出为 phoneShell，行为零变化。
+   * 沉浸光感胶囊壳（sm/md，2026-10-21 折叠屏回归后 md 也走本壳）：
+   * HdsTabs 沉浸光感悬浮胶囊底栏 + miniBar 融合播放栏。
+   * 2026-10-20 平板适配从原 build() 原样抽出为 phoneShell（sm 行为零变化）；
+   * 2026-10-21 md（折叠屏展开 / 小平板竖屏）回归本壳 —— HDS ≥600vp 强制
+   * miniBar 展开态（全局展开态已在 aboutToAppear / onBreakpointChanged 同步
+   * true），材质 / 主题光晕 / 微透明照常，底栏即「沉浸光感」。
+   * md 下顶栏走 immersiveTitleBarNarrow 收窄（见 phoneShell 的 titleBar 注释）。
    */
   @Builder
   phoneShell(): void {
@@ -1131,12 +1233,19 @@ struct Index {
         // （bindToScrollable 隐式显隐管线位移）从物理上消除。
         // avoidLayoutSafeArea 与子页同口径（栏顶 = safeTop，覆盖式渲染）；
         // divider OFF：行 2 自带 0.5vp 底缘线的页面不再由根栏画分割线。
+        // 2026-10-21 折叠屏回归：md 也走本壳 —— 顶栏经 immersiveTitleBarNarrow
+        // 收窄到 contentMaxWidth(md)=600 居中，与内容列对齐（A5 同款逻辑，
+        // 原平板形态验证过）；sm 直用 immersiveTitleBarContent，零改动。
         .titleBar({
           avoidLayoutSafeArea: true,
           style: this.titleBarStyle(),
           content: {
             stackBuilder: (): void => {
-              this.immersiveTitleBarContent();
+              if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD) {
+                this.immersiveTitleBarNarrow();
+              } else {
+                this.immersiveTitleBarContent();
+              }
             },
             divider: {
               showType: DividerShowType.OFF
@@ -1158,7 +1267,8 @@ struct Index {
   }
 
   /**
-   * 平板形态（md/lg，2026-10-20 平板适配档 2）：左侧自绘 NavRail + 内容列。
+   * 平板壳（lg，2026-10-20 平板适配档 2；2026-10-21 折叠屏回归后仅 lg 使用）：
+   * 左侧自绘 NavRail + 内容列。
    *
    * 内容列 = HdsNavigation（顶栏配置与手机形态一致，仅作用于内容列 —— rail
    * 常驻在 Navigation 外）+ 四页常驻 Stack（visibility 切换：切页不销毁页面，

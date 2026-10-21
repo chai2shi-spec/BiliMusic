@@ -15,7 +15,15 @@
  * 更新，由 dragging + dragValue 隔离，插值动画在拖动中暂停。
  */
 
-import { Track, RepeatMode, PLAYBACK_SPEED_OPTIONS, speedLabelOf } from '../../model/MusicModels';
+import {
+  Track,
+  RepeatMode,
+  PLAYBACK_SPEED_OPTIONS,
+  speedLabelOf,
+  PROGRESS_STYLE_SHIMMER,
+  PROGRESS_STYLE_PULSE,
+  PROGRESS_STYLE_WAVE
+} from '../../model/MusicModels';
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { QueueSheet, repeatLabelOf, modeIconOf, nextRepeatMode } from '../QueueSheet';
 import { StyleConstants } from '../../common/constants/StyleConstants';
@@ -26,6 +34,9 @@ import { PlayerConstants } from '../../common/constants/PlayerConstants';
 import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { PlayButtonComponent } from './PlayButtonComponent';
 import { BounceIconButton } from './BounceIconButton';
+import { ShimmerProgressBar } from './ShimmerProgressBar';
+import { PulseDotProgressBar } from './PulseDotProgressBar';
+import { WaveBarsProgressBar } from './WaveBarsProgressBar';
 import { LibraryStore } from '../../service/LibraryStore';
 import { Playlist } from '../../model/MusicModels';
 import {
@@ -39,7 +50,9 @@ import {
   STORE_DURATION,
   STORE_REPEAT_MODE,
   STORE_PLAYBACK_SPEED_ENABLED,
-  STORE_PLAYBACK_SPEED
+  STORE_PLAYBACK_SPEED,
+  STORE_PROGRESS_STYLE,
+  STORE_PLAYER_OPEN
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
@@ -112,6 +125,11 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
   /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
   @State speedButtonScale: number = 1;
+  /**
+   * 播放页进度条样式（设置页镜像）：SHIMMER（流光）/ PULSE（波点）/ WAVE（频谱）
+   * 走自绘分支，其余取值（含未知值）回落经典 Slider —— 交互契约四档一致。
+   */
+  @StorageProp(STORE_PROGRESS_STYLE) progressStyle: string = '';
 
   private player: MusicPlayer = MusicPlayer.getInstance();
 
@@ -135,6 +153,21 @@ export struct ControlAreaComponent {
    */
   @State enterOpacity: number = 0;
   @State enterOffsetY: number = ENTRANCE_OFFSET_VP;
+
+  /**
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
+   * 把控制区入场状态复位为隐藏 —— 随收起动画一起插值淡出下沉（逆向镜像）。
+   */
+  @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
+
+  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  private onPlayerOpenChanged(): void {
+    if (this.playerOpen) {
+      return;
+    }
+    this.enterOpacity = 0;
+    this.enterOffsetY = ENTRANCE_OFFSET_VP;
+  }
 
   /**
    * 进度写入（500ms 一次）→ 520ms 线性插值：animateTo 反复重定目标，
@@ -198,6 +231,29 @@ export struct ControlAreaComponent {
       return this.duration;
     }
     return this.currentTrack !== null ? this.currentTrack.duration : 0;
+  }
+
+  // ===== 自绘进度条（流光 / 波点 / 频谱）的拖拽回调 =====
+  // 交互契约与经典 Slider 完全一致：按下/拖动只写本地隔离值，松手才 seek；
+  // 插值推进、时间标签、拖动隔离共用同一套 dragging / dragValue / sliderValue。
+
+  /** 自绘条按下：进入拖拽隔离（视觉反馈由子组件自理，父只置位） */
+  private onBarDragStart(): void {
+    this.dragging = true;
+  }
+
+  /** 自绘条拖动：本地跟随，不写播放进度 */
+  private onBarDragMove(sec: number): void {
+    this.dragValue = sec;
+  }
+
+  /** 自绘条松手 / 点按定位：交给播放内核；显示值直接落位（trackScale 无视觉、等效空跑） */
+  private onBarDragEnd(sec: number): void {
+    this.dragging = false;
+    if (this.effectiveDuration() > 0) {
+      this.player.seek(sec);
+    }
+    this.bounceBackTrack(sec);
   }
 
   /** 短提示：模式这种「图标变化不明显」的切换给一次文字反馈 */
@@ -466,48 +522,130 @@ export struct ControlAreaComponent {
       .justifyContent(FlexAlign.SpaceBetween)
 
       Column() {
-        Slider({
-          min: 0,
-          max: Math.max(1, this.effectiveDuration()),
-          step: 1,
-          style: SliderStyle.OutSet,
-          value: this.dragging ? this.dragValue : this.sliderValue
-        })
-          .selectedColor($r('app.color.slider_select'))
-          .trackColor($r('app.color.slider_track'))
-          .scale({ x: this.trackScale, y: this.trackScale })
-          .onChange((value: number, mode: SliderChangeMode): void => {
-            if (mode === SliderChangeMode.Begin) {
-              // 按下：只动本地滑块并轻微放大，不写播放进度
-              this.dragging = true;
-              this.dragValue = value;
-              this.scaleUpTrack();
-              return;
+        // 进度条四分支（设置 → 外观「播放页进度条样式」）：三种自绘样式共用
+        // value/max/拖拽回调契约，经典 Slider 保持原样（含未知值兜底）。
+        if (this.progressStyle === PROGRESS_STYLE_SHIMMER) {
+          ShimmerProgressBar({
+            value: this.dragging ? this.dragValue : this.sliderValue,
+            max: this.effectiveDuration(),
+            onSeekStart: (): void => {
+              this.onBarDragStart();
+            },
+            onSeekMove: (sec: number): void => {
+              this.onBarDragMove(sec);
+            },
+            onSeekEnd: (sec: number): void => {
+              this.onBarDragEnd(sec);
             }
-            if (mode === SliderChangeMode.Moving) {
-              this.dragValue = value;
-              return;
-            }
-            // 松手 / 点击定位：交给播放内核，进度条回弹
-            this.dragging = false;
-            if (this.effectiveDuration() > 0) {
-              this.player.seek(value);
-            }
-            this.bounceBackTrack(value);
           })
-          .height($r('app.float.slider_height'))
-          .margin({
-            left: new BreakpointType<Resource>({
-              sm: $r('app.float.slider_margin_sm'),
-              md: $r('app.float.slider_margin_md'),
-              lg: $r('app.float.slider_margin_lg')
-            }).getValue(this.currentBreakpoint),
-            right: new BreakpointType<Resource>({
-              sm: $r('app.float.slider_margin_sm'),
-              md: $r('app.float.slider_margin_md'),
-              lg: $r('app.float.slider_margin_lg')
-            }).getValue(this.currentBreakpoint)
+            .margin({
+              left: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint),
+              right: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint)
+            })
+        } else if (this.progressStyle === PROGRESS_STYLE_PULSE) {
+          PulseDotProgressBar({
+            value: this.dragging ? this.dragValue : this.sliderValue,
+            max: this.effectiveDuration(),
+            onSeekStart: (): void => {
+              this.onBarDragStart();
+            },
+            onSeekMove: (sec: number): void => {
+              this.onBarDragMove(sec);
+            },
+            onSeekEnd: (sec: number): void => {
+              this.onBarDragEnd(sec);
+            }
           })
+            .margin({
+              left: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint),
+              right: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint)
+            })
+        } else if (this.progressStyle === PROGRESS_STYLE_WAVE) {
+          WaveBarsProgressBar({
+            value: this.dragging ? this.dragValue : this.sliderValue,
+            max: this.effectiveDuration(),
+            onSeekStart: (): void => {
+              this.onBarDragStart();
+            },
+            onSeekMove: (sec: number): void => {
+              this.onBarDragMove(sec);
+            },
+            onSeekEnd: (sec: number): void => {
+              this.onBarDragEnd(sec);
+            }
+          })
+            .margin({
+              left: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint),
+              right: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint)
+            })
+        } else {
+          Slider({
+            min: 0,
+            max: Math.max(1, this.effectiveDuration()),
+            step: 1,
+            style: SliderStyle.OutSet,
+            value: this.dragging ? this.dragValue : this.sliderValue
+          })
+            .selectedColor($r('app.color.slider_select'))
+            .trackColor($r('app.color.slider_track'))
+            .scale({ x: this.trackScale, y: this.trackScale })
+            .onChange((value: number, mode: SliderChangeMode): void => {
+              if (mode === SliderChangeMode.Begin) {
+                // 按下：只动本地滑块并轻微放大，不写播放进度
+                this.dragging = true;
+                this.dragValue = value;
+                this.scaleUpTrack();
+                return;
+              }
+              if (mode === SliderChangeMode.Moving) {
+                this.dragValue = value;
+                return;
+              }
+              // 松手 / 点击定位：交给播放内核，进度条回弹
+              this.dragging = false;
+              if (this.effectiveDuration() > 0) {
+                this.player.seek(value);
+              }
+              this.bounceBackTrack(value);
+            })
+            .height($r('app.float.slider_height'))
+            .margin({
+              left: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint),
+              right: new BreakpointType<Resource>({
+                sm: $r('app.float.slider_margin_sm'),
+                md: $r('app.float.slider_margin_md'),
+                lg: $r('app.float.slider_margin_lg')
+              }).getValue(this.currentBreakpoint)
+            })
+        }
         Row() {
           Text(formatTime(this.dragging ? this.dragValue : this.sliderValue))
             .fontColor($r('app.color.play_text_color'))

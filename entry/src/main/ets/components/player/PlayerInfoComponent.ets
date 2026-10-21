@@ -38,27 +38,30 @@ import {
   STORE_LOGIN_REV,
   BILI_REFERER,
   PLAYER_TRANSITION_MS,
+  STORE_PLAYER_OPEN,
+  STORE_PLAYER_TRANSITIONING,
   AUDIO_Q_DOLBY,
   AUDIO_Q_HIRES,
+  GEOMETRY_ID_PLAYER_SURFACE,
+  PLAYER_SURFACE_RADIUS_END_VP,
   formatTrackQuality
 } from '../../common/Constants';
 import { HttpUtil } from '../../utils/HttpUtil';
 import { getLoginUser, LoginUser } from '../../service/LoginStore';
-import { NavStackHolder, PlayerEntranceRect } from '../../service/NavStackHolder';
 
 /** blur 偶发失败的单次重试延迟（ms） */
 const BLUR_RETRY_DELAY_MS: number = 300;
-/**
- * 内容层（封面 / 标题 / 控制区 / 顶栏）在「容器长大」期间的淡入：延迟 + 时长（ms）。
- *
- * 为什么必须延迟：内容不属于生长面（它不跟着缩放，否则文字会逐帧变形），
- * 而是叠在生长面之上 —— 若一上来就全不透明，会看到文字浮在还没长开的
- * 小矩形之外、压在下面的首页上。先淡入 60ms 再渐变 180ms，
- * 让「面在长」和「内容浮现」在 300ms 内错峰完成，且封面（geometryTransition
- * 一镜到底）在中后段仍然可见，不破坏原有的唱片飞行观感。
- */
-const CONTENT_FADE_IN_DELAY_MS: number = 60;
-const CONTENT_FADE_IN_MS: number = 180;
+// ⚠️ 这里曾有 CONTENT_FADE_IN_DELAY_MS / CONTENT_FADE_IN_MS（整块内容层 60ms 延迟 + 180ms 淡入），
+// 2026-10-21 真机首验后**删除**：整块淡入会把封面（CoverDisc，geometryTransition 一镜到底）
+// 一起压成透明 —— 转场头 60ms 封面完全不可见，观感变成「一块背景矩形从迷你栏长开、
+// 内容随后浮现」，而不是「迷你栏那块玻璃整块变大、封面飞出来」。
+// 编辑者注意：**不要为了「避免内容浮在没长开的背景之外」把整块 opacity 加回来** ——
+// 这个职责已由各层自带的分层入场承担：
+//   · 顶栏   TopAreaComponent        → LAYER_DELAY_TOP(450)    + 250ms 淡入
+//   · 标题块 MusicInfoComponent      → LAYER_DELAY_INFO(540)   + 250ms 淡入 + 10vp 上移
+//   · 控制区 ControlAreaComponent    → LAYER_DELAY_CONTROL(660) + 250ms 淡入 + 10vp 上移
+//   · 封面   CoverDiscComponent      → 刻意**不动**（形变由 geometryTransition 独占）
+// 封面因此全程不透明：它以迷你栏唱片为起点飞行，本来就不会「浮在首页上」。
 
 @Component
 export struct PlayerInfoComponent {
@@ -77,22 +80,12 @@ export struct PlayerInfoComponent {
   @StorageLink(STORE_LOGIN_REV) loginRev: number = 0;
 
   /**
-   * 「容器长大」进度：1 = 全屏（常态）；0 = 完全贴合迷你栏矩形。
-   * 从迷你栏进入时由 playEnterTransition 从 0 动画到 1；
-   * 其余情况（无起点 / 测量失败）恒 1，页面就是普通全屏。
+   * 播放页展开态（打开主动画里写 true / Index.closePlayer 里写 false）：
+   * 驱动背景面的 geometryTransition 配对 —— true 时本组件的全屏背景面出现、
+   * PlayBar 迷你栏里的透明锚点消失，系统在「迷你栏真实视觉包围盒 ↔ 全屏」之间
+   * 做几何插值（2026-10-21 起点偏左下根治，见 GEOMETRY_ID_PLAYER_SURFACE 注释）。
    */
-  @State surfaceProgress: number = 1;
-  /** 内容层（封面 / 标题 / 控制区 / 顶栏）不透明度：转场期间与生长面错峰淡入 */
-  @State contentOpacity: number = 1;
-  /** 本组件实测尺寸（vp = 窗口尺寸）：生长面的目标矩形（全屏）用 */
-  @State winW: number = 0;
-  @State winH: number = 0;
-  /**
-   * 转场起点矩形（迷你栏实测，vp）：aboutToAppear 从 NavStackHolder 取一份本地副本后
-   * **立刻清空全局**（一次性语义，避免其它入口复用陈旧矩形）。
-   * null = 无起点 → 不做生长动画，退回「整页淡入」的老转场。
-   */
-  private entrance: PlayerEntranceRect | null = null;
+  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
 
   /**
    * LG 分栏左列圆盘边长上限（vp）：0 = 首帧未实测（宽度驱动，实测后收敛）。
@@ -181,91 +174,35 @@ export struct PlayerInfoComponent {
       : `${base} · 登录可解锁更高音质`;
   }
 
-  // ───────────── 迷你栏 → 全屏 的「容器长大」几何（vp） ─────────────
-  //
-  // 生长面（背景层）用**布局属性**插值，不用 scale：非等比缩放会把圆角拉成椭圆、
-  // 把背景图压扁；布局动画每帧只是一次轻量重排 —— 面里只有三张全屏背景层，
-  // 没有文本，代价可忽略。
-  // p=0 → 与迷你栏矩形完全重合（含胶囊圆角 h/2）；p=1 → 全屏、圆角 0。
-
-  /** 生长进度（钳制到 0~1）；无起点时恒 1 = 全屏（退化到常态） */
-  private growT(): number {
-    if (this.entrance === null) {
-      return 1;
-    }
-    return Math.min(1, Math.max(0, this.surfaceProgress));
-  }
-
   /**
-   * 目标全屏宽 / 高（vp）。
-   * 实测值未到位时退回起点矩形的宽高 —— 保证首帧（p=0，只用到起点值）不会渲染出 0 尺寸。
-   */
-  private fullW(): number {
-    if (this.winW > 0) {
-      return this.winW;
-    }
-    const e: PlayerEntranceRect | null = this.entrance;
-    return e !== null ? e.w : 0;
-  }
-
-  private fullH(): number {
-    if (this.winH > 0) {
-      return this.winH;
-    }
-    const e: PlayerEntranceRect | null = this.entrance;
-    return e !== null ? e.h : 0;
-  }
-
-  private surfaceX(): number {
-    const e: PlayerEntranceRect | null = this.entrance;
-    return e !== null ? e.x * (1 - this.growT()) : 0;
-  }
-
-  private surfaceY(): number {
-    const e: PlayerEntranceRect | null = this.entrance;
-    return e !== null ? e.y * (1 - this.growT()) : 0;
-  }
-
-  private surfaceW(): number {
-    const e: PlayerEntranceRect | null = this.entrance;
-    const full: number = this.fullW();
-    return e !== null ? e.w + (full - e.w) * this.growT() : full;
-  }
-
-  private surfaceH(): number {
-    const e: PlayerEntranceRect | null = this.entrance;
-    const full: number = this.fullH();
-    return e !== null ? e.h + (full - e.h) * this.growT() : full;
-  }
-
-  /** 圆角：迷你栏是胶囊（h/2），全屏时为 0 */
-  private surfaceRadius(): number {
-    const e: PlayerEntranceRect | null = this.entrance;
-    return e !== null ? (e.h / 2) * (1 - this.growT()) : 0;
-  }
-
-  /**
-   * 进场：背景面从迷你栏矩形长到全屏 + 内容层错峰淡入。
+   * 打开主动画（2026-10-21 组件状态切换改版）：**唯一**的 animateTo，
+   * 闭包内写 STORE_PLAYER_OPEN=true，同帧驱动两套 geometryTransition 配对 ——
+   *   · 背景面：PlayBar 迷你栏透明锚点 if 消失 ↔ 本组件全屏背景面 if 出现 →
+   *     系统在「迷你栏**真实视觉包围盒** ↔ 全屏」间几何插值（起点偏左下根治，
+   *     跨 HDS 窗口坐标换算由系统完成，见 GEOMETRY_ID_PLAYER_SURFACE）；
+   *   · 封面：PlayBar 迷你唱片 if 消失 ↔ CoverDisc 大唱片 if 出现 →
+   *     页内配对飞行（圆→圆，独立于背景面）；
+   *   · Index 页签图标 opacity 同步淡出（@StorageProp/@Watch 同帧翻转）。
+   * 时长与曲线（PLAYER_TRANSITION_MS / fastOutSlowIn）即两套配对飞行时长。
+   * onFinish 复位连点防护标志（PlayBar.openPlayer 置位）。
    *
-   * ⚠️ 只在这里（onAppear）启动 —— 首帧已经按 surfaceProgress=0 画过，
-   * 若改在 aboutToAppear 里 animateTo，起点会被同帧状态合批吃掉，看不到生长。
-   * 时长与封面 geometryTransition 严格一致（PLAYER_TRANSITION_MS），
-   * 否则会出现「面已长满、封面还在飞」。曲线 EaseOut：起步快、落位稳。
+   * ⚠️ 只在 onAppear 启动 —— 首帧已经按 playerOpen=false 画过（背景面未挂载），
+   * 若改在 aboutToAppear 里 animateTo，配对出现会被同帧状态合批吃掉。
+   *
+   * 内容层的显现**不在这里**：顶栏 / 标题块 / 控制区各自由分层入场
+   * （LAYER_DELAY_*，主动画基线 450ms 后依次淡入），封面刻意不动。
    */
   private playEnterTransition(): void {
-    if (this.entrance === null) {
-      return;
-    }
     this.getUIContext().animateTo(
-      { duration: PLAYER_TRANSITION_MS, curve: Curve.EaseOut },
+      {
+        duration: PLAYER_TRANSITION_MS,
+        curve: Curve.FastOutSlowIn,
+        onFinish: (): void => {
+          AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
+        }
+      },
       (): void => {
-        this.surfaceProgress = 1;
-      }
-    );
-    this.getUIContext().animateTo(
-      { duration: CONTENT_FADE_IN_MS, delay: CONTENT_FADE_IN_DELAY_MS, curve: Curve.EaseOut },
-      (): void => {
-        this.contentOpacity = 1;
+        AppStorage.setOrCreate(STORE_PLAYER_OPEN, true);
       }
     );
   }
@@ -284,17 +221,8 @@ export struct PlayerInfoComponent {
   };
 
   aboutToAppear(): void {
-    // 转场起点（点击迷你栏时 PlayBar 实测写入）。
-    // ⚠️ 这里**不清空**它：PlayerPage 的 customTransition 也要读同一个值来判断
-    // 走「容器长大」还是「整页淡入」，而两者的先后顺序没有保证（谁先跑都可能）。
-    // 生命周期由 PlayerPage.aboutToDisappear 统一清空。
-    const startRect: PlayerEntranceRect | null = NavStackHolder.playerEntranceRect;
-    if (startRect !== null && startRect.w > 0 && startRect.h > 0) {
-      this.entrance = startRect;
-      this.surfaceProgress = 0;
-      this.contentOpacity = 0;
-      console.info(`[PlayerInfo] grow from x=${startRect.x}, y=${startRect.y}, w=${startRect.w}, h=${startRect.h}`);
-    }
+    // 背景面转场起点不再手动实测：geometryTransition 配对由系统换算
+    // 迷你栏锚点的真实视觉包围盒（见 GEOMETRY_ID_PLAYER_SURFACE）。
     this.onTrackChanged();
     try {
       if (canIUse('SystemCapability.Window.SessionManager')) {
@@ -472,19 +400,28 @@ export struct PlayerInfoComponent {
   }
 
   build() {
-    Stack() {
-      // ── 生长面（背景层）：转场时从迷你栏矩形长到全屏，平时就是全屏背景 ──
-      // 三张背景层放进一个**裁剪**容器：生长过程中圆角外的一切被裁掉，观感就是
-      // 「迷你栏那块玻璃被拉开」。内容层**不在这里**（它不跟着缩放，见 contentOpacity）。
       Stack() {
-        this.SurfaceLayers()
-      }
-      .width(this.surfaceW())
-      .height(this.surfaceH())
-      .position({ x: this.surfaceX(), y: this.surfaceY() })
-      .borderRadius(this.surfaceRadius())
-      .clip(true)
-      .backgroundColor(this.imageColor)
+        // ── 背景面（2026-10-21 起点偏左下根治）：全屏沉浸层，经 geometryTransition
+        // 与 PlayBar 迷你栏里的**透明锚点**配对 —— playerOpen 翻转（本组件
+        // playEnterTransition / Index.closePlayer 的同一条 animateTo）时，系统在
+        // 「迷你栏真实视觉包围盒 ↔ 全屏」间做几何插值，跨 HDS 窗口坐标换算由
+        // 系统完成（getRectangleById 等应用侧 API 拿不到合成变换后的视觉几何）。
+        // 内容层**不在这里**（它不跟着缩放，靠各层分层入场）。
+        if (this.playerOpen) {
+          Stack() {
+            this.SurfaceLayers()
+          }
+          .width(StyleConstants.FULL_WIDTH)
+          .height(StyleConstants.FULL_HEIGHT)
+          .backgroundColor(this.imageColor)
+          // 终点圆角（2026-10-21 展开过程四角圆角）：配对两端显式挂 borderRadius
+          // 即参与 geometryTransition 形变 —— 飞行途中四角呈胶囊同款圆角（起点
+          // 28vp，见 PlayBar 锚点），全屏静止态收平（0），不露底层页面底色。
+          // SurfaceLayers 三层均 100% 有界，clip 不裁静止态内容。
+          .borderRadius(PLAYER_SURFACE_RADIUS_END_VP)
+          .clip(true)
+          .geometryTransition(GEOMETRY_ID_PLAYER_SURFACE)
+        }
 
       Row() {
         if (this.isFoldFull) {
@@ -682,19 +619,15 @@ export struct PlayerInfoComponent {
         top: this.safeTop,
         bottom: this.safeBottom
       })
-      // 内容层随生长面错峰淡入（封面 geometryTransition 不受影响：这里只有 opacity，
-      // 没有任何 transform / 布局动画 —— 一旦挂 translate/scale，共享元素目标框会被搬走）
-      .opacity(this.contentOpacity)
+      // ⚠️ 这里**不能再挂整块 opacity**（2026-10-21 已删）：
+      // 它会连封面一起淡掉，把「迷你栏变大 + 封面飞出」压成「背景块长开 + 内容浮现」。
+      // 内容显现交给各层的分层入场；且本层一旦挂 translate/scale，
+      // 共享元素（封面）的目标框还会被搬走 —— 只允许纯布局，不许 transform。
     }
     .height(StyleConstants.FULL_HEIGHT)
     .width(StyleConstants.FULL_WIDTH)
-    // 窗口尺寸实测：生长面的目标矩形（全屏）用它。这里不是 HDS 托管内容，
-    // 布局回调写状态是安全的（MusicInfoComponent 的圆盘预算同理）。
-    .onAreaChange((_old: Area, n: Area): void => {
-      this.winW = this.toVp(n.width);
-      this.winH = this.toVp(n.height);
-    })
-    // 生长动画只能在 onAppear 启动（首帧已按 surfaceProgress=0 画过），见 playEnterTransition
+    // 主动画只能在 onAppear 启动（首帧已按 playerOpen=false 画过：背景面未挂载），
+    // 见 playEnterTransition
     .onAppear((): void => {
       this.playEnterTransition();
     })

@@ -34,8 +34,11 @@
  *
  * 点击语义（onEntryTap 统一，两种布局一致）：
  *   收起态（水平圆盘 / 垂直收起行）点按 → 先经 onExpandRequest 展开；
- *   展开态点按 → 进播放页（gotoPlayer：animateTo 内 pushPath，封面
- *   geometryTransition 一镜到底，连点防护复用 STORE_PLAYER_TRANSITIONING）。
+ *   展开态点按 → 打开播放页（openPlayer：挂载 Index 根 Stack 的播放页 overlay，
+ *   背景面经槽位内**透明锚点**与播放页全屏面 geometryTransition 配对（起点 =
+ *   迷你栏真实视觉包围盒，系统跨 HDS 窗口换算），封面另走 geometryTransition
+ *   页内配对一镜到底，连点防护复用 STORE_PLAYER_TRANSITIONING；2026-10-21 起
+ *   不再 pushPath 路由跳转）。
  *
  * 封面圆盘尺寸（coverSize → discSizeVp 初值）：**纯常量选择，不做任何测量**。
  *   · 展开态 / 宽屏 / 水平融合 → COVER_SIZE(40)；
@@ -73,15 +76,16 @@
 
 import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { NavStackHolder, PlayerEntranceRect } from '../service/NavStackHolder';
+import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { toThumbUrl } from '../utils/TextUtil';
 import { CoverImage } from './CoverImage';
-import { AnimatorOptions, AnimatorResult, componentUtils } from '@kit.ArkUI';
 import {
   STORE_CURRENT_TRACK,
   STORE_IS_PLAYING,
   STORE_QUEUE,
   STORE_PLAYER_TRANSITIONING,
+  STORE_PLAYER_OPEN,
+  STORE_PLAYER_OVERLAY_MOUNTED,
   STORE_MINI_BAR_EXPANDED,
   STORE_MINI_BAR_ANIM_PHASE,
   MINI_BAR_ANIM_IDLE,
@@ -91,10 +95,11 @@ import {
   STORE_MINI_BAR_PROGRESS,
   STORE_PROGRESS,
   STORE_DURATION,
+  STORE_APP_FOREGROUND,
   STORE_THEME_PRIMARY,
   GEOMETRY_ID_PLAYER_DISC,
-  PLAYER_TRANSITION_MS,
-  MINI_BAR_RECT_ID
+  GEOMETRY_ID_PLAYER_SURFACE,
+  PLAYER_SURFACE_RADIUS_START_VP
 } from '../common/Constants';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
@@ -150,6 +155,12 @@ export struct PlayBar {
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   /** 播放中标志（isPlaying）：切换播放 / 暂停图标；@Watch 驱动唱片 play / pause */
   @StorageLink(STORE_IS_PLAYING) @Watch('onPlayingChanged') isPlaying: boolean = false;
+
+  /**
+   * 前后台标志（2026-10-21 后台耗电优化）：退后台冻结唱片动画，避免
+   * animator 帧回调 / @State 回写在 UI 冻结后空转；回前台在播时续转。
+   */
+  @StorageProp(STORE_APP_FOREGROUND) @Watch('onForegroundChanged') appForeground: boolean = true;
   /**
    * miniBar 展开 / 收起态（Index 的 onBarStyleChange 写入，这里只读；默认折叠）。
    * 空闲时决定 Body 挂载与否（bodyVisible 的兜底分支）；动画进行中不介入
@@ -199,6 +210,13 @@ export struct PlayBar {
    */
   @StorageProp(STORE_MINI_BAR_PROGRESS) miniBarProgress: boolean = true;
 
+  /**
+   * 播放页展开态（Index overlay 挂载后由 PlayerInfoComponent 主动画写 true）：
+   * true 期间迷你唱片摘除（大唱片端 geometryTransition 配对飞行，圆→圆 morph）、
+   * 槽位保留恒定占位（外包 Stack 定宽高，Body 布局零跳动）。
+   */
+  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
+
   /** 唱片当前旋转角度（°）：animator 每帧回写，暂停时冻结在当前值 */
   @State rotateAngle: number = 0;
   /** 迷你播放/暂停键的点击回弹缩放（独立状态，与唱片旋转互不相干） */
@@ -245,7 +263,7 @@ export struct PlayBar {
         this.rotateAngle = value;
       };
       // 挂载时可能已在播放中（isPlaying 初值即 true，@Watch 不会触发，需手动起转）
-      if (this.isPlaying) {
+      if (this.isPlaying && this.appForeground) {
         this.coverAnim.play();
       }
     } catch (e) {
@@ -264,11 +282,21 @@ export struct PlayBar {
 
   /** 播放/暂停 → 唱片续转/冻结。pause 冻结在当前帧角度，绝不复位到 0 */
   private onPlayingChanged(): void {
+    this.syncDiscAnim();
+  }
+
+  /** 退后台冻结 / 回前台续转（在播时），统一走 syncDiscAnim */
+  private onForegroundChanged(): void {
+    this.syncDiscAnim();
+  }
+
+  /** 唱片旋转统一入口：前台且在播才续转，否则冻结在当前帧角度（绝不复位到 0） */
+  private syncDiscAnim(): void {
     const anim: AnimatorResult | null = this.coverAnim;
     if (anim === null) {
       return;
     }
-    if (this.isPlaying) {
+    if (this.isPlaying && this.appForeground) {
       anim.play();
     } else {
       anim.pause();
@@ -290,7 +318,8 @@ export struct PlayBar {
       console.error(`[PlayBar] animator reset failed: ${msg}`);
       return;
     }
-    if (this.isPlaying) {
+    // 后台切歌不起转：回前台时 onForegroundChanged 会按播放态补起转
+    if (this.isPlaying && this.appForeground) {
       anim.play();
     }
   }
@@ -412,59 +441,27 @@ export struct PlayBar {
   }
 
   /**
-   * 跳转全屏播放页。
+   * 打开全屏播放页（2026-10-21 改版：**组件状态切换动画，不再 pushPath 路由**）。
    *
-   * 标记共享元素转场开始（PlayerPage 依赖该标志把唱片旋转延迟到转场结束），
-   * 再在 animateTo 闭包内 pushPath —— 既驱动封面 geometryTransition 一镜到底，
-   * 又保留转场动画供 PlayerPage 的 customTransition 升起动效使用。
+   * 只做两件事：连点防护 → 挂载 Index 根 Stack 上的播放页 overlay。
+   * 主动画（背景面从迷你栏**真实视觉包围盒**向四周扩大 + 封面 geometryTransition
+   * 飞行 + 页签图标淡出）全部由 PlayerInfoComponent 在 overlay 挂载后的**单个
+   * animateTo** 驱动（见其 playEnterTransition）。
+   * 收起为逆向镜像（Index.closePlayer），返回不走路由栈 —— 播放页不再是 NavDestination。
    */
-  private gotoPlayer(): void {
+  private openPlayer(): void {
     // 诊断日志（折叠屏「点 miniBar 不跳转」排查）：能打出这行说明点击已送达展开态条目
-    console.info(`[PlayBar] gotoPlayer: bp=${this.currentBreakpoint}, expanded=${this.expanded}`);
-    // 连点防护：转场进行中再 push 一次会叠出两层播放页（返回要按两次才回得来）。
-    // 复用转场标志即可 —— 它在整个进出过程中都为真（进场的 aboutToAppear 置位、
-    // 返回的 onBackPressed 也会置位），不需要额外的状态。
+    console.info(`[PlayBar] openPlayer: bp=${this.currentBreakpoint}, expanded=${this.expanded}`);
+    // 连点防护：转场进行中再开一次会叠出两层主动画（收起要按两次才回得来）。
+    // 复用转场标志即可 —— 它在整个进出过程中都为真（打开时置位、主动画 onFinish /
+    // closePlayer 收尾复位），不需要额外的状态。
     if (AppStorage.get<boolean>(STORE_PLAYER_TRANSITIONING) ?? false) {
-      console.info('[PlayBar] gotoPlayer ignored: transition in progress');
+      console.info('[PlayBar] openPlayer ignored: transition in progress');
       return;
     }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
-    // 进播放页前实测迷你栏矩形：播放页的背景面从这块矩形「长」到全屏
-    this.captureEntranceRect();
-    this.getUIContext().animateTo(
-      { duration: PLAYER_TRANSITION_MS, curve: Curve.EaseInOut },
-      (): void => {
-        NavStackHolder.stack.pushPath({ name: 'Player' });
-      }
-    );
-  }
-
-  /**
-   * 实测迷你栏当前窗口矩形，写入 NavStackHolder（播放页据此从这块矩形长到全屏）。
-   *
-   * 为什么用 getRectangleById 而不是 onAreaChange：onAreaChange 是布局回调，
-   * 在 HDS 托管的槽位里回写状态会让内容在 HDS 形变动画中重建（历史真机事故：
-   * 「垂直两层下展开迷你栏直接消失」）。这里只在**点击那一刻主动读一次**，
-   * 零状态写入、零重渲染。
-   * 失败一律置 null —— 播放页会自动退回「整页淡入」的老转场，不会出现半截动画。
-   */
-  private captureEntranceRect(): void {
-    try {
-      const ctx = this.getUIContext();
-      const info: componentUtils.ComponentInfo = ctx.getComponentUtils().getRectangleById(MINI_BAR_RECT_ID);
-      const rect: PlayerEntranceRect = {
-        x: ctx.px2vp(info.windowOffset.x),
-        y: ctx.px2vp(info.windowOffset.y),
-        w: ctx.px2vp(info.size.width),
-        h: ctx.px2vp(info.size.height)
-      };
-      NavStackHolder.playerEntranceRect = rect;
-      console.info(`[PlayBar] entrance rect: x=${rect.x}, y=${rect.y}, w=${rect.w}, h=${rect.h}`);
-    } catch (e) {
-      NavStackHolder.playerEntranceRect = null;
-      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
-      console.warn(`[PlayBar] captureEntranceRect failed: ${msg}`);
-    }
+    // 挂载 overlay（Index 根 Stack 条件渲染 LazyDest('Player')，懒加载 + 预热复用）
+    AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, true);
   }
 
   /**
@@ -488,7 +485,7 @@ export struct PlayBar {
       this.onExpandRequest();
       return;
     }
-    this.gotoPlayer();
+    this.openPlayer();
   }
 
   /**
@@ -598,10 +595,38 @@ export struct PlayBar {
       // Stack Bottom 叠加：主行（恒驻唱片 + 隔离的内容体）铺满，
       // 底边多出一条 2vp 直线进度（随 bodyVisible 淡入淡出，见下）。
       Stack({ alignContent: Alignment.Bottom }) {
+        // 透明锚点（2026-10-21 起点偏左下根治）：播放页背景面 geometryTransition
+        // 的迷你栏侧配对极。不渲染任何像素、只提供几何 —— 系统在配对插值时用
+        // 它被 HDS 合成变换后的**真实视觉包围盒**做起点（跨窗口坐标换算由系统
+        // 完成，唱片配对同机制已验证）。刻意做成兄弟替身而不是把本 Stack 整树
+        // 拿去配对：唱片（GEOMETRY_ID_PLAYER_DISC）配对的起点在子树里，整树配对
+        // 会让两套 geometryTransition 嵌套叠加。playerOpen 翻转（播放页侧
+        // playEnterTransition / Index.closePlayer 的同一条 animateTo）驱动配对。
+        if (!this.playerOpen) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .hitTestBehavior(HitTestMode.None)
+            // 起点圆角（2026-10-21 展开过程四角圆角）：geometryTransition 在绑定处
+            // 同步圆角 —— 透明节点不渲染像素，borderRadius + clip 只向配对提供
+            // 「胶囊同款圆角」的几何，展开/收起飞行途中背景面四角即呈 28vp 圆角。
+            .borderRadius(PLAYER_SURFACE_RADIUS_START_VP)
+            .clip(true)
+            .geometryTransition(GEOMETRY_ID_PLAYER_SURFACE)
+        }
+
         Row({ space: 8 }) {
-          // 恒驻唱片：永不重挂载、位置恒为行首 —— 收起/展开动画期间零位移
-          // （旋转连续、geometryTransition 单节点，见 Disc 注释）。
-          this.Disc()
+          // 恒驻唱片槽位（2026-10-21 组件状态切换动画改版）：外包 Stack 定宽高
+          // （discSizeVp）—— 播放页打开（playerOpen=true）时唱片摘除参与
+          // geometryTransition 页内配对（飞向播放页大圆盘），槽位占位恒定，
+          // Body 布局零跳动；收起时唱片随 Index.closePlayer 的 animateTo 回飞归位。
+          Stack() {
+            if (!this.playerOpen) {
+              this.Disc()
+            }
+          }
+          .width(this.discSizeVp)
+          .height(this.discSizeVp)
 
           // 内容体隔离容器：Body 的挂载/卸载（出场节点不占布局）只影响这个
           // Stack 内部，恒驻唱片的布局位置不受任何影响。
@@ -645,9 +670,6 @@ export struct PlayBar {
       }
       .width('100%')
       .height('100%')
-      // 组件 id：仅供 gotoPlayer 用 getRectangleById 实测矩形（不做任何布局回调）——
-      // 播放页背景面从这里「长」到全屏，见 captureEntranceRect 与 MINI_BAR_RECT_ID。
-      .id(MINI_BAR_RECT_ID)
       // 按压反馈（原收起态专属，升级为两态通用）：整条按下轻微降透明度
       .stateStyles({
         pressed: { .opacity(0.85) },

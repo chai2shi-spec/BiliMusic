@@ -19,6 +19,7 @@ import {
   STORE_CURRENT_TRACK,
   STORE_PLAYER_BG_DARK,
   STORE_PLAYER_FOLD_FULL,
+  STORE_PLAYER_OPEN,
   STORE_LOGIN_REV,
   formatTrackQuality
 } from '../../common/Constants';
@@ -65,6 +66,21 @@ export struct MusicInfoComponent {
    */
   @State titleOpacity: number = 0;
   @State titleOffsetY: number = ENTRANCE_OFFSET_VP;
+
+  /**
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
+   * 把标题块入场状态复位为隐藏 —— 随收起动画一起插值淡出下沉（逆向镜像）。
+   */
+  @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
+
+  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  private onPlayerOpenChanged(): void {
+    if (this.playerOpen) {
+      return;
+    }
+    this.titleOpacity = 0;
+    this.titleOffsetY = ENTRANCE_OFFSET_VP;
+  }
 
   aboutToAppear(): void {
     // 延迟直接交给 animateTo 的 delay，不用 setTimeout —— 少一个要清理的定时器

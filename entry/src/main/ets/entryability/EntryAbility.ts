@@ -17,7 +17,7 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
@@ -67,7 +67,16 @@ export default class EntryAbility extends UIAbility {
    * **不保证被调**（进程可能直接被杀），onBackground 是最后一个可靠时机。
    * savePlayerStateNow 内部 fire-and-forget，偶发失败只记日志不阻塞退后台。
    */
+  onForeground(): void {
+    // 前后台标志（2026-10-21 后台耗电优化）：PlayBar/CoverDisc/PlayButton 动画门控
+    // 与 MusicPlayer 落盘节流（5s/30s）的依据。启动时系统也会回调本钩子，
+    // 组件 @StorageProp 默认 true 与之双保险；标志缺失一律按前台处理。
+    AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
+  }
+
   onBackground(): void {
+    // 退后台：动画门控关闭（animator/呼吸链冻结，回前台续转）
+    AppStorage.setOrCreate(STORE_APP_FOREGROUND, false);
     try {
       MusicPlayer.getInstance().savePlayerStateNow();
     } catch (e) {
@@ -119,6 +128,9 @@ export default class EntryAbility extends UIAbility {
         // 底部导航布局（设置页可切）：首帧前首发 AppStorage 镜像，
         // Index 的 @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_BAR_LAYOUT, settings.barLayout);
+        // 播放页进度条样式（设置页可切）同批首发：ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_PROGRESS_STYLE, settings.progressStyle);
         // 迷你栏进度指示开关（设置页可切）同批首发：PlayBar 的 @StorageProp
         // 初值只是占位，真值必须首帧 build 前就位，否则关开关的用户启动时
         // 会先看到进度条再消失。
@@ -131,6 +143,9 @@ export default class EntryAbility extends UIAbility {
         // MusicPlayer.init 恢复 playbackSpeed 字段的数据源。
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED_ENABLED, settings.speedEnabled);
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED, settings.playbackSpeed);
+        // 「与其他应用同时播放」开关同批首发：MusicPlayer 在 AVPlayer prepared 时
+        // 读它决定 audioInterruptMode（INDEPENDENT/SHARE），首播前必须就位。
+        AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);
         // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
         //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
         AppContainer.initRest(this.context)

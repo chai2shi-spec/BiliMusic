@@ -2,6 +2,10 @@
  * 单曲列表项。网络封面直接由 Image 加载（需 INTERNET 权限）。
  * 通过函数属性 onPlay / moreMenuItems 把交互交回父页面。
  *
+ * 标题双行显示（2026-10-21 用户要求）：maxLines(2) + 第二行省略号，长标题更完整；
+ * 封面随之 56→64vp，配显式 lineHeight（标题 21 ×2 + 间距 4 + 副行 17 = 63 ≤ 64）
+ * 硬保证「信息高度不超过封面高度」；短标题单行时行高不变（封面固定高驱动行高）。
+ *
  * ⚠️ 条目内**不放播放图标**（曾有一个粉色的 `Text('▶')`）：
  * 整行本身就是 `onPlay` 的点击区，条目右侧再挂一个播放三角是重复入口，
  * 也和右侧「⋯」挤在一起。播放靠「点整行」，不要加回来。
@@ -230,13 +234,14 @@ export struct TrackItem {
   build() {
     Row() {
       if (this.showCover) {
-        // 56vp 显示位按 2x 请求图床缩略图（与歌单/下载页封面尺寸统一）；
+        // 64vp 显示位按 2x 请求图床缩略图（双行标题改版 2026-10-21：封面 56→64，
+        // 高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17) = 63 ≤ 64）；
         // 加载中 / 失败由 CoverImage 兜浅粉占位
         // altText 让读屏把这行念成「歌名」，而不是跳过封面或念一串 URL
         CoverImage({
-          url: toThumbUrl(this.track.coverUrl, 112),
-          imgWidth: 56,
-          imgHeight: 56,
+          url: toThumbUrl(this.track.coverUrl, 128),
+          imgWidth: 64,
+          imgHeight: 64,
           imgRadius: 8,
           altText: this.track.title
         })
@@ -244,13 +249,19 @@ export struct TrackItem {
 
       Column() {
         // 标题行（2026-10-08 收进 Row）：右侧可挂「已下载」徽标 ——
-        // 标题用 layoutWeight(1) 吃满剩余宽度（过长省略），徽标永不被挤掉。
+        // 标题用 layoutWeight(1) 吃满剩余宽度，徽标永不被挤掉。
+        // 顶对齐（2026-10-21 双行标题改版）：双行标题时徽标对齐第一行而不是
+        // 整块垂直居中；单行标题无视觉差异。
         Row() {
+          // 标题双行显示（2026-10-21 用户要求）：maxLines(2) + 第二行省略号，
+          // 长标题更完整；显式 lineHeight(21) 锁行高（默认行高随字体浮动，会
+          // 破坏「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
           Text(this.track.title)
             .fontSize(16)
             .fontColor($r('app.color.text_primary'))
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(21)
             .layoutWeight(1)
           // 「已下载」徽标（2026-10-08）：与下载页「正在播放」同款视觉，
           // 告诉用户这首已经存到本地（播放会直接走本地文件，不耗流量）。
@@ -276,12 +287,16 @@ export struct TrackItem {
           }
         }
         .width('100%')
+        .alignItems(VerticalAlign.Top)
         Row() {
+          // 副行行高锁 17（13sp）：与标题 lineHeight(21) 一起构成高度预算
+          //（2×21 + 4 + 17 = 63 ≤ 封面 64），见封面注释。
           Text(this.track.artist)
             .fontSize(13)
             .fontColor($r('app.color.text_secondary'))
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(17)
             .layoutWeight(1)
           // 「上次听到 x:xx」跟在歌手后（最近播放页续播提示，
           // 其余页面不传 heardText，空串整块不渲染，布局与原先完全一致）。

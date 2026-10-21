@@ -1465,8 +1465,9 @@ export class DownloadManager {
       await this.finishTask(t, DownloadStatus.PAUSED, t.localFilePath, '');
       return;
     }
-    // 传输中：真正的收尾在 runDownload 的哨兵分支里（它才握着队列元素），
-    // 这里只补一次快照，让行状态先变「已暂停」—— 别让用户等下一个轮询点。
+    // 传输中：真正的收尾在 runDownload 的哨兵分支里（它才握着队列元素）。
+    // 这里 notify 只是补推一次快照 —— 此时状态仍是 DOWNLOADING，
+    // 行会在哨兵落地后（≤20ms）经 finishTask(PAUSED) 变为「已暂停」。
     this.notify();
   }
 

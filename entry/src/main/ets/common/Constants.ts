@@ -117,6 +117,9 @@ export const STORE_LOADING_AUDIO: string = 'loadingAudio';
 export const STORE_VOLUME: string = 'volume';
 export const STORE_MUTED: string = 'isMuted';
 
+/** 前后台标志（EntryAbility onForeground/onBackground 发布）：动画门控与后台落盘节流的依据 */
+export const STORE_APP_FOREGROUND: string = 'appForeground';
+
 /**
  * 定时停止播放：到点时间戳（ms），0 / 未设置 = 关闭。
  *
@@ -127,21 +130,67 @@ export const STORE_MUTED: string = 'isMuted';
 export const STORE_SLEEP_TIMER_END: string = 'sleepTimerEnd';
 
 // ===== 播放页共享元素转场（PlayBar ↔ PlayerPage 唱片一镜到底） =====
-/** 共享元素 id：底栏小唱片与播放页大唱片必须一致（Navigation 场景用 geometryTransition） */
+/** 共享元素 id：底栏小唱片与播放页大唱片必须一致（组件状态切换动画中 geometryTransition 配对） */
 export const GEOMETRY_ID_PLAYER_DISC: string = 'player_cover';
-/** 转场时长（ms），EaseInOut */
-export const PLAYER_TRANSITION_MS: number = 300;
 /**
- * 迷你栏内容节点（PlayBar 根 Stack）的组件 id。
+ * 共享元素 id：迷你栏「透明锚点」与播放页背景面（全屏沉浸层）。
  *
- * 用途：点击迷你栏进播放页时，用 `getComponentUtils().getRectangleById()` 实测它的
- * 窗口矩形（px），换算成 vp 后交给播放页 —— 播放页背景面从这块矩形「长」到全屏。
- * ⚠️ 只用 `.id()` 挂标识，**不挂 onAreaChange**：那会在 HDS 托管的槽位里回写状态，
- * 把迷你栏内容搞塌（见 PlayBar 头部注释）。
+ * 2026-10-21 起点偏左下缺陷的根治：实测证明 getRectangleById / FrameNode 位置 API
+ * （含 WithTransform / ToScreen 变体）全部拿不到 HDS 托管内容被合成变换（缩放+平移）
+ * 后的**真实视觉**矩形 —— 起点只对得上 HDS 宿主窗口内的逻辑布局值，差出一个
+ * HDS 合成系数（真机 ~1.245×1.41、模拟器 ~1.089，且随设备/模式变化）。
+ * geometryTransition 由**系统**做跨窗口坐标换算（唱片配对已真机验证起点精确），
+ * 因此背景面的「从迷你栏原位向四周扩大」也交给 geometryTransition：
+ *   · 迷你栏侧 —— PlayBar 槽位根 Stack 里一个**透明**锚点节点（不渲染任何像素，
+ *     只提供几何），if (!playerOpen) 时在场；
+ *   · 播放页侧 —— PlayerInfoComponent 全屏背景面，if (playerOpen) 时在场；
+ *   · 两极同帧翻转（STORE_PLAYER_OPEN 在同一条 animateTo 里写）→ 系统在
+ *     迷你栏**真实视觉包围盒** ↔ 全屏之间做几何插值，收起自动逆向镜像。
+ * 锚点刻意做成透明替身而不是迷你栏根节点本身：唱片配对（GEOMETRY_ID_PLAYER_DISC）
+ * 的起点是根节点的子孙，若根节点整树参与本配对，两套 geometryTransition 会嵌套
+ * 叠加在同一子树上；替身与唱片是兄弟节点，两套配对完全解耦。
  */
-export const MINI_BAR_RECT_ID: string = 'mini_bar_rect';
+export const GEOMETRY_ID_PLAYER_SURFACE: string = 'player_surface_bg';
+/**
+ * 背景面形变的**起点**圆角半径（vp）：= 迷你栏胶囊半高（布局高 56，实测）。
+ * geometryTransition 在**绑定处**同步圆角（官方文档示例注释），配对两端显式
+ * 挂 borderRadius 即参与形变 —— 展开过程中背景面四角呈胶囊同款圆角，而不是
+ * 直角矩形从迷你栏长出（2026-10-21 用户要求「展开过程四角改为圆角」）。
+ */
+export const PLAYER_SURFACE_RADIUS_START_VP: number = 28;
+/**
+ * 背景面形变的**终点**圆角半径（vp）：全屏态收平 —— 静止时四角若保留圆角，
+ * 会露出底层页面底色，像渲染缺陷。系统对两端半径的处理（全程同步起点值 /
+ * 按端点插值）均满足「过程圆角、终态收平」，模拟器中途帧验证见当轮记录。
+ */
+export const PLAYER_SURFACE_RADIUS_END_VP: number = 0;
+/**
+ * 播放页展开/收起主动画时长（ms），fastOutSlowIn —— 容器纵向延展、封面飞行、
+ * 页签图标淡出共用同一 animateTo，必须严格一致；分层入场（LAYER_DELAY_*）以它为基线。
+ * 2026-10-21 路由 push 改组件状态切换动画时从 300 调到 450（用户动效规格）。
+ */
+export const PLAYER_TRANSITION_MS: number = 450;
 /** 转场进行中标志：转场期间两边唱片的旋转动画暂停，结束后恢复（跨组件走 AppStorage） */
 export const STORE_PLAYER_TRANSITIONING: string = 'playerTransitioning';
+
+// ===== 播放页组件状态切换动画（2026-10-21：去 pushPath 路由，Index 根 Stack overlay 挂载） =====
+/**
+ * 播放页展开态：true = 全屏播放页打开。
+ * 打开：PlayerInfoComponent 主动画 animateTo 内写 true（大唱片 if 出现、PlayBar 迷你唱片
+ * if 消失 → geometryTransition 页内配对飞行；Index 页签图标 opacity 淡出）。
+ * 收起：Index.closePlayer 的 animateTo 内写 false（逆向镜像）；各子组件 @Watch 复位入场状态。
+ */
+export const STORE_PLAYER_OPEN: string = 'playerOpen';
+/**
+ * 播放页 overlay 是否挂载：PlayBar.openPlayer 写 true（Index 根 Stack 条件挂载
+ * LazyDest('Player')，复用懒加载注册 + 1.5s 预热）；closePlayer 收起动画结束后回 false 卸载。
+ */
+export const STORE_PLAYER_OVERLAY_MOUNTED: string = 'playerOverlayMounted';
+/**
+ * 收起播放页请求（seq 递增，与 toast 同款写法）：TopArea 收起按钮写入，
+ * Index @Watch 消费 → closePlayer（收起按钮在 overlay 深层组件树里，跨层信号走 AppStorage）。
+ */
+export const STORE_PLAYER_CLOSE_REQUEST: string = 'playerCloseRequest';
 
 /**
  * HDS 悬浮底栏融合播放栏（miniBar）当前是否展开（HdsBarStyle.EXPAND / COLLAPSE）。
@@ -172,6 +221,14 @@ export const MINI_BAR_ANIM_TO_COLLAPSE: number = 2;
 export const STORE_BAR_LAYOUT: string = 'barLayoutMode';
 
 /**
+ * 播放页进度条样式镜像（AppSettings.progressStyle 的运行时镜像，取值见
+ * MusicModels 的 PROGRESS_STYLE_* 常量）：EntryAbility 启动首发、设置页切换时
+ * 重发，ControlAreaComponent @StorageProp 订阅 → 经典 Slider / 流光 / 波点 /
+ * 频谱四分支渲染即时切换。
+ */
+export const STORE_PROGRESS_STYLE: string = 'playerProgressStyle';
+
+/**
  * 迷你栏进度指示开关镜像（AppSettings.miniBarProgress 的运行时镜像）：
  * EntryAbility 启动首发、设置页切换时重发，PlayBar @StorageProp 订阅 ——
  * 控制迷你栏底部 2vp 直线进度条与水平收起态圆环进度是否渲染（默认开）。
@@ -199,6 +256,14 @@ export const STORE_PLAYBACK_SPEED_ENABLED: string = 'playbackSpeedEnabled';
  * ControlAreaComponent @StorageProp 订阅驱动倍速片标签与菜单 ✓ 刷新。
  */
 export const STORE_PLAYBACK_SPEED: string = 'playbackSpeed';
+
+/**
+ * 「与其他应用同时播放」开关镜像（AppSettings.audioMixEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，MusicPlayer prepared 时消费 ——
+ * 开启后 AVPlayer audioInterruptMode = INDEPENDENT_MODE（播放不被其他应用打断，
+ * 也不抢占对方），关闭恢复 SHARE_MODE 焦点行为（默认关）。
+ */
+export const STORE_AUDIO_MIX_ENABLED: string = 'audioMixEnabled';
 
 /**
  * 播放页沉浸背景是否偏暗（封面主色明度判断）。

@@ -324,6 +324,15 @@ export const BAR_LAYOUT_HORIZONTAL: string = 'horizontal';
 /** 底部导航布局取值（AppSettings.barLayout）：垂直两层 —— 播放栏在上、页签在下（HdsBarLayoutMode.VERTICAL；API 23 设备的默认布局） */
 export const BAR_LAYOUT_VERTICAL: string = 'vertical';
 
+/** 播放页进度条样式（AppSettings.progressStyle）：经典 —— 现有系统 Slider（默认，交互零回归） */
+export const PROGRESS_STYLE_CLASSIC: string = 'classic';
+/** 播放页进度条样式（AppSettings.progressStyle）：流光渐变条 —— 已播段渐变流光扫动 + 拖拽增厚 + 呼吸光晕 */
+export const PROGRESS_STYLE_SHIMMER: string = 'shimmer';
+/** 播放页进度条样式（AppSettings.progressStyle）：脉冲波点 —— 进度头圆点双层脉冲波纹 + 落位涟漪 + 待机呼吸 */
+export const PROGRESS_STYLE_PULSE: string = 'pulse';
+/** 播放页进度条样式（AppSettings.progressStyle）：律动频谱条 —— 曲目 id 播种的伪随机竖条 + 头部律动 + 落位亮波 */
+export const PROGRESS_STYLE_WAVE: string = 'wave';
+
 export interface AppSettings {
   sidebarState: string; // 手机端固定为 'auto'
   playQuality: string;
@@ -340,6 +349,8 @@ export interface AppSettings {
   themeColor: string;
   /** 底部导航布局：BAR_LAYOUT_HORIZONTAL（水平融合）/ BAR_LAYOUT_VERTICAL（垂直两层） */
   barLayout: string;
+  /** 播放页进度条样式：PROGRESS_STYLE_CLASSIC（经典）/ SHIMMER（流光）/ PULSE（波点）/ WAVE（频谱） */
+  progressStyle: string;
   /** 迷你播放栏进度指示显示开关（底部直线 + 收起态圆环；设置 → 外观；默认开） */
   miniBarProgress: boolean;
   /**
@@ -352,6 +363,8 @@ export interface AppSettings {
   speedEnabled: boolean;
   /** 倍速值（档位见 PLAYBACK_SPEED_OPTIONS；开关关闭时由设置页归 1.0） */
   playbackSpeed: number;
+  /** 与其他应用同时播放（设置 → 播放；默认关）：开启后播放不被其他应用音频打断（audioInterruptMode = INDEPENDENT_MODE），也不抢占对方 */
+  audioMixEnabled: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -366,10 +379,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   themeMode: ThemeMode.SYSTEM,
   themeColor: 'pink',
   barLayout: BAR_LAYOUT_HORIZONTAL,
+  progressStyle: PROGRESS_STYLE_CLASSIC,
   miniBarProgress: true,
   miniBarAutoExpand: true,
   speedEnabled: false,
-  playbackSpeed: 1.0
+  playbackSpeed: 1.0,
+  audioMixEnabled: false
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -378,6 +393,20 @@ export const PLAYBACK_SPEED_OPTIONS: number[] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5
 /** 倍速显示标签：1 → "1.0x"，0.25 → "0.25x"，1.5 → "1.5x" */
 export function speedLabelOf(v: number): string {
   return `${v % 1 === 0 ? v.toFixed(1) : String(v)}x`;
+}
+
+/** 播放页进度条样式显示标签（设置页后缀 / toast 用；未知值回落「经典」） */
+export function progressStyleLabelOf(style: string): string {
+  if (style === PROGRESS_STYLE_SHIMMER) {
+    return '流光';
+  }
+  if (style === PROGRESS_STYLE_PULSE) {
+    return '波点';
+  }
+  if (style === PROGRESS_STYLE_WAVE) {
+    return '频谱';
+  }
+  return '经典';
 }
 
 export interface LyricLine {

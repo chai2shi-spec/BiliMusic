@@ -16,7 +16,13 @@
 
 import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { Track } from '../../model/MusicModels';
-import { GEOMETRY_ID_PLAYER_DISC, STORE_CURRENT_TRACK, STORE_IS_PLAYING } from '../../common/Constants';
+import {
+  GEOMETRY_ID_PLAYER_DISC,
+  STORE_CURRENT_TRACK,
+  STORE_IS_PLAYING,
+  STORE_PLAYER_OPEN,
+  STORE_APP_FOREGROUND
+} from '../../common/Constants';
 
 /** 大封面转速：20s 一圈（小圆盘 PlayBar 是 4s/圈，大封面放缓更克制） */
 const COVER_ROTATE_MS: number = 20000;
@@ -28,6 +34,17 @@ const DISC_CAP_UNLIMITED: number = 100000;
 export struct CoverDiscComponent {
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   @StorageLink(STORE_IS_PLAYING) @Watch('onPlayingChanged') isPlay: boolean = false;
+  /** 前后台标志（2026-10-21 后台耗电优化）：退后台冻结旋转，回前台在播时续转 */
+  @StorageProp(STORE_APP_FOREGROUND) @Watch('onForegroundChanged') appForeground: boolean = true;
+  /**
+   * 播放页展开态（2026-10-21 组件状态切换动画改版）：大唱片内容**只在展开态渲染**。
+   * 打开主动画（PlayerInfoComponent.playEnterTransition 的单个 animateTo）里
+   * STORE_PLAYER_OPEN 翻 true → 本组件内容 if 出现，与 PlayBar 迷你唱片 if 消失
+   **同帧配对* → geometryTransition 页内飞行（圆→圆，独立于容器延展）。
+   * 收起（Index.closePlayer 的 animateTo 写 false）时逆向回飞。未展开时 Stack
+   * 空挂（尺寸恒定，布局零跳动）。
+   */
+  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
 
   /**
    * 圆盘边长上限（vp），由宿主按「内容列高 − 标题块 − 控制区」实测预算后传入；
@@ -68,7 +85,7 @@ export struct CoverDiscComponent {
         this.rotateAngle = value;
       };
       // 挂载时可能已在播放中（@Watch 不会触发，需手动起转）
-      if (this.isPlay) {
+      if (this.isPlay && this.appForeground) {
         this.coverAnim.play();
       }
     } catch (e) {
@@ -85,15 +102,26 @@ export struct CoverDiscComponent {
     }
   }
 
-  /** 播放态变化：旋转续转/冻结 */
+  /** 播放态变化：旋转续转/冻结（统一走 syncDiscAnim） */
   onPlayingChanged(_propName: string): void {
+    this.syncDiscAnim();
+  }
+
+  /** 退后台冻结 / 回前台续转（在播时），统一走 syncDiscAnim */
+  onForegroundChanged(_propName: string): void {
+    this.syncDiscAnim();
+  }
+
+  /** 旋转统一入口：前台且在播才续转，否则冻结在当前角度（绝不复位到 0） */
+  private syncDiscAnim(): void {
     const anim: AnimatorResult | null = this.coverAnim;
-    if (anim !== null) {
-      if (this.isPlay) {
-        anim.play();
-      } else {
-        anim.pause();
-      }
+    if (anim === null) {
+      return;
+    }
+    if (this.isPlay && this.appForeground) {
+      anim.play();
+    } else {
+      anim.pause();
     }
   }
 
@@ -118,7 +146,8 @@ export struct CoverDiscComponent {
       console.error(`[CoverDisc] animator reset failed: ${msg}`);
       return;
     }
-    if (this.isPlay) {
+    // 后台切歌不起转：回前台时 onForegroundChanged 会按播放态补起转
+    if (this.isPlay && this.appForeground) {
       anim.play();
     }
   }
@@ -134,32 +163,36 @@ export struct CoverDiscComponent {
 
   build() {
     Stack() {
-      if (this.coverUrl().length > 0 && !this.coverFailed) {
-        Image(this.coverUrl())
+      // 展开态才渲染内容（见 playerOpen 注释）：与 PlayBar 迷你唱片的 if 翻转
+      // 落在同一个 animateTo 内 → geometryTransition 页内配对飞行。
+      if (this.playerOpen) {
+        if (this.coverUrl().length > 0 && !this.coverFailed) {
+          Image(this.coverUrl())
+            .width('100%')
+            .aspectRatio(1)
+            .borderRadius('50%')
+            .objectFit(ImageFit.Cover)
+            .draggable(false)
+            .rotate({ z: 1, angle: this.rotateAngle })
+            .shadow({ radius: 28, color: 'rgba(0, 0, 0, 0.45)', offsetX: 0, offsetY: 10 })
+            .geometryTransition(GEOMETRY_ID_PLAYER_DISC)
+            // 加载失败回落到 ♪ 兜底块，不留白
+            .onError((err: ImageError): void => {
+              this.coverFailed = true;
+            })
+        } else {
+          Column() {
+            Text('♪')
+              .fontSize(64)
+              .fontColor(Color.White)
+              .opacity(0.6)
+          }
           .width('100%')
           .aspectRatio(1)
           .borderRadius('50%')
-          .objectFit(ImageFit.Cover)
-          .draggable(false)
-          .rotate({ z: 1, angle: this.rotateAngle })
-          .shadow({ radius: 28, color: 'rgba(0, 0, 0, 0.45)', offsetX: 0, offsetY: 10 })
-          .geometryTransition(GEOMETRY_ID_PLAYER_DISC)
-          // 加载失败回落到 ♪ 兜底块，不留白
-          .onError((err: ImageError): void => {
-            this.coverFailed = true;
-          })
-      } else {
-        Column() {
-          Text('♪')
-            .fontSize(64)
-            .fontColor(Color.White)
-            .opacity(0.6)
+          .backgroundColor('rgba(255, 255, 255, 0.12)')
+          .justifyContent(FlexAlign.Center)
         }
-        .width('100%')
-        .aspectRatio(1)
-        .borderRadius('50%')
-        .backgroundColor('rgba(255, 255, 255, 0.12)')
-        .justifyContent(FlexAlign.Center)
       }
     }
     // aspectRatio(1) + constraintSize(maxWidth) 组合：宽度先按 100% 解析、再被

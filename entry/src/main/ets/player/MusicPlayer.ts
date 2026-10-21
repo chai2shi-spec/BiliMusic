@@ -47,8 +47,10 @@ import {
   STORE_LOADING_AUDIO,
   STORE_VOLUME,
   STORE_MUTED,
+  STORE_APP_FOREGROUND,
   STORE_PLAYBACK_SPEED,
   STORE_PLAYBACK_SPEED_ENABLED,
+  STORE_AUDIO_MIX_ENABLED,
   STORE_TOAST_MSG,
   STORE_TOAST_HOLD_MS,
   STORE_TOAST_SEQ,
@@ -606,6 +608,9 @@ export class MusicPlayer {
         this.applyVolumeOnPrepared(player);
         // 倍速同款补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
         this.applySpeedOnPrepared(player);
+        // 「与其他应用同时播放」同款补应用：换源每次重建 AVPlayer，prepared 且
+        // 首次 play 前是 SDK 要求的 audioInterruptMode 生效窗口
+        this.applyInterruptModeOnPrepared(player);
         if (this.pendingSeekTo >= 0) {
           // 续播 / 切歌后定位：必须在 prepared 之后再 seek，否则 seek 会被丢弃
           const target: number = this.pendingSeekTo;
@@ -712,8 +717,13 @@ export class MusicPlayer {
         this.lastSessionSyncAt = now;
         this.updateSessionState();
       }
-      // 进度落盘粗节流（每 5s）：既保证重启后能恢复到大致位置，又不高频写 Preferences
-      if (now - this.lastStatePersistAt >= 5000) {
+      // 进度落盘粗节流（2026-10-21 后台耗电优化）：前台每 5s 保证重启后能恢复到
+      // 大致位置；后台播放拉长到 30s 降低写盘频率 —— EntryAbility.onBackground
+      // 已有兜底落盘，回前台后此处自动切回 5s 档，无数据丢失窗口。
+      // 标志缺失（启动早期）=== false 不成立，按前台 5s 处理，与旧行为一致。
+      const persistGapMs: number =
+        AppStorage.get<boolean>(STORE_APP_FOREGROUND) === false ? 30000 : 5000;
+      if (now - this.lastStatePersistAt >= persistGapMs) {
         this.lastStatePersistAt = now;
         this.savePlayerStateNow();
       }
@@ -1632,6 +1642,23 @@ export class MusicPlayer {
     }
   }
 
+  /**
+   * 换源重建后补应用「与其他应用同时播放」打断模式（2026-10-21）。
+   * 读镜像开关（缺省 false 即关闭态）：开启 = INDEPENDENT_MODE（播放不被其他
+   * 应用音频打断、也不抢占对方），关闭 = SHARE_MODE（默认焦点行为）。
+   * audioInterruptMode 是 AVPlayer 可选属性（本 SDK 无 setAudioInterruptMode
+   * 方法），赋值失败（低版本设备不支持等）只影响混音开关，不影响播放本身。
+   */
+  private applyInterruptModeOnPrepared(player: media.AVPlayer): void {
+    try {
+      const mix: boolean = AppStorage.get<boolean>(STORE_AUDIO_MIX_ENABLED) ?? false;
+      player.audioInterruptMode =
+        mix ? audio.InterruptMode.INDEPENDENT_MODE : audio.InterruptMode.SHARE_MODE;
+    } catch (e) {
+      console.error(`apply audioInterruptMode on prepared failed: ${JSON.stringify(e)}`);
+    }
+  }
+
   /** 摘掉某个播放器实例上的全部监听（换源前必做，避免旧实例的错误污染新音源） */
   private detachPlayerEvents(player: media.AVPlayer): void {
     try {
@@ -2524,6 +2551,25 @@ export class MusicPlayer {
       } catch (e) {
         console.error(`setSpeed failed: ${JSON.stringify(e)}`);
       }
+    }
+  }
+
+  /**
+   * 设置页切换「与其他应用同时播放」时对当前实例立即生效（best-effort，2026-10-21）。
+   * SDK 注明 audioInterruptMode「首次 play() 之前设置才能完全生效」，播放中切换
+   * 可能要等下次换源重建（prepared 钩子）才完全切换；playerHoldsSource 已排除
+   * idle/initialized/stop 等非法赋值窗口。
+   */
+  setAudioMixEnabled(enabled: boolean): void {
+    const p: media.AVPlayer | null = this.avPlayer;
+    if (p === null || !this.playerHoldsSource()) {
+      return;
+    }
+    try {
+      p.audioInterruptMode =
+        enabled ? audio.InterruptMode.INDEPENDENT_MODE : audio.InterruptMode.SHARE_MODE;
+    } catch (e) {
+      console.error(`set audioInterruptMode failed: ${JSON.stringify(e)}`);
     }
   }
 

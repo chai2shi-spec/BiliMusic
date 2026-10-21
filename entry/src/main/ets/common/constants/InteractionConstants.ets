@@ -23,23 +23,24 @@ export const BUTTON_RADIUS_VP: number = 8;
 /**
  * ══════════ 播放页分层入场（点迷你条 → 播放页）══════════
  *
- * 进场总时长 300ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
+ * 主动画总时长 450ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
  * 否则会出现「封面已停住、整页还在飘」的错位）。各层按信息优先级依次浮现：
- * 顶栏 → 歌名/进度 → 控制区。
+ * 顶栏 → 歌名/进度 → 控制区 —— 全部排在**主动画基线（450ms）之后**：
+ * 封面落位、容器铺满后内容才分层淡入 + 轻微上移（2026-10-21 用户动效规格第 3 点）。
  *
  * ⚠️ **封面（CoverDiscComponent）刻意不参与分层**：它的形变由 `geometryTransition` 独占
  * （那个 `Image` 节点上还挂着 `rotate`）。若给它的父容器再叠 scale/translate，
  * 转场目标框会按「动画中途的缩放值」计算 → 封面落位后还会再弹一下。
  *
- * 位移与单层时长复用上面的 `ENTRANCE_OFFSET_VP` / `ENTRANCE_DURATION_MS`；
+ * 位移与单层时长复用下面的 `ENTRANCE_OFFSET_VP` / `ENTRANCE_DURATION_MS`；
  * 只有「各层延迟」是这里特有的，集中定义便于真机微调（某层抢戏就把它的延迟调 0 或摘掉）。
  */
-/** 顶栏（投播 / 状态）：与页面同批出现，只淡入不位移（顶栏上下动会像「掉下来」） */
-export const LAYER_DELAY_TOP: number = 0;
-/** 歌名 / 歌手 / 进度条：封面落位后才动，留出「先看封面、再看歌名」的顺序 */
-export const LAYER_DELAY_INFO: number = 90;
+/** 顶栏（收起键 / 投播）：主动画落位后第一批淡入，只淡入不位移（顶栏上下动会像「掉下来」） */
+export const LAYER_DELAY_TOP: number = 450;
+/** 歌名 / 歌手 / 进度条：封面落位后再留一拍，「先看封面、再看歌名」的顺序 */
+export const LAYER_DELAY_INFO: number = 540;
 /** 控制区：最后落位，也是离封面最远的一层 */
-export const LAYER_DELAY_CONTROL: number = 210;
+export const LAYER_DELAY_CONTROL: number = 660;
 
 /**
  * ══════════ 列表入场错峰（位移 + 淡入）══════════

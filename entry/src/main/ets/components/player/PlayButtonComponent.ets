@@ -17,7 +17,7 @@
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { BreakpointType } from '../../common/utils/BreakpointSystem';
-import { STORE_IS_PLAYING } from '../../common/Constants';
+import { STORE_IS_PLAYING, STORE_APP_FOREGROUND } from '../../common/Constants';
 
 /** 图标字号（沿用原控制区规格） */
 const PLAY_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 44, md: 44, lg: 52 });
@@ -28,6 +28,8 @@ const PLAY_BUTTON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm
 export struct PlayButtonComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   @StorageLink(STORE_IS_PLAYING) @Watch('onPlayingChanged') isPlay: boolean = false;
+  /** 前后台标志（2026-10-21 后台耗电优化）：退后台停呼吸链，回前台在播时恢复 */
+  @StorageProp(STORE_APP_FOREGROUND) @Watch('onForegroundChanged') appForeground: boolean = true;
 
   /** 呼吸微形变：x/y 独立缩放 */
   @State playScaleX: number = 1;
@@ -40,7 +42,7 @@ export struct PlayButtonComponent {
   private player: MusicPlayer = MusicPlayer.getInstance();
 
   aboutToAppear(): void {
-    if (this.isPlay) {
+    if (this.isPlay && this.appForeground) {
       this.startBreathing();
     }
   }
@@ -51,7 +53,16 @@ export struct PlayButtonComponent {
 
   /** 播放态变化：播放开启呼吸；暂停立刻停形变并恢复标准尺寸 */
   onPlayingChanged(_propName: string): void {
-    if (this.isPlay) {
+    if (this.isPlay && this.appForeground) {
+      this.startBreathing();
+    } else {
+      this.stopBreathing(true);
+    }
+  }
+
+  /** 前后台切换（2026-10-21 后台耗电优化）：退后台停呼吸链，回前台在播时恢复 */
+  onForegroundChanged(_propName: string): void {
+    if (this.isPlay && this.appForeground) {
       this.startBreathing();
     } else {
       this.stopBreathing(true);

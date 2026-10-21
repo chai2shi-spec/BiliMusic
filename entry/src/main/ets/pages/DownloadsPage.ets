@@ -561,6 +561,18 @@ export struct DownloadsPage {
   }
 
   /**
+   * 歌单组（`pl:` 键）显示修复（2026-10-21）：批量下载的歌单此前只渲染组内
+   * 第一首的普通行（isCollectionGroup 对 pl: 组返回 false，渲染分支因此跳过
+   * 组头），其余 N-1 首歌在下载页完全不可见，且歌单组行与单曲行视觉无法区分。
+   * 组内 >1 条时渲染为带组头的歌单卡片（标题=歌单名、徽标「歌单」、可展开子行）；
+   * 只剩 1 条（单曲下载同样携带 playlistId、或批量删剩一首）退回普通行，
+   * 保持单曲下载的既有观感。
+   */
+  private isPlaylistCard(g: DownloadGroup): boolean {
+    return g.key.indexOf('pl:') === 0 && g.tasks.length > 1;
+  }
+
+  /**
    * 把扁平任务表归成分组视图。
    * 组内按创建时间升序（= 分 P 排队顺序）；组间按组内最新任务的创建时间降序，
    * 与原列表「新在前」的观感保持一致。
@@ -689,7 +701,10 @@ export struct DownloadsPage {
     // N = 组内剩余任务数（2026-10-19）：此前用 partTotal（任务携带的合集原始分 P 数），
     // 删除 1P / 多P 后永远显示原值，「剩余 P 数」不刷新；改用组内任务数后与下方
     // 「已下载 x/N」的 N 同源，删除后随快照立刻变小（tasks.length 在 groupRowKey 里）。
-    const prefix: string = g.isCollection ? `${total} 个分P  ·  ` : '';
+    // 歌单卡片（2026-10-21 显示修复）同位前缀「N 首」。
+    const prefix: string = g.isCollection
+      ? `${total} 个分P  ·  `
+      : (this.isPlaylistCard(g) ? `${total} 首  ·  ` : '');
     if (c.done === total) {
       return `${prefix}已完成 · 共 ${total} 首`;
     }
@@ -1111,12 +1126,13 @@ export struct DownloadsPage {
       .justifyContent(FlexAlign.Center)
       .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-      // 56vp 显示位按 2x 请求缩略图（与歌单/搜索页封面尺寸统一）；
+      // 64vp 显示位按 2x 请求缩略图（双行标题改版 2026-10-21 与 TrackItem 同步：
+      // 封面 56→64，高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
       // 加载中 / 失败由 CoverImage 兜浅粉占位
       CoverImage({
-        url: toThumbUrl(t.coverUrl, 112),
-        imgWidth: 56,
-        imgHeight: 56,
+        url: toThumbUrl(t.coverUrl, 128),
+        imgWidth: 64,
+        imgHeight: 64,
         imgRadius: 8,
         altText: t.title
       })
@@ -1124,11 +1140,14 @@ export struct DownloadsPage {
       Column() {
         Row() {
           // 合集子行带 P 序号前缀（见 taskTitleText）：与组头徽标一起构成「合集」的显式区分
+          // 标题双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) + 第二行省略号；
+          // 显式 lineHeight(21) 锁行高（默认随字体浮动会破坏「信息 ≤ 封面」硬预算）。
           Text(this.taskTitleText(t, nested))
             .fontSize(16)
             .fontColor($r('app.color.text_primary'))
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(21)
             .layoutWeight(1)
           if (this.isCurrent(t)) {
             // 阶段 5：小字徽标改用系统标准 Chip（Chip 不能链式挂属性 → 外边距挂外层 Row）
@@ -1148,13 +1167,17 @@ export struct DownloadsPage {
             .hitTestBehavior(HitTestMode.None)
           }
         }
+        // 顶对齐（2026-10-21 双行标题）：「正在播放」徽标对齐标题第一行
         .width('100%')
+        .alignItems(VerticalAlign.Top)
 
+        // 状态行行高锁 17（13sp）：与标题 lineHeight(21) 构成高度预算（见封面注释）
         Text(this.statusText(t))
           .fontSize(13)
           .fontColor(t.status === DownloadStatus.ERROR ? $r('app.color.state_error') : $r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .lineHeight(17)
           .margin({ top: 4 })
 
         if (t.status === DownloadStatus.DOWNLOADING || t.status === DownloadStatus.PENDING) {
@@ -1314,34 +1337,39 @@ export struct DownloadsPage {
       .justifyContent(FlexAlign.Center)
       .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-      // 56vp 显示位按 2x 请求缩略图（与歌单/搜索页封面尺寸统一）；
+      // 64vp 显示位按 2x 请求缩略图（双行标题改版 2026-10-21 与 TrackItem 同步：
+      // 封面 56→64，高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
       // 加载中 / 失败由 CoverImage 兜浅粉占位
       CoverImage({
-        url: toThumbUrl(g.coverUrl, 112),
-        imgWidth: 56,
-        imgHeight: 56,
+        url: toThumbUrl(g.coverUrl, 128),
+        imgWidth: 64,
+        imgHeight: 64,
         imgRadius: 8,
         altText: g.title
       })
 
       Column() {
         Row() {
+          // 标题双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) + 第二行省略号；
+          // 显式 lineHeight(21) 锁行高（默认随字体浮动会破坏「信息 ≤ 封面」硬预算）。
           Text(g.title)
             .fontSize(16)
             .fontColor($r('app.color.text_primary'))
-            .maxLines(1)
+            .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(21)
             .layoutWeight(1)
-          // 「合集」徽标（2026-10-08）：显式区分合集条目与单视频条目——
+          // 「合集/歌单」徽标（2026-10-08）：显式区分可展开组头与普通行——
           // 此前组头与普通行只差一个小箭头，用户分不清「这是可展开的合集」。
           // 品牌粉胶囊底 + 白字，10 号小字不抢标题视觉。
-          // isCollection 读归组缓存（2026-10-08 卡顿优化）。
-          if (g.isCollection) {
+          // isCollection 读归组缓存（2026-10-08 卡顿优化）；
+          // 歌单卡片（pl: 组，2026-10-21 显示修复）同款徽标、文案「歌单」。
+          if (g.isCollection || this.isPlaylistCard(g)) {
             // 阶段 5：小字徽标改用系统标准 Chip（实底品牌粉 + 白字，与「大会员」同款）
             Row() {
               Chip({
                 label: {
-                  text: '合集',
+                  text: this.isPlaylistCard(g) ? '歌单' : '合集',
                   fontSize: 11,
                   fontColor: this.themeOn
                 },
@@ -1354,13 +1382,17 @@ export struct DownloadsPage {
             .hitTestBehavior(HitTestMode.None)
           }
         }
+        // 顶对齐（2026-10-21 双行标题）：「合集」徽标对齐标题第一行
         .width('100%')
+        .alignItems(VerticalAlign.Top)
 
+        // 状态行行高锁 17（13sp）：与标题 lineHeight(21) 构成高度预算（见封面注释）
         Text(this.groupStatusText(g))
           .fontSize(13)
           .fontColor($r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .lineHeight(17)
           .margin({ top: 4 })
 
         // 2026-10-08 卡顿优化：读归组缓存，不再每次渲染全组 some()
@@ -1506,8 +1538,10 @@ export struct DownloadsPage {
                   Column() {
                     // isCollection 读归组缓存（2026-10-08 卡顿优化）。
                     // 判定语义不变（原 isCollectionGroup）：partTotal>1 的显式标记
-                    // 让「删到只剩一首的合集」仍渲染组头，不会退化成与单视频无异
-                    if (g.isCollection) {
+                    // 让「删到只剩一首的合集」仍渲染组头，不会退化成与单视频无异。
+                    // 歌单组显示修复（2026-10-21）：批量下载的歌单（pl: 组 >1 条）
+                    // 同样渲染组头卡片，其余歌曲不再不可见；删到剩一首退回普通行
+                    if (g.isCollection || this.isPlaylistCard(g)) {
                       this.GroupHeader(g)
                       if (this.isExpanded(g.key)) {
                         ForEach(

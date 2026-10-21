@@ -1,6 +1,7 @@
 /**
- * 骨架屏条目（单曲列表占位）：形状贴合真实内容 —— 56 圆角封面 + 两条文字条，
- * 占位色 brand_surface（浅粉，贴合品牌基调；深色模式自动切换深梅色）。
+ * 骨架屏条目（单曲列表占位）：形状贴合真实内容 —— 64 圆角封面 + 双标题条 +
+ * 副标题条（双行标题改版同步，2026-10-21），占位色 brand_surface（浅粉，贴合
+ * 品牌基调；深色模式自动切换深梅色）。
  *
  * 替换掉原先「加载中…」/ LoadingProgress 的文字级反馈：骨架形状对齐内容布局，
  * 加载完成后内容「落位」不跳动。
@@ -50,17 +51,23 @@ export struct SkeletonTrackItem {
   }
 
   build() {
-    // 占位形状：56 圆角封面 + 标题条 + 副标题条（贴合 TrackItem 的两行文字）
+    // 占位形状：64 圆角封面 + 双标题条 + 副标题条（贴合 TrackItem 双行标题改版
+    // 2026-10-21：封面 56→64，标题条两条模拟 maxLines(2) 的双行标题）
     Row() {
       Row()
-        .width(56)
-        .height(56)
+        .width(64)
+        .height(64)
         .borderRadius(8)
         .backgroundColor(this.themeSurface)
 
       Column({ space: 8 }) {
         Row()
           .width('62%')
+          .height(14)
+          .borderRadius(7)
+          .backgroundColor(this.themeSurface)
+        Row()
+          .width('45%')
           .height(14)
           .borderRadius(7)
           .backgroundColor(this.themeSurface)
