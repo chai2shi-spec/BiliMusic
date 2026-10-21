@@ -27,3 +27,14 @@ build_stdout.log
 # Misc
 *.class
 .DS_Store
+
+# Local tool state
+/.deveco/
+/.ui_verify/
+
+# Diagnostics
+/er/
+
+# File-level backups (superseded by git history)
+*.bak*
+backup_*/
