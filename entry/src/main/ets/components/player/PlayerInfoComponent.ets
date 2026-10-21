@@ -48,6 +48,7 @@ import {
 } from '../../common/Constants';
 import { HttpUtil } from '../../utils/HttpUtil';
 import { getLoginUser, LoginUser } from '../../service/LoginStore';
+import { PLAYER_MAIN_CURVE } from '../../common/constants/InteractionConstants';
 
 /** blur 偶发失败的单次重试延迟（ms） */
 const BLUR_RETRY_DELAY_MS: number = 300;
@@ -56,10 +57,11 @@ const BLUR_RETRY_DELAY_MS: number = 300;
 // 一起压成透明 —— 转场头 60ms 封面完全不可见，观感变成「一块背景矩形从迷你栏长开、
 // 内容随后浮现」，而不是「迷你栏那块玻璃整块变大、封面飞出来」。
 // 编辑者注意：**不要为了「避免内容浮在没长开的背景之外」把整块 opacity 加回来** ——
-// 这个职责已由各层自带的分层入场承担：
-//   · 顶栏   TopAreaComponent        → LAYER_DELAY_TOP(450)    + 250ms 淡入
-//   · 标题块 MusicInfoComponent      → LAYER_DELAY_INFO(540)   + 250ms 淡入 + 10vp 上移
-//   · 控制区 ControlAreaComponent    → LAYER_DELAY_CONTROL(660) + 250ms 淡入 + 10vp 上移
+// 这个职责已由各层自带的分层入场承担（2026-10-21 晚间修订：随背景面覆盖进度空间序淡入，
+// 与飞行尾部重叠，不再等主动画结束后依次弹出）：
+//   · 控制区 ControlAreaComponent    → LAYER_DELAY_CONTROL(400) + 250ms 淡入 + 10vp 上移（底部最先被盖住）
+//   · 标题块 MusicInfoComponent      → LAYER_DELAY_INFO(470)   + 250ms 淡入 + 10vp 上移（中部）
+//   · 顶栏   TopAreaComponent        → LAYER_DELAY_TOP(530)    + 250ms 淡入（顶部最后被盖住）
 //   · 封面   CoverDiscComponent      → 刻意**不动**（形变由 geometryTransition 独占）
 // 封面因此全程不透明：它以迷你栏唱片为起点飞行，本来就不会「浮在首页上」。
 
@@ -183,20 +185,21 @@ export struct PlayerInfoComponent {
    *   · 封面：PlayBar 迷你唱片 if 消失 ↔ CoverDisc 大唱片 if 出现 →
    *     页内配对飞行（圆→圆，独立于背景面）；
    *   · Index 页签图标 opacity 同步淡出（@StorageProp/@Watch 同帧翻转）。
-   * 时长与曲线（PLAYER_TRANSITION_MS / fastOutSlowIn）即两套配对飞行时长。
+   * 时长与曲线（PLAYER_TRANSITION_MS / PLAYER_MAIN_CURVE，2026-10-21 晚间从
+   * FastOutSlowIn 换为 iOS 风格贝塞尔——起手果断、长尾柔和）即两套配对飞行时长。
    * onFinish 复位连点防护标志（PlayBar.openPlayer 置位）。
    *
    * ⚠️ 只在 onAppear 启动 —— 首帧已经按 playerOpen=false 画过（背景面未挂载），
    * 若改在 aboutToAppear 里 animateTo，配对出现会被同帧状态合批吃掉。
    *
    * 内容层的显现**不在这里**：顶栏 / 标题块 / 控制区各自由分层入场
-   * （LAYER_DELAY_*，主动画基线 450ms 后依次淡入），封面刻意不动。
+   * （LAYER_DELAY_*，随背景面覆盖进度空间序淡入，与飞行尾部重叠），封面刻意不动。
    */
   private playEnterTransition(): void {
     this.getUIContext().animateTo(
       {
         duration: PLAYER_TRANSITION_MS,
-        curve: Curve.FastOutSlowIn,
+        curve: PLAYER_MAIN_CURVE,
         onFinish: (): void => {
           AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
         }

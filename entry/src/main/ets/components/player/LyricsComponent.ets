@@ -27,12 +27,15 @@ import {
   STORE_PROGRESS,
   STORE_PLAYER_FOLD_FULL,
   STORE_PLAYER_OPEN,
+  STORE_PLAYER_CONTENT_EXIT,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
-  LAYER_DELAY_CONTROL
+  LAYER_DELAY_CONTROL,
+  LAYER_EXIT_DIVE_LYRIC_VP,
+  LAYER_EXIT_SCALE
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -69,10 +72,19 @@ export struct LyricsComponent {
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
+   * 收起时内容层退场信号（seq 递增，写在 Index.closePlayer 主动画闭包内）：
+   * 复位落在该闭包内 → 歌词层「淡出 + 俯冲下潜 + 缩小」与背景面收缩同曲线同步插值
+   * （2026-10-21 用户要求：退场不要纯淡出，要跟着收缩走向迷你栏）。与 playerOpen 复位幂等共存。
+   */
+  @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
+  /**
    * 分层入场（2026-10-21 动效规格第 3 点）：歌词列表主动画期间不可见，
    * 封面落位后与控制区同批（LAYER_DELAY_CONTROL）淡入，只淡入不位移。
    */
   @State enterOpacity: number = 0;
+  /** 收起退场：俯冲向迷你栏的下潜位移（vp）与缩放（复位落在收起主动画闭包内 → 随收缩同步动画） */
+  @State exitDiveY: number = 0;
+  @State exitScale: number = 1;
 
   /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
   private onPlayerOpenChanged(): void {
@@ -80,6 +92,13 @@ export struct LyricsComponent {
       return;
     }
     this.enterOpacity = 0;
+  }
+
+  /** 退场复位：淡出 + 俯冲向迷你栏（复位落在收起主动画闭包内 → 与背景面收缩同步插值） */
+  private onContentExit(): void {
+    this.enterOpacity = 0;
+    this.exitDiveY = LAYER_EXIT_DIVE_LYRIC_VP;
+    this.exitScale = LAYER_EXIT_SCALE;
   }
 
   aboutToAppear(): void {
@@ -260,6 +279,9 @@ export struct LyricsComponent {
           }).getValue(this.currentBreakpoint),
           bottom: $r('app.float.info_margin_bottom')
         })
+        // 收起退场：SM 头部行俯冲向迷你栏（变换挂子节点，根链不动避免内嵌控制区双重位移）
+        .translate({ y: this.exitDiveY })
+        .scale({ x: this.exitScale, y: this.exitScale })
       }
 
       if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
@@ -285,6 +307,9 @@ export struct LyricsComponent {
           }
         }
         .layoutWeight(1)
+        // 收起退场：LG 分栏歌词俯冲向迷你栏（挂本层；根链不动避免双重位移）
+        .translate({ y: this.exitDiveY })
+        .scale({ x: this.exitScale, y: this.exitScale })
       } else {
         LrcView({
           lyricMilliSecondsTime: this.time * 1000,
@@ -294,6 +319,9 @@ export struct LyricsComponent {
           lyricTopPosition: LyricTopPosition.Middle
         })
           .layoutWeight(1)
+          // 收起退场：歌词列表俯冲向迷你栏（挂本层；根链不动避免内嵌控制区双重位移）
+          .translate({ y: this.exitDiveY })
+          .scale({ x: this.exitScale, y: this.exitScale })
       }
 
       if (this.isShowControl) {
@@ -304,7 +332,7 @@ export struct LyricsComponent {
           })
       }
     }
-    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）
+    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；俯冲变换挂上方子节点
     .opacity(this.enterOpacity)
   }
 }

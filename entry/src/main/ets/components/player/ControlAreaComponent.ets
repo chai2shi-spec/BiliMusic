@@ -52,12 +52,15 @@ import {
   STORE_PLAYBACK_SPEED_ENABLED,
   STORE_PLAYBACK_SPEED,
   STORE_PROGRESS_STYLE,
-  STORE_PLAYER_OPEN
+  STORE_PLAYER_OPEN,
+  STORE_PLAYER_CONTENT_EXIT
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_OFFSET_VP,
   LAYER_DELAY_CONTROL,
+  LAYER_EXIT_DIVE_CONTROL_VP,
+  LAYER_EXIT_SCALE,
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
@@ -160,6 +163,16 @@ export struct ControlAreaComponent {
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
 
+  /**
+   * 收起时内容层退场信号（seq 递增，写在 Index.closePlayer 主动画闭包内）：
+   * 复位落在该闭包内 → 控制区「淡出 + 俯冲下潜 + 缩小」与背景面收缩同曲线同步插值
+   * （2026-10-21 用户要求：退场不要纯淡出，要跟着收缩走向迷你栏）。与 playerOpen 复位幂等共存。
+   */
+  @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
+  /** 收起退场：俯冲向迷你栏的下潜位移（vp）与缩放（复位落在收起主动画闭包内 → 随收缩同步动画） */
+  @State exitDiveY: number = 0;
+  @State exitScale: number = 1;
+
   /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
   private onPlayerOpenChanged(): void {
     if (this.playerOpen) {
@@ -167,6 +180,14 @@ export struct ControlAreaComponent {
     }
     this.enterOpacity = 0;
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
+  }
+
+  /** 退场复位：淡出 + 俯冲向迷你栏（复位落在收起主动画闭包内 → 与背景面收缩同步插值） */
+  private onContentExit(): void {
+    this.enterOpacity = 0;
+    this.enterOffsetY = ENTRANCE_OFFSET_VP;
+    this.exitDiveY = LAYER_EXIT_DIVE_CONTROL_VP;
+    this.exitScale = LAYER_EXIT_SCALE;
   }
 
   /**
@@ -697,8 +718,10 @@ export struct ControlAreaComponent {
       })
     }
     // 分层入场只挂 transform 系属性，不动 width/height/padding（改布局属性会触发整树重排）
+    // 收起退场在此叠俯冲位移 + 缩放（exitDiveY 与入场位移相加，随收缩同步插值）
     .opacity(this.enterOpacity)
-    .translate({ y: this.enterOffsetY })
+    .translate({ y: this.enterOffsetY + this.exitDiveY })
+    .scale({ x: this.exitScale, y: this.exitScale })
   }
 
   /** 队列弹层宿主：bindSheet 只收 CustomBuilder，包一层共享 QueueSheet */

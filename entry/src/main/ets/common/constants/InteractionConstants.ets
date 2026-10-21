@@ -1,3 +1,5 @@
+import { curves } from '@kit.ArkUI';
+
 /**
  * 按压缩放交互参数（TrackItem 首创，各列表条目推广共用）。
  *
@@ -23,10 +25,19 @@ export const BUTTON_RADIUS_VP: number = 8;
 /**
  * ══════════ 播放页分层入场（点迷你条 → 播放页）══════════
  *
- * 主动画总时长 450ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
- * 否则会出现「封面已停住、整页还在飘」的错位）。各层按信息优先级依次浮现：
- * 顶栏 → 歌名/进度 → 控制区 —— 全部排在**主动画基线（450ms）之后**：
- * 封面落位、容器铺满后内容才分层淡入 + 轻微上移（2026-10-21 用户动效规格第 3 点）。
+ * 主动画总时长 700ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
+ * 否则会出现「封面已停住、整页还在飘」的错位）。
+ *
+ * 2026-10-21 晚间修订（用户反馈「生硬」）：内容层不再等主动画完全结束后依次弹出
+ * （旧规格 450/540/660 会让页面空一拍再 pop-pop-pop，总落定 ~910ms），改为
+ * **随背景面覆盖进度空间序淡入** —— 背景面自底向上生长：底部区域最先被盖住、
+ * 中部 ~210ms、顶部 ~530ms（按 PLAYER_MAIN_CURVE @700ms 推算），各层延迟对齐
+ * 其所在区域被盖住的时刻，淡入与飞行尾部重叠，读感为「页面边生长边显内容」，
+ * 总落定 ~780ms。
+ *
+ * 2026-10-21 深夜再调（用户反馈「太快了」，参考华为音乐）：整体从 450ms 档放慢到
+ * 700ms 档（延迟 260/300/340 → 400/470/530）；随后退场按用户要求从纯淡出改为
+ * 「跟着收缩俯冲向迷你栏」（见下方 LAYER_EXIT_DIVE_*）。
  *
  * ⚠️ **封面（CoverDiscComponent）刻意不参与分层**：它的形变由 `geometryTransition` 独占
  * （那个 `Image` 节点上还挂着 `rotate`）。若给它的父容器再叠 scale/translate，
@@ -35,12 +46,44 @@ export const BUTTON_RADIUS_VP: number = 8;
  * 位移与单层时长复用下面的 `ENTRANCE_OFFSET_VP` / `ENTRANCE_DURATION_MS`；
  * 只有「各层延迟」是这里特有的，集中定义便于真机微调（某层抢戏就把它的延迟调 0 或摘掉）。
  */
-/** 顶栏（收起键 / 投播）：主动画落位后第一批淡入，只淡入不位移（顶栏上下动会像「掉下来」） */
-export const LAYER_DELAY_TOP: number = 450;
-/** 歌名 / 歌手 / 进度条：封面落位后再留一拍，「先看封面、再看歌名」的顺序 */
-export const LAYER_DELAY_INFO: number = 540;
-/** 控制区：最后落位，也是离封面最远的一层 */
-export const LAYER_DELAY_CONTROL: number = 660;
+/** 顶栏（收起键 / 投播）：所在区域最后被背景面盖住（顶部），故最后淡入，只淡入不位移（顶栏上下动会像「掉下来」） */
+export const LAYER_DELAY_TOP: number = 530;
+/** 歌名 / 歌手 / 进度条：中部区域 ~210ms 已覆盖，470ms 起淡入留足余量 */
+export const LAYER_DELAY_INFO: number = 470;
+/** 控制区（含歌词，同批）：底部区域最先被背景面盖住，最早淡入 */
+export const LAYER_DELAY_CONTROL: number = 400;
+/**
+ * ══════════ 收起退场：跟着收缩俯冲向迷你栏（2026-10-21 用户要求，替代纯淡出）══════════
+ *
+ * closePlayer 的**主动画闭包内**（700ms / PLAYER_MAIN_CURVE，与背景面收缩同一条
+ * animateTo）递增 STORE_PLAYER_CONTENT_EXIT，四个内容层组件 @Watch 把下潜位移 /
+ * 缩放 / 透明度一并复位 → 各层边淡出边俯冲下沉，与背景面收回迷你栏同曲线同步。
+ *
+ * · 位移按「离迷你栏越远潜得越深」分层（顶栏最深、控制区最浅）；
+ * · 缩放统一 LAYER_EXIT_SCALE（各层绕自身中心缩小，配合下沉读感为「收进迷你栏」）；
+ * · 透明度仍要归零：overlay 在 700ms 后卸载，残留不透明会在卸载帧跳变。
+ *
+ * ⚠️ 挂载点必须避开封面（GT 独占）与内嵌 ControlArea：歌词层的变换挂在头部 /
+ * 歌词列表节点而不是组件根（SM 根里还装着 ControlArea，挂根会双重位移）。
+ */
+/** 顶栏（收起键 / 投播）下潜位移（vp）——离迷你栏最远，潜得最深 */
+export const LAYER_EXIT_DIVE_TOP_VP: number = 280;
+/** 标题块（歌名 / 歌手 / 音质回显）下潜位移（vp） */
+export const LAYER_EXIT_DIVE_INFO_VP: number = 220;
+/** 歌词层（头部 + 歌词列表）下潜位移（vp） */
+export const LAYER_EXIT_DIVE_LYRIC_VP: number = 180;
+/** 控制区下潜位移（vp）——离迷你栏最近，潜得最浅 */
+export const LAYER_EXIT_DIVE_CONTROL_VP: number = 140;
+/** 退场统一缩放（各层绕自身中心，1 = 不缩） */
+export const LAYER_EXIT_SCALE: number = 0.72;
+/**
+ * 播放页主动画曲线（打开 / 收起共用）：果断起步 + 长尾柔和收住（iOS 全屏展开
+ * 同款手感）。GT 配对（背景面 / 唱片）、页签图标淡出均由该曲线驱动。
+ * 2026-10-21 晚间从 Curve.FastOutSlowIn 换用（用户反馈「生硬」）。
+ * 注：cubicBezierCurve 的返回类型 ICurve 在 SDK 声明里未导出、无法显式标注，
+ * 此处靠类型推断（消费方只把它塞进 animateTo 的 curve 参数，无需命名该类型）。
+ */
+export const PLAYER_MAIN_CURVE = curves.cubicBezierCurve(0.32, 0.72, 0, 1);
 
 /**
  * ══════════ 列表入场错峰（位移 + 淡入）══════════

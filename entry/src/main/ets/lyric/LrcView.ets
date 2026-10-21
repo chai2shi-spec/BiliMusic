@@ -1,9 +1,28 @@
 /**
  * Canvas 歌词渲染组件（移植自 audio-interaction-master 的 LrcView）。
  *
- * 逐行绘制 + 400ms 线性补间滚动 + 上下渐隐遮罩，视觉效果远好于 List 方案。
+ * 逐行绘制 + 400ms ease-in-out 补间滚动 + 上下渐隐遮罩，视觉效果远好于 List 方案。
  * 逐字特效（LetterGradient / LetterScaleGradient / LetterStar）需要 KRC 逐字
  * 时间轴；本项目 LyricsApi 只有行级时间轴，固定使用 LyricScrollEffect.Line。
+ *
+ * ── 时间轴同步（2026-10-21 改造，见 design/歌词同步问题诊断与方案.md）──
+ * 入参 `lyricMilliSecondsTime` 来自 STORE_PROGRESS，而那条链路为了不拖垮进度条
+ * 是按 **500ms 分桶**推送的（MusicPlayer.PROGRESS_PUSH_INTERVAL_MS）。
+ * 直接把桶值当播放位置判行，换行平均滞后 171~235ms、最坏 500ms，
+ * 且行间隔 < 500ms 的密集歌（说唱 / 日文短句）会**整行跳过**。
+ *
+ * 本组件的做法是「tick 校正 + 本机时钟外推 + 换行精准唤醒」：
+ *   1. 每来一个 tick 就把它当作新的锚点（值 + 到达时刻），
+ *      用 `锚点值 + (now - 锚点时刻) × 播放倍率` 算出「现在放到哪儿了」，
+ *      精度从 500ms 提到 ~20ms（只受定时器精度限制），**不增加任何声明式重渲染**；
+ *   2. 判行后算出「距下一行起点还有多久」，用一次 setTimeout 睡到那一刻再判，
+ *      不做常驻 60fps 轮询（每行只唤醒 1~2 次，比原先每个 tick 全量重绘更省）；
+ *   3. 外推上限 1.2s：tick 丢了（卡顿 / 后台冻结）就不再往前推，等下一个 tick 校正，
+ *      避免「卡住时歌词越走越远，恢复后猛回头」。
+ *
+ * 行级判据用二分查「最后一个 lineStartTime <= 当前时刻」的行（左闭右开）。
+ * 旧实现是线性扫描 + 右边界 `>=`，因为行时长 = 下一行起点 − 本行起点，
+ * `>=` 会让上一行在下一行起点那一刻仍然命中 → 换行永远再晚一个 tick。
  *
  * 移植适配（按本项目 ArkTS 规范）：
  *   - 默认导出改具名导出；去掉 hypium / MediaService Logger 依赖（console 即可）；
@@ -16,6 +35,7 @@ import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { LrcEntry } from './LrcEntry';
 import { angleToRadian } from './LrcUtils';
 import { Rectangle, LyricTopPosition, LyricScrollEffect } from './LyricConst';
+import { STORE_PLAYBACK_SPEED, STORE_PLAYBACK_SPEED_ENABLED } from '../common/Constants';
 
 const NONE_LINE: number = -1;
 const STAR_ANGLE_NUMBER: number = 5;
@@ -28,6 +48,22 @@ const EMPTY_LYRIC: LrcEntry = {
 /** 逐字渐变的进度间隔（在极小的区间内从高亮色跳回常规色） */
 const GRADIENT_PROGRESS_SPACE = 0.0000001;
 const GRADIENT_PROGRESS_MAX = 1 - GRADIENT_PROGRESS_SPACE;
+
+/**
+ * 本机时钟外推的上限（ms）。
+ * tick 正常 500ms 一次，超过这个值说明 tick 丢了（缓冲卡顿 / 后台冻结）——
+ * 此时停止外推，等下一个 tick 把锚点拉回来，宁可歌词停在原地也不要越走越远。
+ */
+const EXTRAPOLATE_CAP_MS: number = 1200;
+/** 换行唤醒的延后量（ms）：确保唤醒时已经跨过换行点，而不是差几毫秒判成上一行 */
+const WAKE_LEAD_MS: number = 6;
+/** 单次唤醒的最小延迟（ms）：避免 delay<=0 时退化成 0ms 忙等 */
+const WAKE_MIN_MS: number = 10;
+/**
+ * 单次唤醒的最大延迟（ms）：只是兜底。
+ * 正常情况下每个 tick（500ms）都会重排定时器，远到不了这个上限。
+ */
+const WAKE_MAX_MS: number = 1000;
 
 /** Area.width/height 是 Length（number|string|Resource），归一化成 number（vp） */
 function parseAreaLength(len: Length): number {
@@ -44,8 +80,8 @@ function parseAreaLength(len: Length): number {
 export struct LrcView {
   @Prop @Watch('onTimeUpdated') lyricMilliSecondsTime: number = 0;
   @Prop @Watch('onLyricUpdated') mLrcEntryList: Array<LrcEntry> = [];
-  @Prop @Watch('onTimeUpdated') lyricScrollEffect: LyricScrollEffect = LyricScrollEffect.Line;
-  /** 播放状态：暂停时挂起滚动补间 */
+  @Prop @Watch('onEffectChanged') lyricScrollEffect: LyricScrollEffect = LyricScrollEffect.Line;
+  /** 播放状态：暂停时挂起滚动补间，同时冻结本机时钟外推 */
   @Prop @Watch('playLyrics') isPlay: boolean = false;
   lyricTopPosition: LyricTopPosition = LyricTopPosition.Top;
 
@@ -81,8 +117,15 @@ export struct LrcView {
   private starInCircleAngle: number = 0;
   private starsPath2D: Path2D = new Path2D();
   private starsColor: string = '#18BBFC';
+  /** 上一次处理过的 tick 值（ms）：用来区分「新 tick」与「其它原因触发的重绘」 */
+  private lastTickMs: number = -1;
+  /** 当前锚点值（lyricMilliSecondsTime）到达时的本机时刻，外推的基准 */
+  private baseLocalMs: number = 0;
+  /** 换行精准唤醒的定时器 id；-1 = 未排 */
+  private wakeTimer: number = -1;
 
   aboutToAppear(): void {
+    this.baseLocalMs = Date.now();
     const options: AnimatorOptions = {
       duration: 400,
       easing: 'linear',
@@ -97,18 +140,30 @@ export struct LrcView {
   }
 
   aboutToDisappear(): void {
+    this.cancelWake();
     if (this.animator !== null) {
       this.animator.finish();
       this.animator = null;
     }
   }
 
-  /** 滚动到目标偏移：从当前偏移补间到 -desOffsetY（ease-in-out 起收都缓，换行不突兀） */
+  /**
+   * 滚动到目标偏移：从当前偏移补间到 -desOffsetY（ease-in-out 起收都缓，换行不突兀）。
+   *
+   * 暂停态改为**瞬时对齐**：补间动画是自走的 400ms，暂停时若仍播放，
+   * 拖动进度条会出现「歌词自己滚一段」的错觉（历史 bug，顺手修掉）。
+   */
   startAnimator(desOffsetY: number): void {
+    if (this.animator !== null) {
+      this.animator.finish();
+    }
+    if (!this.isPlay) {
+      this.drawContent(-desOffsetY);
+      return;
+    }
     if (this.animator === null) {
       return;
     }
-    this.animator.finish();
     const options: AnimatorOptions = {
       duration: 400,
       easing: 'ease-in-out',
@@ -120,7 +175,6 @@ export struct LrcView {
       end: -desOffsetY
     };
     this.animator = this.getUIContext().createAnimator(options);
-    console.info(`[LrcView] startAnimator curOffset: ${this.curCanvasOffsetY}, desOffset: ${-desOffsetY}`);
     this.animator.onFrame = (value: number): void => {
       this.drawContent(value);
     };
@@ -131,15 +185,170 @@ export struct LrcView {
     this.animator.play();
   }
 
+  /**
+   * 播放状态变化。
+   *
+   * 恢复播放：把外推基准重置到「此刻」，否则暂停期间累积的 elapsed 会被一次性
+   * 外推出去（暂停 10 分钟 = 歌词瞬间跑到结尾）。
+   * 暂停：冻结外推（audioNow 直接返回锚点值）并停掉换行唤醒，
+   * 但**不重绘** —— 锚点值比真实暂停位置最多早 500ms，此时重绘会让歌词倒退一行。
+   */
   playLyrics(): void {
-    if (this.animator === null) {
+    if (this.isPlay) {
+      this.baseLocalMs = Date.now();
+      if (this.animator !== null) {
+        this.animator.play();
+      }
+      this.judgeAndDraw(this.audioNow());
+      this.scheduleWake();
+    } else {
+      this.cancelWake();
+      if (this.animator !== null) {
+        this.animator.pause();
+      }
+    }
+  }
+
+  /** 当前播放倍率：开关关闭或读取异常时按 1.0（与 MusicPlayer.applySpeedOnPrepared 同口径） */
+  private playRate(): number {
+    const enabled: boolean = (AppStorage.get(STORE_PLAYBACK_SPEED_ENABLED) as boolean) ?? false;
+    if (!enabled) {
+      return 1;
+    }
+    const rate: number = (AppStorage.get(STORE_PLAYBACK_SPEED) as number) ?? 1.0;
+    return rate > 0 ? rate : 1;
+  }
+
+  /**
+   * 「现在实际放到哪儿了」（ms）。
+   *
+   * 锚点 = 最近一个 tick 的值 + 它到达的本机时刻；播放中用两者的时间差外推。
+   * 外推有上限（EXTRAPOLATE_CAP_MS）：tick 丢了就停住等校正，不越走越远。
+   */
+  private audioNow(): number {
+    const anchorMs: number = this.lyricMilliSecondsTime;
+    if (!this.isPlay || this.baseLocalMs <= 0) {
+      return anchorMs;
+    }
+    const elapsed: number = Date.now() - this.baseLocalMs;
+    if (elapsed <= 0) {
+      return anchorMs;
+    }
+    return anchorMs + Math.min(elapsed, EXTRAPOLATE_CAP_MS) * this.playRate();
+  }
+
+  private cancelWake(): void {
+    if (this.wakeTimer !== -1) {
+      clearTimeout(this.wakeTimer);
+      this.wakeTimer = -1;
+    }
+  }
+
+  /** 下一行的起点（ms）；已经是最后一行 / 没有歌词时返回 -1 */
+  private nextLineStart(nowMs: number): number {
+    const list: Array<LrcEntry> = this.mLrcEntryList;
+    if (!list || list.length === 0) {
+      return -1;
+    }
+    const next: number = this.findShowLine(nowMs) + 1;
+    if (next < 0 || next >= list.length) {
+      return -1;
+    }
+    return list[next].lineStartTime;
+  }
+
+  /**
+   * 排一次「换行唤醒」。
+   *
+   * 不做常驻轮询：算出下一行起点对应的本机时刻，一次 setTimeout 睡到那里。
+   * 每个 tick 到达都会重排（见 onTimeUpdated），所以这条定时器的延迟天然
+   * 被 tick 不断修正 —— 每行实际只唤醒 1~2 次。
+   */
+  private scheduleWake(): void {
+    this.cancelWake();
+    if (!this.isPlay || !this.hasLrc()) {
       return;
     }
-    if (this.isPlay) {
-      this.animator.play();
-    } else {
-      this.animator.pause();
+    const nowAudio: number = this.audioNow();
+    const nextStart: number = this.nextLineStart(nowAudio);
+    if (nextStart < 0 || nextStart <= nowAudio) {
+      // 已经在最后一行，或算出来的是个过去时刻（tick 刚落、还没重绘）
+      return;
     }
+    const rate: number = this.playRate();
+    const localAtSwitch: number = this.baseLocalMs
+      + (nextStart - this.lyricMilliSecondsTime) / rate;
+    const delay: number = localAtSwitch - Date.now() + WAKE_LEAD_MS;
+    if (delay < WAKE_MIN_MS) {
+      // 算出来已经过了换行点却没换行 → 外推与真实进度有偏差（倍率读错 / 系统时间跳变）。
+      // 此时**不再 10ms 空转**，把校正交给下一个 tick（≤500ms 必到），
+      // 最坏退回旧行为，但不会出现忙等把 CPU 打满。
+      return;
+    }
+    this.wakeTimer = setTimeout((): void => {
+      this.wakeTimer = -1;
+      this.judgeAndDraw(this.audioNow());
+      this.scheduleWake();
+    }, Math.min(delay, WAKE_MAX_MS));
+  }
+
+  /**
+   * 判行 + 重绘：只有换行才滚动/重绘。
+   *
+   * 行级歌词（本项目固定 Line 效果）在同一行内不需要重绘 —— 旧实现每个 tick
+   * 都全量重绘一遍（60 行 × measureText），纯属浪费；逐字特效才需要按时间重绘。
+   */
+  private judgeAndDraw(nowMs: number): void {
+    if (!this.hasLrc()) {
+      this.drawContent(0);
+      return;
+    }
+    const line: number = this.findShowLine(nowMs);
+    if (line !== this.mCurrentLine) {
+      this.mCurrentLine = line;
+      if (line < 0) {
+        // 时间在第一行之前（前奏）：回到顶部，不高亮任何行
+        this.startAnimator(0);
+      } else {
+        // 留下的 lag 是「换行比这一行真实起点晚多少」——
+        // 真机 hilog 过滤 [LrcView] 应稳定在几十 ms 量级（改造前 170~500ms）
+        console.info(`[LrcView] line ${line} lag ${Math.round(nowMs - this.mLrcEntryList[line].lineStartTime)}ms`);
+        this.smoothScrollTo(line);
+      }
+      return;
+    }
+    if (this.lyricScrollEffect !== LyricScrollEffect.Line) {
+      this.drawContent(this.curCanvasOffsetY);
+    }
+  }
+
+  /**
+   * 立即对齐到当前时间所在行（不补间）。
+   *
+   * 切歌 / 歌词换了一批时必须瞬时对齐：否则会从上一首的滚动位置补间过来，
+   * 观感是「从第 3 行一路滑到第 50 行」。
+   */
+  private alignImmediately(): void {
+    if (this.viewWidth <= 0 || this.viewHeight <= 0) {
+      return;
+    }
+    this.calculate();
+    if (!this.hasLrc()) {
+      this.mCurrentLine = NONE_LINE;
+      this.drawContent(0);
+      return;
+    }
+    const line: number = this.findShowLine(this.lyricMilliSecondsTime);
+    this.mCurrentLine = line;
+    if (this.animator !== null) {
+      this.animator.finish();
+    }
+    this.drawContent(-this.getOffset(line));
+  }
+
+  /** 滚动效果切换：保持当前偏移重绘（不同效果绘制分支不同） */
+  onEffectChanged(): void {
+    this.drawContent(this.curCanvasOffsetY);
   }
 
   /** 画一颗五角星（LetterStar 特效用，行级歌词不会走到） */
@@ -164,17 +373,17 @@ export struct LrcView {
   private calculate(): void {
     this.lrcWidth = this.viewWidth - this.paddingLeft - this.paddingRight;
     this.lrcHeight = this.viewHeight - this.paddingTop - this.paddingBottom;
-    if (this.initFirstLineY === 0) {
-      switch (this.lyricTopPosition) {
-        case LyricTopPosition.Middle:
-          this.initFirstLineY = this.paddingTop + this.lrcHeight / 2.8;
-          break;
-        case LyricTopPosition.Top:
-          this.initFirstLineY = this.paddingTop;
-          break;
-        default:
-          break;
-      }
+    // 每次尺寸变化都重算：原先只在 initFirstLineY === 0 时算一次，
+    // 横竖屏 / 分屏 / 折叠屏展开导致的高度变化后，首行基准会停在旧值上
+    switch (this.lyricTopPosition) {
+      case LyricTopPosition.Middle:
+        this.initFirstLineY = this.paddingTop + this.lrcHeight / 2.8;
+        break;
+      case LyricTopPosition.Top:
+        this.initFirstLineY = this.paddingTop;
+        break;
+      default:
+        break;
     }
     this.lrcX = 0;
     this.lrcY = this.initFirstLineY;
@@ -510,37 +719,59 @@ export struct LrcView {
     this.startAnimator(offset);
   }
 
-  /** 歌词内容变化：清空高亮并按当前时间重绘 */
+  /** 歌词内容变化：停掉在跑的动画与唤醒，瞬时对齐到当前行（切歌不滑行） */
   onLyricUpdated(): void {
-    this.mCurrentLine = NONE_LINE;
-    this.onTimeUpdated();
+    this.cancelWake();
+    this.lastTickMs = this.lyricMilliSecondsTime;
+    this.baseLocalMs = Date.now();
+    this.alignImmediately();
+    this.scheduleWake();
   }
 
-  /** 时间更新：换行时平滑滚动，同行内直接重绘 */
+  /**
+   * 收到新的进度 tick（500ms 一次）。
+   *
+   * 只把 tick 当锚点用：记下「值 + 到达时刻」，然后用外推值判行。
+   * 换行是否发生由外推决定，所以歌词不必等这 500ms —— 这是本次改造的核心。
+   */
   onTimeUpdated(): void {
-    if (!this.hasLrc()) {
-      this.drawContent(0);
-      return;
+    const tickMs: number = this.lyricMilliSecondsTime;
+    if (tickMs !== this.lastTickMs) {
+      this.lastTickMs = tickMs;
+      this.baseLocalMs = Date.now();
     }
-    let line = this.findShowLine(this.lyricMilliSecondsTime);
-    if (line !== this.mCurrentLine) {
-      this.mCurrentLine = line;
-      this.smoothScrollTo(line);
-    } else {
-      this.drawContent(this.curCanvasOffsetY);
-    }
+    this.judgeAndDraw(this.audioNow());
+    this.scheduleWake();
   }
 
+  /**
+   * 当前时间所在行。
+   *
+   * 二分查「最后一个 lineStartTime <= milliSeconds」的行 —— 天然左闭右开：
+   * 在下一行起点那一刻就已经切到下一行，不会像旧实现的 `>=` 那样把上一行
+   * 多留一个 tick。顺带不再依赖 lineDuration，重复时间标签（duration=0）的行
+   * 也能被正确命中；复杂度从 O(n) 降到 O(log n)（每次判行都调）。
+   *
+   * 返回 NONE_LINE 表示「时间在第一行之前」（前奏），调用方据此不高亮任何行。
+   */
   findShowLine(milliSeconds: number): number {
-    if (this.mLrcEntryList && this.mLrcEntryList.length > 0) {
-      for (let index = 0; index < this.mLrcEntryList.length; index++) {
-        if (this.mLrcEntryList[index].lineStartTime <= milliSeconds
-          && this.mLrcEntryList[index].lineStartTime + this.mLrcEntryList[index].lineDuration >= milliSeconds) {
-          return index;
-        }
+    const list: Array<LrcEntry> = this.mLrcEntryList;
+    if (!list || list.length === 0) {
+      return NONE_LINE;
+    }
+    let lo: number = 0;
+    let hi: number = list.length - 1;
+    let found: number = NONE_LINE;
+    while (lo <= hi) {
+      const mid: number = (lo + hi) >> 1;
+      if (list[mid].lineStartTime <= milliSeconds) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
       }
     }
-    return this.mCurrentLine;
+    return found;
   }
 
   build() {
@@ -551,9 +782,12 @@ export struct LrcView {
         if (parseAreaLength(oldArea.width) !== parseAreaLength(newArea.width)
           || parseAreaLength(oldArea.height) !== parseAreaLength(newArea.height)) {
           this.calculate();
-          let line = this.findShowLine(this.lyricMilliSecondsTime);
-          let offset = this.getOffset(line);
-          this.drawContent(-offset);
+          // 用外推后的「当前播放位置」对齐，而不是滞后的 tick 值：
+          // 尺寸变化往往伴随旋转/折叠，此刻对齐偏了一行会很显眼
+          const line: number = this.findShowLine(this.audioNow());
+          this.mCurrentLine = line;
+          this.drawContent(-this.getOffset(line));
+          this.scheduleWake();
         }
       })
   }

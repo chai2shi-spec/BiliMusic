@@ -147,9 +147,11 @@ import {
   STORE_PLAYER_OPEN,
   STORE_PLAYER_OVERLAY_MOUNTED,
   STORE_PLAYER_CLOSE_REQUEST,
+  STORE_PLAYER_CONTENT_EXIT,
   STORE_PLAYER_TRANSITIONING,
   PLAYER_TRANSITION_MS
 } from '../common/Constants';
+import { PLAYER_MAIN_CURVE } from '../common/constants/InteractionConstants';
 import { getLoginUser } from '../service/LoginStore';
 import { FavSyncManager } from '../service/FavSyncManager';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
@@ -321,7 +323,7 @@ struct Index {
    *
    * 迷你栏 → 全屏播放页不再是 NavDestination 路由：PlayBar.openPlayer 写
    * STORE_PLAYER_OVERLAY_MOUNTED → 本页根 Stack 条件挂载 LazyDest('Player')
-   * （复用懒加载注册 + 1.5s 预热）→ PlayerInfoComponent 单个 animateTo(450ms,
+    * （复用懒加载注册 + 1.5s 预热）→ PlayerInfoComponent 单个 animateTo(700ms,
    * fastOutSlowIn) 驱动：容器从迷你栏向四周扩大 + 封面 geometryTransition 页内配对飞行 +
    * 页签图标淡出（playerOpen）+ 内容分层入场（LAYER_DELAY_*）。
    * 收起逆向镜像：TopArea 收起按钮（STORE_PLAYER_CLOSE_REQUEST seq）或
@@ -336,21 +338,28 @@ struct Index {
 
   /**
    * 收起播放页（逆向镜像，2026-10-21 组件状态切换动画）：
-   * 单个 animateTo(450ms, fastOutSlowIn) 写 STORE_PLAYER_OPEN=false —— 同帧驱动：
-   *   · PlayerInfoComponent @Watch：生长面收回起始矩形（surfaceProgress→0）；
-   *   · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
-   *   · 各子层 @Watch 复位入场状态 → 内容随动画淡出；
-   *   · 页签图标 opacity 恢复。
-   * 450ms 后卸载 overlay 并复位连点防护标志。
+   * 单条主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE），闭包内同时写：
+   *   · STORE_PLAYER_CONTENT_EXIT 递增 → 四个内容层 @Watch 复位退场状态
+   *     （淡出 + 俯冲下潜 + 缩小，2026-10-21 用户要求「跟着收缩到迷你栏」，
+   *     与背景面收缩同曲线同步插值）；
+   *   · STORE_PLAYER_OPEN=false —— 同帧驱动：
+   *     · 背景面 geometryTransition 收回迷你栏透明锚点矩形；
+   *     · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
+   *     · 各子层 playerOpen @Watch 复位入场状态（与 contentExit 复位幂等，兜底）；
+   *     · 页签图标 opacity 恢复。
+   * 700ms 后卸载 overlay 并复位连点防护标志。
    */
   private closePlayer(): void {
     if (!this.playerOpen) {
       return;
     }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
+    // 主动画：背景面收回 + 封面回飞 + 内容层俯冲退场 + 页签恢复
     this.getUIContext().animateTo(
-      { duration: PLAYER_TRANSITION_MS, curve: Curve.FastOutSlowIn },
+      { duration: PLAYER_TRANSITION_MS, curve: PLAYER_MAIN_CURVE },
       (): void => {
+        const exitSeq: number = (AppStorage.get<number>(STORE_PLAYER_CONTENT_EXIT) ?? 0) + 1;
+        AppStorage.setOrCreate(STORE_PLAYER_CONTENT_EXIT, exitSeq);
         AppStorage.setOrCreate(STORE_PLAYER_OPEN, false);
       }
     );
@@ -891,7 +900,7 @@ struct Index {
     .justifyContent(FlexAlign.Center)
     .height('100%')
      // 播放页展开时页签图标淡出（2026-10-21 动效规格第 1 点）：与容器向四周扩大
-    // 同一条 450ms animateTo（playerOpen 在打开/收起主动画闭包内翻转）——
+     // 同一条 700ms animateTo（playerOpen 在打开/收起主动画闭包内翻转）——
     // HdsTabs 底座不销毁，只是图标逐步衰减。
     .opacity(this.playerOpen ? 0 : 1)
     // 按下即预置切页动画时长（2026-10-19 修「远距切页过快」）：DOWN 发生在

@@ -2,7 +2,7 @@
  * 播放核心（原生 ArkTS 版）。
  * 使用 @ohos.multimedia.media (AVPlayer) + @ohos.multimedia.avsession (AVSession)。
  * - 通过 setMediaSource 在请求头注入 Referer（B 站音频流必需）
- * - AVSession 负责锁屏 / 通知栏控制
+ * - AVSession 负责锁屏 / 通知栏 / 媒体中心（控制中心卡片，HiCar 车机卡片同源）的显示与遥控
  * - 状态写入 AppStorage，UI 用 @StorageLink 订阅
  *
  * 移植自原 React 版 PlayerContext.tsx 的队列 / 播放模式 / 进度逻辑。
@@ -18,6 +18,7 @@ import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import common from '@ohos.app.ability.common';
 import { extractAudioFromVideo, expandVideoParts } from '../api/BilibiliApi';
+import { getLyricForTrack } from '../api/LyricsApi';
 import { LibraryStore } from '../service/LibraryStore';
 import { DownloadManager } from '../service/DownloadManager';
 import { BackgroundPlayback } from '../service/BackgroundPlayback';
@@ -29,6 +30,8 @@ import {
   AppSettings,
   downloadQualityId,
   fitByByteBudget,
+  LyricLine,
+  LyricResult,
   PLAYBACK_SPEED_OPTIONS,
   PREF_VALUE_BUDGET_BYTES,
   RepeatMode,
@@ -222,9 +225,66 @@ async function attachMediaSourceSafely(
     return true;
   } catch (e) {
     const err: BusinessError = e as BusinessError;
-    plogError(`setMediaSource rejected: ${err.code} ${err.message}`);
-    return false;
+  plogError(`setMediaSource rejected: ${err.code} ${err.message}`);
+  return false;
+}
+}
+
+/**
+ * avSession.LoopMode → 应用内 RepeatMode（媒体中心/车机 setLoopMode 命令的映射）。
+ * LOOP_MODE_CUSTOM 不在本应用的档位里，返回 null 表示忽略该命令。
+ */
+function loopModeToRepeatMode(mode: avSession.LoopMode): RepeatMode | null {
+  switch (mode) {
+    case avSession.LoopMode.LOOP_MODE_SEQUENCE:
+      return RepeatMode.NONE;
+    case avSession.LoopMode.LOOP_MODE_SINGLE:
+      return RepeatMode.ONE;
+    case avSession.LoopMode.LOOP_MODE_LIST:
+      return RepeatMode.ALL;
+    case avSession.LoopMode.LOOP_MODE_SHUFFLE:
+      return RepeatMode.SHUFFLE;
+    default:
+      return null;
   }
+}
+
+/** 应用内 RepeatMode → avSession.LoopMode（播放状态上报用，与 loopModeToRepeatMode 互逆）。 */
+function repeatModeToLoopMode(mode: RepeatMode): avSession.LoopMode {
+  switch (mode) {
+    case RepeatMode.ALL:
+      return avSession.LoopMode.LOOP_MODE_LIST;
+    case RepeatMode.ONE:
+      return avSession.LoopMode.LOOP_MODE_SINGLE;
+    case RepeatMode.SHUFFLE:
+      return avSession.LoopMode.LOOP_MODE_SHUFFLE;
+    default:
+      return avSession.LoopMode.LOOP_MODE_SEQUENCE;
+  }
+}
+
+/** 秒 → LRC 时间标签的分秒部分（`mm:ss.cc`，百分秒）。 */
+function formatLrcTime(seconds: number): string {
+  const total: number = Math.max(0, seconds);
+  const mm: number = Math.floor(total / 60);
+  const ss: number = Math.floor(total % 60);
+  const cs: number = Math.floor((total - Math.floor(total)) * 100);
+  return `${mm < 10 ? '0' : ''}${mm}:${ss < 10 ? '0' : ''}${ss}.${cs < 10 ? '0' : ''}${cs}`;
+}
+
+/**
+ * LyricLine[]（行级时间轴，秒）→ 标准歌词格式（LRC）文本，供 AVMetadata.lyric
+ * 上报给媒体中心 / 车机。空行丢弃；空串 = 没有可报歌词。
+ */
+function buildLrcText(lines: LyricLine[]): string {
+  const parts: string[] = [];
+  lines.forEach((line: LyricLine): void => {
+    if (line.text.length === 0) {
+      return;
+    }
+    parts.push(`[${formatLrcTime(line.time)}]${line.text}`);
+  });
+  return parts.join('\n');
 }
 
 export class MusicPlayer {
@@ -283,6 +343,12 @@ export class MusicPlayer {
   private coverCache: image.PixelMap | undefined;
   /** 封面缓存对应的曲目 id（缓存失效判定） */
   private coverCacheAssetId: string = '';
+  /** 已上报到 AVSession 的歌词 LRC 文本：时长补报等元数据重报时带上，不重复拼装 */
+  private lastLyricText: string = '';
+  /** 歌词已尝试（或已上报）对应的曲目 id：同曲重报不重复拉取歌词 */
+  private lastLyricAssetId: string = '';
+  /** 歌词请求令牌：切歌后在途旧结果必须丢弃，防止车机显示上一首的词 */
+  private lyricFetchToken: number = 0;
   /** 已展开过的多 P 合集 bvid。避免切歌 / 重播同一合集时反复请求 view 接口。 */
   private expandedBvids: Set<string> = new Set<string>();
   /** 续播定位：loadAndPlay 在 avPlayer 进入 prepared 后跳转到该秒数（>0 表示需要续播） */
@@ -413,6 +479,9 @@ export class MusicPlayer {
         } catch (e) {
           console.error(`activate AVSession failed: ${JSON.stringify(e)}`);
         }
+        // 媒体中心/车机（HiCar）能力声明（since 26）：真机 API 26 生效，
+        // 低版本设备失败仅日志降级，不影响核心播控。
+        this.declareSessionCapabilities(this.session);
       }
     }
 
@@ -803,6 +872,30 @@ export class MusicPlayer {
       session.on('playPrevious', (): void => {
         this.prev();
       });
+      // 媒体中心 / HiCar 车机卡片扩展命令（2026-10-21）：快进快退 / 收藏 / 倍速 / 播放模式。
+      // fastForward/rewind 的 time 单位毫秒，缺省 15s（与 AVMetadata.skipIntervals 一致）。
+      session.on('fastForward', (time?: number): void => {
+        this.seekBy((time ?? 15000) / 1000);
+      });
+      session.on('rewind', (time?: number): void => {
+        this.seekBy(-(time ?? 15000) / 1000);
+      });
+      // 车机收藏键：assetId 校验为当前曲才执行，防止误翻其他曲目
+      session.on('toggleFavorite', (assetId: string): void => {
+        const current: Track | null = this.currentTrackSnapshot();
+        if (current !== null && current.id === assetId) {
+          this.toggleLike(current);
+        }
+      });
+      session.on('setSpeed', (speed: number): void => {
+        this.setPlaybackSpeed(speed);
+      });
+      session.on('setLoopMode', (mode: avSession.LoopMode): void => {
+        const mapped: RepeatMode | null = loopModeToRepeatMode(mode);
+        if (mapped !== null) {
+          this.setRepeatMode(mapped);
+        }
+      });
     } catch (e) {
       console.error(`register session events failed: ${JSON.stringify(e)}`);
     }
@@ -820,21 +913,16 @@ export class MusicPlayer {
     // 系统媒体胶囊（灵动胶囊）需要 PixelMap 形式的封面，网络 URL 无法直接识别，
     // 故把封面解码成 PixelMap 再写入 mediaImage；任何环节失败都降级为无封面，不阻断上报。
     // 同一曲目的重复上报（时长补报 / 信息合并后的重报）直接复用缓存的 PixelMap。
-    let cover: image.PixelMap | undefined;
-    if (track.coverUrl && track.coverUrl.length > 0) {
-      if (this.coverCacheAssetId === track.id && this.coverCache !== undefined) {
-        cover = this.coverCache;
-      } else {
-        try {
-          const loaded: image.PixelMap | null = await this.loadCoverPixelMap(track.coverUrl);
-          if (loaded !== null) {
-            this.coverCache = loaded;
-            this.coverCacheAssetId = track.id;
-            cover = loaded;
-          }
-        } catch (e) {
-          console.error(`load cover pixelmap failed: ${JSON.stringify(e)}`);
+    if (track.coverUrl && track.coverUrl.length > 0
+      && !(this.coverCacheAssetId === track.id && this.coverCache !== undefined)) {
+      try {
+        const loaded: image.PixelMap | null = await this.loadCoverPixelMap(track.coverUrl);
+        if (loaded !== null) {
+          this.coverCache = loaded;
+          this.coverCacheAssetId = track.id;
         }
+      } catch (e) {
+        console.error(`load cover pixelmap failed: ${JSON.stringify(e)}`);
       }
     }
     // 播控横幅的进度条与时间 = position / duration，缺 duration 就两个都不渲染。
@@ -845,19 +933,141 @@ export class MusicPlayer {
       this.lastPublishedDurationMs = durationMs;
     }
     try {
-      this.session.setAVMetadata({
-        assetId: track.id,
-        title: track.title || '未命名歌曲',
-        artist: track.artist || 'BiliMusic',
-        album: 'BiliMusic',
-        duration: durationMs,
-        mediaImage: cover
-      }).catch((e: BusinessError): void => {
+      this.session.setAVMetadata(this.buildAVMetadata(track)).catch((e: BusinessError): void => {
         console.error(`setAVMetadata failed: ${e.code} ${e.message}`);
       });
     } catch (e) {
       console.error(`setAVMetadata failed: ${JSON.stringify(e)}`);
     }
+    // 歌词补报（fire-and-forget）：命中 LyricsApi 缓存则几乎零开销，未命中才发请求；
+    // 失败静默（歌词非必需，绝不阻断上报链路）。
+    this.publishSessionLyric(track);
+  }
+
+  /**
+   * 统一组装 AVMetadata：首报 / 时长补报（republishSessionDuration）/ 歌词补报
+   * 三处上报共用。setAVMetadata 是**整体替换**语义，任何一处绕开本函数直接拼对象，
+   * 都会把其他处已报的字段覆盖丢失（2026-10-21 HiCar 车机卡片改造收口点）。
+   */
+  private buildAVMetadata(track: Track): avSession.AVMetadata {
+    const durationSec: number = track.duration > 0 ? track.duration : this.lastDuration;
+    const meta: avSession.AVMetadata = {
+      assetId: track.id,
+      title: track.title || '未命名歌曲',
+      artist: track.artist || 'BiliMusic',
+      album: 'BiliMusic',
+      duration: Math.round(durationSec * 1000),
+      // 快进/快退步长：媒体中心与车机按此渲染 ±15s（与 seekBy 缺省一致）
+      skipIntervals: avSession.SkipIntervals.SECONDS_15,
+      mediaImage: (this.coverCacheAssetId === track.id && this.coverCache !== undefined)
+        ? this.coverCache : undefined
+    };
+    // 上一曲/下一曲：按队列索引上报，越界不设字段——媒体中心/车机据此把按钮点亮/置灰
+    const prev: Track | undefined = this.queue[this.currentIndex - 1];
+    const next: Track | undefined = this.queue[this.currentIndex + 1];
+    if (prev !== undefined) {
+      meta.previousAssetId = prev.id;
+    }
+    if (next !== undefined) {
+      meta.nextAssetId = next.id;
+    }
+    // 歌词：仅当本曲已拼好 LRC（publishSessionLyric 写入）才带上
+    if (this.lastLyricAssetId === track.id && this.lastLyricText.length > 0) {
+      meta.lyric = this.lastLyricText;
+    }
+    return meta;
+  }
+
+  /**
+   * 异步补报歌词：AVMetadata.lyric 要求标准歌词格式（LRC），复用 LyricsApi 缓存
+   * （与播放页歌词共享，不重复请求）。令牌防切歌竞态；synced=false（纯文本歌词）
+   * 不上报，避免被 LRC 解析器乱显。本曲只尝试一次，重报不重复拉取。
+   */
+  private publishSessionLyric(track: Track): void {
+    if (!this.session) {
+      return;
+    }
+    if (this.lastLyricAssetId === track.id) {
+      return;
+    }
+    const token: number = ++this.lyricFetchToken;
+    // 立即标记「本曲已尝试」：时长补报等重报路径不再重复发起歌词请求
+    this.lastLyricAssetId = track.id;
+    this.lastLyricText = '';
+    getLyricForTrack(track).then((result: LyricResult | null): void => {
+      // 切歌竞态：在途结果属于旧曲，丢弃
+      if (token !== this.lyricFetchToken || result === null || !result.synced) {
+        return;
+      }
+      const lrc: string = buildLrcText(result.lines);
+      if (lrc.length === 0) {
+        return;
+      }
+      this.lastLyricText = lrc;
+      if (!this.session) {
+        return;
+      }
+      try {
+        this.session.setAVMetadata(this.buildAVMetadata(track)).catch((e: BusinessError): void => {
+          console.error(`setAVMetadata with lyric failed: ${e.code} ${e.message}`);
+        });
+      } catch (e) {
+        console.error(`setAVMetadata with lyric failed: ${JSON.stringify(e)}`);
+      }
+    }).catch((e: Error): void => {
+      console.error(`publish session lyric failed: ${e.message}`);
+    });
+  }
+
+  /**
+   * 能力声明（since 26，媒体中心 = 控制中心/锁屏/HiCar 车机卡片同源）：
+   * setMediaCenterControlType 让媒体中心优先显示这排控制，要求所设命令必须已 on() 注册
+   * （registerSessionEvents 先于本方法执行，顺序天然满足）；低版本设备失败仅日志降级。
+   */
+  private declareSessionCapabilities(session: avSession.AVSession): void {
+    try {
+      session.setMediaCenterControlType([
+        'playNext', 'playPrevious', 'fastForward', 'rewind', 'setSpeed', 'setLoopMode', 'toggleFavorite'
+      ]).catch((e: BusinessError): void => {
+        console.error(`setMediaCenterControlType failed: ${e.code} ${e.message}`);
+      });
+    } catch (e) {
+      console.error(`setMediaCenterControlType failed: ${JSON.stringify(e)}`);
+    }
+    try {
+      session.setSupportedLoopModes([
+        avSession.LoopMode.LOOP_MODE_SEQUENCE,
+        avSession.LoopMode.LOOP_MODE_SINGLE,
+        avSession.LoopMode.LOOP_MODE_LIST,
+        avSession.LoopMode.LOOP_MODE_SHUFFLE
+      ]).catch((e: BusinessError): void => {
+        console.error(`setSupportedLoopModes failed: ${e.code} ${e.message}`);
+      });
+    } catch (e) {
+      console.error(`setSupportedLoopModes failed: ${JSON.stringify(e)}`);
+    }
+    try {
+      session.setSupportedPlaySpeeds(PLAYBACK_SPEED_OPTIONS).catch((e: BusinessError): void => {
+        console.error(`setSupportedPlaySpeeds failed: ${e.code} ${e.message}`);
+      });
+    } catch (e) {
+      console.error(`setSupportedPlaySpeeds failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
+   * 快进 / 快退（媒体中心/车机 fastForward/rewind 命令）：当前进度偏移 deltaSec，
+   * 钳到 [0, 时长]；时长未知（尚未 prepared）不动作。
+   */
+  private seekBy(deltaSec: number): void {
+    const progress: number = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
+    const duration: number = this.lastDuration > 0
+      ? this.lastDuration
+      : ((AppStorage.get(STORE_DURATION) as number) ?? 0);
+    if (duration <= 0) {
+      return;
+    }
+    this.seek(Math.max(0, Math.min(duration, progress + deltaSec)));
   }
 
   /**
@@ -1034,10 +1244,15 @@ export class MusicPlayer {
       elapsedTime: Math.round(((AppStorage.get(STORE_PROGRESS) as number) ?? 0) * 1000),
       updateTime: Date.now()
     };
+    // HiCar 车机卡片扩展状态（2026-10-21）：收藏态 / 播放模式 / 倍速随既有节流一并上报
+    const track: Track | null = this.currentTrackSnapshot();
     try {
       this.session.setAVPlaybackState({
         state: state,
-        position: position
+        position: position,
+        isFavorite: track !== null && track.isLiked,
+        loopMode: repeatModeToLoopMode(this.repeatMode),
+        speed: this.playbackSpeed
       }).catch((e: BusinessError): void => {
         console.error(`setAVPlaybackState failed: ${e.code} ${e.message}`);
       });
@@ -2499,6 +2714,8 @@ export class MusicPlayer {
     this.setStore(STORE_REPEAT_MODE, mode);
     this.setStore(STORE_SHUFFLE, this.isShuffled);
     this.savePlayerStateNow();
+    // 播放模式变了：媒体中心/车机卡片的模式图标要联动
+    this.updateSessionState();
   }
 
   /** 兼容旧调用：开/关随机等价于在 随机 / 顺序 两个模式间切换。 */
@@ -2552,6 +2769,8 @@ export class MusicPlayer {
         console.error(`setSpeed failed: ${JSON.stringify(e)}`);
       }
     }
+    // 倍速变了：媒体中心/车机卡片的倍速状态要联动
+    this.updateSessionState();
   }
 
   /**
@@ -2645,6 +2864,8 @@ export class MusicPlayer {
     // 收藏是单 key，撞 8192 字节上限时会抛错。这里绝不能让它冒成 unhandled rejection ——
     // 症状是「界面已显示收藏（isLiked 已翻 true）、重启后什么都没了」。
     LibraryStore.toggleFavoriteTrack(updated);
+    // 收藏态变了：媒体中心/车机卡片的心形图标要联动
+    this.updateSessionState();
   }
 
   private shuffle<T>(arr: T[]): T[] {

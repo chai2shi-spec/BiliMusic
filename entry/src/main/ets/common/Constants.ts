@@ -165,11 +165,12 @@ export const PLAYER_SURFACE_RADIUS_START_VP: number = 28;
  */
 export const PLAYER_SURFACE_RADIUS_END_VP: number = 0;
 /**
- * 播放页展开/收起主动画时长（ms），fastOutSlowIn —— 容器纵向延展、封面飞行、
- * 页签图标淡出共用同一 animateTo，必须严格一致；分层入场（LAYER_DELAY_*）以它为基线。
- * 2026-10-21 路由 push 改组件状态切换动画时从 300 调到 450（用户动效规格）。
+ * 播放页展开/收起主动画时长（ms），曲线 PLAYER_MAIN_CURVE（cubicBezier(0.32,0.72,0,1)）——
+ * 容器纵向延展、封面飞行、页签图标淡出共用同一 animateTo，必须严格一致；分层入场（LAYER_DELAY_*）以它为基线。
+ * 2026-10-21 路由 push 改组件状态切换动画时从 300 调到 450（用户动效规格）；
+ * 同日深夜参考华为音乐从 450 放慢到 700（用户反馈「太快了」）。
  */
-export const PLAYER_TRANSITION_MS: number = 450;
+export const PLAYER_TRANSITION_MS: number = 700;
 /** 转场进行中标志：转场期间两边唱片的旋转动画暂停，结束后恢复（跨组件走 AppStorage） */
 export const STORE_PLAYER_TRANSITIONING: string = 'playerTransitioning';
 
@@ -191,6 +192,12 @@ export const STORE_PLAYER_OVERLAY_MOUNTED: string = 'playerOverlayMounted';
  * Index @Watch 消费 → closePlayer（收起按钮在 overlay 深层组件树里，跨层信号走 AppStorage）。
  */
 export const STORE_PLAYER_CLOSE_REQUEST: string = 'playerCloseRequest';
+/**
+ * 收起时内容层退场信号（seq 递增）：Index.closePlayer 在主动画（700ms /
+ * PLAYER_MAIN_CURVE）闭包内写入，四个内容层组件 @Watch 消费 → 复位为
+ * 「淡出 + 俯冲下潜 + 缩小」（跟着背景面收缩走向迷你栏，2026-10-21 用户要求）。
+ */
+export const STORE_PLAYER_CONTENT_EXIT: string = 'playerContentExit';
 
 /**
  * HDS 悬浮底栏融合播放栏（miniBar）当前是否展开（HdsBarStyle.EXPAND / COLLAPSE）。

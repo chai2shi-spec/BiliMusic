@@ -6,13 +6,13 @@
  * 懒加载注册 + 1.5s 预热，冷启动优化不回退）→ 本组件 → PlayerInfoComponent。
  *
  * 打开/收起的主动画全部由组件状态驱动（无 pushPath / pop / customTransition）：
- *   · 打开：PlayerInfoComponent.playEnterTransition —— 单个 animateTo(450ms,
- *     fastOutSlowIn) 写 STORE_PLAYER_OPEN=true，同帧驱动两套 geometryTransition
+ *   · 打开：PlayerInfoComponent.playEnterTransition —— 单个 animateTo(700ms,
+ *     PLAYER_MAIN_CURVE) 写 STORE_PLAYER_OPEN=true，同帧驱动两套 geometryTransition
  *     配对（背景面从迷你栏真实视觉包围盒长到全屏 + 唱片页内配对飞行）与
  *     Index 页签图标 opacity 淡出。
  *   · 收起：TopArea 收起按钮（STORE_PLAYER_CLOSE_REQUEST seq）或系统返回
  *     （Index.onBackPress 拦截）→ Index.closePlayer 的 animateTo 逆向镜像，
- *     450ms 后 STORE_PLAYER_OVERLAY_MOUNTED=false 卸载本壳。
+ *     700ms 后 STORE_PLAYER_OVERLAY_MOUNTED=false 卸载本壳。
  *
  * 保留的原有机制：
  *   - 全屏布局避让（safeTop / safeBottom 在 PlayerInfoComponent 内部消费）；

@@ -24,7 +24,7 @@
  */
 
 import { HttpUtil } from '../utils/HttpUtil';
-import { cleanTitle, parseDurationText, stripHtmlTags, toHttpsUrl } from '../utils/TextUtil';
+import { parseDurationText, stripHtmlTags, toHttpsUrl } from '../utils/TextUtil';
 import { BiliApiError, SearchResponse, SearchResultItem, searchVideo } from '../api/BilibiliApi';
 import { buildTrack, slimTrack, Track, Playlist } from '../model/MusicModels';
 import {
@@ -545,45 +545,276 @@ export function mapSearchResultToTrack(item: SearchResultItem): Track {
 
 /** 方案 §3.2 的标题噪声词（命中一条 −2，只罚一次） */
 const NOISE_WORDS: string[] = ['翻唱', '鬼畜', '伴奏', '合集', '教程', '纯音乐'];
-/** 强匹配阈值（≥5 自动选中） */
-const SCORE_STRONG: number = 5;
-/** 弱匹配阈值（3~4 进待确认） */
-const SCORE_WEAK: number = 3;
-/** 出局分（标题不含歌名，直接淘汰） */
+/**
+ * 强匹配阈值（≥6 自动选中）。
+ * 分级：A 档（全标题）5 分 / B 档（主标题）4 分 / C 档（再剥版本标签）3 分，
+ * 歌手命中 +2、时长吻合 +2。于是 A+歌手=7、B+歌手=6 可自动选中，
+ * 而 **C 档最高 3+2=5，永远进不了自动选中** —— 这是刻意的：
+ * C 档典型是「Remix 找不到，退而匹配原版」，必须让用户确认。
+ */
+const SCORE_STRONG: number = 6;
+/** 弱匹配阈值（4~5 进待确认） */
+const SCORE_WEAK: number = 4;
+/** 出局分（标题对不上任何一档，直接淘汰） */
 const SCORE_OUT: number = -100;
 /** B 站搜索风控码（RETRYABLE_BIZ_CODES 同款口径），命中即停 */
 const RISK_CODES: number[] = [-352, -412, -509, -799];
 
-/** 匹配用归一化：全角→半角、统一小写、去空白（cleanTitle 负责去括号噪声段） */
+/**
+ * HTML 实体解码。
+ *
+ * B 站搜索结果的 `title` 里存在 HTML 实体（`Shatter the God&#x27;s Crown`），
+ * 而 `stripHtmlTags` 只去标签、不解码 —— 不解码时 `God&#x27;s` 归一成
+ * `god&x27;s`，与歌名 `God's` 永远对不上，整首直接出局。
+ * 实测这是 268 首歌单里一批曲目「搜得到却匹配不上」的直接原因之一。
+ */
+const HTML_ENTITY_FROM: string[] = ['&#x27;', '&#39;', '&apos;', '&#34;', '&quot;', '&amp;', '&lt;', '&gt;', '&nbsp;'];
+const HTML_ENTITY_TO: string[] = ['\'', '\'', '\'', '"', '"', '&', '<', '>', ' '];
+
+function decodeHtmlEntities(raw: string): string {
+  let s: string = raw;
+  for (let i: number = 0; i < HTML_ENTITY_FROM.length; i++) {
+    if (s.indexOf(HTML_ENTITY_FROM[i]) < 0) {
+      continue;
+    }
+    s = s.split(HTML_ENTITY_FROM[i]).join(HTML_ENTITY_TO[i]);
+  }
+  return s;
+}
+
+/**
+ * 标点统一剔除。两侧（歌名 / 视频标题）必须用同一套规则，
+ * 才能让 `Butter-Fly` 对上 `Butter Fly`、`secret base ~君がくれたもの~`
+ * 对上 `secret base ～君がくれたもの～`。
+ */
+const MATCH_PUNCT_RE: RegExp =
+  /[!！?？.。,，、;；:：'"“”‘’`´~～\-–—_|\\\/·•&+*=×()（）\[\]{}【】《》「」『』<>〈〉#@$%^]/g;
+
+/** 匹配用归一化：实体解码 → 全角转半角 → 小写 → 去标点 → 去空白 */
 function normalizeForMatch(raw: string): string {
-  let s: string = raw.replace(/[\uFF01-\uFF5E]/g, (ch: string): string => {
+  let s: string = decodeHtmlEntities(raw);
+  s = s.replace(/[\uFF01-\uFF5E]/g, (ch: string): string => {
     return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
   });
   s = s.replace(/\u3000/g, ' ');
   s = s.toLowerCase();
+  s = s.replace(MATCH_PUNCT_RE, '');
   return s.replace(/\s+/g, '');
 }
 
 /**
- * 打分（方案 §3.2）：歌名包含 +3（必须项）；标题或 UP 主名含歌手名 +2；
- * 时长差 ≤5s +2 / ≤30s +1 / >60s −3；标题含噪声词 −2。
- * 返回 SCORE_OUT 表示出局。
+ * 主标题：截到第一个左括号。
+ * `别看我只是一只羊（《羊年喜羊羊》片头曲）` → `别看我只是一只羊`。
+ *
+ * 不用 `cleanTitle` 的原因：它的括号正则 `[【[(（]([^】\])）]*)[】\])）]`
+ * **不跨嵌套**，遇到 `（《铠甲勇士刑天》电视剧片头曲）` 整段匹配失败、原样保留，
+ * 于是歌名归一化后变成 `不败的英雄铠甲勇士刑天电视剧片头曲`，而 B 站标题是
+ * `不败的英雄铠甲勇士刑天动态鼓谱` —— 明明搜到了也被判出局。
+ */
+const OPEN_BRACKET_RE: RegExp = /[（(【\[《「『<〈]/;
+
+function coreTitle(raw: string): string {
+  const at: number = raw.search(OPEN_BRACKET_RE);
+  return at < 0 ? raw : raw.slice(0, at);
+}
+
+/**
+ * 版本 / 来源标签。歌名与视频标题的差异大多来自这些片段
+ * （`(TVサイズ)`、`(THE FIRST TAKE Studio Ver.)`、`DJ版`、`Remix`）。
+ * 剥离后用于「核心名」兜底匹配（C 档），只用来救「同一首歌的另一个版本」。
+ */
+const VERSION_TAGS: string[] = [
+  'tvsize', 'tv size', 'the first take', 'studio ver', 'movie ver', 'short ver',
+  'off vocal', 'instrumental', 'nightcore', 'musicbox', '八音盒', 'acoustic',
+  '伴奏', '纯音乐', '现场版', '演唱会', '音乐会', '重置版', '重制版', '剧情版', '完整版',
+  '钢琴版', '钢琴', '片段', 'dj版', 'remix', 'live', 'cover', '翻唱', 'karaoke', 'demo', 'mix', 'dj', 'tv'
+];
+
+/** 纯 ASCII 的标签要按「整词」匹配，否则 `deliver` 里的 `live` 也会被吃掉 */
+const LATIN_TAG_RE: RegExp = /^[a-z0-9 ]+$/;
+const WORD_CHAR_RE: RegExp = /[a-z0-9_]/;
+
+/**
+ * 找 tag 在 s 中作为「独立词」出现的位置（手写替代 `new RegExp('\\b'+tag+'\\b')`）。
+ *
+ * 为什么不用正则：打分是热路径 —— 500 首 × 30 候选 × 34 个标签 ≈ 51 万次
+ * `new RegExp` 构造，真机上会明显拖慢匹配。手写扫描是纯 charAt 比较，零分配。
+ */
+function indexOfStandalone(s: string, tag: string): number {
+  let from: number = 0;
+  while (from <= s.length) {
+    const at: number = s.indexOf(tag, from);
+    if (at < 0) {
+      return -1;
+    }
+    const before: string = at > 0 ? s.charAt(at - 1) : '';
+    const afterAt: number = at + tag.length;
+    const after: string = afterAt < s.length ? s.charAt(afterAt) : '';
+    const okBefore: boolean = before.length === 0 || !WORD_CHAR_RE.test(before);
+    const okAfter: boolean = after.length === 0 || !WORD_CHAR_RE.test(after);
+    if (okBefore && okAfter) {
+      return at;
+    }
+    from = at + 1;
+  }
+  return -1;
+}
+
+function stripVersionTags(raw: string): string {
+  let s: string = decodeHtmlEntities(raw).toLowerCase();
+  for (let i: number = 0; i < VERSION_TAGS.length; i++) {
+    const tag: string = VERSION_TAGS[i];
+    if (LATIN_TAG_RE.test(tag)) {
+      let at: number = indexOfStandalone(s, tag);
+      while (at >= 0) {
+        s = `${s.slice(0, at)} ${s.slice(at + tag.length)}`;
+        at = indexOfStandalone(s, tag);
+      }
+    } else {
+      s = s.split(tag).join(' ');
+    }
+  }
+  return s;
+}
+
+/** 文本里命中的版本标签（判断候选与歌名是不是同一版本） */
+function versionTagsOf(raw: string): string[] {
+  const low: string = decodeHtmlEntities(raw).toLowerCase();
+  const out: string[] = [];
+  for (let i: number = 0; i < VERSION_TAGS.length; i++) {
+    const tag: string = VERSION_TAGS[i];
+    const hit: boolean = LATIN_TAG_RE.test(tag) ? indexOfStandalone(low, tag) >= 0 : low.indexOf(tag) >= 0;
+    if (hit) {
+      out.push(tag);
+    }
+  }
+  return out;
+}
+
+/** 多歌手拆分：`本間芽衣子/安城鳴子/鶴見知利子` 整串去比几乎不可能命中，逐个比才有分 */
+const ARTIST_SPLIT_RE: RegExp = /[/、,，&;；]|\bfeat\.?\b|\bft\.?\b|\bx\b/;
+
+function splitArtists(artist: string): string[] {
+  const parts: string[] = artist.split(ARTIST_SPLIT_RE);
+  const out: string[] = [];
+  for (let i: number = 0; i < parts.length; i++) {
+    const p: string = parts[i].trim();
+    if (p.length > 0 && out.indexOf(p) < 0) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** 取第一个歌手（备用关键词用） */
+export function primaryArtist(artist: string): string {
+  const list: string[] = splitArtists(artist);
+  return list.length > 0 ? list[0] : '';
+}
+
+/**
+ * 备用关键词：「中文段 + 第一歌手」。
+ *
+ * 双语标题（`格拉默的余烬 The Embers of Glamoth`）整串丢给 B 站搜索召回很差，
+ * 中文段单独搜反而一击命中。**只在「首轮 30 条候选全部出局」时才用**，
+ * 所以正常情况下不增加任何请求。
+ */
+const CJK_RUN_RE: RegExp =
+  /[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af][\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\s]*/g;
+
+export function fallbackKeyword(song: ExternalSong): string {
+  const base: string = coreTitle(song.title);
+  const runs: RegExpMatchArray | null = base.match(CJK_RUN_RE);
+  let best: string = '';
+  if (runs !== null) {
+    for (let i: number = 0; i < runs.length; i++) {
+      const t: string = runs[i].trim();
+      if (t.length >= 2 && t.length > best.length) {
+        best = t;
+      }
+    }
+  }
+  const head: string = best.length > 0 ? best : base;
+  const artist: string = primaryArtist(song.artist);
+  const kw: string = artist.length > 0 ? `${head} ${artist}` : head;
+  return kw.trim();
+}
+
+/**
+ * 非音源类视频（谱 / 教学 / 音高测量）：**只 −1，不做出局判据**。
+ * 音乐区大量「动态鼓谱」「音高测量」其实带原曲音轨，只是不如纯音源好听；
+ * 扣 1 分足以让同分的干净版本胜出，又不会把「只有这类视频」的歌判死。
+ */
+const TUTORIAL_WORDS: string[] = [
+  '鼓谱', '谱', '音高', '扒谱', '翻弹', '教学', '讲解', '解析', '采访', '解说', '盘点', '混剪', '剪辑', 'midi', '工程文件'
+];
+
+interface TitleMatch {
+  /** 'A' 全标题 / 'B' 主标题（去括号）/ 'C' 核心名（再剥版本标签）/ '' 不匹配 */
+  tier: string;
+  base: number;
+}
+
+/** 标题三级匹配 */
+function matchTitleTier(songTitle: string, videoTitle: string): TitleMatch {
+  const nvFull: string = normalizeForMatch(videoTitle);
+  const nvCore: string = normalizeForMatch(coreTitle(videoTitle));
+  const sFull: string = normalizeForMatch(songTitle);
+  const core: string = normalizeForMatch(coreTitle(songTitle));
+  const sCore: string = core.length >= 2 ? core : sFull;
+  const stripped: string = normalizeForMatch(stripVersionTags(coreTitle(songTitle)));
+  const sStripped: string = stripped.length >= 2 ? stripped : sCore;
+  if (sFull.length > 0 && nvFull.indexOf(sFull) >= 0) {
+    const a: TitleMatch = { tier: 'A', base: 5 };
+    return a;
+  }
+  if (sCore.length >= 2 && (nvFull.indexOf(sCore) >= 0 || nvCore.indexOf(sCore) >= 0)) {
+    const b: TitleMatch = { tier: 'B', base: 4 };
+    return b;
+  }
+  if (sStripped.length >= 2 && (nvFull.indexOf(sStripped) >= 0 || nvCore.indexOf(sStripped) >= 0)) {
+    const c: TitleMatch = { tier: 'C', base: 3 };
+    return c;
+  }
+  const miss: TitleMatch = { tier: '', base: SCORE_OUT };
+  return miss;
+}
+
+/**
+ * 打分（2026-10-21 重写，实测口径见 design/歌单导入-匹配算法改进.md）。
+ *
+ * 旧版三个硬伤，都会把「其实搜到了」变成「未找到」：
+ *   ① 歌名完全不清洗，视频标题却走 `cleanTitle` —— `错位时空 (DJ版)` 的
+ *      `(dj版)` 永远不可能出现在清洗后的标题里，直接出局；
+ *   ② `stripHtmlTags` 只去标签、不解码实体（`God&#x27;s`）；
+ *   ③ 多歌手整串比（`A/B/C`）几乎不可能在标题里出现，白丢 2 分降到「待确认」。
+ *
+ * 现在：三级标题匹配（A5 / B4 / C3）+ 子歌手逐个比 + 版本一致性校验。
+ * 返回 SCORE_OUT 表示标题对不上任何一档。
  */
 export function scoreCandidate(song: ExternalSong, item: SearchResultItem): number {
   const videoTitle: string = stripHtmlTags(item.title);
-  const normVideo: string = normalizeForMatch(cleanTitle(videoTitle));
-  const normSong: string = normalizeForMatch(song.title);
-  if (normSong.length === 0 || !normVideo.includes(normSong)) {
+  const m: TitleMatch = matchTitleTier(song.title, videoTitle);
+  if (m.base === SCORE_OUT) {
     return SCORE_OUT;
   }
-  let score: number = 3;
-  const normArtist: string = normalizeForMatch(song.artist);
-  if (normArtist.length > 0) {
-    const inTitle: boolean = normVideo.includes(normArtist);
-    const inAuthor: boolean = normalizeForMatch(item.author).includes(normArtist);
-    if (inTitle || inAuthor) {
-      score += 2;
+  let score: number = m.base;
+  const nv: string = normalizeForMatch(videoTitle);
+  const nvAuthor: string = normalizeForMatch(item.author);
+  const nvAll: string = normalizeForMatch(song.artist);
+  let artistHit: boolean = nvAll.length > 0 && (nv.indexOf(nvAll) >= 0 || nvAuthor.indexOf(nvAll) >= 0);
+  if (!artistHit) {
+    const subs: string[] = splitArtists(song.artist);
+    for (let i: number = 0; i < subs.length; i++) {
+      const na: string = normalizeForMatch(subs[i]);
+      if (na.length >= 2 && (nv.indexOf(na) >= 0 || nvAuthor.indexOf(na) >= 0)) {
+        artistHit = true;
+        break;
+      }
     }
+  }
+  if (artistHit) {
+    score += 2;
   }
   if (song.durationSec > 0) {
     const dur: number = parseDurationText(item.duration);
@@ -598,10 +829,31 @@ export function scoreCandidate(song: ExternalSong, item: SearchResultItem): numb
       }
     }
   }
+  // 版本一致性：歌名要 Remix / Live，候选却是原版（或反之）都该降级
+  const sv: string[] = versionTagsOf(song.title);
+  const cv: string[] = versionTagsOf(videoTitle);
+  let shared: boolean = false;
+  for (let i: number = 0; i < sv.length; i++) {
+    if (cv.indexOf(sv[i]) >= 0) {
+      shared = true;
+      break;
+    }
+  }
+  if (sv.length > 0 && !shared) {
+    score -= 2;
+  } else if (cv.length > 0 && sv.length === 0) {
+    score -= 1;
+  }
   const lowerTitle: string = videoTitle.toLowerCase();
   for (let i: number = 0; i < NOISE_WORDS.length; i++) {
-    if (lowerTitle.includes(NOISE_WORDS[i])) {
+    if (lowerTitle.indexOf(NOISE_WORDS[i]) >= 0 && song.title.toLowerCase().indexOf(NOISE_WORDS[i]) < 0) {
       score -= 2;
+      break;
+    }
+  }
+  for (let i: number = 0; i < TUTORIAL_WORDS.length; i++) {
+    if (lowerTitle.indexOf(TUTORIAL_WORDS[i]) >= 0) {
+      score -= 1;
       break;
     }
   }
@@ -632,20 +884,35 @@ function matchCacheKey(song: ExternalSong): string {
 //
 
 /**
- * 匹配并发与节流（推翻方案 §3.3 原「严格串行 + 每首硬等 1.0~1.5s」）。
+ * 匹配并发与节流（2026-10-22 第二次调参：**主动降速规避风控**）。
  *
- * 实测依据（2026-10-16，PC UA + buvid 打 `/x/web-interface/wbi/search/type`）：
- *   · 单请求 rt ≈ 420ms（纯网络往返；page_size 20/30/50 耗时一致）
- *   · 并发 2 / 3 / 5 / 8 各打 16 首 → **全部 100% 成功、零风控**，墙钟近线性下降
- *     （2 并发 221ms/首 → 8 并发 61ms/首）
- * 也就是说旧实现那 1.25s/首的等待**全是自缚**：500 首要跑约 14 分钟，其中 13 分钟在睡。
+ * 历史：方案 §3.3 原是「严格串行 + 每首硬等 1.0~1.5s」（500 首要 14 分钟，13 分钟在睡）；
+ * 10-16 实测短跑（并发 2/3/5/8 各打 16 首）全部零风控，于是改成「并发 4 + 间隔 200ms」
+ * ≈ 5 QPS。**但那个结论只在 16 首的短窗口成立**：真机导入 268 首时，跑到第 86 首就吃到
+ * HTTP 412，之后每首都失败（这正是「很多没找到」的另一半原因）。
  *
- * 现取「并发 4 + 全局最小间隔 200ms」= 稳态上限 5 QPS（真机弱网时由 rt 决定，更低），
- * 比旧版快约 8 倍，同时给风控留一个量级余量；RISK_CODES 命中即停 + resume 的兜底不变。
- * 若真机出现限流，只需调小 MATCH_CONCURRENCY / 调大 MATCH_MIN_GAP_MS，其余逻辑无需动。
+ * 结论：B 站卡的不是瞬时 QPS，而是**同一 buvid/IP 在几分钟内的累计请求量**。
+ * 故稳态按 ~1.25 QPS 走（并发 2 + 全局间隔 800ms）：268 首约 4~5 分钟，
+ * 慢 3~4 倍但能整轮跑完，比「跑 1 分钟撞墙、剩下 180 首全废」划算得多。
+ * 想让速度再退一档，把 MATCH_MIN_GAP_MS 改 1000 即可（约 60 次/分钟），其余逻辑自洽。
+ *
+ * 仍保留自适应兜底（见 RISK_* ）：万一还是撞墙，会自动降速 + 等待后**自动继续**，
+ * 不必用户手动点「继续匹配」；连续失败 RISK_RETRY_LIMIT 次才交还用户。
  */
-const MATCH_CONCURRENCY: number = 4;
-const MATCH_MIN_GAP_MS: number = 200;
+const MATCH_CONCURRENCY: number = 2;
+const MATCH_MIN_GAP_MS: number = 800;
+/** 命中风控后的退避间隔上限：间隔翻倍到 3s 就不再涨（否则一首要等 10s，观感像卡死） */
+const RISK_GAP_MAX_MS: number = 3000;
+/** 退避等待基数（ms）：第 1 次 20s、第 2 次 40s、第 3 次 80s（指数退避） */
+const RISK_BACKOFF_BASE_MS: number = 20000;
+/** 一轮任务最多自动重试几次；超过就停在 RISK 态让用户决定（避免无限空转） */
+const RISK_RETRY_LIMIT: number = 3;
+/** 连续成功这么多首后，把被抬高过的间隔缓慢降回基础值（风控已过的信号） */
+const GAP_EASE_AFTER_OK: number = 30;
+/** 每次回落的幅度（乘法因子）：不会一步跳回 600ms，避免刚降速又撞墙 */
+const GAP_EASE_FACTOR: number = 0.75;
+/** 退避等待的分段长度（ms）：每隔这么久刷一次倒计时文案，让用户知道没卡死 */
+const BACKOFF_TICK_MS: number = 5000;
 /** 单次搜索取的候选数（20→30：实测 rt 完全一致，候选多 50% 能提高命中率、减少手工复核） */
 const MATCH_PAGE_SIZE: number = 30;
 /**
@@ -704,6 +971,18 @@ export class ImportTaskManager {
   private activeIndexes: number[] = [];
   /** 全局最小请求间隔的共享时间戳（节流，见 MATCH_MIN_GAP_MS） */
   private lastRequestAt: number = 0;
+  /**
+   * 当前生效的请求间隔 / 并发（**运行期可变**，与常量不同）。
+   * 命中风控 → 间隔翻倍、并发降到 1；连续成功 GAP_EASE_AFTER_OK 首 → 间隔缓慢回落。
+   */
+  private gapMs: number = MATCH_MIN_GAP_MS;
+  private concurrency: number = MATCH_CONCURRENCY;
+  /** 本轮连续成功的曲目数（回落间隔的计数） */
+  private okStreak: number = 0;
+  /** 本次任务已自动退避重试的次数（达 RISK_RETRY_LIMIT 就停在 RISK 态） */
+  private riskRetries: number = 0;
+  /** 用户主动停止/重置：退避 sleep 醒来后不许把任务强行复活 */
+  private aborting: boolean = false;
   /** 命中风控时置真：其余在飞 worker 的失败不作数（保持 PENDING 待 resume） */
   private riskHit: boolean = false;
   /** 风控回退水位：resume 时游标回到这里（在飞条目都不会被跳过） */
@@ -757,6 +1036,11 @@ export class ImportTaskManager {
     this.riskHit = false;
     this.riskFloor = 0;
     this.lastRequestAt = 0;
+    this.gapMs = MATCH_MIN_GAP_MS;
+    this.concurrency = MATCH_CONCURRENCY;
+    this.okStreak = 0;
+    this.riskRetries = 0;
+    this.aborting = false;
     this.matchCache.clear();
     this.running = true;
     this.notify();
@@ -777,19 +1061,29 @@ export class ImportTaskManager {
     this.riskHit = false;
     this.activeIndexes = [];
     this.lastRequestAt = 0;
+    // 用户手动续跑 = 认为风控已过去：速率回到基础值（自动退避走的不是这条路，不会自我重置）
+    this.gapMs = MATCH_MIN_GAP_MS;
+    this.concurrency = MATCH_CONCURRENCY;
+    this.okStreak = 0;
+    this.riskRetries = 0;
+    this.aborting = false;
     this.running = true;
     this.notify();
     this.run();
   }
 
-  /** 用户主动中断：保留已完成进度，剩余条目停在 PENDING */
+  /**
+   * 用户主动中断：保留已完成进度，剩余条目停在 PENDING。
+   *
+   * ⚠️ 不 early-return —— 自动退避等待期间 `running` 已经是 false（被 hitRisk 置的），
+   * 旧写法在这里直接 return，会让「停止」在限流倒计时里点了没反应。
+   */
   stop(): void {
-    if (!this.running) {
-      return;
-    }
+    this.aborting = true;
     this.running = false;
     if (this.state.phase === ImportPhase.MATCHING) {
       this.state.phase = ImportPhase.STOPPED;
+      this.state.riskMessage = '';
     }
     this.notify();
   }
@@ -898,6 +1192,7 @@ export class ImportTaskManager {
 
   /** 放弃本次任务（清快照回 IDLE；正在跑时先停） */
   reset(): void {
+    this.aborting = true;
     this.running = false;
     this.state = emptyImportState();
     this.cursor = 0;
@@ -905,33 +1200,57 @@ export class ImportTaskManager {
     this.activeIndexes = [];
     this.riskHit = false;
     this.riskFloor = 0;
+    this.gapMs = MATCH_MIN_GAP_MS;
+    this.concurrency = MATCH_CONCURRENCY;
+    this.okStreak = 0;
+    this.riskRetries = 0;
     this.matchCache.clear();
     this.notify();
   }
 
   /**
-   * 并发调度：起 N 个 worker 共享同一个取号游标（`cursor` 取走即自增，单线程下天然无锁）。
+   * 任务主循环：起 N 个 worker 共享同一个取号游标（`cursor` 取走即自增，单线程下天然无锁），
+   * 一轮轮跑池子，**命中风控时自动降速 + 退避 + 续跑**（最多 RISK_RETRY_LIMIT 次）。
+   *
    * worker 只在「做完手上这一首」后才退出，故停止/风控时 `cursor` 之前的条目必定已定状态，
    * resume 语义与旧串行版完全一致（不跳曲、不重复标记）。
+   *
+   * 为什么不让用户手动点「继续」：一是他未必知道要点；二是限流通常只持续几十秒，
+   * 手动续跑几乎必然在还没解除时再次撞墙，白跑一轮。降速后自动接上才是正解。
+   * 达上限（连续撞墙）才停在 RISK 态交还用户，避免无限空转。
    */
   private async run(): Promise<void> {
-    const items: ImportItem[] = this.state.items;
-    const left: number = items.length - this.cursor;
-    const workerCount: number = Math.min(MATCH_CONCURRENCY, Math.max(1, left));
-    const pool: Promise<void>[] = [];
-    for (let i: number = 0; i < workerCount; i++) {
-      pool.push(this.workerLoop());
-    }
-    await Promise.all(pool);
-    if (this.riskHit) {
-      // 风控：游标退回「在飞条目里的最小下标」，被中断的条目仍是 PENDING → resume 重跑这批
-      this.cursor = this.riskFloor;
+    let hit: boolean = await this.runRound();
+    while (hit) {
+      if (this.aborting || this.riskRetries >= RISK_RETRY_LIMIT) {
+        break;
+      }
+      this.riskRetries++;
+      // 降速：间隔翻倍（封顶 RISK_GAP_MAX_MS）、并发压到 1（多路同时撞墙最容易被判定为爬虫）
+      this.gapMs = Math.min(this.gapMs * 2, RISK_GAP_MAX_MS);
+      this.concurrency = 1;
+      this.okStreak = 0;
+      const waitMs: number = RISK_BACKOFF_BASE_MS * Math.pow(2, this.riskRetries - 1);
+      await this.backoffWait(waitMs);
+      if (this.aborting) {
+        break;
+      }
+      this.lastRequestAt = 0;
       this.riskHit = false;
       this.riskFloor = 0;
-      this.activeIndexes = [];
-      this.state.currentTitle = '';
-      this.state.processed = this.done;
-      this.recount();
+      this.running = true;
+      this.state.phase = ImportPhase.MATCHING;
+      this.state.riskMessage = '';
+      this.notify();
+      hit = await this.runRound();
+    }
+    if (hit) {
+      // 连续撞墙 / 用户中止：停在 RISK，保留进度
+      if (!this.aborting && this.state.phase === ImportPhase.MATCHING) {
+        this.state.phase = ImportPhase.RISK;
+        this.state.currentTitle = '';
+        this.state.riskMessage = `已连续 ${this.riskRetries} 次被限流，先暂停（已完成 ${this.done} 首）。稍后点「继续匹配」可接着跑`;
+      }
       this.notify();
       return;
     }
@@ -944,6 +1263,83 @@ export class ImportTaskManager {
       }
       this.notify();
     }
+  }
+
+  /**
+   * 跑一轮 worker 池（并发数取运行期的 `concurrency`）。
+   * 返回 true = 本轮命中风控（游标已退回，条目保持 PENDING 供下一轮重跑）。
+   */
+  private async runRound(): Promise<boolean> {
+    const items: ImportItem[] = this.state.items;
+    const left: number = items.length - this.cursor;
+    const workerCount: number = Math.min(this.concurrency, Math.max(1, left));
+    const pool: Promise<void>[] = [];
+    for (let i: number = 0; i < workerCount; i++) {
+      pool.push(this.workerLoop());
+    }
+    await Promise.all(pool);
+    if (this.riskHit) {
+      // 风控：游标退回「在飞条目里的最小下标」，被中断的条目仍是 PENDING → 下一轮重跑这批
+      this.cursor = this.riskFloor;
+      this.riskHit = false;
+      this.riskFloor = 0;
+      this.activeIndexes = [];
+      this.state.processed = this.done;
+      this.recount();
+      // 清掉歌名：hitRisk 写的「限流」提示会被 worker 退出时的 publishCurrent 覆盖成歌名
+      this.state.currentTitle = '';
+      this.notify();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 退避等待：分段 sleep，顺便把倒计时写进「正在匹配」文案。
+   * 期间 phase 仍是 MATCHING（见 hitRisk 的注释），所以页面停在匹配态看到倒计时，
+   * 而不是被切到报告页、误以为任务已经结束。
+   */
+  private async backoffWait(totalMs: number): Promise<void> {
+    let leftMs: number = totalMs;
+    while (leftMs > 0 && !this.aborting) {
+      const step: number = Math.min(BACKOFF_TICK_MS, leftMs);
+      const sec: number = Math.ceil(leftMs / 1000);
+      this.state.currentTitle = `B 站限流，已自动降速（间隔 ${(this.gapMs / 1000).toFixed(1)}s），${sec}s 后继续`;
+      this.notify();
+      await importSleep(step);
+      leftMs -= step;
+    }
+  }
+
+  /** 连续成功够多 → 间隔按 GAP_EASE_FACTOR 缓慢降回基础值（风控已解除的信号） */
+  private easeGapAfterStable(): void {
+    if (this.okStreak < GAP_EASE_AFTER_OK) {
+      return;
+    }
+    this.okStreak = 0;
+    if (this.gapMs > MATCH_MIN_GAP_MS) {
+      this.gapMs = Math.max(MATCH_MIN_GAP_MS, Math.round(this.gapMs * GAP_EASE_FACTOR));
+    }
+  }
+
+  /**
+   * 判断一次失败是不是「被限流」。
+   *
+   * ⚠️ 必须同时认两种形态（2026-10-21 真机踩到）：
+   *   ① 业务码：`BiliApiError` 的 `code` 落在 RISK_CODES 里（-352 等）；
+   *   ② **HTTP 状态码**：`HttpUtil` 对 `responseCode >= 400` 抛的是**普通 `Error`**
+   *      （`HTTP 412 for <url>`），不是 `BiliApiError`。
+   *
+   * 只认 ① 的后果非常隐蔽：真机导入 268 首、跑到第 86 首吃到 412 之后，
+   * 后面**每一首都被当成普通失败标成「未找到」**，界面还显示「匹配完成」——
+   * 用户看到的就是「很多歌都没找到」，而实际上只是被限流了。
+   */
+  private static isRiskError(e: Object): boolean {
+    if (e instanceof BiliApiError) {
+      return RISK_CODES.indexOf(e.code) >= 0;
+    }
+    const msg: string = e instanceof Error ? e.message : '';
+    return msg.indexOf('HTTP 412') >= 0 || msg.indexOf('HTTP 429') >= 0;
   }
 
   /** 单个 worker：循环「取号 → 匹配 → 计数」，直到无号可取或被停 / 风控 */
@@ -961,19 +1357,21 @@ export class ImportTaskManager {
       this.notifyThrottled();
       try {
         await this.matchItem(item);
+        this.okStreak++;
+        this.easeGapAfterStable();
       } catch (e) {
-        if (e instanceof BiliApiError && RISK_CODES.indexOf(e.code) >= 0) {
+        if (ImportTaskManager.isRiskError(e)) {
           this.hitRisk(idx);
           this.exitWorker(idx);
           return;
         }
         if (this.riskHit) {
-          // 风控期间其它在飞请求的失败不作数：条目保持 PENDING，等 resume 重跑
+          // 风控期间其它在飞请求的失败不作数：条目保持 PENDING，等下一轮重跑
           this.exitWorker(idx);
           return;
         }
         item.status = ImportItemStatus.MISSING;
-        item.failReason = '搜索失败，可稍后手动重试';
+        item.failReason = '搜索失败（网络异常），可稍后重试';
       }
       this.done++;
       this.state.processed = this.done;
@@ -989,12 +1387,18 @@ export class ImportTaskManager {
     this.notifyThrottled();
   }
 
-  /** 命中风控：停轮 + 记录回退水位（取所有在飞条目的最小下标） */
+  /**
+   * 命中风控：停轮 + 记录回退水位（取所有在飞条目的最小下标）。
+   *
+   * ⚠️ phase 的取值决定 UI 会不会切页，很关键：
+   *   · 还能自动重试 → **保持 MATCHING**。因为向导页的 `onImportStateChanged` 只在
+   *     「MATCHING → 非 MATCHING」时切到报告态，**不会再切回匹配态**；若这里先置 RISK，
+   *     退避结束自动续跑时页面已经停在报告页，用户看到的是「暂停了但进度自己在涨」。
+   *   · 已达重试上限 / 用户中止 → 置 RISK，交还用户手动续跑。
+   */
   private hitRisk(idx: number): void {
     this.riskHit = true;
     this.running = false;
-    this.state.phase = ImportPhase.RISK;
-    this.state.riskMessage = 'B 站搜索被限流，已保留当前进度，稍后可继续';
     let floor: number = idx;
     for (let i: number = 0; i < this.activeIndexes.length; i++) {
       if (this.activeIndexes[i] < floor) {
@@ -1002,12 +1406,22 @@ export class ImportTaskManager {
       }
     }
     this.riskFloor = floor;
+    this.okStreak = 0;
+    if (!this.aborting && this.riskRetries < RISK_RETRY_LIMIT) {
+      this.state.phase = ImportPhase.MATCHING;
+      this.state.riskMessage = '';
+      this.state.currentTitle = 'B 站限流，正在自动降速…';
+    } else {
+      this.state.phase = ImportPhase.RISK;
+      this.state.currentTitle = '';
+      this.state.riskMessage = 'B 站搜索被限流，已保留当前进度，稍后可继续';
+    }
   }
 
-  /** 全局节流：保证相邻两次「请求发起」间隔 ≥ MATCH_MIN_GAP_MS（单线程下无竞态） */
+  /** 全局节流：保证相邻两次「请求发起」间隔 ≥ 当前 gapMs（单线程下无竞态） */
   private async throttle(): Promise<void> {
     const now: number = Date.now();
-    const earliest: number = this.lastRequestAt + MATCH_MIN_GAP_MS;
+    const earliest: number = this.lastRequestAt + this.gapMs;
     this.lastRequestAt = now > earliest ? now : earliest;
     const wait: number = earliest - now;
     if (wait > 0) {
@@ -1058,7 +1472,26 @@ export class ImportTaskManager {
     this.matchCache.set(key, cached);
   }
 
-  /** 匹配一首：搜「歌名 歌手」（无结果降级「歌名」）→ 打分 → 分档（方案 §3.1） */
+  /** 候选打分过滤：只保留标题至少命中一档的（其余视为不相关） */
+  private scoreList(song: ExternalSong, list: SearchResultItem[]): ScoredCandidate[] {
+    const scored: ScoredCandidate[] = [];
+    for (let i: number = 0; i < list.length; i++) {
+      const score: number = scoreCandidate(song, list[i]);
+      if (score > SCORE_OUT) {
+        const c: ScoredCandidate = { score: score, play: list[i].play, item: list[i] };
+        scored.push(c);
+      }
+    }
+    return scored;
+  }
+
+  /**
+   * 匹配一首：搜「歌名 歌手」→（零结果降级纯歌名）→ 打分 → 分档。
+   *
+   * 2026-10-21 增补：**首轮候选全部出局时**，用「中文段 + 第一歌手」再召回一次。
+   * 依据是双语标题（`格拉默的余烬 The Embers of Glamoth`）整串搜索召回极差，
+   * 中文段单独搜反而直接命中。只在失败分支触发，正常曲目不增加任何请求。
+   */
   private async matchOne(item: ImportItem): Promise<void> {
     const song: ExternalSong = item.song;
     let keyword: string = song.title;
@@ -1071,23 +1504,23 @@ export class ImportTaskManager {
       await this.throttle();
       resp = await searchVideo(song.title, 1, MATCH_PAGE_SIZE);
     }
-    const list: SearchResultItem[] = resp.result ?? [];
-    if (list.length === 0) {
-      item.status = ImportItemStatus.MISSING;
-      item.failReason = '没有搜到相关视频';
-      return;
-    }
-    const scored: ScoredCandidate[] = [];
-    for (let i: number = 0; i < list.length; i++) {
-      const score: number = scoreCandidate(song, list[i]);
-      if (score > SCORE_OUT) {
-        const c: ScoredCandidate = { score: score, play: list[i].play, item: list[i] };
-        scored.push(c);
+    let list: SearchResultItem[] = resp.result ?? [];
+    let scored: ScoredCandidate[] = this.scoreList(song, list);
+    if (scored.length === 0) {
+      const alt: string = fallbackKeyword(song);
+      if (alt.length > 0 && alt !== keyword && alt !== song.title) {
+        await this.throttle();
+        const altResp: SearchResponse = await searchVideo(alt, 1, MATCH_PAGE_SIZE);
+        const altList: SearchResultItem[] = altResp.result ?? [];
+        if (altList.length > 0) {
+          list = altList;
+          scored = this.scoreList(song, altList);
+        }
       }
     }
     if (scored.length === 0) {
       item.status = ImportItemStatus.MISSING;
-      item.failReason = '没有找到足够相似的版本';
+      item.failReason = list.length === 0 ? '没有搜到相关视频' : '没有找到足够相似的版本';
       return;
     }
     // 分高优先；同分优先播放量高的（方案 §3.2）
@@ -1112,10 +1545,12 @@ export class ImportTaskManager {
       item.candidates = candidates;
       item.chosen = null;
     } else {
+      // 低分但「标题确实对上过」的候选仍留给复核页：用户常能一眼认出正确版本，
+      // 比让 TA 从空白页手动敲关键词强（旧版这里直接清空 candidates）。
       item.status = ImportItemStatus.MISSING;
-      item.candidates = [];
+      item.candidates = candidates;
       item.chosen = null;
-      item.failReason = '相似度不足，建议手动搜索';
+      item.failReason = '相似度不足，建议手动确认';
     }
   }
 
