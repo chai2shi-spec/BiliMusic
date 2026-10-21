@@ -79,6 +79,9 @@
  *     保住搜索词 / 滚动位置等页内状态）+ 底部浮一条 64vp 常驻播放条
  *     （tabletPlayBar：PlayBar 独立挂载 —— 非 SM 下 bodyVisible 恒 true、
  *     点按直达播放页；队列空不渲染；推入的 NavDestination 盖住整块内容列）。
+ *     2026-10-22 壳选择解耦：lg 判定叠加「未处于折叠屏展开态」（isTabletShell，
+ *     读全局折叠态 STORE_FOLD_EXPANDED，见 service/FormFactorHolder）—— 阔折叠
+ *     展开宽度落 lg（≥840vp）也走 phoneShell，平板壳只服务非折叠设备大窗口。
  * 两分支共用 NavStackHolder 单例路由栈与播放内核 —— 跨断点切换（sm/md↔lg）
  * 单树重挂，路由栈 / 播放存活；页内瞬时状态会丢（已知取舍）。
  * tabController / applyMiniBarStyle / 屏幕滑动收放等 HDS 联动只在 phoneShell
@@ -149,7 +152,8 @@ import {
   STORE_PLAYER_CLOSE_REQUEST,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_PLAYER_TRANSITIONING,
-  PLAYER_TRANSITION_MS
+  PLAYER_TRANSITION_MS,
+  STORE_FOLD_EXPANDED
 } from '../common/Constants';
 import { PLAYER_MAIN_CURVE } from '../common/constants/InteractionConstants';
 import { getLoginUser } from '../service/LoginStore';
@@ -288,6 +292,25 @@ struct Index {
   currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
 
   /**
+   * 折叠屏展开态（2026-10-22 折叠态适配层重写）：service/FormFactorHolder 在
+   * EntryAbility.onCreate 首发的全局唯一真源（@StorageProp 只读）。它与宽度断点
+   * **正交**，共同决定壳形态（见 isTabletShell）—— 折叠屏展开时窗口宽度可能落在
+   * md（600~840vp）也可能落到 lg（≥840vp，阔折叠大屏 / 横屏），但用户要的都是
+   * 手机壳的沉浸光感胶囊，不是平板 NavRail。
+   */
+  @StorageProp(STORE_FOLD_EXPANDED) isFoldExpanded: boolean = false;
+
+  /**
+   * 是否挂平板壳（2026-10-22 壳选择解耦）：**lg 宽度 且 未处于折叠屏展开态**。
+   * 折叠屏开合全程（sm↔md↔lg）恒走 phoneShell，同壳不重挂 —— HdsTabs 与四页
+   * 实例存活、页内瞬时状态保留；只有真平板 / 非折叠设备的大窗口才进 NavRail 壳。
+   */
+  private isTabletShell(): boolean {
+    return !this.isFoldExpanded
+      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG;
+  }
+
+  /**
    * miniBar 初始折叠是否已应用过（只补一次的守卫）。
    * 部分版本上 miniBarStyle 初始值不生效，参考 Sumy：挂载后延迟 100ms 由
    * 控制器 applyMiniBarStyle(COLLAPSE) 补一次；用户后续的展开 / 收起不受影响。
@@ -397,17 +420,17 @@ struct Index {
   private tabFadeTimer: number = -1;
 
   /**
-   * A3：NavRail 切页转场（@Watch on activeTab，仅 lg 平板形态起播）。
-   * sm/md 均走 HdsTabs（自带转场），本组状态恒 1/0（属性无感）；
-   * 2026-10-21 折叠屏回归：md 回到 phoneShell，早退条件从仅 SM 扩到 SM+MD，
-   * 只剩 lg（NavRail 壳）需要自绘淡入 + 位移。先记录方向再早退，双端互不干扰。
+   * A3：NavRail 切页转场（@Watch on activeTab，仅平板壳起播）。
+   * phoneShell（含折叠屏展开的 md / lg 宽度）均走 HdsTabs（自带转场），
+   * 本组状态恒 1/0（属性无感）；2026-10-22 壳选择解耦：早退条件从
+   * 「SM+MD」改为「非平板壳」—— 阔折叠展开落 lg 宽度时同样有 HdsTabs，
+   * 不需要自绘淡入。先记录方向再早退，双端互不干扰。
    * 方向感：沿 rail 前进（下标增大）内容从右侧滑入，后退从左侧。
    */
   private onTabSwitchedForFade(): void {
     const prev: number = this.lastTabForFade;
     this.lastTabForFade = this.activeTab;
-    if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
-      || this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD) {
+    if (!this.isTabletShell()) {
       return;
     }
     if (prev < 0 || prev === this.activeTab) {
@@ -556,11 +579,12 @@ struct Index {
         // 非受控 index（见 activeTab 注释）的代价 = 冷启动不再自动落回上次页签，
         // 这里一次性恢复（activeTab 未持久化时恒为 0，守卫跳过；持久化过则恢复）。
         // 2026-10-21 折叠屏回归：sm/md 均走 phoneShell（有 HdsTabs / tabController），
-        // changeIndex 不受 HDS ≥600vp 锁定影响（锁的只是 miniBarStyle）→ 守卫放宽
-        // 为非 lg；lg 冷启动走 NavRail 分支，没有 HdsTabs —— 控制器不可用也无需
-        // 恢复，页面 visibility 直接消费 activeTab。
+        // changeIndex 不受 HDS ≥600vp 锁定影响（锁的只是 miniBarStyle）→ 守卫放宽。
+        // 2026-10-22 壳选择解耦：守卫改为「非平板壳」—— 阔折叠展开落 lg 宽度时
+        // 同样有 HdsTabs，changeIndex 可用；平板壳走 NavRail 分支，没有 HdsTabs ——
+        // 控制器不可用也无需恢复，页面 visibility 直接消费 activeTab。
         if (this.activeTab !== 0
-          && this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_LG) {
+          && !this.isTabletShell()) {
           this.tabController.changeIndex(this.activeTab);
         }
       }
@@ -1120,8 +1144,11 @@ struct Index {
       // （HdsTabs 沉浸光感胶囊，HDS ≥600vp 强制 miniBar 展开、材质照常），
       // 仅 lg（真平板）保留 NavRail 平板壳。附带收益：折叠屏开合 sm↔md 同壳，
       // 不再整树重挂，HdsTabs 与四页实例存活、页内瞬时状态保留。
+      // 2026-10-22 折叠态适配层重写：lg 判定再叠加「未处于折叠屏展开态」
+      // （isTabletShell，见该方法的注释）—— 阔折叠展开宽度落 lg（≥840vp）时
+      // 同样走 phoneShell，彻底根治「展开进了平板模式」；壳选择 = 宽度 × 折叠态。
       // AppToast / AppDialogHost 全局宿主挂分支外，两种形态共用。
-      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
+      if (this.isTabletShell()) {
         this.tabletShell()
       } else {
         this.phoneShell()
@@ -1250,7 +1277,11 @@ struct Index {
           style: this.titleBarStyle(),
           content: {
             stackBuilder: (): void => {
-              if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD) {
+              // 2026-10-22 壳选择解耦：phoneShell 下**非 sm** 一律走收窄顶栏 ——
+              // md（折叠展开 / 小平板竖屏）与折叠展开落 lg 宽度（阔折叠大屏）
+              // 同待遇，immersiveTitleBarNarrow 的 maxWidth 走 contentMaxWidth
+              // 按断点取值（md 600 / lg 720），与内容列同宽；sm 直用全宽顶栏，零改动。
+              if (this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_SM) {
                 this.immersiveTitleBarNarrow();
               } else {
                 this.immersiveTitleBarContent();

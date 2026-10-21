@@ -279,8 +279,21 @@ export const STORE_AUDIO_MIX_ENABLED: string = 'audioMixEnabled';
  */
 export const STORE_PLAYER_BG_DARK: string = 'playerBgDark';
 
-/** 播放页折叠屏展开态（display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL），供左右分栏布局消费。 */
-export const STORE_PLAYER_FOLD_FULL: string = 'playerFoldFull';
+/**
+ * 折叠屏展开态全局唯一真源（display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL）。
+ * 由 service/FormFactorHolder（App 生命周期常驻，EntryAbility.onCreate 初始化）
+ * **唯一写入**：冷启动同步读一次 getFoldDisplayMode，之后 foldDisplayModeChange
+ * 持续跟进开合。消费端（Index 壳选择、播放页分栏、歌词/标题字号）一律
+ * @StorageProp 只读订阅 —— 2026-10-22 折叠态适配层重写：旧键 STORE_PLAYER_FOLD_FULL
+ * 由播放页组件私有注册（播放页不挂载则状态缺失），已废弃删除。
+ */
+export const STORE_FOLD_EXPANDED: string = 'foldExpanded';
+
+/**
+ * 本机是否为折叠屏设备（display.isFoldable()）。FormFactorHolder 唯一写入，
+ * 目前仅作诊断 / 预留（非折叠设备恒 false，恒不触发壳层切换）。
+ */
+export const STORE_DEVICE_FOLDABLE: string = 'deviceFoldable';
 
 /** 下载任务快照（DownloadTask[]）。由 DownloadManager 推送，下载页 @StorageLink 订阅。 */
 export const STORE_DOWNLOAD_TASKS: string = 'downloadTasks';

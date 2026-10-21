@@ -17,6 +17,7 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
+import { FormFactorHolder } from '../service/FormFactorHolder';
 import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
@@ -26,6 +27,11 @@ export default class EntryAbility extends UIAbility {
     // 中覆盖（未覆盖的品牌色 / 播放页白色系自动回落 base）；$r('sys.color.*') 系统资源
     // 本身随系统深浅切换，无需代码干预。
     this.registerAppFreezeWatcher();
+    // 折叠态适配层（2026-10-22 重写）：App 生命周期常驻的折叠开合唯一真源，
+    // 必须在首帧前 init —— Index 的壳选择（折叠屏展开一律手机壳）与播放页
+    // 分栏都读 STORE_FOLD_EXPANDED，晚了会先渲染错壳再跳变。display API
+    // 不依赖窗口，onCreate 即可调用。失败内部兜底为「非折叠」。
+    FormFactorHolder.init();
   }
 
   /**

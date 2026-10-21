@@ -5,9 +5,10 @@
  * （dealColor）做页面底色 + 模糊封面图打底；主色明度写入
  * STORE_PLAYER_BG_DARK，供顶栏投播按钮与状态栏内容色切换。
  *
- * 布局三分支（完整移植断点系统）：
- *   · 折叠屏展开（isFoldFull）→ 封面 / 歌词左右分栏；
- *   · MD/LG 断点 → 栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
+ * 布局三分支（折叠态适配层重写 2026-10-22：折叠态读全局 FormFactorHolder）：
+ *   · 折叠屏展开（isFoldFull，STORE_FOLD_EXPANDED）→ 封面 / 歌词左右分栏
+ *     （md/lg 宽度均 8 列 4+4，阔折叠展开落 lg 不破版）；
+ *   · MD/LG 断点（真平板 / 大窗口）→ 栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
  *   · SM 断点 → Swiper 双页（封面页 | 歌词页）+ 顶栏叠加。
  *
  * 安全区：STORE_SAFE_TOP / STORE_SAFE_BOTTOM（全屏布局方案，见 Constants.ts 注释）。
@@ -16,7 +17,6 @@
 import { effectKit } from '@kit.ArkGraphics2D';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
-import { display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Track } from '../../model/MusicModels';
@@ -34,7 +34,7 @@ import {
   STORE_SAFE_TOP,
   STORE_SAFE_BOTTOM,
   STORE_PLAYER_BG_DARK,
-  STORE_PLAYER_FOLD_FULL,
+  STORE_FOLD_EXPANDED,
   STORE_LOGIN_REV,
   BILI_REFERER,
   PLAYER_TRANSITION_MS,
@@ -75,7 +75,12 @@ export struct PlayerInfoComponent {
   @State imageColor: string = 'rgba(0, 0, 2, 1.00)';
   /** 背景图：取色成功前显示原图，成功后换模糊图 */
   @State bgCover: PixelMap | string = '';
-  @State isFoldFull: boolean = false;
+  /**
+   * 折叠屏展开态（2026-10-22 折叠态适配层重写）：不再本组件私有注册
+   * display 监听（旧实现播放页不挂载则全局无折叠态），改订阅全局唯一真源
+   * service/FormFactorHolder 的 STORE_FOLD_EXPANDED（EntryAbility 常驻首发）。
+   */
+  @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   /** 背景明暗（本组件取色写入 STORE_PLAYER_BG_DARK 后回读）：A7 标题块码率文案压深/提亮用 */
   @StorageProp(STORE_PLAYER_BG_DARK) isBgDark: boolean = true;
   /** 登录态版本号（A7 音质文案随登录/退出刷新，见 qualityText 的注释） */
@@ -218,35 +223,17 @@ export struct PlayerInfoComponent {
   /** 当前背景/配色已应用（或正在应用）的曲目 id；'' = 无。
    *  同曲对象重建（merge/点赞/重试/暂停→播放重载/单曲环绕）据此跳过重铺 */
   private themedId: string = '';
-  private foldCallback: Callback<display.FoldDisplayMode> = (data: display.FoldDisplayMode): void => {
-    this.isFoldFull = data === display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL;
-    AppStorage.setOrCreate(STORE_PLAYER_FOLD_FULL, this.isFoldFull);
-  };
+
+  // 折叠态检测已迁出（2026-10-22 折叠态适配层重写）：旧实现在这里注册
+  // display.getFoldDisplayMode / foldDisplayModeChange 并写 STORE_PLAYER_FOLD_FULL
+  // —— 播放页是懒加载 overlay，不挂载就没有折叠态，壳层冷启动读不到。
+  // 现由 service/FormFactorHolder 在 EntryAbility.onCreate 统一初始化，
+  // 本组件 @StorageProp(STORE_FOLD_EXPANDED) 只读订阅。
 
   aboutToAppear(): void {
     // 背景面转场起点不再手动实测：geometryTransition 配对由系统换算
     // 迷你栏锚点的真实视觉包围盒（见 GEOMETRY_ID_PLAYER_SURFACE）。
     this.onTrackChanged();
-    try {
-      if (canIUse('SystemCapability.Window.SessionManager')) {
-        const mode: display.FoldDisplayMode = display.getFoldDisplayMode();
-        this.isFoldFull = mode === display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL;
-        AppStorage.setOrCreate(STORE_PLAYER_FOLD_FULL, this.isFoldFull);
-        display.on('foldDisplayModeChange', this.foldCallback);
-      }
-    } catch (e) {
-      console.error(`Failed to register fold callback: ${JSON.stringify(e)}`);
-    }
-  }
-
-  aboutToDisappear(): void {
-    try {
-      if (canIUse('SystemCapability.Window.SessionManager')) {
-        display.off('foldDisplayModeChange', this.foldCallback);
-      }
-    } catch (e) {
-      console.error(`Failed to unregister fold callback: ${JSON.stringify(e)}`);
-    }
   }
 
   onTrackChanged(): void {
@@ -434,12 +421,21 @@ export struct PlayerInfoComponent {
                 bottom: $r('app.float.music_info_margin_top'),
                 left: $r('app.float.top_margin_left')
               })
+            // 2026-10-22 折叠态适配层重写：显式补 lg 档列定义 —— 阔折叠展开宽度
+            // 可能落 lg（≥840vp），只写 md 会让 GridRow/GridCol 在 lg 下回落默认
+            // 列数/跨度（12 列默认跨度），4+4 分栏破版。md/lg 均按 8 列 4+4。
             GridRow({
-              columns: { md: BreakpointConstants.COLUMN_MD },
+              columns: {
+                md: BreakpointConstants.COLUMN_MD,
+                lg: BreakpointConstants.COLUMN_MD
+              },
               gutter: BreakpointConstants.GUTTER_MUSIC_X
             }) {
               GridCol({
-                span: { md: BreakpointConstants.SPAN_SM }
+                span: {
+                  md: BreakpointConstants.SPAN_SM,
+                  lg: BreakpointConstants.SPAN_SM
+                }
               }) {
                 MusicInfoComponent()
               }
@@ -449,7 +445,10 @@ export struct PlayerInfoComponent {
               })
 
               GridCol({
-                span: { md: BreakpointConstants.SPAN_SM }
+                span: {
+                  md: BreakpointConstants.SPAN_SM,
+                  lg: BreakpointConstants.SPAN_SM
+                }
               }) {
                 LyricsComponent({ isShowControl: false })
               }

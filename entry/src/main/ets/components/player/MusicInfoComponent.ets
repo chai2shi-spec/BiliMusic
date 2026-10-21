@@ -18,7 +18,7 @@ import {
   AUDIO_Q_HIRES,
   STORE_CURRENT_TRACK,
   STORE_PLAYER_BG_DARK,
-  STORE_PLAYER_FOLD_FULL,
+  STORE_FOLD_EXPANDED,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_LOGIN_REV,
@@ -36,7 +36,8 @@ import {
 @Component
 export struct MusicInfoComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  @StorageLink(STORE_PLAYER_FOLD_FULL) isFoldFull: boolean = false;
+  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读（2026-10-22 迁移） */
+  @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
 
   /**

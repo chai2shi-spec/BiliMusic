@@ -25,7 +25,7 @@ import {
   STORE_CURRENT_TRACK,
   STORE_IS_PLAYING,
   STORE_PROGRESS,
-  STORE_PLAYER_FOLD_FULL,
+  STORE_FOLD_EXPANDED,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_THEME_PRIMARY,
@@ -46,7 +46,8 @@ export struct LyricsComponent {
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   /** 播放进度（秒）：LrcView 要毫秒，传入时 ×1000 */
   @StorageLink(STORE_PROGRESS) time: number = 0;
-  @StorageLink(STORE_PLAYER_FOLD_FULL) isFoldFull: boolean = false;
+  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读（2026-10-22 迁移） */
+  @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageLink(STORE_IS_PLAYING) isPlay: boolean = false;
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   /** 是否随歌词渲染底部控制区（SM 歌词页 true；LG/折叠分栏布局 false，控制区在封面侧） */
@@ -284,7 +285,10 @@ export struct LyricsComponent {
         .scale({ x: this.exitScale, y: this.exitScale })
       }
 
-      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
+      // 平板大屏歌词（7 列居中窄栅格）只服务真 LG；折叠屏展开即使宽度落 lg
+      //（阔折叠大屏，2026-10-22 折叠态适配层重写）也走普通歌词列表 —— 分栏
+      // 由外层折叠分支的 8 列 4+4 栅格负责，再套窄栅格会双重收窄。
+      if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG && !this.isFoldFull) {
         Row() {
           GridRow({
             columns: { lg: BreakpointConstants.COLUMN_LYRIC_LG }
