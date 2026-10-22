@@ -36,8 +36,11 @@ export const BUTTON_RADIUS_VP: number = 8;
  * 总落定 ~780ms。
  *
  * 2026-10-21 深夜再调（用户反馈「太快了」，参考华为音乐）：整体从 450ms 档放慢到
- * 700ms 档（延迟 260/300/340 → 400/470/530）；随后退场按用户要求从纯淡出改为
- * 「跟着收缩俯冲向迷你栏」（见下方 LAYER_EXIT_DIVE_*）。
+ * 700ms 档（延迟 260/300/340 → 400/470/530）。
+ * 2026-10-22 收起规格再改（用户要求「除封面和背景的其他元素直接消失」）：退场从
+ * 「跟着收缩俯冲向迷你栏」改为「内容层瞬隐」—— closePlayer 在主动画闭包**外**
+ * 递增 STORE_PLAYER_CONTENT_EXIT，各内容层 @Watch 复位落在隐式动画作用域外 →
+ * 单帧直接消失；封面 / 背景仍走 700ms 几何转场（俯冲常量 LAYER_EXIT_* 已删除）。
  *
  * ⚠️ **封面（CoverDiscComponent）刻意不参与分层**：它的形变由 `geometryTransition` 独占
  * （那个 `Image` 节点上还挂着 `rotate`）。若给它的父容器再叠 scale/translate，
@@ -52,30 +55,6 @@ export const LAYER_DELAY_TOP: number = 530;
 export const LAYER_DELAY_INFO: number = 470;
 /** 控制区（含歌词，同批）：底部区域最先被背景面盖住，最早淡入 */
 export const LAYER_DELAY_CONTROL: number = 400;
-/**
- * ══════════ 收起退场：跟着收缩俯冲向迷你栏（2026-10-21 用户要求，替代纯淡出）══════════
- *
- * closePlayer 的**主动画闭包内**（700ms / PLAYER_MAIN_CURVE，与背景面收缩同一条
- * animateTo）递增 STORE_PLAYER_CONTENT_EXIT，四个内容层组件 @Watch 把下潜位移 /
- * 缩放 / 透明度一并复位 → 各层边淡出边俯冲下沉，与背景面收回迷你栏同曲线同步。
- *
- * · 位移按「离迷你栏越远潜得越深」分层（顶栏最深、控制区最浅）；
- * · 缩放统一 LAYER_EXIT_SCALE（各层绕自身中心缩小，配合下沉读感为「收进迷你栏」）；
- * · 透明度仍要归零：overlay 在 700ms 后卸载，残留不透明会在卸载帧跳变。
- *
- * ⚠️ 挂载点必须避开封面（GT 独占）与内嵌 ControlArea：歌词层的变换挂在头部 /
- * 歌词列表节点而不是组件根（SM 根里还装着 ControlArea，挂根会双重位移）。
- */
-/** 顶栏（收起键 / 投播）下潜位移（vp）——离迷你栏最远，潜得最深 */
-export const LAYER_EXIT_DIVE_TOP_VP: number = 280;
-/** 标题块（歌名 / 歌手 / 音质回显）下潜位移（vp） */
-export const LAYER_EXIT_DIVE_INFO_VP: number = 220;
-/** 歌词层（头部 + 歌词列表）下潜位移（vp） */
-export const LAYER_EXIT_DIVE_LYRIC_VP: number = 180;
-/** 控制区下潜位移（vp）——离迷你栏最近，潜得最浅 */
-export const LAYER_EXIT_DIVE_CONTROL_VP: number = 140;
-/** 退场统一缩放（各层绕自身中心，1 = 不缩） */
-export const LAYER_EXIT_SCALE: number = 0.72;
 /**
  * 播放页主动画曲线（打开 / 收起共用）：果断起步 + 长尾柔和收住（iOS 全屏展开
  * 同款手感）。GT 配对（背景面 / 唱片）、页签图标淡出均由该曲线驱动。

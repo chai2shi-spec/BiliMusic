@@ -18,7 +18,7 @@ import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { FormFactorHolder } from '../service/FormFactorHolder';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_WINDOW_WIDTH_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
@@ -217,22 +217,28 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 读取系统避让区尺寸并发布到 AppStorage（单位 vp）。
-   *
-   * 为什么必须自己读：窗口开了全屏布局之后内容不再自动避让，根容器与页签层的留白尺寸
-   * 只能从窗口避让区取。
-   *   bottom = max(TYPE_SYSTEM.bottomRect,               （三键导航时 = 导航栏高度）
-   *                TYPE_NAVIGATION_INDICATOR.bottomRect) （手势导航时 = 指示条区域高度）
-   * 取两者较大值，三键 / 手势两种导航模式都能拿到正确高度。
-   *
-   * top（状态栏高度）由页签层消费，用来把 Tabs 内容顶到状态栏下方。
-   *
-   * 换算用 densityPixels 手算而不用 px2vp()：本文件在 Ability（非 UI 上下文）里执行，
-   * px2vp 依赖 UIContext，这里拿不到（页面侧用 UIContext.px2vp，见 Index.ets）。
-   *
-   * 注意：这里只做**一次同步首发**，avoidAreaChange 监听的注册在 pages/Index.ets
-   * （页面侧能拿到 UIContext，且首页是常驻根页面），避免两处重复监听、重复写同一个 key。
-   */
+    * 读取系统避让区尺寸并发布到 AppStorage（单位 vp）。
+    *
+    * 为什么必须自己读：窗口开了全屏布局之后内容不再自动避让，根容器与页签层的留白尺寸
+    * 只能从窗口避让区取。
+    *   bottom = max(TYPE_SYSTEM.bottomRect,               （三键导航时 = 导航栏高度）
+    *                TYPE_NAVIGATION_INDICATOR.bottomRect) （手势导航时 = 指示条区域高度）
+    * 取两者较大值，三键 / 手势两种导航模式都能拿到正确高度。
+    *
+    * 同时**分开**发布两个来源（2026-10-22 修「大屏展开底部导航不居中」）：
+    *   STORE_NAV_BAR_BOTTOM       = TYPE_SYSTEM 底部矩形（>0 即三键导航）
+    *   STORE_NAV_INDICATOR_BOTTOM = TYPE_NAVIGATION_INDICATOR 底部矩形（手势指示条）
+    * 悬浮胶囊按「避让区来源」判导航模式选避让策略，不再按固定高度阈值猜 ——
+    * 阔折叠 / 阔直板大屏展开态的高度与手机不同，按阈值猜必错。
+    *
+    * top（状态栏高度）由页签层消费，用来把 Tabs 内容顶到状态栏下方。
+    *
+    * 换算用 densityPixels 手算而不用 px2vp()：本文件在 Ability（非 UI 上下文）里执行，
+    * px2vp 依赖 UIContext，这里拿不到（页面侧用 UIContext.px2vp，见 Index.ets）。
+    *
+    * 注意：这里只做**一次同步首发**，avoidAreaChange 监听的注册在 pages/Index.ets
+    * （页面侧能拿到 UIContext，且首页是常驻根页面），避免两处重复监听、重复写同一个 key。
+    */
   private publishSafeArea(windowStage: window.WindowStage): void {
     try {
       const win: window.Window = windowStage.getMainWindowSync();
@@ -250,9 +256,18 @@ export default class EntryAbility extends UIAbility {
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
       const topVp: number = sys.topRect.height / density;
-      const bottomVp: number = Math.max(sys.bottomRect.height, indicator.bottomRect.height) / density;
+      const navBarBottomVp: number = sys.bottomRect.height / density;
+      const indicatorBottomVp: number = indicator.bottomRect.height / density;
+      const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);
       AppStorage.setOrCreate(STORE_SAFE_TOP, topVp);
       AppStorage.setOrCreate(STORE_SAFE_BOTTOM, bottomVp);
+      AppStorage.setOrCreate(STORE_NAV_BAR_BOTTOM, navBarBottomVp);
+      AppStorage.setOrCreate(STORE_NAV_INDICATOR_BOTTOM, indicatorBottomVp);
+      // 窗口内容区宽度（vp）：悬浮胶囊「居中 sideMargin」公式的输入（见 Constants
+      // 的 STORE_WINDOW_WIDTH_VP 注释）。窗口全屏布局 → windowRect 宽 = HdsTabs 宽。
+      // 后续折叠开合 / 分屏 / 转屏由 Index 的 HdsTabs.onAreaChange 持续回写。
+      const windowWidthVp: number = win.getWindowProperties().windowRect.width / density;
+      AppStorage.setOrCreate(STORE_WINDOW_WIDTH_VP, windowWidthVp);
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`writeSafeArea failed: ${msg}`);

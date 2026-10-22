@@ -1,14 +1,18 @@
 /**
- * 收藏夹同步页（B 站收藏夹 → 本地歌单镜像，2026-10-13）。
+ * 收藏夹同步页（B 站收藏夹 → 本地歌单镜像，2026-10-13；2026-10-23 手动选择性同步）。
  *
  * 入口：「设置 → 账户 → 收藏夹同步」（路由名仍为 'CloudSync'，历史沿用）。
  *
+ * ⚠️ 2026-10-23 产品决策：**登录成功后不再自动同步**，收藏夹只在本页手动触发；
+ * 且每个收藏夹可勾选是否参与同步（默认全选，勾选状态持久化，见 FavSelectionStore）。
+ *
  * 数据来源：`service/FavSyncManager`（编排一轮同步）+ `service/FavSyncStore`
- * （每夹上次同步结果）。本页**只负责触发与展示**，不直接调网络 / 不碰本地歌单，
- * 一切写操作都在管理器里完成，避免与自动同步（登录后）并发写同一份数据。
+ * （每夹上次同步结果）+ `api/BilibiliApi.getFavoriteFolders`（进页拉收藏夹列表，
+ * 未同步过的夹也要展示出来供勾选）。本页**只负责触发与展示**，同步的写操作
+ * 都在管理器里完成，避免并发写同一份镜像数据。
  *
  * 订阅：
- *   · `STORE_LOGIN_REV`  —— 登录/登出后重查登录态与列表
+ *   · `STORE_LOGIN_REV`  —— 登录/登出后重查登录态并重拉收藏夹列表
  *   · `STORE_FAV_SYNC_REV` —— 每轮同步开始/结束递增，@Watch 里刷新 syncing 与列表
  *   · `STORE_SAFE_TOP|BOTTOM` —— 自绘沉浸顶栏让位 / 底部安全区
  *
@@ -21,11 +25,13 @@
  * bottomBuilder 承载「上次同步 …」状态行（仅有列表时渲染，定高 28）。
  *
  * ⚠️ 同步是**双向**的（B 站取消收藏 → 本地移除），但只有当某收藏夹在服务端被
- * **完整**拉取成功时才允许删本地 —— 本页在说明卡里如实告知用户这一安全边界。
+ * **完整**拉取成功时才允许删本地（断网 / 被风控的那一轮只增不减，不会误删）。
  */
 
 import { FavSyncManager, FavSyncSummary, FavPushSummary } from '../service/FavSyncManager';
-import { FavFolderSyncState, FAV_SYNC_OK, FAV_SYNC_PARTIAL, FAV_SYNC_FAILED, loadFavSyncStates } from '../service/FavSyncStore';
+import { FavFolderSyncState, FAV_SYNC_OK, FAV_SYNC_PARTIAL, FAV_SYNC_FAILED, loadFavSyncStates, getFavSyncState } from '../service/FavSyncStore';
+import { isFolderSelected, setFolderSelected } from '../service/FavSelectionStore';
+import { FavoriteFolder, FavoriteFoldersResult, getFavoriteFolders } from '../api/BilibiliApi';
 import { getLoginUser, LoginUser } from '../service/LoginStore';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { showAppToast } from '../components/AppToast';
@@ -48,6 +54,7 @@ import {
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 「立即同步」冷却（ms）：收藏夹接口对高频请求敏感，连点只会继续被拒 */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -88,6 +95,23 @@ function formatClock(ms: number): string {
   return `${monStr}-${dayStr} ${hhStr}:${mmStr}`;
 }
 
+/**
+ * 收藏夹展示行（2026-10-23 勾选同步）：服务端收藏夹列表（进页拉取）+
+ * 勾选态（FavSelectionStore）+ 上次同步状态（FavSyncStore）三者合并的 UI 模型。
+ * 未同步过的夹 state 为 null（徽标不渲染、副题显示服务端条数）。
+ */
+interface FavRowItem {
+  /** 收藏夹 id（B 站的 media_id） */
+  mediaId: number;
+  title: string;
+  /** 服务端报告的条数（未同步过时作为副题展示） */
+  mediaCount: number;
+  /** 是否勾选参与同步（默认全选） */
+  selected: boolean;
+  /** 上次同步状态；null = 从未同步过 */
+  state: FavFolderSyncState | null;
+}
+
 @Component
 export struct FavSyncPage {
   /** 未登录：渲染登录引导空态（不发请求） */
@@ -100,6 +124,15 @@ export struct FavSyncPage {
   @State syncing: boolean = false;
   /** 每夹上次同步状态（来自 FavSyncStore，按 mediaId 稳定） */
   @State states: FavFolderSyncState[] = [];
+  /**
+   * 收藏夹展示行（2026-10-23）：进页拉服务端收藏夹列表（未同步过的夹也展示，
+   * 否则首次使用时没有任何可勾选的东西）。拉取失败时保留为空，回退 states 兜底。
+   */
+  @State rows: FavRowItem[] = [];
+  /** 收藏夹列表拉取中（进页 / 登录后 / 手动重试） */
+  @State foldersLoading: boolean = false;
+  /** 收藏夹列表拉取失败原因（'' = 无失败）；失败时展示重试行 */
+  @State foldersError: string = '';
   /** 最近一次同步时间（ms 时间戳，0 = 从未同步） */
   @State lastSyncAt: number = 0;
   /** 待推送到 B 站的改动条数（本地选过删/加但还没发出去，含失败待重试的） */
@@ -128,7 +161,12 @@ export struct FavSyncPage {
   /** HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 状态行 28（有列表时） */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
-      + (this.states.length > 0 ? SYNC_STATUS_ROW_HEIGHT : 0);
+      + (this.hasListContent() ? SYNC_STATUS_ROW_HEIGHT : 0);
+  }
+
+  /** 是否有任何可展示的列表内容（勾选行或历史状态，决定状态行 / 让位量） */
+  private hasListContent(): boolean {
+    return this.rows.length > 0 || this.states.length > 0;
   }
 
   /** 列表滚动控制器 */
@@ -141,6 +179,8 @@ export struct FavSyncPage {
   aboutToAppear(): void {
     this.refreshFromStore();
     this.checkLogin();
+    // 拉收藏夹列表（登录态下）：未同步过的夹也要展示出来供勾选（2026-10-23）
+    this.fetchFolders();
   }
 
   aboutToDisappear(): void {
@@ -201,22 +241,108 @@ export struct FavSyncPage {
     this.needLogin = user === null;
   }
 
+  /**
+   * 拉取服务端收藏夹列表并合并成展示行（2026-10-23 勾选同步）。
+   * 只在登录态下发请求；失败置 foldersError（UI 展示重试），rows 保留旧值
+   * （上次成功拉到的列表不作废，避免一次网络抖动把已勾选的列表清掉）。
+   */
+  private fetchFolders(): void {
+    const user: LoginUser | null = getLoginUser();
+    if (user === null) {
+      this.needLogin = true;
+      this.rows = [];
+      this.foldersError = '';
+      return;
+    }
+    this.foldersLoading = true;
+    this.foldersError = '';
+    getFavoriteFolders(user.mid)
+      .then((r: FavoriteFoldersResult): void => {
+        const list: FavoriteFolder[] = r && r.list ? r.list : [];
+        const out: FavRowItem[] = [];
+        for (let i = 0; i < list.length; i++) {
+          const f: FavoriteFolder = list[i];
+          out.push({
+            mediaId: f.id,
+            title: f.title,
+            mediaCount: f.mediaCount,
+            selected: isFolderSelected(f.id),
+            state: getFavSyncState(f.id)
+          });
+        }
+        this.rows = out;
+        this.foldersLoading = false;
+      })
+      .catch((e: ESObject): void => {
+        this.foldersLoading = false;
+        this.foldersError = e instanceof Error ? e.message : JSON.stringify(e);
+        console.warn(`fav sync page: fetchFolders failed: ${this.foldersError}`);
+      });
+  }
+
+  /** 同步结束后刷新各行的上次同步状态（标题/条数/徽标实时跟上本轮结果） */
+  private refreshRowStates(): void {
+    if (this.rows.length === 0) {
+      return;
+    }
+    const refreshed: FavRowItem[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r: FavRowItem = this.rows[i];
+      refreshed.push({
+        mediaId: r.mediaId,
+        title: r.title,
+        mediaCount: r.mediaCount,
+        selected: r.selected,
+        state: getFavSyncState(r.mediaId)
+      });
+    }
+    this.rows = refreshed;
+  }
+
+  /** 勾选/取消勾选一个收藏夹：持久化 + 行内状态更新（整行可点，触达 ≥ 44vp） */
+  private onRowCheckToggled(mediaId: number): void {
+    const next: boolean = !isFolderSelected(mediaId);
+    setFolderSelected(mediaId, next);
+    const updated: FavRowItem[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r: FavRowItem = this.rows[i];
+      if (r.mediaId === mediaId) {
+        updated.push({
+          mediaId: r.mediaId,
+          title: r.title,
+          mediaCount: r.mediaCount,
+          selected: next,
+          state: r.state
+        });
+      } else {
+        updated.push(r);
+      }
+    }
+    this.rows = updated;
+  }
+
   private onLoginRevChanged(): void {
     const user: LoginUser | null = getLoginUser();
     if (user === null) {
       // 退出登录：清空列表，回登录引导态
       this.needLogin = true;
       this.states = [];
+      this.rows = [];
+      this.foldersError = '';
       this.lastSyncAt = 0;
       return;
     }
     this.needLogin = false;
     this.refreshFromStore();
+    // 登录 / 登录态变化 → 重拉收藏夹列表（换号后夹列表完全不同）
+    this.fetchFolders();
   }
 
   private onFavSyncRevChanged(): void {
     const wasSyncing: boolean = this.syncing;
     this.refreshFromStore();
+    // 行内徽标 / 副题跟上本轮结果（勾选行才有，states 兜底列表走 refreshFromStore）
+    this.refreshRowStates();
     // 由「进行中」翻转为「已结束」的这一次，给一句结果提示
     if (wasSyncing && !this.syncing) {
       if (this.pushRoundActive) {
@@ -264,7 +390,8 @@ export struct FavSyncPage {
       return;
     }
     if (s.total === 0) {
-      this.toast('还没有自己创建的收藏夹', 2000);
+      // 管理器在「一个夹都没勾」时带 reason（2026-10-23）；没 reason 才是真的没有收藏夹
+      this.toast(s.reason.length > 0 ? s.reason : '还没有自己创建的收藏夹', 2400);
       return;
     }
     const parts: string[] = [];
@@ -298,6 +425,21 @@ export struct FavSyncPage {
     if (user === null) {
       this.needLogin = true;
       return;
+    }
+    // 勾选校验（2026-10-23）：列表已拉到且一个都没勾 → 拦下（列表没拉到时不拦，
+    // 管理器按持久化的勾选状态过滤，兜底全选）
+    if (this.rows.length > 0) {
+      let anySelected: boolean = false;
+      for (let i = 0; i < this.rows.length; i++) {
+        if (this.rows[i].selected) {
+          anySelected = true;
+          break;
+        }
+      }
+      if (!anySelected) {
+        this.toast('请先勾选要同步的收藏夹', 2000);
+        return;
+      }
     }
     this.retryLocked = true;
     this.retryCooling = true;
@@ -355,13 +497,28 @@ export struct FavSyncPage {
     return $r('app.color.state_success');
   }
 
-  /** 行副标题：条数（+ 上次同步时钟） */
+  /** 行副标题：条数（+ 上次同步时钟 + 失败原因） */
   private rowSubtitle(s: FavFolderSyncState): string {
-    const countText: string = s.playlistId.length > 0
-      ? `${s.lastItemCount} 首`
-      : (s.lastResult === FAV_SYNC_OK ? '空收藏夹' : '未建成镜像');
+    let countText: string;
+    if (s.playlistId.length > 0) {
+      /**
+       * 「没拉全 + 0 首」几乎一定是首轮失败的假象（镜像里其实已经有歌）——
+       * 不显示误导性的「0 首」，否则用户会以为收藏夹空了。
+       */
+      countText = (s.lastItemCount === 0 && s.lastResult !== FAV_SYNC_OK) ? '条数未知' : `${s.lastItemCount} 首`;
+    } else {
+      countText = s.lastResult === FAV_SYNC_OK ? '空收藏夹' : '未建成镜像';
+    }
+    const parts: string[] = [countText];
     const timeText: string = formatClock(s.lastSyncAt);
-    return timeText.length > 0 ? `${countText} · ${timeText}` : countText;
+    if (timeText.length > 0) {
+      parts.push(timeText);
+    }
+    // 失败原因此前完全没展示，用户只看到一个「未拉全/失败」徽标却不知道是风控还是网络
+    if (s.lastResult !== FAV_SYNC_OK && s.lastReason.length > 0) {
+      parts.push(s.lastReason);
+    }
+    return parts.join(' · ');
   }
 
   private toast(message: string, duration: number): void {
@@ -375,39 +532,7 @@ export struct FavSyncPage {
    */
   @Builder
   syncBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('收藏夹同步')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '收藏夹同步' })
   }
 
   /**
@@ -422,7 +547,7 @@ export struct FavSyncPage {
         .layoutWeight(1)
       Text(this.syncing
         ? '同步中…'
-        : `上次同步 ${formatClock(this.lastSyncAt)} · ${this.states.length} 个收藏夹`)
+        : `上次同步 ${formatClock(this.lastSyncAt)} · ${this.rows.length > 0 ? this.rows.length : this.states.length} 个收藏夹`)
         .fontSize(11)
         .fontColor($r('app.color.text_tertiary'))
     }
@@ -430,43 +555,6 @@ export struct FavSyncPage {
     .height(SYNC_STATUS_ROW_HEIGHT)
     .padding({ left: 16, right: 16, top: 4, bottom: 8 })
     .alignItems(VerticalAlign.Center)
-  }
-
-  /** 说明卡：同步范围 + 双向同步的安全边界（如实告知，避免用户误以为会丢歌） */
-  @Builder
-  infoCard() {
-    Column() {
-      Text('同步范围')
-        .fontSize(13)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .margin({ bottom: 6 })
-      Text('只同步你自己创建的收藏夹，每个收藏夹会镜像成本地歌单，名称形如「收藏夹名（收藏夹）」。')
-        .fontSize(13)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .lineHeight(18)
-      CardDivider()
-      Text('双向同步 + 安全边界')
-        .fontSize(13)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .margin({ top: 12, bottom: 6 })
-      Text('B 站取消收藏的曲目，本地镜像也会移除；但只有该收藏夹被完整拉取成功时才删除本地 —— 断网或被风控的那一轮只增不减，不会误删。')
-        .fontSize(13)
-        .fontColor($r('app.color.text_primary'))
-        .width('100%')
-        .lineHeight(18)
-      Text('在本地对镜像歌单做的增删会同步回 B 站（需登录）。单个收藏夹超过 500 首时，只镜像最新的 500 首，且该收藏夹不做任何删除。')
-        .fontSize(13)
-        .fontColor($r('app.color.text_tertiary'))
-        .width('100%')
-        .lineHeight(18)
-        .margin({ top: 12 })
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-    .padding({ left: 16, right: 16, top: 16, bottom: 16 })
   }
 
   /** 「N 条待同步」行：本地已改但还没成功推到 B 站的写操作，可手动重试 */
@@ -563,6 +651,64 @@ export struct FavSyncPage {
     .alignItems(VerticalAlign.Center)
   }
 
+  /** 勾选行副标题（2026-10-23）：没同步过的夹显示服务端条数；同步过复用状态副题 */
+  private rowSubtitleFor(r: FavRowItem): string {
+    if (r.state !== null) {
+      return this.rowSubtitle(r.state);
+    }
+    return `${r.mediaCount} 首 · 未同步`;
+  }
+
+  /**
+   * 一个收藏夹**勾选行**（2026-10-23 手动选择性同步）：
+   * 整行可点切换勾选（触达 ≥ 44vp）；Checkbox 做纯视觉（HitTestMode.None 不响应命中，
+   * 否则点勾选框会同时触发自身 onChange 与行 onClick，一次点击翻转两次等于没翻）。
+   * 未同步过的夹（state=null）不渲染结果徽标。
+   */
+  @Builder
+  selectableFolderRow(r: FavRowItem) {
+    Row() {
+      Checkbox()
+        .select(r.selected)
+        .selectedColor(this.themePrimary)
+        .width(22)
+        .height(22)
+        .hitTestBehavior(HitTestMode.None)
+      Column() {
+        Text(r.title)
+          .fontSize(16)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.rowSubtitleFor(r))
+          .fontSize(13)
+          .fontColor($r('app.color.text_tertiary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 3 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 12 })
+
+      if (r.state !== null) {
+        Text(this.resultLabel(r.state.lastResult))
+          .fontSize(11)
+          .fontColor(this.resultColor(r.state.lastResult))
+          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+          .borderRadius(4)
+          .backgroundColor(this.themeSurface)
+          .hitTestBehavior(HitTestMode.None)
+      }
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .alignItems(VerticalAlign.Center)
+    .onClick((): void => {
+      this.onRowCheckToggled(r.mediaId);
+    })
+  }
+
   build() {
     HdsNavDestination() {
       Stack() {
@@ -586,7 +732,7 @@ export struct FavSyncPage {
                 .attributeModifier(this.buttonMaterial)
                 .margin({ top: 20 })
                 .onClick((): void => {
-                  NavStackHolder.stack.pushPath({ name: 'Login' });
+                  NavStackHolder.stack.pushPathByName('Login', undefined);
                 })
             }
             .layoutWeight(1)
@@ -605,17 +751,6 @@ export struct FavSyncPage {
                   .height(this.barTotalHeight())
               }
               ListItem() {
-                // ⚠️ 自定义组件带尾随构建块时不能链式挂属性（`InsetCard() {...}.margin()` 会
-                // 被解析成两条语句 → 编译报错），故用外层 Row 承载上间距。
-                Row() {
-                  InsetCard() {
-                    this.infoCard()
-                  }
-                }
-                .width('100%')
-                .padding({ top: 12 })
-              }
-              ListItem() {
                 this.syncButtonRow()
               }
               if (this.pendingCount > 0) {
@@ -632,15 +767,13 @@ export struct FavSyncPage {
               ListItem() {
                 SectionHeader({ headerText: '收藏夹' })
               }
-              if (this.states.length === 0) {
+              if (this.foldersLoading && this.rows.length === 0) {
                 ListItem() {
                   Column() {
-                    Text(this.syncing ? '正在同步收藏夹…' : '还没有同步记录')
+                    Text('正在拉取收藏夹列表…')
                       .fontSize(16)
                       .fontColor($r('app.color.text_secondary'))
-                    Text(this.syncing
-                      ? '首次同步会逐个拉取收藏夹内容，请稍候'
-                      : '点上方「立即同步」，把你创建的收藏夹镜像到本地')
+                    Text('列表用于勾选要同步的收藏夹，请稍候')
                       .fontSize(13)
                       .fontColor($r('app.color.text_tertiary'))
                       .margin({ top: 8 })
@@ -650,15 +783,77 @@ export struct FavSyncPage {
                   .padding({ top: 40, bottom: 40, left: 32, right: 32 })
                   .alignItems(HorizontalAlign.Center)
                 }
-              } else {
+              } else if (this.rows.length > 0) {
+                // 勾选列表（2026-10-23 手动选择性同步）：进页拉服务端列表，整行可点切换勾选
                 ListItem() {
                   InsetCard() {
-                    ForEach(this.states, (s: FavFolderSyncState, index: number): void => {
+                    ForEach(this.rows, (r: FavRowItem, index: number): void => {
                       if (index > 0) {
                         CardDivider()
                       }
-                      this.folderRow(s)
-                    }, (s: FavFolderSyncState): string => `${s.mediaId}_${s.lastResult}_${s.lastItemCount}_${s.lastSyncAt}`)
+                      this.selectableFolderRow(r)
+                    }, (r: FavRowItem): string => `${r.mediaId}_${r.selected}_${
+                      r.state ? `${r.state.lastResult}_${r.state.lastItemCount}_${r.state.lastSyncAt}` : 'none'}`)
+                  }
+                }
+              } else {
+                // 列表没拉到（失败 / 网络未回）：错误提示 + 重试；states 作为历史结果兜底展示
+                if (this.foldersError.length > 0) {
+                  ListItem() {
+                    Column() {
+                      Text('收藏夹列表拉取失败')
+                        .fontSize(16)
+                        .fontColor($r('app.color.text_secondary'))
+                      Text(this.foldersError)
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .maxLines(2)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .margin({ top: 8 })
+                        .textAlign(TextAlign.Center)
+                      Text('重试')
+                        .fontSize(13)
+                        .fontColor(this.themePrimary)
+                        .height(44)
+                        .padding({ left: 16, right: 16 })
+                        .margin({ top: 4 })
+                        .onClick((): void => {
+                          this.fetchFolders();
+                        })
+                    }
+                    .width('100%')
+                    .padding({ top: 32, bottom: 16, left: 32, right: 32 })
+                    .alignItems(HorizontalAlign.Center)
+                  }
+                }
+                if (this.states.length > 0) {
+                  ListItem() {
+                    InsetCard() {
+                      ForEach(this.states, (s: FavFolderSyncState, index: number): void => {
+                        if (index > 0) {
+                          CardDivider()
+                        }
+                        this.folderRow(s)
+                      }, (s: FavFolderSyncState): string => `${s.mediaId}_${s.lastResult}_${s.lastItemCount}_${s.lastSyncAt}`)
+                    }
+                  }
+                } else if (this.foldersError.length === 0) {
+                  ListItem() {
+                    Column() {
+                      Text(this.syncing ? '正在同步收藏夹…' : '还没有收藏夹')
+                        .fontSize(16)
+                        .fontColor($r('app.color.text_secondary'))
+                      Text(this.syncing
+                        ? '首次同步会逐个拉取收藏夹内容，请稍候'
+                        : '你在 B 站创建的收藏夹会显示在这里；点上方「立即同步」镜像到本地')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .margin({ top: 8 })
+                        .textAlign(TextAlign.Center)
+                    }
+                    .width('100%')
+                    .padding({ top: 40, bottom: 40, left: 32, right: 32 })
+                    .alignItems(HorizontalAlign.Center)
                   }
                 }
               }
@@ -692,7 +887,7 @@ export struct FavSyncPage {
         },
         // 标题行下方自定义区（bottomBuilder 承载，仅有列表时配置）：
         // 「上次同步 …」状态行。⚠️ bottomBuilder 高度不自适应，由参数显式给定。
-        bottomBuilder: this.states.length > 0 ? {
+        bottomBuilder: this.hasListContent() ? {
           builder: (): void => {
             this.syncStatusRow();
           },
@@ -701,6 +896,9 @@ export struct FavSyncPage {
         } : undefined
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.scroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

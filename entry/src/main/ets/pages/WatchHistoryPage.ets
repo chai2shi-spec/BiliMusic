@@ -25,6 +25,7 @@ import {
 } from '../api/BilibiliApi';
 import { getLoginUser, LoginUser } from '../service/LoginStore';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { LibraryStore } from '../service/LibraryStore';
 import {
   DownloadManager,
@@ -68,6 +69,7 @@ import {
   BUTTON_RADIUS_VP,
   LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 失败后「重试」的冷却（ms）：历史接口与 followings 同属风控敏感区，连点只会继续被拒 */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -523,10 +525,8 @@ export struct WatchHistoryPage {
       this.toast('这条没有 UP 主信息', 1500);
       return;
     }
-    NavStackHolder.upMid = mid;
-    NavStackHolder.upName = track.artist;
-    NavStackHolder.upFace = faceUrl.length > 0 ? toThumbUrl(faceUrl, 96) : '';
-    NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+    NavStackHolder.stack.pushPathByName('UpSpace',
+      new UpSpaceRouteParam(mid, track.artist, faceUrl.length > 0 ? toThumbUrl(faceUrl, 96) : ''));
   }
 
   // ===== 下载链（与 SearchPage / PlaylistDetail 同一套） =====
@@ -637,40 +637,7 @@ export struct WatchHistoryPage {
    */
   @Builder
   historyBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('观看历史')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    // 行内边距与 AboutPage.aboutBar 完全一致（真机要求：返回键样式对齐关于页）
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '观看历史' })
   }
 
   /**
@@ -851,11 +818,12 @@ export struct WatchHistoryPage {
   /** 「加入歌单」选择弹层（遮罩 + 面板，与 SearchPage 同款） */
   @Builder
   pickerOverlay() {
+    // 全屏点击捕获层：只负责「点弹窗外关闭」，不带遮罩底色
+    //（2026-10-23 用户要求：加入歌单弹窗周围不要暗色/主题色遮罩，与 SearchPage 同步）
     Column() {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor($r('app.color.scrim'))
     .onClick((): void => {
       this.dismissPicker();
     })
@@ -965,7 +933,7 @@ export struct WatchHistoryPage {
                 .attributeModifier(this.buttonMaterial)
                 .margin({ top: 20 })
                 .onClick((): void => {
-                  NavStackHolder.stack.pushPath({ name: 'Login' });
+                  NavStackHolder.stack.pushPathByName('Login', undefined);
                 })
             }
             .layoutWeight(1)
@@ -1148,6 +1116,9 @@ export struct WatchHistoryPage {
         }
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

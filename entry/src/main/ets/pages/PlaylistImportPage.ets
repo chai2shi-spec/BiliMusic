@@ -39,6 +39,7 @@ import {
 import { PLAYLIST_MAX_ITEMS } from '../service/LibraryStore';
 import { Track, Playlist } from '../model/MusicModels';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { PlaylistDetailRouteParam } from '../service/NavRouteParams';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { readText } from '../utils/ClipboardUtil';
@@ -60,6 +61,7 @@ import {
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /**
  * 向导 5 态（方案 §5.2）。匹配中 / 报告的实际进度数据来自 importState，
@@ -380,7 +382,18 @@ export struct PlaylistImportPage {
 
   /** 可导入条目数（强匹配含复核后确认的：setChosen 会置为 STRONG） */
   private importableCount(): number {
-    return this.importState.strong;
+    // 必须按 bvid 去重，与 `ImportTaskManager.finish()` 的落库口径一致：
+    // 两首不同的歌匹配到同一个 B 站视频时，finish 只落一首，若这里直接返回
+    // `importState.strong`，按钮会写「54 首」而落库是 53 首（真机实测踩到）。
+    const items: ImportItem[] = this.importState.items;
+    const seen: Set<string> = new Set<string>();
+    for (let i: number = 0; i < items.length; i++) {
+      const t: Track | null = items[i].chosen;
+      if (t !== null) {
+        seen.add(t.bvid);
+      }
+    }
+    return seen.size;
   }
 
   /** 中断 / 限流后未处理的条目数 */
@@ -462,8 +475,7 @@ export struct PlaylistImportPage {
       return;
     }
     this.toast(`已导入歌单「${p.name}」（${p.tracks.length} 首）`, 2600);
-    NavStackHolder.selectedPlaylistId = p.id;
-    NavStackHolder.stack.pushPath({ name: 'PlaylistDetail' });
+    NavStackHolder.stack.pushPathByName('PlaylistDetail', new PlaylistDetailRouteParam(p.id));
   }
 
   //
@@ -579,39 +591,7 @@ export struct PlaylistImportPage {
    */
   @Builder
   pageBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('从外部导入歌单')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '从外部导入歌单' })
   }
 
   //
@@ -1158,6 +1138,9 @@ export struct PlaylistImportPage {
         }
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.scroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

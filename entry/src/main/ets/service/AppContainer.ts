@@ -13,11 +13,20 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { initRdb } from '../database/RdbHelper';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { DownloadManager } from './DownloadManager';
-import { initBuvidCookie, upgradeBuvidCookie } from './BiliDevice';
+import { initBuvidCookie, upgradeBuvidCookie, isBuvidFallback } from './BiliDevice';
 import { initLoginState, isLoggedIn } from './LoginStore';
 import { countFavPushOps, setFavPushKicker } from './FavPushStore';
 import { FavSyncManager } from './FavSyncManager';
 import { initUpSpaceCache } from './UpSpaceCacheStore';
+import { initLyricCache } from './LyricCacheStore';
+
+/**
+ * buvid 升级失败的延迟重试间隔（ms，2026-10-22 平板登录修复）：
+ * 本地兜底 buvid 是风控易感指纹（登录二维码被提前作废 / playurl 偶发拦截的
+ * 共同根因候选），首次 upgradeBuvidCookie 失败（断网 / 风控）时到点再试一次。
+ * 取 10s：避开启动网络高峰，且晚于 spi 请求自身的 15s 超时窗口边缘。
+ */
+const BUVID_UPGRADE_RETRY_MS: number = 10000;
 
 export class AppContainer {
   private static initialized: boolean = false;
@@ -38,6 +47,9 @@ export class AppContainer {
     // UP 主页缓存目录（2026-10-09）：文件型存储，进页直接用缓存不联网；
     // 同步建目录，毫秒级，不拖慢启动
     initUpSpaceCache(context);
+    // 歌词缓存目录（2026-10-22 多源歌词）：单曲一个 JSON 文件。
+    // Preferences 单值 8192 字节上限装不下整首歌词，旧实现写两首就静默失败。
+    initLyricCache(context);
 
     // buvid：缺它首页推荐接口会被 412 拦下，必须早于任何页面请求装填
     initBuvidCookie();
@@ -72,6 +84,15 @@ export class AppContainer {
 
     // 后台换取官方 buvid（不 await：本地兜底值已足够过 412，不能拖慢启动）
     upgradeBuvidCookie();
+    // 2026-10-22 平板登录修复：仍是兜底假值（首次升级失败 / 新装机）时延迟重试
+    // 一次 —— 假指纹是「二维码 3 秒被作废、登录失败、偶发播放拦截」的共同根因
+    // 候选；成功一次即置 PREF_BUVID_OFFICIAL 标记，此后不再触发本重试。
+    setTimeout((): void => {
+      if (isBuvidFallback()) {
+        console.warn('[BiliDevice] buvid still fallback, delayed retry upgrade');
+        upgradeBuvidCookie();
+      }
+    }, BUVID_UPGRADE_RETRY_MS);
     AppContainer.initialized = true;
   }
 

@@ -17,9 +17,7 @@ import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { STORE_PLAYER_BG_DARK, STORE_PLAYER_CLOSE_REQUEST, STORE_PLAYER_CONTENT_EXIT, STORE_PLAYER_OPEN } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
-  LAYER_DELAY_TOP,
-  LAYER_EXIT_DIVE_TOP_VP,
-  LAYER_EXIT_SCALE
+  LAYER_DELAY_TOP
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -27,19 +25,19 @@ export struct TopAreaComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   @StorageProp(STORE_PLAYER_BG_DARK) isDark: boolean = true;
   /**
-   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
-   * 把本层入场状态复位为隐藏 —— 随收起动画一起插值淡出（逆向镜像的一部分）。
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的主动画闭包内）时
+   * 把本层入场状态复位为隐藏 —— 与 onContentExit 复位幂等兜底（那时已是隐藏值，
+   * 同值复位不产生属性变化，不会触发动画）。
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
-   * 收起时内容层退场信号（seq 递增，写在 Index.closePlayer 主动画闭包内）：
-   * 复位落在该闭包内 → 顶栏「淡出 + 俯冲下潜 + 缩小」与背景面收缩同曲线同步插值
-   * （2026-10-21 用户要求：退场不要纯淡出，要跟着收缩走向迷你栏）。与 playerOpen 复位幂等共存。
+   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
+   * 复位不在任何隐式动画作用域内 → 顶栏单帧直接消失（2026-10-22 用户要求
+   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
-  /** 收起退场：俯冲向迷你栏的下潜位移（vp）与缩放（复位落在收起主动画闭包内 → 随收缩同步动画） */
-  @State exitDiveY: number = 0;
-  @State exitScale: number = 1;
+  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把顶栏点亮 */
+  private exitRequested: boolean = false;
 
   /**
    * 分层入场（方案 B）：顶栏在主动画落位后第一批淡入，**只淡入不位移** ——
@@ -54,7 +52,7 @@ export struct TopAreaComponent {
     AppStorage.setOrCreate(STORE_PLAYER_CLOSE_REQUEST, (seq ?? 0) + 1);
   }
 
-  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
   private onPlayerOpenChanged(): void {
     if (this.playerOpen) {
       return;
@@ -62,18 +60,22 @@ export struct TopAreaComponent {
     this.enterOpacity = 0;
   }
 
-  /** 退场复位：淡出 + 俯冲向迷你栏（复位落在收起主动画闭包内 → 与背景面收缩同步插值） */
+  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
   private onContentExit(): void {
+    this.exitRequested = true;
     this.enterOpacity = 0;
-    this.exitDiveY = LAYER_EXIT_DIVE_TOP_VP;
-    this.exitScale = LAYER_EXIT_SCALE;
   }
 
   aboutToAppear(): void {
+    this.exitRequested = false;
     this.getUIContext().animateTo(
       { duration: ENTRANCE_DURATION_MS, curve: Curve.EaseOut, delay: LAYER_DELAY_TOP },
       (): void => {
-        this.enterOpacity = 1;
+        // 竞态闸门：打开后 530ms 内收起时，本延迟闭包仍在途——不拦会把已瞬隐的
+        // 顶栏重新点亮（收起飞行途中闪现）。
+        if (!this.exitRequested) {
+          this.enterOpacity = 1;
+        }
       }
     );
   }
@@ -108,9 +110,7 @@ export struct TopAreaComponent {
     }
     .height($r('app.float.info_margin_top_sm'))
     .width(StyleConstants.FULL_WIDTH)
-    // 分层入场只挂 opacity；收起退场在此叠 translate/scale（俯冲向迷你栏），均不动 layout 属性
+    // 分层入场只挂 opacity；收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换
     .opacity(this.enterOpacity)
-    .translate({ y: this.exitDiveY })
-    .scale({ x: this.exitScale, y: this.exitScale })
   }
 }

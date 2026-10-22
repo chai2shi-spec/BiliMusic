@@ -1,6 +1,8 @@
 ﻿/**
- * 歌单详情页：展示歌单内单曲，支持播放全部 / 单曲播放 / 加入队列 / 从歌单移除。
- * 目标歌单 id 由 NavStackHolder.selectedPlaylistId 传入。
+ * 歌单详情页：展示歌单内单曲，支持播放全部 / 单曲播放 / 加入队列 / 从歌单移除 /
+ * 长按拖动排序 / 一键排序（按名称 / 时长 / 播放量，2026-10-22）。
+ * 排序开放范围：普通歌单 + 订阅 UP 歌单；收藏夹镜像禁用（顺序由 B 站服务端决定，
+ * 完整同步会覆盖手动顺序）。目标歌单 id 由路由参数 PlaylistDetailRouteParam 传入。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
  * 返回行 + 头部区，批 1 样板同款）；栏内不放标题文字
@@ -13,8 +15,8 @@
  * 重命名 / 删除歌单入口在歌单列表页行内 ⋮ 菜单。
  */
 
-import { Playlist, Track, DownloadTask, DownloadStatus, buildTrack } from '../model/MusicModels';
-import { LibraryStore } from '../service/LibraryStore';
+import { Playlist, Track, DownloadTask, DownloadStatus, buildTrack, VideoDetail } from '../model/MusicModels';
+import { LibraryStore, PlaylistSortKey } from '../service/LibraryStore';
 import * as BilibiliApi from '../api/BilibiliApi';
 import { SpaceVideo } from '../api/BilibiliApi';
 import { toHttpsUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
@@ -28,6 +30,7 @@ import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { PlaylistDetailRouteParam, NavRouteParamReader, UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
@@ -49,6 +52,8 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { showAppToast } from '../components/AppToast';
 import { enqueueFavOp, FAV_OP_DEL } from '../service/FavPushStore';
 import { FavSyncManager } from '../service/FavSyncManager';
+import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /**
  * 「拉取新投稿」每次最多收多少条。
@@ -67,8 +72,9 @@ const PD_REVEAL_PAGE_SIZE: number = 20;
  * 歌单头部区（bottomBuilder 承载）实测前的估计高度：封面行 + 元信息 + 简介 + padding。
  * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定；实测值
  * （headerAreaHeight）回来后覆盖，此值只防首次布局 0 高闪跳。
+ * 2026-10-22 头部区间距 top 12→4、bottom 16→8 后同步 -16。
  */
-const PLAYLIST_HEADER_ESTIMATE_HEIGHT: number = 190;
+const PLAYLIST_HEADER_ESTIMATE_HEIGHT: number = 174;
 
 /**
  * 顶栏滚动模糊时机（2026-10-09 用户定档）：
@@ -98,6 +104,9 @@ export struct PlaylistDetail {
    * if）——barTotalHeight() 恒 > 0 不能当门控。
    */
   @State headerAreaHeight: number = 0;
+
+  /** 目标歌单 id（路由参数 PlaylistDetailRouteParam 带入，aboutToAppear 取参一次） */
+  private playlistId: string = '';
 
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 头部区实测高。
@@ -154,6 +163,11 @@ export struct PlaylistDetail {
   @State descText: string = '';
 
   aboutToAppear(): void {
+    // 路由入参（2026-10-22 传参改造）：目标歌单 id 随 pushPathByName 入栈，
+    // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
+    const routeParam: PlaylistDetailRouteParam | null =
+      NavRouteParamReader.readPlaylistDetailParam(NavStackHolder.stack);
+    this.playlistId = routeParam !== null ? routeParam.playlistId : '';
     this.load();
     // @Watch 不为 @StorageLink 的初始同步触发（工程内已踩过两次的坑），
     // 这里必须补一次已下载集合的初算；ensureLoaded 幂等 —— AppContainer 启动链
@@ -231,7 +245,7 @@ export struct PlaylistDetail {
   }
 
   private load(): void {
-    const p: Playlist | null = LibraryStore.getPlaylist(NavStackHolder.selectedPlaylistId);
+    const p: Playlist | null = LibraryStore.getPlaylist(this.playlistId);
     this.playlist = p;
     this.titleText = p ? p.name : '歌单';
     this.coverUrl = p ? p.coverUrl : '';
@@ -264,6 +278,85 @@ export struct PlaylistDetail {
     const next: number = Math.min(this.tracks.length + PD_REVEAL_PAGE_SIZE, all.length);
     this.tracks = all.slice(0, next);
   }
+
+  /**
+   * 本歌单是否开放「长按拖动排序 / 自动排序」（2026-10-22 用户确认的范围）：
+   * 普通歌单 + 订阅 UP 歌单可排；**收藏夹镜像禁用** —— applyFavMirror 双向同步
+   * 会按 B 站服务端顺序整体重建，手动顺序会被覆盖，开放只会误导用户。
+   */
+  private canReorder(): boolean {
+    return this.playlist !== null && !LibraryStore.isFavMirror(this.playlist);
+  }
+
+  /**
+   * 长按拖动排序落库（ForEach.onMove 回调，2026-10-22）。
+   *
+   * onMove 由系统在拖拽**松手后**触发一次（from = 拖起下标，to = 落点下标），
+   * 下标限定在 ForEach 数据（this.tracks 切片）内 —— 不含列表首尾的占位/状态条目；
+   * 切片是 playlist.tracks 的**前缀**，切片下标即全量下标，movePlaylistTrack
+   * 内部按 trackId 定位（不收 from），传错下标也只影响 to 的 clamp，删不错歌。
+   *
+   * 本地切片先对齐（与系统已完成的视觉移动一致），再落库；落库 →
+   * STORE_LIBRARY_REV bump → onLibraryChanged → load() 重切（保留揭示条数），
+   * 结果与本地切片同序，无视觉跳变。
+   */
+  private onTrackMove(from: number, to: number): void {
+    const p: Playlist | null = this.playlist;
+    if (p === null || from < 0 || from >= this.tracks.length) {
+      return;
+    }
+    const moved: Track = this.tracks[from];
+    const next: Track[] = [...this.tracks];
+    next.splice(from, 1);
+    const target: number = Math.max(0, Math.min(to, next.length));
+    next.splice(target, 0, moved);
+    this.tracks = next;
+    LibraryStore.movePlaylistTrack(p.id, moved.id, target);
+  }
+
+  /**
+   * 「排序」菜单项（bindMenu，2026-10-22）：按名称（拼音升序，复用
+   * LibraryStore.compareByTitle 同款比较器）/ 按时长（降序）/ 按播放量（降序）/
+   * 按加入时间（降序，新在前；存量无戳条目首排时物化，见 materializeAddedAt）。
+   * 自动排序是一次性动作，不打开旧的 titleSorted 持续规则（见 sortPlaylistTracks 注释）。
+   */
+  private sortMenuItems(): MenuElement[] {
+    return [
+      {
+        value: '按名称',
+        action: (): void => {
+          this.applyAutoSort('title', '已按名称排序');
+        }
+      },
+      {
+        value: '按时长',
+        action: (): void => {
+          this.applyAutoSort('duration', '已按时长排序');
+        }
+      },
+      {
+        value: '按播放量',
+        action: (): void => {
+          this.applyAutoSort('playCount', '已按播放量排序');
+        }
+      },
+      {
+        value: '按加入时间',
+        action: (): void => {
+          this.applyAutoSort('addedTime', '已按加入时间排序');
+        }
+      }
+    ];
+  }
+
+  /** 执行自动排序并 toast 回执（歌单不存在 = 菜单打开期间被删，静默返回） */
+  private applyAutoSort(sortKey: PlaylistSortKey, toastText: string): void {
+    const sorted: Playlist | null = LibraryStore.sortPlaylistTracks(this.playlistId, sortKey);
+    if (sorted !== null) {
+      this.toast(toastText, 1500);
+    }
+  }
+
 
   /**
    * 头部区元信息行：歌曲数 + 来源。
@@ -353,6 +446,8 @@ export struct PlaylistDetail {
         });
         const r = LibraryStore.mergeUpTracks(p.id, tracks);
         this.load();
+        // 拉新结果同步回 UP 主页缓存（2026-10-23）：重进 UP 页即显示本次拉到的最新一页
+        this.syncUpSpaceCache(tracks, res.via);
         if (r.added === 0) {
           // 拿到了数据但全是已有的 = 确实没有新投稿，不是故障
           this.toast('已是最新 · 该 UP 还没有新投稿', 1800);
@@ -368,6 +463,43 @@ export struct PlaylistDetail {
       })
       .then((): void => {
         this.upRefreshing = false;
+      });
+  }
+
+  /**
+   * 拉新结果同步回 UP 主页缓存（2026-10-23）：歌单页拉新只写歌单，UP 主页缓存里
+   * 还是旧一页 —— 重进 UP 页显示旧列表，用户以为没拉到又得再拉一次。
+   * 这里把刚取回的最新一页整表写进缓存，与 UpSpacePage「拉取新投稿」的落盘语义
+   * 一致（列表换新、page=1、hasMore 按 via 推导）；资料字段沿用缓存已有值，
+   * 缓存不存在时以歌单资料新建（头像 / fans / archiveCount 置空值，UP 页有兜底显示，
+   * 下拉刷新即补全）。
+   */
+  private syncUpSpaceCache(collected: Track[], via: number): void {
+    const p: Playlist | null = this.playlist;
+    if (!p || p.upMid.length === 0 || collected.length === 0) {
+      return;
+    }
+    getUpSpaceCache(p.upMid)
+      .then((cached: UpSpaceCacheEntry | null): void => {
+        const entry: UpSpaceCacheEntry = {
+          upMid: p.upMid,
+          upName: cached !== null && cached.upName.length > 0 ? cached.upName : p.upName,
+          upFace: cached !== null ? cached.upFace : '',
+          fans: cached !== null ? cached.fans : 0,
+          archiveCount: cached !== null ? cached.archiveCount : 0,
+          tracks: collected,
+          page: 1,
+          // 空间接口真分页（ps 上限 50，BilibiliApi.SPACE_PS_MAX 未导出）：拿满一页才可能还有下页
+          hasMore: via === BilibiliApi.UP_VIA_SPACE && collected.length >= 50,
+          sourceVia: via,
+          cachedAtMs: Date.now()
+        };
+        saveUpSpaceCache(entry).catch((): void => {
+          // 失败已在 saveUpSpaceCache 内记日志，这里只兜 rejection
+        });
+      })
+      .catch((): void => {
+        // 读旧缓存失败：放弃同步（不阻塞拉新主流程，UP 页下次联网自会重建缓存）
       });
   }
 
@@ -393,12 +525,51 @@ export struct PlaylistDetail {
         }
       },
       {
+        value: '进入 UP 主页',
+        action: (): void => {
+          this.openUpSpace(track);
+        }
+      },
+      {
         value: '从歌单移除',
         action: (): void => {
           this.confirmRemoveTrack(track);
         }
       }
     ];
+  }
+
+  /**
+   * 「进入 UP 主页」→ 站内页（UpSpacePage），与 SearchPage 同款。
+   * mid 两条来源：
+   *  1. 曲目自带的 upMid（搜索 / 排行榜 / 订阅投稿映射时已落下）—— 直接用，零请求；
+   *  2. 旧版本落盘曲目没有 upMid（读出来是 undefined，⚠️ `?? ''` 不能省）→
+   *     用 bvid 走 `getVideoDetail` 换 `owner.mid`（该接口带 viewCache，TTL 内不重复发请求）。
+   * 头像传空串占位：曲目行不带 UP 头像，UpSpacePage 用 CoverImage 兜占位图，
+   * loadCard 拿到真图后覆盖。
+   */
+  private async openUpSpace(track: Track): Promise<void> {
+    let mid: string = track.upMid ?? '';
+    if (mid.length === 0) {
+      const bvid: string = track.bvid.length > 0 ? track.bvid : track.id;
+      if (bvid.indexOf('BV') !== 0) {
+        this.toast('这条没有 UP 主信息', 1500);
+        return;
+      }
+      this.toast('正在获取投稿作者…', 1200);
+      try {
+        const detail: VideoDetail = await BilibiliApi.getVideoDetail(bvid);
+        mid = detail.owner ? String(detail.owner.mid) : '';
+      } catch (e) {
+        console.error(`openUpSpace resolve mid failed: ${JSON.stringify(e)}`);
+        mid = '';
+      }
+      if (mid.length === 0) {
+        this.toast('获取 UP 主失败', 1500);
+        return;
+      }
+    }
+    NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, track.artist, ''));
   }
 
   /**
@@ -414,7 +585,7 @@ export struct PlaylistDetail {
     const p: Playlist | null = this.playlist;
     if (p === null || !LibraryStore.isFavMirror(p)) {
       // 普通歌单：原行为，不打扰用户
-      LibraryStore.removeTracksFromPlaylist(NavStackHolder.selectedPlaylistId, [track.id]);
+      LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
       this.load();
       return;
     }
@@ -431,7 +602,7 @@ export struct PlaylistDetail {
         value: '移除并取消收藏',
         action: (): void => {
           // ① 本地移除（立刻生效，UI 不等网络）
-          LibraryStore.removeTracksFromPlaylist(NavStackHolder.selectedPlaylistId, [track.id]);
+          LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
           this.load();
           // ② 入队一条「取消收藏」写意图（持久化，失败可重试）
           const mediaId: number = LibraryStore.favMediaIdOf(p);
@@ -590,6 +761,20 @@ export struct PlaylistDetail {
               this.refreshUpTracks();
             })
         }
+        // 「排序」入口（2026-10-22）：长按拖动排序管「手动微调」，这颗按钮管
+        // 「一键排序」（按名称拼音升序 / 按时长降序 / 按播放量降序，见 sortMenuItems）。
+        // 与拖动同一闸门（canReorder）：收藏夹镜像顺序由 B 站服务端决定，不开放；
+        // 空歌单没东西可排，不显示。
+        if (this.canReorder() && this.playlist && this.playlist.tracks.length > 0) {
+          Button('排序', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themeDeep)
+            .attributeModifier(this.buttonMaterial)
+            .bindMenu(this.sortMenuItems())
+        }
       }
       .width('100%')
       .margin({ top: 12 })
@@ -597,7 +782,9 @@ export struct PlaylistDetail {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .padding({ left: 20, right: 20, top: 12, bottom: 16 })
+    // 头部区间距（2026-10-22 用户要求上移）：top 12→4 紧贴标题行下沿，
+    // bottom 16→8 让首个曲目条目同步上移（列表占位随 headerAreaHeight 实测自动跟随）。
+    .padding({ left: 20, right: 20, top: 4, bottom: 8 })
   }
 
   /**
@@ -608,32 +795,7 @@ export struct PlaylistDetail {
    */
   @Builder
   playlistBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    // 行内边距与 AboutPage.aboutBar 完全一致（真机要求：返回键样式对齐关于页）
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '' })
   }
 
   /**
@@ -684,6 +846,13 @@ export struct PlaylistDetail {
                   .height(this.barTotalHeight())
               }
               // 条目渲染（SearchPage 同款）：@State tracks 切片数组直接驱动 ForEach。
+              // 长按拖动排序（2026-10-22）：ForEach.onMove 是官方推荐路线（系统自带
+              // 浮起/让位动画 + 拖到列表边缘自动滚动；List.onItemDragStart 路线拖到
+              // 边缘不滚动，见 list.d.ts 注释）。onMove 下标限定在 ForEach 数据
+              //（this.tracks 切片）内，自动避开首尾占位/状态条目；系统只在**松手后**
+              // 回调一次，落库与刷新见 onTrackMove。
+              // 收藏夹镜像禁用：canReorder() 为 false 时传 undefined = 不注册，
+              // 长按不浮起（顺序由 B 站服务端决定，完整同步会覆盖手动顺序）。
               ForEach(
                 this.tracks,
                 (t: Track, index: number): void => {
@@ -704,6 +873,11 @@ export struct PlaylistDetail {
                 },
                 (t: Track): string => t.id
               )
+                .onMove(this.canReorder()
+                  ? (from: number, to: number): void => {
+                    this.onTrackMove(from, to);
+                  }
+                  : undefined)
               // 加载更多状态条（SearchPage 同款）：本地切片即时揭示，没有加载中态，
               // 只区分「上拉加载更多」与「已经到底啦」。
               if (this.tracks.length > 0) {
@@ -787,6 +961,9 @@ export struct PlaylistDetail {
         }
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

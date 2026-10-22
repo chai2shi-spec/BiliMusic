@@ -306,6 +306,31 @@ export function stripHtmlTags(raw: string): string {
 }
 
 /**
+ * HTML 实体解码（`&amp;` `&lt;` `&quot;` `&#39;` 等）。
+ *
+ * 原来只在 `PlaylistImporter` 里（解析 B 站标题噪声段用），2026-10-22 提到这里共用 ——
+ * HTML 搜索页兜底通道（`BilibiliApi.searchVideoByHtml`）解析卡片 `title="..."` 属性时，
+ * 标题里的引号 / 尖括号全被转义过，不解码会把 `&quot;` 原样带进歌名、导致打分对不上。
+ *
+ * ⚠️ 只覆盖 B 站实际会出现的几种，不做通用实体表（会被 `&#xxxx;` 数字实体绕过，
+ * 但标题里几乎没有）。顺序很重要：`&amp;` 必须**最后**替换，否则 `&amp;lt;`
+ * 会被先解成 `&lt;` 再被误当成标签。
+ */
+const HTML_ENTITY_FROM: string[] = ['&#x27;', '&#39;', '&apos;', '&#34;', '&quot;', '&lt;', '&gt;', '&nbsp;', '&amp;'];
+const HTML_ENTITY_TO: string[] = ['\'', '\'', '\'', '"', '"', '<', '>', ' ', '&'];
+
+export function decodeHtmlEntities(raw: string): string {
+  let s: string = raw;
+  for (let i: number = 0; i < HTML_ENTITY_FROM.length; i++) {
+    if (s.indexOf(HTML_ENTITY_FROM[i]) < 0) {
+      continue;
+    }
+    s = s.split(HTML_ENTITY_FROM[i]).join(HTML_ENTITY_TO[i]);
+  }
+  return s;
+}
+
+/**
  * `mm:ss` / `hh:mm:ss` → 秒。解析不了就返回 0（调用方按「无时长」处理，不显示占位）。
  *
  * ⚠️ 榜单接口给的是 `duration("0:15")` 这种字符串，音乐中心给的是秒数 —— 两种都要认。

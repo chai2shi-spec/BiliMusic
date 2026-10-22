@@ -24,8 +24,8 @@
  */
 
 import { HttpUtil } from '../utils/HttpUtil';
-import { parseDurationText, stripHtmlTags, toHttpsUrl } from '../utils/TextUtil';
-import { BiliApiError, SearchResponse, SearchResultItem, searchVideo } from '../api/BilibiliApi';
+import { decodeHtmlEntities, parseDurationText, stripHtmlTags, toHttpsUrl } from '../utils/TextUtil';
+import { BiliApiError, SearchResponse, SearchResultItem, searchVideo, searchVideoByHtml } from '../api/BilibiliApi';
 import { buildTrack, slimTrack, Track, Playlist } from '../model/MusicModels';
 import {
   createPlaylist,
@@ -561,26 +561,14 @@ const SCORE_OUT: number = -100;
 const RISK_CODES: number[] = [-352, -412, -509, -799];
 
 /**
- * HTML 实体解码。
+ * HTML 实体解码已上移到 `utils/TextUtil.ts`（`decodeHtmlEntities`，2026-10-22）：
+ * HTML 搜索页兜底通道解析卡片 `title="..."` 属性时也要用，两处共用一份。
  *
- * B 站搜索结果的 `title` 里存在 HTML 实体（`Shatter the God&#x27;s Crown`），
- * 而 `stripHtmlTags` 只去标签、不解码 —— 不解码时 `God&#x27;s` 归一成
- * `god&x27;s`，与歌名 `God's` 永远对不上，整首直接出局。
+ * 背景（保留原注释，说明为什么必须有它）：B 站搜索结果的 `title` 里存在 HTML 实体
+ * （`Shatter the God&#x27;s Crown`），而 `stripHtmlTags` 只去标签、不解码 ——
+ * 不解码时 `God&#x27;s` 归一成 `god&x27;s`，与歌名 `God's` 永远对不上，整首直接出局。
  * 实测这是 268 首歌单里一批曲目「搜得到却匹配不上」的直接原因之一。
  */
-const HTML_ENTITY_FROM: string[] = ['&#x27;', '&#39;', '&apos;', '&#34;', '&quot;', '&amp;', '&lt;', '&gt;', '&nbsp;'];
-const HTML_ENTITY_TO: string[] = ['\'', '\'', '\'', '"', '"', '&', '<', '>', ' '];
-
-function decodeHtmlEntities(raw: string): string {
-  let s: string = raw;
-  for (let i: number = 0; i < HTML_ENTITY_FROM.length; i++) {
-    if (s.indexOf(HTML_ENTITY_FROM[i]) < 0) {
-      continue;
-    }
-    s = s.split(HTML_ENTITY_FROM[i]).join(HTML_ENTITY_TO[i]);
-  }
-  return s;
-}
 
 /**
  * 标点统一剔除。两侧（歌名 / 视频标题）必须用同一套规则，
@@ -903,13 +891,13 @@ const MATCH_CONCURRENCY: number = 2;
 const MATCH_MIN_GAP_MS: number = 800;
 /** 命中风控后的退避间隔上限：间隔翻倍到 3s 就不再涨（否则一首要等 10s，观感像卡死） */
 const RISK_GAP_MAX_MS: number = 3000;
-/** 退避等待基数（ms）：第 1 次 20s、第 2 次 40s、第 3 次 80s（指数退避） */
-const RISK_BACKOFF_BASE_MS: number = 20000;
+/** 退避等待基数（ms）：第 1 次 90s、第 2 次 180s、第 3 次 360s（指数退避） */
+const RISK_BACKOFF_BASE_MS: number = 90000;
 /** 一轮任务最多自动重试几次；超过就停在 RISK 态让用户决定（避免无限空转） */
 const RISK_RETRY_LIMIT: number = 3;
 /** 连续成功这么多首后，把被抬高过的间隔缓慢降回基础值（风控已过的信号） */
 const GAP_EASE_AFTER_OK: number = 30;
-/** 每次回落的幅度（乘法因子）：不会一步跳回 600ms，避免刚降速又撞墙 */
+/** 每次回落的幅度（乘法因子）：不会一步跳回 800ms，避免刚降速又撞墙 */
 const GAP_EASE_FACTOR: number = 0.75;
 /** 退避等待的分段长度（ms）：每隔这么久刷一次倒计时文案，让用户知道没卡死 */
 const BACKOFF_TICK_MS: number = 5000;
@@ -979,6 +967,12 @@ export class ImportTaskManager {
   private concurrency: number = MATCH_CONCURRENCY;
   /** 本轮连续成功的曲目数（回落间隔的计数） */
   private okStreak: number = 0;
+  /**
+   * 已切换到 HTML 搜索页通道（见 `searchWithFallback`）。
+   * **一旦切过去，本任务剩余曲目全走 HTML、不再回 API** —— API 配额按 IP 算，
+   * 慢慢试也不会恢复，只会每首都白等一次 800ms 节流。下次导入（start）重置。
+   */
+  private htmlChannel: boolean = false;
   /** 本次任务已自动退避重试的次数（达 RISK_RETRY_LIMIT 就停在 RISK 态） */
   private riskRetries: number = 0;
   /** 用户主动停止/重置：退避 sleep 醒来后不许把任务强行复活 */
@@ -1039,6 +1033,7 @@ export class ImportTaskManager {
     this.gapMs = MATCH_MIN_GAP_MS;
     this.concurrency = MATCH_CONCURRENCY;
     this.okStreak = 0;
+    this.htmlChannel = false;
     this.riskRetries = 0;
     this.aborting = false;
     this.matchCache.clear();
@@ -1065,6 +1060,7 @@ export class ImportTaskManager {
     this.gapMs = MATCH_MIN_GAP_MS;
     this.concurrency = MATCH_CONCURRENCY;
     this.okStreak = 0;
+    this.htmlChannel = false;
     this.riskRetries = 0;
     this.aborting = false;
     this.running = true;
@@ -1203,6 +1199,7 @@ export class ImportTaskManager {
     this.gapMs = MATCH_MIN_GAP_MS;
     this.concurrency = MATCH_CONCURRENCY;
     this.okStreak = 0;
+    this.htmlChannel = false;
     this.riskRetries = 0;
     this.matchCache.clear();
     this.notify();
@@ -1231,7 +1228,7 @@ export class ImportTaskManager {
       this.concurrency = 1;
       this.okStreak = 0;
       const waitMs: number = RISK_BACKOFF_BASE_MS * Math.pow(2, this.riskRetries - 1);
-      await this.backoffWait(waitMs);
+      await this.cooldownWait(waitMs, 'B 站限流，已自动降速');
       if (this.aborting) {
         break;
       }
@@ -1295,16 +1292,20 @@ export class ImportTaskManager {
   }
 
   /**
-   * 退避等待：分段 sleep，顺便把倒计时写进「正在匹配」文案。
+   * 冷却/退避等待：分段 sleep，顺便把倒计时写进「正在匹配」文案。
    * 期间 phase 仍是 MATCHING（见 hitRisk 的注释），所以页面停在匹配态看到倒计时，
    * 而不是被切到报告页、误以为任务已经结束。
+   *
+   * 用户点「中断」时 `aborting` 置真，最迟一个 tick 后退出。
    */
-  private async backoffWait(totalMs: number): Promise<void> {
+  private async cooldownWait(totalMs: number, prefix: string): Promise<void> {
     let leftMs: number = totalMs;
     while (leftMs > 0 && !this.aborting) {
       const step: number = Math.min(BACKOFF_TICK_MS, leftMs);
       const sec: number = Math.ceil(leftMs / 1000);
-      this.state.currentTitle = `B 站限流，已自动降速（间隔 ${(this.gapMs / 1000).toFixed(1)}s），${sec}s 后继续`;
+      const mm: number = Math.floor(sec / 60);
+      const clock: string = mm > 0 ? `${mm} 分 ${sec % 60} 秒` : `${sec} 秒`;
+      this.state.currentTitle = `${prefix}，${clock}后继续（已完成 ${this.done}/${this.state.items.length} 首）`;
       this.notify();
       await importSleep(step);
       leftMs -= step;
@@ -1418,7 +1419,13 @@ export class ImportTaskManager {
     }
   }
 
-  /** 全局节流：保证相邻两次「请求发起」间隔 ≥ 当前 gapMs（单线程下无竞态） */
+  /**
+   * 全局节流：保证相邻两次「请求发起」间隔 ≥ 当前 gapMs（单线程下无竞态）。
+   *
+   * ⚠️ 这个间隔只是「别把接口打得太难看」的礼貌值，**不是防 412 的手段**：
+   * 实测限流按 IP 累计计量，降速只能把撞墙点从第 86 首推到第 100 首。
+   * 真正的解法是撞墙后切 HTML 通道（见 `searchWithFallback`）。
+   */
   private async throttle(): Promise<void> {
     const now: number = Date.now();
     const earliest: number = this.lastRequestAt + this.gapMs;
@@ -1486,6 +1493,32 @@ export class ImportTaskManager {
   }
 
   /**
+   * 搜索（含通道降级）：API 撞 412 就**整任务**切到 HTML 搜索页。
+   *
+   * 为什么整任务切换而不是每次先试 API：API 配额按 IP 算，撞墙后**每次调用都会失败**，
+   * 慢慢试也不会恢复，只会让每首都白等一次节流、日志也一团糟。
+   * 切过去就不再回来 —— 本任务剩余曲目全走 HTML（HTML 页实测 40/40 次正常，
+   * 而同类 API 请求第 48 次就被 412）。下次导入 `start()` 会重置回 API。
+   */
+  private async searchWithFallback(keyword: string): Promise<SearchResultItem[]> {
+    if (this.htmlChannel) {
+      return await searchVideoByHtml(keyword);
+    }
+    try {
+      const resp: SearchResponse = await searchVideo(keyword, 1, MATCH_PAGE_SIZE);
+      return resp.result ?? [];
+    } catch (e) {
+      if (!ImportTaskManager.isRiskError(e)) {
+        throw e;
+      }
+      // API 配额耗尽：切 HTML 通道，本次请求立刻用 HTML 补上（不浪费这一首）
+      this.htmlChannel = true;
+      console.info('[Import] API 搜索被限流，后续改走 HTML 搜索页通道');
+      return await searchVideoByHtml(keyword);
+    }
+  }
+
+  /**
    * 匹配一首：搜「歌名 歌手」→（零结果降级纯歌名）→ 打分 → 分档。
    *
    * 2026-10-21 增补：**首轮候选全部出局时**，用「中文段 + 第一歌手」再召回一次。
@@ -1499,19 +1532,17 @@ export class ImportTaskManager {
       keyword = `${song.title} ${song.artist}`;
     }
     await this.throttle();
-    let resp: SearchResponse = await searchVideo(keyword, 1, MATCH_PAGE_SIZE);
-    if (resp.result.length === 0 && song.artist.length > 0) {
+    let list: SearchResultItem[] = await this.searchWithFallback(keyword);
+    if (list.length === 0 && song.artist.length > 0) {
       await this.throttle();
-      resp = await searchVideo(song.title, 1, MATCH_PAGE_SIZE);
+      list = await this.searchWithFallback(song.title);
     }
-    let list: SearchResultItem[] = resp.result ?? [];
     let scored: ScoredCandidate[] = this.scoreList(song, list);
     if (scored.length === 0) {
       const alt: string = fallbackKeyword(song);
       if (alt.length > 0 && alt !== keyword && alt !== song.title) {
         await this.throttle();
-        const altResp: SearchResponse = await searchVideo(alt, 1, MATCH_PAGE_SIZE);
-        const altList: SearchResultItem[] = altResp.result ?? [];
+        const altList: SearchResultItem[] = await this.searchWithFallback(alt);
         if (altList.length > 0) {
           list = altList;
           scored = this.scoreList(song, altList);

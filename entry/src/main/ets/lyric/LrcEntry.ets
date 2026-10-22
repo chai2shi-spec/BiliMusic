@@ -17,4 +17,9 @@ export interface LrcEntry {
   lineWords: string;
   /** 逐字内容（行级歌词为空） */
   words: Word[];
+  /**
+   * 副行文本（翻译 / 罗马音），按顺序在歌词下方各占一行。
+   * 可选：行级歌词 / 无翻译的歌不填，LrcView 据此跳过副行绘制。
+   */
+  subLines?: string[];
 }

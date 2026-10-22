@@ -32,6 +32,7 @@ import { Playlist } from '../model/MusicModels';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { LoginRouteParam } from '../service/NavRouteParams';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { LibraryStore, PlaylistImportResult } from '../service/LibraryStore';
 import { copyText, readText } from '../utils/ClipboardUtil';
@@ -859,10 +860,24 @@ export struct SettingsPage {
       secondaryButton: {
         value: '去登录',
         action: (): void => {
-          NavStackHolder.stack.pushPath({ name: 'Login' });
+          this.pushLoginWithRefresh();
         }
       }
     });
+  }
+
+  /**
+   * 推登录页并挂 onPop 返回回调（2026-10-22 Navigation 差距收敛）：
+   * 登录页无论登录成功与否返回，都幂等重读一次登录态刷新「账户」分组
+   * （refreshLoginUi 只重读缓存，无副作用，重复调用安全）。正常路径
+   * STORE_LOGIN_REV 的 @Watch 已刷新，这里是双保险；用户没登录直接
+   * 返回时 @Watch 不触发，靠这里兜住。
+   */
+  private pushLoginWithRefresh(): void {
+    NavStackHolder.stack.pushPathByName('Login', new LoginRouteParam(),
+      (info: PopInfo): void => {
+        this.refreshLoginUi();
+      });
   }
 
   private toast(message: string, duration: number): void {
@@ -1255,13 +1270,13 @@ export struct SettingsPage {
               .accessibilityLevel('yes')
               .onClick((): void => {
                 if (this.loginUser === null) {
-                  NavStackHolder.stack.pushPath({ name: 'Login' });
+                  this.pushLoginWithRefresh();
                   return;
                 }
                 // 待重验态优先去**重新登录**：此时退出登录只会把凭据清掉，
                 // 而用户的目标是「让登录重新能用」，不是「我要退出」。
                 if (this.loginStale) {
-                  NavStackHolder.stack.pushPath({ name: 'Login' });
+                  this.pushLoginWithRefresh();
                   return;
                 }
                 this.confirmLogout();
@@ -1356,8 +1371,7 @@ export struct SettingsPage {
               // 才完全生效），换源重建后由 prepared 钩子保证必生效。
               HdsListItemCard({
                 textItem: {
-                  primaryText: { text: '与其他应用同时播放' },
-                  secondaryText: { text: '开启后播放不会被其他应用的音频打断' }
+                  primaryText: { text: '与其他应用同时播放' }
                 },
                 suffixItem: new SuffixSwitch({
                   isCheck: this.settings.audioMixEnabled,
@@ -1384,8 +1398,7 @@ export struct SettingsPage {
               // update 写好，双写会因 put 未落内存产生读-改-写覆盖竞态）。
               HdsListItemCard({
                 textItem: {
-                  primaryText: { text: '倍速播放' },
-                  secondaryText: { text: '开启后可在播放页选择播放倍速' }
+                  primaryText: { text: '倍速播放' }
                 },
                 suffixItem: new SuffixSwitch({
                   isCheck: this.settings.speedEnabled,

@@ -28,9 +28,7 @@ import { getLoginUser, LoginUser } from '../../service/LoginStore';
 import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_OFFSET_VP,
-  LAYER_DELAY_INFO,
-  LAYER_EXIT_DIVE_INFO_VP,
-  LAYER_EXIT_SCALE
+  LAYER_DELAY_INFO
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -72,21 +70,21 @@ export struct MusicInfoComponent {
   @State titleOffsetY: number = ENTRANCE_OFFSET_VP;
 
   /**
-   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
-   * 把标题块入场状态复位为隐藏 —— 随收起动画一起插值淡出下沉（逆向镜像）。
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的主动画闭包内）时
+   * 把标题块入场状态复位为隐藏 —— 与 onContentExit 复位幂等兜底（那时已是隐藏值，
+   * 同值复位不产生属性变化，不会触发动画）。
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
-   * 收起时内容层退场信号（seq 递增，写在 Index.closePlayer 主动画闭包内）：
-   * 复位落在该闭包内 → 标题块「淡出 + 俯冲下潜 + 缩小」与背景面收缩同曲线同步插值
-   * （2026-10-21 用户要求：退场不要纯淡出，要跟着收缩走向迷你栏）。与 playerOpen 复位幂等共存。
+   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
+   * 复位不在任何隐式动画作用域内 → 标题块单帧直接消失（2026-10-22 用户要求
+   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
-  /** 收起退场：俯冲向迷你栏的下潜位移（vp）与缩放（复位落在收起主动画闭包内 → 随收缩同步动画） */
-  @State exitDiveY: number = 0;
-  @State exitScale: number = 1;
+  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把标题块点亮 */
+  private exitRequested: boolean = false;
 
-  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
   private onPlayerOpenChanged(): void {
     if (this.playerOpen) {
       return;
@@ -95,21 +93,25 @@ export struct MusicInfoComponent {
     this.titleOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 退场复位：淡出 + 俯冲向迷你栏（复位落在收起主动画闭包内 → 与背景面收缩同步插值） */
+  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
   private onContentExit(): void {
+    this.exitRequested = true;
     this.titleOpacity = 0;
     this.titleOffsetY = ENTRANCE_OFFSET_VP;
-    this.exitDiveY = LAYER_EXIT_DIVE_INFO_VP;
-    this.exitScale = LAYER_EXIT_SCALE;
   }
 
   aboutToAppear(): void {
+    this.exitRequested = false;
     // 延迟直接交给 animateTo 的 delay，不用 setTimeout —— 少一个要清理的定时器
     this.getUIContext().animateTo(
       { duration: ENTRANCE_DURATION_MS, curve: Curve.EaseOut, delay: LAYER_DELAY_INFO },
       (): void => {
-        this.titleOpacity = 1;
-        this.titleOffsetY = 0;
+        // 竞态闸门：打开后 470ms 内收起时，本延迟闭包仍在途——不拦会把已瞬隐的
+        // 标题块重新点亮（收起飞行途中闪现）。
+        if (!this.exitRequested) {
+          this.titleOpacity = 1;
+          this.titleOffsetY = 0;
+        }
       }
     );
   }
@@ -245,10 +247,9 @@ export struct MusicInfoComponent {
           })
           // 分层入场（方案 B）：只挂 transform 系属性，不动 width/height/padding。
           // 这一层是「封面之外的容器」，所以不会影响 CoverDisc 的 geometryTransition 目标框。
-          // 收起退场在此叠俯冲位移 + 缩放（exitDiveY 与入场位移相加，随收缩同步插值）。
+          // 收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换。
           .opacity(this.titleOpacity)
-          .translate({ y: this.titleOffsetY + this.exitDiveY })
-          .scale({ x: this.exitScale, y: this.exitScale })
+          .translate({ y: this.titleOffsetY })
           Blank()
           // 控制区同样包一层测高容器，实测高度参与圆盘预算
           Column() {

@@ -20,6 +20,7 @@ import { FollowedUp, FollowingsData, getFollowings, BiliApiError } from '../api/
 import { getPlaylistByUpMid } from '../service/LibraryStore';
 import { getLoginUser, LoginUser } from '../service/LoginStore';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { CoverImage } from '../components/CoverImage';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
@@ -48,6 +49,7 @@ import {
   BUTTON_RADIUS_VP,
   LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 失败后「重试」的冷却（ms）：followings 接口按 IP 风控限流，连点只会继续被拒（与 UpSpacePage 同口径） */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -314,10 +316,8 @@ export struct FollowsPage {
 
   /** 行点击 → UP 主页（订阅 / 拉新投稿在那边完成）；头像顺手传过去当首帧占位 */
   private openUpSpace(up: FollowedUp): void {
-    NavStackHolder.upMid = String(up.mid);
-    NavStackHolder.upName = up.uname;
-    NavStackHolder.upFace = toThumbUrl(up.face, 96);
-    NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+    NavStackHolder.stack.pushPathByName('UpSpace',
+      new UpSpaceRouteParam(String(up.mid), up.uname, toThumbUrl(up.face, 96)));
   }
 
   /**
@@ -327,40 +327,7 @@ export struct FollowsPage {
    */
   @Builder
   followsBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('我的关注')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    // 行内边距与 AboutPage.aboutBar 完全一致（真机要求：返回键样式对齐关于页）
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '我的关注' })
   }
 
   /**
@@ -469,7 +436,7 @@ export struct FollowsPage {
                 .attributeModifier(this.buttonMaterial)
                 .margin({ top: 20 })
                 .onClick((): void => {
-                  NavStackHolder.stack.pushPath({ name: 'Login' });
+                  NavStackHolder.stack.pushPathByName('Login', undefined);
                 })
             }
             .layoutWeight(1)
@@ -622,6 +589,9 @@ export struct FollowsPage {
         } : undefined
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

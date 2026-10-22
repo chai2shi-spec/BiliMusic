@@ -48,6 +48,7 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /**
  * 标题栏按钮行（播放全部 / 清空）固定高：padding 4/8 + 按钮 32 = 44。
@@ -283,40 +284,7 @@ export struct RecentPage {
    */
   @Builder
   recentBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('最近播放')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    // 行内边距与 AboutPage.aboutBar 完全一致（真机要求：返回键样式对齐关于页）
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '最近播放' })
   }
 
   /**
@@ -485,6 +453,9 @@ export struct RecentPage {
         } : undefined
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

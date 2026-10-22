@@ -53,14 +53,16 @@ import {
   STORE_PLAYBACK_SPEED,
   STORE_PROGRESS_STYLE,
   STORE_PLAYER_OPEN,
-  STORE_PLAYER_CONTENT_EXIT
+  STORE_PLAYER_CONTENT_EXIT,
+  STORE_PICK_PLAYLIST_ADD,
+  STORE_PLAYER_CLOSE_REQUEST,
+  STORE_TAB_SWITCH_REQUEST,
+  STORE_TAB_SWITCH_TARGET
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_OFFSET_VP,
   LAYER_DELAY_CONTROL,
-  LAYER_EXIT_DIVE_CONTROL_VP,
-  LAYER_EXIT_SCALE,
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
@@ -92,6 +94,8 @@ const SPEED_CHIP_WIDTH: BreakpointType<number> = new BreakpointType<number>({ sm
  * 静默截断会让人以为「我的歌单」不存在。
  */
 const PLAYLIST_PICKER_MAX: number = 5;
+/** 歌单页签下标（与 Index 的 TAB_PLAYLISTS 同值；模块私有常量跨文件不可引用） */
+const TAB_INDEX_PLAYLISTS: number = 1;
 /** 进度插值时长（ms）：STORE_PROGRESS 按 500ms 分桶推送，插值略长避免步进感 */
 const PROGRESS_TWEEN_MS: number = 520;
 /** 判定「大跳」的阈值（秒）：超过视为 seek / 切歌，直接落位不做扫动 */
@@ -138,13 +142,18 @@ export struct ControlAreaComponent {
 
   aboutToAppear(): void {
     this.sliderValue = this.progress;
+    this.exitRequested = false;
     // 分层入场（方案 B）：控制区最后落位（LAYER_DELAY_CONTROL）。
     // 延迟交给 animateTo 的 delay —— 不用 setTimeout，少一个要清理的定时器。
     this.getUIContext().animateTo(
       { duration: ENTRANCE_DURATION_MS, curve: Curve.EaseOut, delay: LAYER_DELAY_CONTROL },
       (): void => {
-        this.enterOpacity = 1;
-        this.enterOffsetY = 0;
+        // 竞态闸门：打开后 400ms 内收起时，本延迟闭包仍在途——不拦会把已瞬隐的
+        // 控制区重新点亮（收起飞行途中闪现）。
+        if (!this.exitRequested) {
+          this.enterOpacity = 1;
+          this.enterOffsetY = 0;
+        }
       }
     );
   }
@@ -158,22 +167,22 @@ export struct ControlAreaComponent {
   @State enterOffsetY: number = ENTRANCE_OFFSET_VP;
 
   /**
-   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的 animateTo 闭包内）时
-   * 把控制区入场状态复位为隐藏 —— 随收起动画一起插值淡出下沉（逆向镜像）。
+   * 播放页展开态：收起（→ false，落在 Index.closePlayer 的主动画闭包内）时
+   * 把控制区入场状态复位为隐藏 —— 与 onContentExit 复位幂等兜底（那时已是隐藏值，
+   * 同值复位不产生属性变化，不会触发动画）。
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
 
   /**
-   * 收起时内容层退场信号（seq 递增，写在 Index.closePlayer 主动画闭包内）：
-   * 复位落在该闭包内 → 控制区「淡出 + 俯冲下潜 + 缩小」与背景面收缩同曲线同步插值
-   * （2026-10-21 用户要求：退场不要纯淡出，要跟着收缩走向迷你栏）。与 playerOpen 复位幂等共存。
+   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
+   * 复位不在任何隐式动画作用域内 → 控制区单帧直接消失（2026-10-22 用户要求
+   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
-  /** 收起退场：俯冲向迷你栏的下潜位移（vp）与缩放（复位落在收起主动画闭包内 → 随收缩同步动画） */
-  @State exitDiveY: number = 0;
-  @State exitScale: number = 1;
+  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把控制区点亮 */
+  private exitRequested: boolean = false;
 
-  /** 收起复位：入场状态回隐藏态（落在收起 animateTo 内即动画淡出） */
+  /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
   private onPlayerOpenChanged(): void {
     if (this.playerOpen) {
       return;
@@ -182,12 +191,11 @@ export struct ControlAreaComponent {
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 退场复位：淡出 + 俯冲向迷你栏（复位落在收起主动画闭包内 → 与背景面收缩同步插值） */
+  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
   private onContentExit(): void {
+    this.exitRequested = true;
     this.enterOpacity = 0;
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
-    this.exitDiveY = LAYER_EXIT_DIVE_CONTROL_VP;
-    this.exitScale = LAYER_EXIT_SCALE;
   }
 
   /**
@@ -397,7 +405,7 @@ export struct ControlAreaComponent {
       items.push({
         value: `还有 ${options.length - shown.length} 个…去歌单页选`,
         action: (): void => {
-          this.createPlaylistAndAdd(track, options);
+          this.goToPlaylistsTab();
         }
       });
     }
@@ -408,6 +416,29 @@ export struct ControlAreaComponent {
       }
     });
     return items;
+  }
+
+  /**
+   * 「去歌单页选」：收起播放页 overlay + 切到歌单页签 + 让歌单页进入「点选加入」
+   * 模式（2026-10-22 补齐承接：旧实现只切页签就停了，用户落在歌单页无从下手）。
+   *
+   * 三路信号：
+   * · 收起：TopArea 收起按钮同款 seq（STORE_PLAYER_CLOSE_REQUEST）→
+   *   Index.closePlayer 收起动画；
+   * · 切页签：写目标下标 + 递增 STORE_TAB_SWITCH_REQUEST（Index @Watch 消费：
+   *   手机壳走 HdsTabsController.changeIndex，平板壳直写 activeTab）；
+   * · 点选加入：递增 STORE_PICK_PLAYLIST_ADD，PlaylistsPage @Watch 快照当前曲目
+   *   进入点选模式 —— 整行点击即把曲目加入该歌单（提示条见 PlaylistsPage）。
+   * 切页发生在收起动画（700ms）之下，overlay 收回时露出的就是带着提示条的歌单页。
+   */
+  private goToPlaylistsTab(): void {
+    const closeSeq: number | undefined = AppStorage.get<number>(STORE_PLAYER_CLOSE_REQUEST);
+    AppStorage.setOrCreate(STORE_PLAYER_CLOSE_REQUEST, (closeSeq ?? 0) + 1);
+    AppStorage.setOrCreate(STORE_TAB_SWITCH_TARGET, TAB_INDEX_PLAYLISTS);
+    const reqSeq: number | undefined = AppStorage.get<number>(STORE_TAB_SWITCH_REQUEST);
+    AppStorage.setOrCreate(STORE_TAB_SWITCH_REQUEST, (reqSeq ?? 0) + 1);
+    const pickSeq: number | undefined = AppStorage.get<number>(STORE_PICK_PLAYLIST_ADD);
+    AppStorage.setOrCreate(STORE_PICK_PLAYLIST_ADD, (pickSeq ?? 0) + 1);
   }
 
   /**
@@ -718,10 +749,9 @@ export struct ControlAreaComponent {
       })
     }
     // 分层入场只挂 transform 系属性，不动 width/height/padding（改布局属性会触发整树重排）
-    // 收起退场在此叠俯冲位移 + 缩放（exitDiveY 与入场位移相加，随收缩同步插值）
+    // 收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换
     .opacity(this.enterOpacity)
-    .translate({ y: this.enterOffsetY + this.exitDiveY })
-    .scale({ x: this.exitScale, y: this.exitScale })
+    .translate({ y: this.enterOffsetY })
   }
 
   /** 队列弹层宿主：bindSheet 只收 CustomBuilder，包一层共享 QueueSheet */

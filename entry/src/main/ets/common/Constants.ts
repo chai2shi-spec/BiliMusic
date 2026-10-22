@@ -77,6 +77,13 @@ export const PREF_BUVID: string = 'bilimusic_buvid';
 /** 持久化后的 buvid Cookie 串（buvid3=...; buvid4=...） */
 export const PREF_BUVID_COOKIE: string = 'bilimusic_buvid_cookie';
 /**
+ * buvid 是否已升级为官方值（finger/spi 下发，2026-10-22 平板登录修复）：
+ * false / 缺省 = 仍是本地 MD5 兜底假值 —— 是登录二维码被风控提前作废与
+ * playurl 偶发拦截的共同根因候选，AppContainer 启动后会延迟重试升级
+ * （见 service/BiliDevice.ts 的 isBuvidFallback / upgradeBuvidCookie）。
+ */
+export const PREF_BUVID_OFFICIAL: string = 'bilimusic_buvid_official';
+/**
  * 扫码登录 Cookie 串（SESSDATA=...; bili_jct=...; DedeUserID=...; DedeUserID__ckMd5=...）。
  * 由 LoginStore 在扫码成功时解析写入，启动时重新装填进 HttpUtil。
  */
@@ -114,8 +121,7 @@ export const STORE_QUEUE: string = 'queue';
 export const STORE_REPEAT_MODE: string = 'repeatMode';
 export const STORE_SHUFFLE: string = 'isShuffled';
 export const STORE_LOADING_AUDIO: string = 'loadingAudio';
-export const STORE_VOLUME: string = 'volume';
-export const STORE_MUTED: string = 'isMuted';
+// 独立音量键 volume / isMuted 已随播放器音量通路移除（2026-10-22，音量恒走系统媒体音量）
 
 /** 前后台标志（EntryAbility onForeground/onBackground 发布）：动画门控与后台落盘节流的依据 */
 export const STORE_APP_FOREGROUND: string = 'appForeground';
@@ -187,15 +193,26 @@ export const STORE_PLAYER_OPEN: string = 'playerOpen';
  * LazyDest('Player')，复用懒加载注册 + 1.5s 预热）；closePlayer 收起动画结束后回 false 卸载。
  */
 export const STORE_PLAYER_OVERLAY_MOUNTED: string = 'playerOverlayMounted';
+
+// ===== 二级页悬浮播放条（2026-10-22：推送子页底部只保留播放栏，对齐华为音乐） =====
+/**
+ * 推送的 NavDestination 是否在导航栈顶（首页 navBar 时为 false）。
+ * 由 NavStackHolder.setupInterception 的 willShow（随转场同步翻转）与
+ * didShow（转场落定后的权威校正，兜 push 防抖在 willShow 内取消的边角）
+ * 写入；Index 消费 —— 为 true 且队列非空时在根 Stack 挂 SubPagePlayBar。
+ */
+export const STORE_SUB_PAGE_ACTIVE: string = 'subPageActive';
 /**
  * 收起播放页请求（seq 递增，与 toast 同款写法）：TopArea 收起按钮写入，
  * Index @Watch 消费 → closePlayer（收起按钮在 overlay 深层组件树里，跨层信号走 AppStorage）。
  */
 export const STORE_PLAYER_CLOSE_REQUEST: string = 'playerCloseRequest';
 /**
- * 收起时内容层退场信号（seq 递增）：Index.closePlayer 在主动画（700ms /
- * PLAYER_MAIN_CURVE）闭包内写入，四个内容层组件 @Watch 消费 → 复位为
- * 「淡出 + 俯冲下潜 + 缩小」（跟着背景面收缩走向迷你栏，2026-10-21 用户要求）。
+ * 收起时内容层瞬隐信号（seq 递增）：Index.closePlayer 在主动画（700ms /
+ * PLAYER_MAIN_CURVE）闭包**外**写入，四个内容层组件与 PlayerInfoComponent 的
+ * 自持内容（SM Swiper 指示点 / LG 标题块）@Watch 消费 → 复位落在隐式动画
+ * 作用域外，单帧直接消失（2026-10-22 用户要求「除封面和背景的其他元素直接
+ * 消失」；封面 / 背景仍由闭包内的 STORE_PLAYER_OPEN=false 驱动 700ms 几何转场）。
  */
 export const STORE_PLAYER_CONTENT_EXIT: string = 'playerContentExit';
 
@@ -356,12 +373,63 @@ export const STORE_SEARCH_TABS_HEIGHT: string = 'searchTabsHeight';
 export const STORE_ACTIVE_TAB: string = 'activeTab';
 
 /**
- * 手势指示条避让区高度的预估上限（vp）。
- * 手势导航的指示条区域一般在 24~34vp；超过它（约 48vp+）就是三键导航栏 ——
- * 那是一整条可点击的系统控件，必须完整避让，不能像手势条那样只避开一半。
- * 融合胶囊底栏（Index.barFloatingStyle 的 barBottomMargin 折算公式）消费。
+ * 跨层切页签请求（seq 递增）：播放页 overlay 深层组件（如「去歌单页选」菜单项）
+ * 不持有 HdsTabsController，也无法穿透写 Index 的私有成员 —— 与收起请求
+ * （STORE_PLAYER_CLOSE_REQUEST）同一套 seq 信号写法，Index @Watch 消费。
+ * 目标下标先写 STORE_TAB_SWITCH_TARGET，再递增本键；先写目标后发信号，
+ * 消费端读到的目标必然是本次请求的。
  */
-export const GESTURE_INDICATOR_MAX_VP: number = 36;
+export const STORE_TAB_SWITCH_REQUEST: string = 'tabSwitchRequest';
+
+/** 切页签请求的目标页签下标（与 STORE_TAB_SWITCH_REQUEST 配对使用，见其注释） */
+export const STORE_TAB_SWITCH_TARGET: string = 'tabSwitchTarget';
+
+/**
+ * 「去歌单页选」点选加入请求（seq 递增）：播放页 ControlArea 的菜单项在收起
+ * 播放页 + 切到歌单页签的同时递增本键；PlaylistsPage @Watch 消费 —— 快照
+ * STORE_CURRENT_TRACK 后进入「点选加入」模式（整行点击 = 加入该歌单，单次
+ * 点选即退出，顶部占位条目内嵌提示条）。与 STORE_TAB_SWITCH_REQUEST 同款
+ * seq 写法；2026-10-22 补齐「去歌单页选」的承接（旧实现只切页签就停了）。
+ */
+export const STORE_PICK_PLAYLIST_ADD: string = 'pickPlaylistAdd';
+
+/**
+ * 三键导航栏避让区高度（vp）：getWindowAvoidArea(TYPE_SYSTEM).bottomRect.height
+ * 经 px2vp 换算。三键导航模式下非 0（整条可点击系统控件），手势导航模式下为 0 ——
+ * **以它是否 > 0 区分导航模式**（判据 = 避让区来源，不按高度猜）。
+ *
+ * 背景（2026-10-22 修「阔折叠 / 阔直板大屏展开底部导航不居中」根因 1）：
+ * 旧实现用固定 36vp 高度阈值猜「超过即三键」，但大屏展开态的手势指示条 /
+ * 避让区高度与手机不同（不同形态、不同密度、分屏都会变），按阈值猜会误判
+ * 分支 → barBottomMargin 折算错 → 胶囊垂直偏移。现删除阈值，模式与高度全部
+ * 动态实测。写入：EntryAbility.writeSafeArea 首帧前同步首发一次 +
+ * pages/Index.ets 注册 avoidAreaChange 动态更新（转屏 / 折叠开合 / 切导航模式
+ * 自动重算）。消费：Index.barFloatingStyle 的 barBottomMargin（三键 → 完整
+ * 避让）、tabletPlayBar 底部 padding。
+ */
+export const STORE_NAV_BAR_BOTTOM: string = 'navBarBottomVp';
+
+/**
+ * 手势指示条避让区高度（vp）：getWindowAvoidArea(TYPE_NAVIGATION_INDICATOR)
+ * .bottomRect.height 经 px2vp 换算。手势导航模式下非 0，三键导航模式下为 0。
+ * 悬浮胶囊只需避开它的一半（下沉进避让区上半段，可见指示条仍完整露出，
+ * 贴近底部边框的悬浮观感）；三键导航栏则必须完整避让（走 STORE_NAV_BAR_BOTTOM）。
+ * 写入 / 消费方与 STORE_NAV_BAR_BOTTOM 相同。
+ */
+export const STORE_NAV_INDICATOR_BOTTOM: string = 'navIndicatorBottomVp';
+
+/**
+ * 窗口内容区宽度（vp）：EntryAbility.writeSafeArea 首帧前用 windowRect.width ÷
+ * densityPixels 首发一次，pages/Index.ets 再挂 HdsTabs.onAreaChange 持续回写
+ * （折叠开合 / 分屏 / 转屏后组件重排即触发）。
+ *
+ * 用途（2026-10-22 修「阔折叠 / 阔直板大屏展开底部导航不居中」根因 2）：
+ * HDS 悬浮页签栏是**底左锚定**（barSideMargin = 胶囊左缘缩进，实测见
+ * Index.ets BAR_FLOATING_BAR_WIDTH 注释），队列空时大屏上单胶囊贴左不居中；
+ * 队列空且宽度 ≥600vp 时用 (宽度 − 胶囊宽) ÷ 2 反算 barSideMargin 才能居中。
+ * 不用 currentBreakpoint 判宽度：断点只给区间，居中公式要的是精确值。
+ */
+export const STORE_WINDOW_WIDTH_VP: string = 'windowWidthVp';
 
 /**
  * 全局轻提示通道（AppToast）。任何代码（含拿不到 UIContext 的播放内核）
@@ -389,19 +457,6 @@ export const STORE_LIBRARY_REV: string = 'libraryRev';
 export const STORE_LOGIN_REV: string = 'loginRev';
 
 /**
- * 「一次显式登录动作刚刚成功」的一次性事件信号（值形如 `{ mid, ts }`）。
- *
- * ⚠️ 为什么不复用 STORE_LOGIN_REV：登录成功时它会被递增**多次**
- * （persistLoginCookie 一次 + refreshLoginUser 的用户信息变化再一次），
- * 拿它当「登录完成」触发器会重复触发；且冷启动时 refreshLoginUser 的变更
- * 也会递增它 —— 那属于「恢复会话」，不该触发自动同步。
- *
- * 写入（唯一）：service/LoginStore.ts 的 persistLoginCookie（扫码 / 短信登录成功共用）。
- * 消费：pages/Index.ets 的 @Watch → 触发收藏夹自动同步一次。
- */
-export const STORE_LOGIN_EVENT: string = 'loginEvent';
-
-/**
  * 收藏夹同步版本号：每轮同步结束（成功/部分成功/失败）递增。
  * 写入：service/FavSyncManager.ts；消费：同步页 @StorageLink + @Watch 刷新状态。
  */
@@ -419,6 +474,14 @@ export const STORE_IMPORT_STATE: string = 'playlistImportState';
  * 体量很小（每夹约 150 字节），直接走单 key，无需分片。
  */
 export const PREF_FAV_SYNC_STATE: string = 'bilimusic_fav_sync_state';
+
+/**
+ * 收藏夹同步**勾选状态**（`number[]`，见 service/FavSelectionStore.ts）。
+ * 只存「未勾选」的收藏夹 id（倒置存储）：默认全选、新建夹自动入选，
+ * 老版本升级零迁移（没有数据 = 从未取消过勾选）。
+ * 写入 / 读取：service/FavSelectionStore.ts（同步页勾选交互 + 管理器过滤）。
+ */
+export const PREF_FAV_SELECTION: string = 'bilimusic_fav_selection';
 
 /**
  * 收藏夹**待推送队列**分片前缀（`FavPushOp[]`，见 service/FavPushStore.ts）。
@@ -443,7 +506,9 @@ export const STORE_NET_RETRY_REV: string = 'netRetryRev';
  *   写入：EntryAbility 首帧前同步首发一次（避免内容先贴边再弹回来），
  *         pages/Index.ets 的 aboutToAppear 再主动读一次并注册 avoidAreaChange 动态更新。
  *   消费：**分散给真正需要避让的控件与页面**，各消费一次、互不重叠 ——
- *         STORE_SAFE_BOTTOM → HdsTabs 悬浮页签栏的 barBottomMargin（20 + 安全区）、
+ *         STORE_SAFE_BOTTOM → HdsTabs 悬浮页签栏的 barBottomMargin（净离底 +
+ *                             按导航模式叠加避让区，见 STORE_NAV_BAR_BOTTOM /
+ *                             STORE_NAV_INDICATOR_BOTTOM）、
  *                             迷你播放条 padding-bottom、各 Tab 列表 contentEndOffset、
  *                             子页内容层 plain padding（AboutPage 末尾留白等；子页沉浸
  *                             由目的地链 .ignoreLayoutSafeArea 声明，见各页注释）；

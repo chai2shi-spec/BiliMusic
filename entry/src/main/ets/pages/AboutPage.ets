@@ -26,6 +26,7 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
 import { copyText } from '../utils/ClipboardUtil';
 import { showAppToast } from '../components/AppToast';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
 const ABOUT_BLUR_START_VP: number = 30;
@@ -117,39 +118,7 @@ export struct AboutPage {
    */
   @Builder
   aboutBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('关于')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '关于' })
   }
 
   /**
@@ -192,39 +161,49 @@ export struct AboutPage {
               .width('100%')
 
             // ── 应用信息（图标 + 名称 + 版本 + 作者 / 来源 + 一句话简介）──
-            Column() {
-              this.appIcon()
-              Text('BiliMusic')
-                .fontSize(20)
-                .fontWeight(FontWeight.Bold)
-                .fontColor($r('app.color.text_primary'))
-                .margin({ top: 12 })
-              Text(this.appVersion)
-                .fontSize(13)
-                .fontColor($r('app.color.text_secondary'))
-                .margin({ top: 4 })
-              Text('作者：chai')
-                .fontSize(13)
-                .fontColor($r('app.color.text_secondary'))
-                .margin({ top: 4 })
-              Text('转译自 github.com/HanversionOvO/BiliMusic')
-                .fontSize(13)
-                .fontColor($r('app.color.text_secondary'))
-                .margin({ top: 4 })
-              Text('一款基于 HarmonyOS 的 B 站第三方音乐播放器，默认匿名访问 B 站音频资源，也可扫码登录解锁更高音质。')
-                .fontSize(13)
-                .fontColor($r('app.color.text_secondary'))
-                .lineHeight(18)
-                .textAlign(TextAlign.Center)
-                .padding({ left: 24, right: 24 })
-                .margin({ top: 12, bottom: 24 })
+            // 让位结构与 InsetCard 同款（外层 Row padding 16、内层 Column layoutWeight
+            // 承底色）：不能用 width('100%') + margin —— 百分比宽不含外边距，底色会
+            // 向右溢出 16vp，与下方 InsetCard 宽窄不一致（2026-10-22 用户反馈修复）。
+            Row() {
+              Column() {
+                this.appIcon()
+                Text('BiliMusic')
+                  .fontSize(20)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor($r('app.color.text_primary'))
+                  .margin({ top: 12 })
+                Text(this.appVersion)
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .margin({ top: 4 })
+                Text('作者：chai')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .margin({ top: 4 })
+                Text('转译自 github.com/HanversionOvO/BiliMusic')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .margin({ top: 4 })
+                Text('github.com/bbplayer-app/BBPlayer')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .margin({ top: 4 })
+                Text('一款基于 HarmonyOS 的 B 站第三方音乐播放器，默认匿名访问 B 站音频资源，也可扫码登录解锁更高音质。')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .lineHeight(18)
+                  .textAlign(TextAlign.Center)
+                  .padding({ left: 24, right: 24 })
+                  .margin({ top: 12, bottom: 24 })
+              }
+              .layoutWeight(1)
+              .backgroundColor($r('app.color.bg_card'))
+              .borderRadius(12)
+              .padding({ left: 16, right: 16, top: 24 })
+              .alignItems(HorizontalAlign.Center)
             }
             .width('100%')
-            .backgroundColor($r('app.color.bg_card'))
-            .borderRadius(12)
-            .padding({ left: 16, right: 16, top: 24 })
-            .margin({ left: 16, right: 16 })
-            .alignItems(HorizontalAlign.Center)
+            .padding({ left: 16, right: 16 })
 
             // ── 项目说明 ──
             SectionHeader({ headerText: '项目说明' })
@@ -301,8 +280,13 @@ export struct AboutPage {
         }
       }
     })
-    // ⚠️ 本页不要加 .hideBackButton(true)：批 1 样板是整批迁移里唯一真机验证过的
-    // 标题栏视觉，批 2 曾顺手隐藏默认返回键，真机确认破坏原样式后已回退。
+    // ⚠️ 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键。此前 stackBuilder 自绘
+    // 返回键与默认返回键在标题栏左上角重叠（dumpLayout 实证：自绘键 [224,90][312,178]
+    // 压在默认键 [256,94][336,174] 上，两个 chevron 视觉重影、按压命中哪个键效果
+    // 就不一致——用户反馈「返回键按压效果错误」即此）。批 2 当年隐藏默认键被判
+    // 「破坏原样式」回退，实为双键重叠未被识别；现保留自绘键（44x44 + press_overlay，
+    // 九个子页统一），隐藏默认键。
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.aboutScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

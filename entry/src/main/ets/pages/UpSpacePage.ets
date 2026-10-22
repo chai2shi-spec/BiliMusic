@@ -9,7 +9,8 @@
  *    那个匿名只回 v_voucher，字段全空；
  *  · 投稿 `getUserVideos`（x/space/wbi/arc/search，30 条/页，真分页）。
  *
- * 入参走 NavStackHolder 静态字段（upMid 必填、upName 兜底），与 PlaylistDetail 同套约定。
+ * 入参走路由参数 UpSpaceRouteParam（pushPathByName 入栈，upMid 必填、
+ * upName 兜底、upFace 首帧占位），与 PlaylistDetail 同套约定。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
  * 返回行 + UP 资料头部区，批 1 样板同款）；侧滑返回是 Navigation 级能力，不受影响。
@@ -26,6 +27,11 @@
  *  · 头部「拉取新投稿」：取最新投稿 → 并入订阅歌单 + 本页列表同步换新 + 重写缓存；
  *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料。
  * 无缓存（首次进入）仍走 loadCard + loadPage(1) 联网加载，成功后落盘。
+ *
+ * 投稿搜索（2026-10-23，A+B 混合）：头部搜索框输入即**本地过滤**已加载列表
+ * （标题/歌手匹配，离线可用）；Enter /「搜索」按钮走 `searchUpVideosByKeyword`
+ * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿，可覆盖未加载页，3 页上限）。
+ * 渲染源三态切换见 displayTracks()；搜索态不落缓存、不参与翻页。
  */
 
 import * as BilibiliApi from '../api/BilibiliApi';
@@ -36,6 +42,7 @@ import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service
 import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { UpSpaceRouteParam, NavRouteParamReader } from '../service/NavRouteParams';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
@@ -59,6 +66,7 @@ import {
 } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 每页投稿数：匿名 30；登录态走空间接口可吃满 50（该接口 ps 上限） */
 const PAGE_SIZE_ANON: number = 30;
@@ -79,8 +87,10 @@ const UP_BLUR_END_VP: number = 80;
  * UP 资料头部区（bottomBuilder 承载）实测前的估计高度：头像行 + 元信息行 + padding。
  * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定；实测值
  * （headerAreaHeight）回来后覆盖，此值只防首次布局 0 高闪跳。
+ * 2026-10-22 头部区间距 top 12→4、bottom 16→8 后同步 -16。
+ * 2026-10-23 搜索框行加入（40 高 + 12 上边距）：154 → 206。
  */
-const UP_HEADER_ESTIMATE_HEIGHT: number = 170;
+const UP_HEADER_ESTIMATE_HEIGHT: number = 206;
 
 /** `mm:ss` / `hh:mm:ss` → 秒（SpaceVideo.length 是字符串；榜单是秒数，两种都认） */
 function spaceDuration(raw: string): number {
@@ -121,6 +131,8 @@ export struct UpSpacePage {
   @State upName: string = '';
   @State upFace: string = '';
   @State fans: number = 0;
+  /** UP 投稿总数（card 的 archive_count，缓存持久化）；0 = 未知（旧缓存 / 卡片失败） */
+  @State archiveCount: number = 0;
   @State tracks: Track[] = [];
   @State loading: boolean = false;
   @State loadingMore: boolean = false;
@@ -145,6 +157,22 @@ export struct UpSpacePage {
   @State retryCooling: boolean = false;
   /** 下拉刷新进行中（Refresh 双向绑定 $$refreshing，forceRefresh 复位） */
   @State refreshing: boolean = false;
+  // ===== 投稿搜索（2026-10-23：本地过滤 + B 站按 mid 过滤搜索，A+B 混合）=====
+  /** 搜索框文本：输入即本地过滤已加载列表（onChange 重算）；Enter/「搜索」触发 B 站搜索 */
+  @State searchKeyword: string = '';
+  /** 本地过滤结果（keyword 变化即时重算；keyword 为空 = 不过滤，此数组为空占位） */
+  @State filteredTracks: Track[] = [];
+  /** B 站搜索在途（footer 显示「正在 B 站搜索…」） */
+  @State remoteSearching: boolean = false;
+  /**
+   * B 站搜索结果（**null = 不在远程搜索态**，这是态开关本体；
+   * 非 null 时空数组也有效 = 「B 站确实没搜到该 UP 的相关投稿」）。
+   */
+  @State remoteResults: Track[] | null = null;
+  /** B 站搜索失败原因（人话，describeError 翻译；空串 = 没失败） */
+  @State remoteFailReason: string = '';
+  /** 搜索竞态令牌：只认最新一次搜索/清除（照 SearchPage.searchToken 纪律，旧响应丢弃） */
+  private searchToken: number = 0;
   private retryLocked: boolean = false;
   private retryTimer: number = -1;
   /**
@@ -195,11 +223,15 @@ export struct UpSpacePage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    const mid: string = NavStackHolder.upMid;
+    // 路由入参（2026-10-22 传参改造）：显式参数类随 pushPathByName 入栈，
+    // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
+    const routeParam: UpSpaceRouteParam | null =
+      NavRouteParamReader.readUpSpaceParam(NavStackHolder.stack);
+    const mid: string = routeParam !== null ? routeParam.upMid : '';
     this.upMid = mid;
-    this.upName = NavStackHolder.upName;
+    this.upName = routeParam !== null ? routeParam.upName : '';
     // 入口方若已拿到头像（搜 UP 主结果）就先垫上，loadCard 拿到真图后会覆盖
-    this.upFace = NavStackHolder.upFace;
+    this.upFace = routeParam !== null ? routeParam.upFace : '';
     if (mid.length === 0) {
       this.loadFailed = true;
       this.failReason = '没有拿到 UP 主信息，请从列表里重新进入';
@@ -231,6 +263,9 @@ export struct UpSpacePage {
         this.upFace = cached.upFace;
       }
       this.fans = cached.fans;
+      if (cached.archiveCount > 0) {
+        this.archiveCount = cached.archiveCount;
+      }
       this.tracks = cached.tracks;
       this.page = cached.page;
       this.hasMore = cached.hasMore;
@@ -276,6 +311,7 @@ export struct UpSpacePage {
       upName: this.upName,
       upFace: this.upFace,
       fans: this.fans,
+      archiveCount: this.archiveCount,
       tracks: this.tracks,
       page: this.page,
       hasMore: this.hasMore,
@@ -308,6 +344,10 @@ export struct UpSpacePage {
         this.upName = card.name.length > 0 ? card.name : this.upName;
         this.upFace = card.face;
         this.fans = card.fans;
+        // 投稿总数（2026-10-23 用户需求：订阅态元信息行显示 UP 的投稿数而非订阅歌单曲目数）
+        if (card.archiveCount > 0) {
+          this.archiveCount = card.archiveCount;
+        }
         // 资料补全后同步进缓存（列表已加载时更新缓存内 profile；列表为空时 no-op）
         this.saveToCache();
       })
@@ -381,6 +421,8 @@ export struct UpSpacePage {
       return;
     }
     this.tracks = this.mapAll(res.list);
+    // 搜索态下的刷新也要让过滤视图跟上新列表（keyword 为空时是 no-op）
+    this.applyLocalFilter();
     this.page = 1;
     // 只有空间接口能真分页；搜索 / related 拿到的就是这一批
     this.hasMore = res.via === BilibiliApi.UP_VIA_SPACE && res.list.length >= this.pageSize();
@@ -427,6 +469,8 @@ export struct UpSpacePage {
           this.tracks.push(fresh[i]);
         }
       }
+      // 翻页追加后重跑本地过滤：新进来的条目才能出现在过滤视图里
+      this.applyLocalFilter();
       this.loadFailed = false;
       this.failReason = '';
       // 翻页追加后整表落盘：再次进页能带着已翻页内容恢复，并从 page+1 续拉
@@ -444,6 +488,10 @@ export struct UpSpacePage {
   }
 
   private onReachEnd(): void {
+    // 远程搜索结果是一次性的（不分页），搜索态上拉到底不再触发翻页
+    if (this.remoteResults !== null || this.remoteSearching) {
+      return;
+    }
     if (this.loading || this.loadingMore || !this.hasMore) {
       return;
     }
@@ -499,6 +547,8 @@ export struct UpSpacePage {
       this.retryLocked = false;
       this.retryCooling = false;
     }, RETRY_COOLDOWN_MS);
+    // 重试是完整重置：搜索态一并清掉（刷新的是完整列表，过滤态残留会语义错乱）
+    this.clearSearch();
     this.loadFailed = false;
     this.failReason = '';
     this.hasMore = true;
@@ -521,6 +571,8 @@ export struct UpSpacePage {
       this.refreshing = false;
       return;
     }
+    // 下拉刷新 = 显式要求看完整最新列表：先退出搜索态再拉（过滤/远程结果不对新列表负责）
+    this.clearSearch();
     this.loading = true;
     this.loadCard();
     this.loadFirstMultiSource()
@@ -531,6 +583,103 @@ export struct UpSpacePage {
         this.loading = false;
         this.refreshing = false;
       });
+  }
+
+  // ===== 投稿搜索（2026-10-23）=====
+
+  /**
+   * 列表渲染源（三态切换）：远程搜索态 → B 站搜索结果；本地过滤态 → 过滤结果；
+   * 默认 → 全量已加载列表。ForEach 数据源统一走这里，条目渲染 / 菜单零改动复用。
+   */
+  private displayTracks(): Track[] {
+    if (this.remoteResults !== null) {
+      return this.remoteResults;
+    }
+    if (this.searchKeyword.trim().length > 0) {
+      return this.filteredTracks;
+    }
+    return this.tracks;
+  }
+
+  /**
+   * 本地过滤（方案 A）：标题 / 歌手包含关键词（小写化匹配），输入即生效、离线可用。
+   * keyword 为空 → 空数组（displayTracks 会退回全量列表）。
+   * tracks 换新 / 追加的三处（loadFirstMultiSource / loadPageViaSpace / refreshSubscription）
+   * 之后都要重跑一次，保证翻页新进来的条目也能出现在过滤视图里。
+   */
+  private applyLocalFilter(): void {
+    const kw: string = this.searchKeyword.trim().toLowerCase();
+    if (kw.length === 0) {
+      this.filteredTracks = [];
+      return;
+    }
+    this.filteredTracks = this.tracks.filter((t: Track): boolean => {
+      return t.title.toLowerCase().indexOf(kw) >= 0
+        || t.artist.toLowerCase().indexOf(kw) >= 0;
+    });
+  }
+
+  /**
+   * 搜索框输入变化：即时重算本地过滤；若正处于远程结果态则一并退出 ——
+   * 远程结果只对「发起搜索时的关键词」有效，输入已变，旧结果不能继续顶着显示。
+   */
+  private onKeywordChanged(): void {
+    this.applyLocalFilter();
+    if (this.remoteResults !== null || this.remoteSearching) {
+      this.searchToken++; // 在途请求回来一律作废
+      this.remoteResults = null;
+      this.remoteSearching = false;
+      this.remoteFailReason = '';
+    }
+  }
+
+  /**
+   * B 站全量搜索（方案 B）：按关键词搜全站 → 按 `mid === upMid` 过滤出该 UP
+   * **全部历史投稿**中匹配的部分（不限已加载页；3 页 × 20 条上限）。
+   *
+   * 竞态纪律（照 SearchPage）：token 只认最新；`clearSearch` / 再次输入都会令旧响应作废。
+   * `searchOk=false`（搜索接口自己被拒）与 0 命中分开提示，别让用户把限流当成「没搜到」。
+   */
+  private runRemoteSearch(): void {
+    const kw: string = this.searchKeyword.trim();
+    if (kw.length === 0 || this.upMid.length === 0 || this.remoteSearching) {
+      return;
+    }
+    this.searchToken++;
+    const token: number = this.searchToken;
+    this.remoteSearching = true;
+    this.remoteFailReason = '';
+    BilibiliApi.searchUpVideosByKeyword(this.upMid, this.upName, kw)
+      .then((res: BilibiliApi.UpVideosSearchResult): void => {
+        if (token !== this.searchToken) {
+          return;
+        }
+        this.remoteSearching = false;
+        if (!res.searchOk) {
+          this.remoteFailReason = '搜索被 B 站拒绝，过一会儿再试';
+          return;
+        }
+        this.remoteResults = this.mapAll(res.list);
+      })
+      .catch((e: Error): void => {
+        if (token !== this.searchToken) {
+          return;
+        }
+        this.remoteSearching = false;
+        this.remoteFailReason = this.describeError(
+          e instanceof Error ? e : new Error(JSON.stringify(e))
+        );
+      });
+  }
+
+  /** 清除搜索：回完整列表（清关键词 + 退出远程搜索态，在途响应一律作废）。 */
+  private clearSearch(): void {
+    this.searchToken++;
+    this.searchKeyword = '';
+    this.filteredTracks = [];
+    this.remoteResults = null;
+    this.remoteSearching = false;
+    this.remoteFailReason = '';
   }
 
   /**
@@ -583,6 +732,17 @@ export struct UpSpacePage {
         this.subscribed = true;
         this.subscribedCount = r.playlist.tracks.length;
         this.showSubscribeResult(r);
+        // 订阅取回的就是该 UP 的最新投稿页（2026-10-23）：与「拉取新投稿」同样把
+        // 页面列表和缓存一并换新 —— 否则缓存命中进入 + 订阅的场景下，缓存里还是
+        // 进页时的旧列表，重进页面看不到刚拉到的条目，又得手动再拉一次。
+        this.tracks = mapped;
+        this.applyLocalFilter();
+        this.page = 1;
+        this.hasMore = this.sourceVia === BilibiliApi.UP_VIA_SPACE
+          && mapped.length >= this.pageSize();
+        this.loadFailed = false;
+        this.failReason = '';
+        this.saveToCache();
       })
       // 与 refreshSubscription 同理：缺这个 catch 时，订阅失败会让 subBusy 永久卡死，
       // 按钮再也点不动（见 refreshSubscription 里的注释）。
@@ -677,6 +837,8 @@ export struct UpSpacePage {
         // ——「已是最新」分支同样执行，列表与缓存都换成本次真实返回；
         // collectTracks 内已写 sourceVia，据此恢复 hasMore（与 loadFirstMultiSource 同式）
         this.tracks = collected;
+        // 本页列表同步换新后重跑本地过滤（keyword 为空时是 no-op）
+        this.applyLocalFilter();
         this.page = 1;
         this.hasMore = this.sourceVia === BilibiliApi.UP_VIA_SPACE
           && collected.length >= this.pageSize();
@@ -823,7 +985,15 @@ export struct UpSpacePage {
       parts.push(`粉丝 ${formatFans(this.fans)}`);
     }
     if (this.subscribed) {
-      parts.push(`已订阅 ${this.subscribedCount} 首`);
+      // 2026-10-23 用户需求：订阅态显示 UP 的投稿总数（card 的 archive_count），
+      // 不再显示订阅歌单的曲目数 —— 两者经常不相等（订阅时只装了当时加载到的投稿），
+      // 后者会让用户误以为 UP 的投稿就这么多。未知时（旧缓存 / 卡片被风控）
+      // 退回已加载条数做近似，口径仍与未订阅分支一致。
+      const submissionCount: number =
+        this.archiveCount > 0 ? this.archiveCount : this.tracks.length;
+      if (submissionCount > 0) {
+        parts.push(`${submissionCount} 个投稿`);
+      }
     } else if (this.tracks.length > 0) {
       parts.push(`${this.tracks.length} 个投稿`);
     }
@@ -911,10 +1081,65 @@ export struct UpSpacePage {
       .width('100%')
       .margin({ top: 12 })
       .alignItems(VerticalAlign.Center)
+
+      // 搜索框行（2026-10-23）：输入即过滤**已加载**的投稿（本地，离线可用）；
+      // Enter / 「搜索」按钮发起 B 站全站搜索（按 mid 过滤回该 UP 的投稿，
+      // 能覆盖未加载页）。「清除」只在有关键词或处于远程结果态时出现。
+      // 行高恒定（40 + 上边距 12），头部区实测高度自适配，无需特殊处理。
+      Row({ space: 8 }) {
+        TextInput({ placeholder: '搜索 TA 的投稿', text: this.searchKeyword })
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(14)
+          .fontColor($r('app.color.text_primary'))
+          .placeholderColor($r('app.color.text_tertiary'))
+          .placeholderFont({ size: 14 })
+          .backgroundColor($r('app.color.bg_card'))
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 14, right: 14 })
+          .onChange((v: string): void => {
+            this.searchKeyword = v;
+            this.onKeywordChanged();
+          })
+          .onSubmit((): void => {
+            this.runRemoteSearch();
+          })
+        Button(this.remoteSearching ? '搜索中' : '搜索', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(40)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 16, right: 16 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          // 不用 .enabled(false) 表达「空词 / 搜索中不可点」：禁用态会用系统灰字
+          // 覆盖 themePrimary 字色（用户要求按钮字色恒为主题色）；点击兜底在
+          // runRemoteSearch 里（空词 / 在途一律 no-op）。
+          .onClick((): void => {
+            this.runRemoteSearch();
+          })
+        if (this.searchKeyword.trim().length > 0 || this.remoteResults !== null) {
+          Button('清除', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(40)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 16, right: 16 })
+            .backgroundColor($r('app.color.bg_divider'))
+            .fontColor($r('app.color.text_secondary'))
+            .onClick((): void => {
+              this.clearSearch();
+            })
+        }
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .padding({ left: 20, right: 20, top: 12, bottom: 16 })
+    // 头部区间距（2026-10-22 用户要求上移）：top 12→4 紧贴标题行下沿，
+    // bottom 16→8 让首个投稿条目同步上移（列表占位随 headerAreaHeight 实测自动跟随）。
+    .padding({ left: 20, right: 20, top: 4, bottom: 8 })
   }
 
   /**
@@ -925,32 +1150,7 @@ export struct UpSpacePage {
    */
   @Builder
   upSpaceBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    // 行内边距与 AboutPage.aboutBar 完全一致（真机要求：返回键样式对齐关于页）
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '' })
   }
 
   /**
@@ -1080,10 +1280,11 @@ export struct UpSpacePage {
                     .width('100%')
                     .height(this.barTotalHeight())
                 }
-                // 条目渲染（SearchPage 同款）：@State tracks 数组直接驱动 ForEach，
-                // 追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
+                // 条目渲染（SearchPage 同款）：渲染源走 displayTracks() 三态切换
+                // （远程搜索结果 / 本地过滤结果 / 全量已加载），@State 数组直接驱动
+                // ForEach，追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
                 ForEach(
-                  this.tracks,
+                  this.displayTracks(),
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
@@ -1101,9 +1302,36 @@ export struct UpSpacePage {
                 // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
                 // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
                 // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏骨架不动。
+                // 2026-10-23 搜索分支排在最前：搜索态的计数 / 失败 / 在途提示
+                // 优先于常规加载文案（搜索态下不翻页，旧三分支不会再被走到）。
                 ListItem() {
                   Row() {
-                    if (this.loadingMore) {
+                    if (this.remoteSearching) {
+                      LoadingProgress()
+                        .width(18)
+                        .height(18)
+                        .color($r('app.color.text_tertiary'))
+                      Text('正在 B 站搜索…')
+                        .fontSize(12)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .margin({ left: 8 })
+                    } else if (this.remoteFailReason.length > 0) {
+                      Text(this.remoteFailReason)
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else if (this.remoteResults !== null) {
+                      Text(this.remoteResults.length > 0
+                        ? `B 站搜到该 UP 的 ${this.remoteResults.length} 条投稿`
+                        : 'B 站没搜到该 UP 的相关投稿，试试更短的关键词')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else if (this.searchKeyword.trim().length > 0) {
+                      Text(this.filteredTracks.length > 0
+                        ? `已加载投稿中命中 ${this.filteredTracks.length} 条，「搜索」可找全部`
+                        : '已加载的投稿里没有匹配，「搜索」可去 B 站找全部投稿')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else if (this.loadingMore) {
                       LoadingProgress()
                         .width(18)
                         .height(18)
@@ -1183,6 +1411,9 @@ export struct UpSpacePage {
         }
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     .translate({ x: this.navTransX })

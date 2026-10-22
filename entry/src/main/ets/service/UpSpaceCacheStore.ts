@@ -30,6 +30,8 @@ export interface UpSpaceCacheEntry {
   upName: string;
   upFace: string;
   fans: number;
+  /** UP 投稿总数（card 的 archive_count，订阅态头部元信息行显示用）；0 = 未知（旧缓存） */
+  archiveCount: number;
   /** 已加载的全部曲目（含翻页追加） */
   tracks: Track[];
   /** 最后成功页码（恢复后从 page+1 续拉） */
@@ -106,6 +108,7 @@ export async function getUpSpaceCache(upMid: string): Promise<UpSpaceCacheEntry 
       upName: typeof parsed.upName === 'string' ? parsed.upName : '',
       upFace: typeof parsed.upFace === 'string' ? parsed.upFace : '',
       fans: typeof parsed.fans === 'number' ? parsed.fans : 0,
+      archiveCount: typeof parsed.archiveCount === 'number' ? parsed.archiveCount : 0,
       tracks: tracks,
       page: typeof parsed.page === 'number' && parsed.page >= 1 ? parsed.page : 1,
       hasMore: typeof parsed.hasMore === 'boolean' ? parsed.hasMore : false,

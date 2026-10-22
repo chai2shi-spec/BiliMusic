@@ -31,8 +31,13 @@
  * `setWindowLayoutFullScreen(true)`（窗口级全屏，见 EntryAbility.enableFullScreenLayout），
  * 系统**不再自动避让**安全区。HDS 的悬浮栏只认 `barBottomMargin` 这个「离屏幕底边多远」，
  * 由本页按导航模式折算（见 barFloatingStyle）：
- *   手势导航   barBottomMargin = 6 + safeBottom × 0.5（避开指示条一半，贴近底部边框）
- *   三键导航   barBottomMargin = 6 + safeBottom      （整条导航栏必须完整避让）
+ *   手势导航   barBottomMargin = 6 + 指示条避让区 × 0.5（避开指示条一半，贴近底部边框）
+ *   三键导航   barBottomMargin = 6 + 三键导航栏避让区  （整条导航栏必须完整避让）
+ * ⚠️ 导航模式判据 = **避让区来源**（getWindowAvoidArea 实测 TYPE_NAVIGATION_INDICATOR /
+ * TYPE_SYSTEM 底部矩形，avoidAreaChange 动态更新，UIContext.px2vp 换算），不写死高度
+ * 阈值 —— 阔折叠 / 阔直板大屏展开态的指示条与导航栏高度和手机不同（形态、密度、
+ * 分屏都影响），旧的「safeBottom > 36vp 猜三键」启发式在大屏上误判分支 →
+ * barBottomMargin 偏移，即「大屏展开底部导航不居中」根因 1，已删除。
  * 若真机上出现「离底留白翻倍」，那就是 HDS 内部也做了一次避让 → 把间距改成 BAR_BOTTOM_MARGIN。
  *
  * ══════════ 全屏布局与避让的消费点（**不使用 expandSafeArea**） ══════════
@@ -132,11 +137,13 @@ import {
   STORE_MINI_BAR_EXPANDED,
   STORE_SAFE_TOP,
   STORE_SAFE_BOTTOM,
+  STORE_NAV_BAR_BOTTOM,
+  STORE_NAV_INDICATOR_BOTTOM,
   STORE_NET_RETRY_REV,
   STORE_ACTIVE_TAB,
-  STORE_LOGIN_EVENT,
+  STORE_TAB_SWITCH_REQUEST,
+  STORE_TAB_SWITCH_TARGET,
   STORE_BAR_LAYOUT,
-  GESTURE_INDICATOR_MAX_VP,
   STORE_DL_BAR_HAS_TASKS,
   STORE_DL_BAR_SELECTING,
   STORE_PL_BAR_SELECTING,
@@ -153,25 +160,41 @@ import {
   STORE_PLAYER_CONTENT_EXIT,
   STORE_PLAYER_TRANSITIONING,
   PLAYER_TRANSITION_MS,
-  STORE_FOLD_EXPANDED
+  STORE_FOLD_EXPANDED,
+  STORE_WINDOW_WIDTH_VP
 } from '../common/Constants';
 import { PLAYER_MAIN_CURVE } from '../common/constants/InteractionConstants';
-import { getLoginUser } from '../service/LoginStore';
-import { FavSyncManager } from '../service/FavSyncManager';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
-import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
+import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
 import { DlSelectToggle, DlQueueActions, DlControlBar } from '../components/DownloadsTabBar';
 import { PlTitleActions, PlSelectToolbar } from '../components/PlaylistsTabBar';
 import { SearchInputBar, SearchTabsBar } from '../components/SearchTabBar';
 
 /**
- * 悬浮页签栏离屏幕底边的净间距（vp，不含安全区）。
- * 旧值 20 让胶囊浮得太高；压到 6 使其贴近屏幕底部边框（少量安全区由下方公式叠加）。
+ * 悬浮页签栏完整避开系统底部控件（三键导航栏 / 手势指示条避让区）后的净空隙（vp）。
+ * 旧值 20 让胶囊浮得太高压到 6；2026-10-22 用户定夺调高对齐华为音乐悬浮观感 ——
+ * 手势导航分支改完整避让指示条（原只避一半，离底约 20vp），6 时离底约 34vp 用户
+ * 反馈仍偏高，压到 2（离底约 30vp）。若目测仍需微调，只动此值（每 +1vp = +2.75px）。
  */
-const BAR_BOTTOM_MARGIN: number = 6;
-/** 页签栏微透明 —— 移植自 Sumy 的 barOpacity: 0.9 */
-const BAR_OPACITY: number = 0.9;
+const BAR_BOTTOM_MARGIN: number = 2;
+/**
+ * 阔折叠展开（lg 宽度）且队列非空（带 miniBar）时悬浮栏离屏幕左右边缘的边距
+ * （vp，2026-10-22 需求「底部导航栏和迷你栏靠近一点、左右两边留空多一点」）：
+ * 页签胶囊贴左、迷你栏贴右按同一值对称内收（lg=83，用户定值；md/sm 走 HDS 默认）。
+ * ⚠️ 历史「实测落位 ≈0.917×设置值」是密度误读：当时按 3.0 折算，阔折叠实际密度
+ * 2.75（barSideMargin 本身就是精确 vp，83vp×2.75=228px 分毫不差），不存在 HDS 缩放。
+ */
+const BAR_SIDE_MARGIN_LG: number = 83;
+/**
+ * 悬浮页签胶囊**锁定**宽度（vp，4 页签）：barFloatingStyle.barWidth 显设值，
+ * 居中公式 sideMargin=(容器宽−本值)/2 的被减数。选 304（= 76×4）与「队列非空
+ * lg 双胶囊散开」时 HDS 的实测宽度（S=83 → 304vp）一致，跨状态切换宽度不跳变。
+ * ⚠️ 不锁宽时 HDS 宽度随边距漂移（dumpLayout 实测：默认 S→328、S=83→304、
+ * S=318→272），公式里的「宽」不可控，必须配 barWidth 一起设。
+ * 若 HDS 版本升级导致宽度漂移，用 uitest dumpLayout 重测本校准。
+ */
+const BAR_FLOATING_BAR_WIDTH: number = 304;
 /** A3 平板切页转场：内容列淡入位移时长（ms）与滑入偏移（vp） */
 const TABLET_TAB_FADE_MS: number = 220;
 const TABLET_TAB_FADE_OFFSET_VP: number = 16;
@@ -194,16 +217,20 @@ const TAB_PLAYLISTS: number = 1;
 const TAB_DOWNLOADS: number = 2;
 const TAB_SETTINGS: number = 3;
 /**
- * 顶栏滚动模糊时机（渐进模糊指南口径 0→20）：根栏常显后起糊即触发，
- * 起点透明 / 终点 bg_page 的样式插值在 20vp 内完成。
+ * 顶栏滚动模糊时机（2026-10-22 收紧 20 → 8）。
+ *
+ * 语义：模糊强度 = clamp(offset, start, end) 在 start→end 之间线性插值
+ * （COMMON_BLUR / GRADIENT_BLUR 语义相同，默认终点均为 8vp）。
+ * 区间越短，「半糊」的过渡帧越少，越早进入稳定满载状态。
+ * 旧值 20vp 的问题：慢滚时要在 20vp 内持续插值，视觉上是「慢慢显形」（还行），
+ * 但**快滑时这段插值被压缩进 1~2 帧**，等于把一次渐变硬切成跳变，
+ * 与「材质被系统丢掉一帧」叠加后就是用户看到的闪烁。
+ *
+ * 权衡：8vp ≈ SDK 默认终点。再小（≤4）会变成「一碰就满糊」，
+ * 起糊突兀、失去渐入质感；6~12 是可调区间。
  */
 const TAB_BLUR_START_VP: number = 0;
-const TAB_BLUR_END_VP: number = 20;
-/**
- * 兜底档（GRADIENT_BLUR）模糊蒙层额外高度：罩住溢出渲染的第二行
- * （44 工具条 + 余量）。沉浸档（IMMERSIVE_GRADIENT_BLUR）忽略此值。
- */
-const FALLBACK_MASK_EXTRA_VP: number = 52;
+const TAB_BLUR_END_VP: number = 8;
 /**
  * 屏幕竖向滑动（parallelGesture）判定收/放意图的触发阈值（vp）：
  * 上滑超过 → 展开、下滑超过 → 收起；一次手势只触发一次。
@@ -246,6 +273,30 @@ struct Index {
    * 全局底部播放栏与 NavDestination 子页各自用这个值避让（见 PlayBar / 各子页）。
    */
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
+
+  /**
+   * 三键导航栏避让区高度（vp，TYPE_SYSTEM.bottomRect）：>0 即三键导航。
+   * 与 safeBottom（两来源取 max 的通用避让值）分开存 —— 悬浮胶囊要按「导航模式」
+   * 选避让策略（三键整条避让 / 手势只避一半指示条）。旧实现用 36vp 高度阈值猜
+   * 模式，阔折叠 / 阔直板大屏展开态指示条高度与手机不同 → 误判 → 胶囊垂直偏移
+   * （「大屏展开底部导航不居中」根因 1）。现按避让区来源判模式，动态实测。
+   * 写入：EntryAbility 首发一次 + 本页 avoidAreaChange 监听动态更新。
+   */
+  @StorageLink(STORE_NAV_BAR_BOTTOM) navBarBottom: number = 0;
+
+  /**
+   * 手势指示条避让区高度（vp，TYPE_NAVIGATION_INDICATOR.bottomRect）：
+   * 手势导航下 = 指示条区域高度，三键导航下 = 0。悬浮胶囊只避开它的一半。
+   */
+  @StorageLink(STORE_NAV_INDICATOR_BOTTOM) navIndicatorBottom: number = 0;
+
+  /**
+   * 窗口内容区宽度（vp）：悬浮胶囊「居中 sideMargin」公式的输入（Constants 的
+   * STORE_WINDOW_WIDTH_VP 注释）。EntryAbility 首帧前首发（冷启动首帧即正确，
+   * 不闪「贴左 → 居中」），本页 HdsTabs.onAreaChange 持续回写 —— 折叠开合 /
+   * 分屏 / 转屏后组件重排即触发，宽度变 → 居中量自动重算。
+   */
+  @StorageLink(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
 
   /**
    * 播放队列（歌单列表）：决定融合播放栏是否挂进悬浮胶囊 ——
@@ -360,16 +411,16 @@ struct Index {
   @StorageProp(STORE_PLAYER_CLOSE_REQUEST) @Watch('onCloseRequest') playerCloseRequest: number = 0;
 
   /**
-   * 收起播放页（逆向镜像，2026-10-21 组件状态切换动画）：
-   * 单条主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE），闭包内同时写：
-   *   · STORE_PLAYER_CONTENT_EXIT 递增 → 四个内容层 @Watch 复位退场状态
-   *     （淡出 + 俯冲下潜 + 缩小，2026-10-21 用户要求「跟着收缩到迷你栏」，
-   *     与背景面收缩同曲线同步插值）；
-   *   · STORE_PLAYER_OPEN=false —— 同帧驱动：
-   *     · 背景面 geometryTransition 收回迷你栏透明锚点矩形；
-   *     · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
-   *     · 各子层 playerOpen @Watch 复位入场状态（与 contentExit 复位幂等，兜底）；
-   *     · 页签图标 opacity 恢复。
+   * 收起播放页（2026-10-22 内容层瞬隐规格）：两段式。
+   * ① STORE_PLAYER_CONTENT_EXIT 递增在 animateTo 闭包【外】执行 —— 四个内容层
+   *   组件 @Watch 复位入场状态时不在任何隐式动画作用域内 → 属性单帧跳变，
+   *   顶栏 / 标题块 / 控制区 / 歌词 / 指示点**直接消失**（用户 2026-10-22 要求
+   *   「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
+   * ② 唯一的主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE）闭包内只写
+   *   STORE_PLAYER_OPEN=false —— 同帧驱动：
+   *   · 背景面 geometryTransition 收回迷你栏透明锚点矩形；
+   *   · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
+   *   · 页签图标 opacity 恢复。
    * 700ms 后卸载 overlay 并复位连点防护标志。
    */
   private closePlayer(): void {
@@ -377,12 +428,13 @@ struct Index {
       return;
     }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
-    // 主动画：背景面收回 + 封面回飞 + 内容层俯冲退场 + 页签恢复
+    // ① 内容层瞬隐：seq 递增在主动画闭包外（各层 @Watch 复位不参与隐式动画）。
+    const exitSeq: number = (AppStorage.get<number>(STORE_PLAYER_CONTENT_EXIT) ?? 0) + 1;
+    AppStorage.setOrCreate(STORE_PLAYER_CONTENT_EXIT, exitSeq);
+    // ② 主动画：背景面收回 + 封面回飞 + 页签恢复（内容层已瞬隐，不随行）。
     this.getUIContext().animateTo(
       { duration: PLAYER_TRANSITION_MS, curve: PLAYER_MAIN_CURVE },
       (): void => {
-        const exitSeq: number = (AppStorage.get<number>(STORE_PLAYER_CONTENT_EXIT) ?? 0) + 1;
-        AppStorage.setOrCreate(STORE_PLAYER_CONTENT_EXIT, exitSeq);
         AppStorage.setOrCreate(STORE_PLAYER_OPEN, false);
       }
     );
@@ -395,6 +447,32 @@ struct Index {
   /** TopArea 收起按钮的跨层信号（seq 递增） */
   private onCloseRequest(): void {
     this.closePlayer();
+  }
+
+  /**
+   * 跨层切页签请求（seq 递增，STORE_TAB_SWITCH_TARGET 携带目标下标）：
+   * 播放页 overlay 深层组件（「去歌单页选」菜单项）发出。
+   *
+   * 手机壳：HdsTabs 是非受控 index（见 onChange 注释），外部写 activeTab 不会
+   * 切换可见页签 —— 必须走 tabController.changeIndex，由 HDS 内部状态切页，
+   * onChange 再回写 activeTab（驱动标题 / 下载页门控 / 顶栏 stackBuilder）。
+   * 平板壳：没有 HdsTabs / tabController，activeTab（@StorageLink 写穿
+   * STORE_ACTIVE_TAB）就是唯一事实源 —— 页面 visibility / NavRail 选中态
+   * 全部跟随它，直接赋值即切页。
+   */
+  @StorageProp(STORE_TAB_SWITCH_REQUEST) @Watch('onTabSwitchRequest') tabSwitchRequest: number = 0;
+
+  /** 消费跨层切页签请求：按壳形态选择唯一有效的切页通道（见上方注释） */
+  private onTabSwitchRequest(): void {
+    const target: number = AppStorage.get<number>(STORE_TAB_SWITCH_TARGET) ?? -1;
+    if (target < 0) {
+      return;
+    }
+    if (this.isTabletShell()) {
+      this.activeTab = target;
+    } else {
+      this.tabController.changeIndex(target);
+    }
   }
 
   /**
@@ -486,15 +564,12 @@ struct Index {
   @StorageProp(STORE_DL_BAR_HAS_TASKS) dlBarHasTasks: boolean = false;
 
   /**
-   * 登录成功的一次性事件信号（值 = 登录成功时刻的时间戳，见 Constants 的注释）。
-   *
-   * 为什么挂在根页：这里常驻、生命周期贯穿 App；登录页会在登录成功后退出，
-   * 不适合承载「登录后跑一次收藏夹同步」这种全局副作用。
-   *
-   * ⚠️ @Watch **不会**在组件初始化时触发 → 冷启动（initLoginState 恢复会话）
-   * 不会误触发自动同步，符合「不做每次启动自动跑」的产品决策。
+   * 路由栈注入（2026-10-22 Navigation 差距收敛）：@Consume('navPathStack')
+   * 的子组件可拿到与两壳 HdsNavigation 同一份栈实例；当前子页面经
+   * NavStackHolder 静态单例访问（等价同一份），此 @Provide 为标准注入
+   * 通道预留，避免子组件再依赖 service 层单例。
    */
-  @StorageProp(STORE_LOGIN_EVENT) @Watch('onLoginEvent') loginEvent: number = 0;
+  @Provide('navPathStack') navPathStack: NavPathStack = NavStackHolder.stack;
 
   private tabController: HdsTabsController = new HdsTabsController();
 
@@ -534,6 +609,9 @@ struct Index {
   private netLostToastShown: boolean = false;
 
   aboutToAppear(): void {
+    // 路由拦截器（登录拦截基础设施 + 同名 push 防抖）：两壳共享同一栈，
+    // 只挂一次；先于任何子页 push 挂载，冷启动即生效。
+    NavStackHolder.setupInterception();
     // 先探测材质能力：barFloatingStyle() 在首帧 build 时就要用到它
     this.useExquisiteMaterial = MaterialCompat.supportsImmersiveMaterial();
     // 断点要先于子页注册：register 会同步把当前断点写进 AppStorage，
@@ -594,22 +672,6 @@ struct Index {
     setTimeout((): void => {
       preloadAllLazyPages();
     }, 1500);
-  }
-
-  /**
-   * 登录成功（一次显式登录动作）→ 自动同步一次 B 站收藏夹。
-   *
-   * 时序已由 LoginStore 保证：信号只在 refreshLoginUser 成功、cachedUser 就绪后才发
-   * （见 LoginStore.pendingAutoSyncSignal），所以这里 getLoginUser() 必然非空。
-   * 同步管理器自身幂等（running/pending），同一次登录连发信号也只跑一轮。
-   *
-   * fire-and-forget：不 await，避免阻塞首帧；进度由 STORE_FAV_SYNC_REV 驱动同步页。
-   */
-  private onLoginEvent(): void {
-    if (getLoginUser() === null) {
-      return;
-    }
-    FavSyncManager.getInstance().syncAll('auto');
   }
 
   /**
@@ -722,11 +784,16 @@ struct Index {
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
       const topVp: number = ui.px2vp(sys.topRect.height);
-      const bottomPx: number = Math.max(sys.bottomRect.height, indicator.bottomRect.height);
-      const bottomVp: number = ui.px2vp(bottomPx);
+      // 两个来源分开发布（2026-10-22 修「大屏展开底部导航不居中」）：
+      // 悬浮胶囊的避让策略按「来源」选，不再用 max 后的单一值 + 高度阈值猜模式。
+      const navBarBottomVp: number = ui.px2vp(sys.bottomRect.height);
+      const indicatorBottomVp: number = ui.px2vp(indicator.bottomRect.height);
+      const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);
       AppStorage.setOrCreate(STORE_SAFE_TOP, topVp);
       AppStorage.setOrCreate(STORE_SAFE_BOTTOM, bottomVp);
-      console.info(`avoidArea: top=${topVp}vp bottom=${bottomVp}vp`);
+      AppStorage.setOrCreate(STORE_NAV_BAR_BOTTOM, navBarBottomVp);
+      AppStorage.setOrCreate(STORE_NAV_INDICATOR_BOTTOM, indicatorBottomVp);
+      console.info(`avoidArea: top=${topVp}vp bottom=${bottomVp}vp navBar=${navBarBottomVp}vp indicator=${indicatorBottomVp}vp`);
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`applyAvoidArea failed: ${msg}`);
@@ -736,17 +803,20 @@ struct Index {
   /**
    * 沉浸光感悬浮胶囊样式（参数逐条移植自 Sumy-Music 的 getBarFloatingStyle）。
    *
-   * 四项合起来才是「沉浸光感」：
+   * 三项合起来才是「沉浸光感」：
    *   systemMaterialEffect → 系统**沉浸式材质**（IMMERSIVE）；设备支持时用 EXQUISITE 精美档
    *   lightColor           → **主题色光晕**：品牌粉 12% 透明度，让材质泛一层粉光而不是死灰
-   *   barOpacity           → **微透明** 0.9，下层的封面 / 列表能透上来一点
+   *   barOpacity           → 不设（2026-10-22 用户定夺：回归系统默认 1，不透明，
+   *                           由 IMMERSIVE 材质自身呈现光感，不靠透出下层内容）
    *   barBottomMargin      → **悬浮**：净离底 6vp；再按导航方式叠加底部安全区（见文件头说明）
+    *   barSideMargin        → **水平锚定**：HDS 底左锚定，队列空大屏时反算居中、
+    *                           队列非空 lg 对称内收 83vp（见 barFloatingStyle 内注释）
    *
    * 融合播放栏（miniBar）：队列非空时挂入 —— PlayBar 作为槽位内容与页签排进同一行
    * （HORIZONTAL：播放栏左、页签右），材质背景跟随页签胶囊（enableMiniBarBackground
    * 默认 true），液态玻璃观感由 HDS 统一渲染；队列为空时不带 miniBar，播放栏整体隐藏。
    *
-   * ⚠️ safeBottom / queue 变化会让本函数返回新对象，HdsTabs 是受控样式，重建即生效。
+    * ⚠️ navBarBottom / navIndicatorBottom / queue 变化会让本函数返回新对象，HdsTabs 是受控样式，重建即生效。
    */
   /**
    * barFloatingStyle 的**内容键缓存**（2026-10-14 修复「收起/展开瞬间完成」的另一半）。
@@ -768,35 +838,78 @@ struct Index {
     // 内容键：本样式的全部语义输入（见 cachedFloatingStyle 注释）。
     // 展开态用非响应式读（miniBarExpandedNow）—— 收放翻转本身不触发本页重渲染。
     const expandedNow: boolean = this.miniBarExpandedNow();
-    const key: string = `${this.safeBottom}|${this.useExquisiteMaterial ? 1 : 0}`
+    // 悬浮栏水平锚定（2026-10-22 dumpLayout 实测定论，修「大屏展开底部导航不居中」
+    // 根因 2）：HDS 悬浮页签栏是**底左锚定** —— barSideMargin 只是胶囊左缘缩进，
+    // 不是两侧对称边距；带 miniBar 时 HDS 自动两胶囊对称散开（整体居中），队列空时
+    // 单胶囊贴左、大屏右侧空出几百 vp → 视觉不居中。故：
+    //   · 队列空 且 容器宽 ≥600vp → sideMargin=(宽−胶囊宽)/2 反算居中，并用
+    //     barWidth 锁死胶囊宽（显设边距时 HDS 默认宽度会漂移：实测 S=83→304 /
+    //     S=318→272，不锁宽度则公式里的「宽」不可控）；
+    //   · 队列非空 且 lg（阔折叠展开）→ 保留用户调校的对称内收 83vp（不锁宽，
+    //     维持用户按 304 口径调出的双胶囊散开视觉）；
+    //   · 其余（手机 / sm 折叠闭合）→ 全不设，HDS sm 默认即居中（实测佐证）。
+    const emptyQueue: boolean = this.queue.length === 0;
+    const centerSingleBar: boolean = emptyQueue && this.windowWidthVp >= 600;
+    let sideMargin: number | undefined = undefined;
+    if (centerSingleBar) {
+      sideMargin = Math.max(0, (this.windowWidthVp - BAR_FLOATING_BAR_WIDTH) / 2);
+    } else if (!emptyQueue && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
+      sideMargin = BAR_SIDE_MARGIN_LG;
+    }
+    const key: string = `${this.navBarBottom}|${this.navIndicatorBottom}`
+      + `|${this.useExquisiteMaterial ? 1 : 0}`
       + `|${this.themePrimary}|${this.barLayout}|${this.queue.length > 0 ? 1 : 0}`
-      + `|${expandedNow ? 1 : 0}`;
+      + `|${expandedNow ? 1 : 0}|${sideMargin ?? 0}`;
     if (this.cachedFloatingStyle !== null && this.cachedFloatingStyleKey === key) {
       return this.cachedFloatingStyle;
     }
     const style: HdsTabsFloatingStyle = {
-      // 整体下沉贴近屏幕底部边框，但**不完全压住**系统底部手势条：
-      //   手势导航 → 只避开指示条区域的一半（safeBottom/2）：胶囊下沉进避让区的上半段，
-      //              可见的手势指示条仍完整露在胶囊下方（实测 27.85vp 避让区 → 离底约 20vp）；
-      //   三键导航 → 整条导航栏是可点击系统控件，必须完整避让（barBottomMargin = 6 + safeBottom）。
-      // safeBottom 变化（转屏 / 切导航模式）会重建样式，位置自动跟随。
-      barBottomMargin: this.safeBottom > GESTURE_INDICATOR_MAX_VP
-        ? BAR_BOTTOM_MARGIN + this.safeBottom
-        : BAR_BOTTOM_MARGIN + this.safeBottom * 0.5,
+      // 胶囊完整浮在系统底部控件上方、与屏幕底缘留出明显空隙（对齐华为音乐观感）。
+      // ⚠️ 避让策略按「避让区来源」选，不写死高度阈值（2026-10-22 修「大屏展开
+      // 底部导航不居中」根因 1：旧的「safeBottom > 36vp 猜三键」在阔折叠 / 阔直板
+      // 大屏展开态误判 → 胶囊垂直偏移）：
+      //   三键导航（TYPE_SYSTEM 底部矩形 > 0）→ 整条导航栏是可点击系统控件，
+      //     完整避让：barBottomMargin = 6 + navBarBottom；
+      //   手势导航（TYPE_NAVIGATION_INDICATOR 底部矩形）→ 同样完整避让指示条
+      //     避让区（2026-10-22 用户定夺：旧「下沉进避让区上半段」离底仅约 20vp，
+      //     调高对齐华为音乐 —— 胶囊底缘离屏 ≈ 6 + 27.85 ≈ 34vp）。
+      // 两种导航方式语义统一：完整避开系统控件 + 净空隙 6vp。
+      // 两个高度都来自 getWindowAvoidArea + avoidAreaChange 动态实测（px2vp 换算），
+      // 转屏 / 折叠开合 / 切导航模式 / 分屏自动跟随（键变化 → 样式受控重建生效）。
+      // ⚠️ 双重避让坑：本工程窗口是全屏布局（HdsTabs 底边 = 物理屏幕底边），
+      // 这里必须自带避让；若真机出现「离底留白翻倍」说明 HDS 内部又避了一次，
+      // 把净距改成 BAR_BOTTOM_MARGIN 即可 —— 切不可在根容器再叠 padding.bottom。
+      barBottomMargin: BAR_BOTTOM_MARGIN + (this.navBarBottom > 0
+        ? this.navBarBottom
+        : this.navIndicatorBottom),
+      // 水平锚定（见上面 sideMargin 计算处注释）：队列空大屏反算居中（配 barWidth
+      // 锁宽）/ 队列非空 lg 对称内收 83vp / 其余 undefined 走 HDS 分档默认
+      barSideMargin: sideMargin,
+      // 居中分支锁死胶囊宽度（md/lg 两档同值，覆盖 ≥600vp 全部 HDS 分档）；
+      // 其余分支不设（undefined），维持 HDS 默认宽度。
+      barWidth: centerSingleBar
+        ? {
+          mediumWidth: BAR_FLOATING_BAR_WIDTH,
+          largeWidth: BAR_FLOATING_BAR_WIDTH
+        }
+        : undefined,
       systemMaterialEffect: {
         materialType: hdsMaterial.MaterialType.IMMERSIVE,
         materialLevel: this.useExquisiteMaterial
           ? hdsMaterial.MaterialLevel.EXQUISITE
           : hdsMaterial.MaterialLevel.ADAPTIVE
       },
-      lightColor: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA),
-      barOpacity: BAR_OPACITY
+      lightColor: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA)
     };
     if (this.queue.length > 0) {
       const mini: HdsTabsMiniBar = {
         miniBarBuilder: (): void => {
           this.PlayBarHost();
         },
+        // 2026-10-22 恢复光感：诊断实验曾把这里关成 false，miniBar 段失去材质
+        // 背景（IMMERSIVE 材质与 lightColor 光晕均不渲染）——「迷你栏沉浸光感
+        // 消失」的根因。显式写 true：防 SDK 默认值变更或再被误关。
+        enableMiniBarBackground: true,
         // ⚠️ 受控样式必须跟随手动态，绝不能写死 EXPAND：HdsTabs 受控重建时
         // 重放本配置 —— 写死 EXPAND 等于每次重建都强制展开（旧 bug 根源）。
         // 2026-10-14 起配合内容键缓存：只有展开态真正变化才产生新配置对象触发重建，
@@ -964,19 +1077,17 @@ struct Index {
   /**
    * 根标题栏样式：统一委托 HdsTitleBarStyle.styleOptions（2026-10-12 收敛）。
    *
-   * 两档决策与样式细节全部收在助手一处，与其余 HdsNavDestination 子页同源：
-   * - **沉浸档**：GRADIENT_BLUR（0→20vp 线性插值）+ blurStrategy: ENABLE
-   *   + ADAPTIVE/ADAPTIVE 材质 + 显式样式端点（originalStyle 透明背景 →
-   *   scrollEffectStyle bg_page 不透明背景，渐进模糊指南四步法）。
-   * - **兜底档**：GRADIENT_BLUR 玻璃色端点 + maskExtra 罩住溢出渲染的第二行。
+   * 顶部导航栏滚动联动渐进模糊（2026-10-22 用户指定重开）：GRADIENT_BLUR
+   * 渐变模糊 + TAB_BLUR_*_VP（0→8vp）起止偏移线性过渡，搭配 ADAPTIVE/SMOOTH
+   * 材质光感；滚动偏移由 HdsNavigation bindToScrollable 绑定链自动监听驱动，
+   * 无需手动监听滚动事件。两档决策与简史见 HdsTitleBarStyle 类头。
    *
    * （历史：2026-10-11 沉浸档曾内联在本方法，与助手两份配置反复人工对齐易
-   * 漂移；2026-10-12 补样式端点后两路完全等价，收敛为单行委托。ENABLE 的
-   * 来历：FAQ faqs-arkui-1095 末问答，部分设备 blurStrategy 默认 ADAPTIVE
-   * 下动态模糊不渲染，ENABLE 强制开启。）
+   * 漂移；2026-10-12 收敛为单行委托。2026-10-22 当日多次变更：取消滚动模糊
+   * → 调整材质档位 → 重开 GRADIENT_BLUR，TAB_BLUR_*_VP 实参恢复为样式输入。）
    */
   private titleBarStyle(): TitleBarStyleOptions {
-    return HdsTitleBarStyle.styleOptions(TAB_BLUR_START_VP, TAB_BLUR_END_VP, FALLBACK_MASK_EXTRA_VP);
+    return HdsTitleBarStyle.styleOptions(TAB_BLUR_START_VP, TAB_BLUR_END_VP);
   }
 
   /**
@@ -988,6 +1099,7 @@ struct Index {
    * 字段是唯一真源（四页 List 直挂，身份恒定），本方法按 activeTab 取当前页签的
    * 稳定实例单绑（FAQ faqs-arkui-1095 / Spatialization 参考工程 MainPage 同款）；
    * activeTab 是 @State，切页签触发重渲染 → 属性重设 → 自动换绑新页签的 scroller。
+   * （2026-10-22 重开 GRADIENT_BLUR 后，本绑定重新驱动顶栏滚动渐进模糊。）
    */
   private activeTabScroller(): Scroller {
     if (this.activeTab === TAB_SEARCH) {
@@ -1030,7 +1142,9 @@ struct Index {
     }
     .width('100%')
     .height(NAV_TITLE_BAR_HEIGHT)
-    .padding({ left: 20, right: 16 })
+    // 水平基线统一 NAV_H_PADDING(16)：标题行 / 搜索行 / 页签行 / 列表内容共用
+    // 同一条左缘（旧版这里 20、搜索行 12、内容行 16，滚动时三套竖线互相错位）。
+    .padding({ left: NAV_H_PADDING, right: NAV_H_PADDING })
     .alignItems(VerticalAlign.Center)
   }
 
@@ -1237,6 +1351,15 @@ struct Index {
           .barFloatingStyle(this.barFloatingStyle())
           .width('100%')
           .height('100%')
+          // HdsTabs 实铺宽度持续回写（STORE_WINDOW_WIDTH_VP）：折叠开合 / 分屏 /
+          // 转屏后组件重排即触发，宽度变 → barFloatingStyle 的居中 sideMargin
+          // 自动重算（EntryAbility 首发保证冷启动首帧就有正确值，不闪跳）。
+          .onAreaChange((_old: Area, cur: Area): void => {
+            const w: Length = cur.width;
+            if (typeof w === 'number' && w > 0) {
+              this.windowWidthVp = w;
+            }
+          })
           // 屏幕滑动收/放（2026-10-14 需求，用户澄清为全屏手势）：上滑展开、
           // 下滑收起，超过 SCREEN_PAN_TRIGGER_VP 判定一次意图
           // （screenPanConsumed 防连发）。parallelGesture = 与子组件手势**并行
@@ -1436,9 +1559,11 @@ struct Index {
     .padding({
       left: 16,
       right: 16,
-      bottom: this.safeBottom > GESTURE_INDICATOR_MAX_VP
-        ? 8 + this.safeBottom
-        : 8 + this.safeBottom * 0.5
+      // 同悬浮胶囊：按避让区来源选策略（三键整条避让 / 手势避一半指示条），
+      // 不写死高度阈值（2026-10-22 与 barFloatingStyle 同步改）。
+      bottom: 8 + (this.navBarBottom > 0
+        ? this.navBarBottom
+        : this.navIndicatorBottom * 0.5)
     })
   }
 }

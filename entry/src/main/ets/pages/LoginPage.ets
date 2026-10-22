@@ -60,9 +60,24 @@ import { applyQrSuccess, applySmsLoginCookies, getLoginUser, refreshLoginUser, L
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AudioQuality, AppSettings } from '../model/MusicModels';
 import { HttpUtil } from '../utils/HttpUtil';
+import { NavTitleRow } from '../components/NavTitleRow';
 
 /** 二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
 const QR_POLL_INTERVAL_MS: number = 2000;
+
+/**
+ * 二维码「早失效」判定阈值（ms，2026-10-22 平板登录修复）：
+ * 正常有效期 ~180s；存活 <30s 且从未进入已扫码态 = 异常作废。
+ * 真根因（2026-10-22 定位）：poll 的 GET + queryParams 发空参请求，服务端
+ * 查无 qrcode_key 一律答 86038 —— 已在 BilibiliApi.pollQrLogin 改为 key 内联
+ * URL 根治。本判定与自动换码保留为安全网：万一再出现异常早失效（真风控等），
+ * 自动换码重试（见 pollOnce 86038 分支），超限转手动蒙层。
+ */
+const QR_EARLY_INVALIDATE_MS: number = 30000;
+/** 早失效自动刷新次数上限：防止服务端持续作废时无限「3 秒换一张」循环 */
+const QR_AUTO_REFRESH_MAX: number = 3;
+/** 早失效自动刷新退避序列（ms）：逐次拉长，给风控窗口冷却时间 */
+const QR_AUTO_REFRESH_DELAYS_MS: number[] = [1000, 3000, 7000];
 
 /** 页签下标（刻意用数字常量而不是 enum：.ets 里声明 enum 会连带报 SDK 解析错误） */
 const TAB_QR: number = 0;
@@ -78,6 +93,14 @@ const LOGIN_TABS_ROW_HEIGHT: number = 44;
 /** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
 const LOGIN_BLUR_START_VP: number = 30;
 const LOGIN_BLUR_END_VP: number = 80;
+
+/**
+ * 短信卡底部上移占位（2026-10-22 键盘遮挡修复）：页面内容整体垂直居中，
+ * 弹出输入法时系统避让只保证焦点输入框可见，卡内更下方的验证码按钮仍会被
+ * 键盘盖住（平板实测盖住 ~67px）。在短信卡下方补一块占位，把居中点上抬
+ * 约一半高度，让「输入框 + 按钮」在手机 / 平板上都落到键盘上方。
+ */
+const SMS_CARD_LIFT_VP: number = 160;
 
 /** 区号固定中国大陆（对齐 BBPlayer usePhoneLogin 的 COUNTRY_CODE） */
 const COUNTRY_CODE: string = '86';
@@ -341,6 +364,10 @@ export struct LoginPage {
   private polling: boolean = false;
   /** 二维码生成时刻（ms）：86038 时算存活时长，用于区分「自过期」与「扫码后被作废」 */
   private qrGeneratedAt: number = 0;
+  /** 早失效自动刷新已用次数（页内不重置，超限转手动；见 pollOnce 86038 分支） */
+  private autoRefreshCount: number = 0;
+  /** 早失效自动刷新定时器 id（-1 = 未启动；aboutToDisappear 成对清理） */
+  private autoRefreshTimer: number = -1;
 
   // ── 短信页签状态（三步状态机 + 极验面板） ──
   /** 三步状态机：PHASE_PHONE / PHASE_GEETEST / PHASE_CODE */
@@ -375,6 +402,9 @@ export struct LoginPage {
   private geetestConsumed: boolean = false;
 
   aboutToAppear(): void {
+    // 平板登录诊断（2026-10-22）：若「二维码 3 秒换一张」实为页面被反复重挂
+    //（startQrLogin 被重复触发而非 86038 早失效），短时间内出现多条本日志即可定位。
+    console.info(`[Login] appear ts=${Date.now()}`);
     this.bridge.onGeetestResult = (message: string): void => {
       this.handleGeetestResult(message);
     };
@@ -383,6 +413,7 @@ export struct LoginPage {
 
   aboutToDisappear(): void {
     this.stopPolling();
+    this.clearAutoRefresh();
     this.clearWatchdog();
     // 页面销毁后桥对象仍被 Web 持有：断开回调，避免迟到的回调打到已卸载的组件
     this.bridge.onGeetestResult = (_message: string): void => {
@@ -405,8 +436,11 @@ export struct LoginPage {
 
   // ── 扫码页签逻辑 ──
 
-  /** 重新生成二维码并开始新一轮轮询（首进页面 / 过期刷新共用） */
+  /** 重新生成二维码并开始新一轮轮询（首进页面 / 过期刷新 / 早失效自动刷新共用） */
   private startQrLogin(): void {
+    // 先清掉 pending 的自动刷新：用户点击 expired 蒙层手动刷新时，
+    // 不能让迟到的自动刷新再换一张码（打断扫码确认）
+    this.clearAutoRefresh();
     this.stopPolling();
     this.qrPhase = 'loading';
     this.statusText = '正在获取二维码…';
@@ -442,6 +476,14 @@ export struct LoginPage {
     }
   }
 
+  /** 清理早失效自动刷新定时器（startQrLogin 重入 / 页面销毁共用） */
+  private clearAutoRefresh(): void {
+    if (this.autoRefreshTimer !== -1) {
+      clearTimeout(this.autoRefreshTimer);
+      this.autoRefreshTimer = -1;
+    }
+  }
+
   private async pollOnce(): Promise<void> {
     if (this.polling || this.qrPhase === 'expired' || this.qrcodeKey.length === 0) {
       return;
@@ -460,8 +502,29 @@ export struct LoginPage {
         this.stopPolling();
         // 存活时长是关键诊断信号：正常 ~180s；若只有几秒且从未出现 86090，
         // 说明 key 被服务端提前作废（而非超时）
-        console.warn(`QR expired: aliveMs=${Date.now() - this.qrGeneratedAt}` +
+        const aliveMs: number = Date.now() - this.qrGeneratedAt;
+        console.warn(`QR expired: aliveMs=${aliveMs}` +
           `, lastPhase=${this.qrPhase}`);
+        // 早失效自愈（2026-10-22 平板登录修复）：被风控提前作废（存活 <30s 且
+        // 从未扫码）时自动换码重试，退避逐次拉长、上限 QR_AUTO_REFRESH_MAX 次；
+        // 超限、正常 180s 自过期、扫码后作废仍走手动蒙层（行为不变）。
+        if (aliveMs < QR_EARLY_INVALIDATE_MS && this.qrPhase !== 'scanned'
+          && this.autoRefreshCount < QR_AUTO_REFRESH_MAX) {
+          this.autoRefreshCount++;
+          const delayIdx: number = this.autoRefreshCount - 1;
+          const delay: number = delayIdx < QR_AUTO_REFRESH_DELAYS_MS.length
+            ? QR_AUTO_REFRESH_DELAYS_MS[delayIdx]
+            : QR_AUTO_REFRESH_DELAYS_MS[QR_AUTO_REFRESH_DELAYS_MS.length - 1];
+          console.warn(`QR early-invalidate: auto refresh ` +
+            `${this.autoRefreshCount}/${QR_AUTO_REFRESH_MAX} in ${delay}ms`);
+          this.statusText = `二维码被提前失效，正在自动刷新` +
+            `（${this.autoRefreshCount}/${QR_AUTO_REFRESH_MAX}）`;
+          this.autoRefreshTimer = setTimeout((): void => {
+            this.autoRefreshTimer = -1;
+            this.startQrLogin();
+          }, delay);
+          return;
+        }
         this.qrPhase = 'expired';
         this.statusText = '二维码已过期';
       } else {
@@ -860,39 +923,7 @@ export struct LoginPage {
   /** 标题栏内容（titleBar 的 stackBuilder 承载）：返回行 + 「登录 B 站」标题 */
   @Builder
   loginBar() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(26)
-          .fontColor([$r('app.color.text_primary')])
-      }
-      .width(44)
-      .height(44)
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      .borderRadius(22)
-      .stateStyles({
-        pressed: { .backgroundColor($r('app.color.press_overlay')) },
-        normal: { .backgroundColor(Color.Transparent) }
-      })
-      .accessibilityText('返回')
-      .accessibilityLevel('yes')
-      .onClick((): void => {
-        NavStackHolder.stack.pop();
-      })
-
-      Text('登录 B 站')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-    }
-    .width('100%')
-    .height(NAV_TITLE_BAR_HEIGHT)
-    .padding({ left: 16, right: 16 })
-    .alignItems(VerticalAlign.Center)
+    NavTitleRow({ title: '登录 B 站' })
   }
 
   /**
@@ -1375,6 +1406,11 @@ export struct LoginPage {
               .backgroundColor($r('app.color.bg_card'))
               .borderRadius(12)
               .margin({ left: 12, right: 12, top: 10, bottom: 20 })
+
+            // 短信卡上移占位（2026-10-22）：只加在短信页签，扫码页签维持原居中。
+            Blank()
+              .height(SMS_CARD_LIFT_VP)
+              .width('100%')
             }
           }
           .width('100%')
@@ -1423,6 +1459,9 @@ export struct LoginPage {
         }
       }
     })
+    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
+    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
+    .hideBackButton(true)
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.loginScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）

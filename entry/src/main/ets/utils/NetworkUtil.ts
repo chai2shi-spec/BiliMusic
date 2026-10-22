@@ -82,6 +82,30 @@ export function isUnmeteredNetwork(): boolean {
   }
 }
 
+/**
+ * 当前是否有可用网络（netId !== 0）。
+ *
+ * 只用来给播放失败**分支路**，不参与任何拦截决策：
+ * 断网时没必要再跑「换备用直链 → 重解析 ×3」整条恢复梯度（每条都得等超时），
+ * 直接告诉用户「网络未连接」比让他看 20 秒加载中更有用。
+ *
+ * ⚠️ 与 isUnmeteredNetwork 相反，这里探测失败返回 **true**：
+ * 报「网络未连接」的代价远大于错过一次短路（用户会去检查 Wi-Fi 而不是重试点歌）。
+ */
+export function hasNetwork(): boolean {
+  try {
+    const net: connection.NetHandle = connection.getDefaultNetSync();
+    if (!net || net.netId === 0) {
+      return false;
+    }
+    return true;
+  } catch (e) {
+    const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+    console.error(`hasNetwork probe failed: ${msg}`);
+    return true;
+  }
+}
+
 /** 当前网络的中文描述，用于提示文案 */
 export function currentNetworkLabel(): string {
   try {

@@ -556,6 +556,32 @@ export function getPlaylist(id: string): Playlist | null {
   return getPlaylists().find((p: Playlist): boolean => p.id === id) ?? null;
 }
 
+/**
+ * 移动歌单在列表中的位置（歌单列表页「长按拖动排序」落库，2026-10-22）。
+ *
+ * 歌单顺序是纯本地展示态：新建/订阅走 unshift 进头部（与手动顺序天然兼容），
+ * 收藏夹同步 / 订阅拉新都只改既有歌单内容、不重建列表顺序，所以任何类型的歌单
+ * （含收藏夹镜像）都可以自由拖。按 id 定位（不收 from 下标），与 movePlaylistTrack
+ * 同款纪律：传错下标最多影响 to 的 clamp，不会拖丢歌单。
+ * @returns 是否发生了实际移动（id 找不到 / 原地 → false 且不落盘）。
+ */
+export function movePlaylist(playlistId: string, toIndex: number): boolean {
+  const list: Playlist[] = getPlaylists();
+  const fromIndex: number = list.findIndex((p: Playlist): boolean => p.id === playlistId);
+  if (fromIndex < 0) {
+    return false;
+  }
+  // clamp：负值 / 越界一律收进合法区间（防御性，正常拖拽不会触发）
+  const target: number = Math.max(0, Math.min(Math.floor(toIndex), list.length - 1));
+  if (target === fromIndex) {
+    return false;
+  }
+  const moved: Playlist = list.splice(fromIndex, 1)[0];
+  list.splice(target, 0, moved);
+  persistPlaylists(list);
+  return true;
+}
+
 export function updatePlaylist(updated: Playlist): void {
   const playlists: Playlist[] = getPlaylists().map((p: Playlist): Playlist => {
     return p.id === updated.id ? Object.assign({}, updated, { updatedAt: new Date().toISOString() }) : p;
@@ -807,7 +833,10 @@ export function addTrackToPlaylist(playlistId: string, track: Track): Playlist |
     newlyAdded = !exists;
     // 持续规则：打过「按名称排序」标记的歌单，新增曲目要插到**按名的正确位置**，
     // 而不是默认追加到末尾（追加只在未排序的歌单上才是对的）。
-    const appended: Track[] = exists ? playlist.tracks : [...playlist.tracks, track];
+    // 加入时间戳盖章（拷贝，不污染与队列 / 最近播放共享的原实例）：
+    // 歌单详情「按加入时间」排序靠它。
+    const appended: Track[] = exists ? playlist.tracks
+      : [...playlist.tracks, Object.assign({}, track, { addedAt: new Date().toISOString() })];
     updatedPlaylist = {
       id: playlist.id,
       name: playlist.name,
@@ -1184,7 +1213,11 @@ export function mergeUpTracks(playlistId: string, incoming: Track[]): {
   if (fresh.length === 0) {
     return { playlist: current, added: 0, dropped: 0 };
   }
-  let merged: Track[] = [...fresh, ...current.tracks];
+  // 加入时间戳盖章（同批同戳 → 比较器批内保 pubdate 序；拷贝盖章不污染拉新
+  // 返回的原实例）：歌单详情「按加入时间」排序靠它。
+  const stamp: string = new Date().toISOString();
+  const stampedFresh: Track[] = fresh.map((t: Track): Track => Object.assign({}, t, { addedAt: stamp }));
+  let merged: Track[] = [...stampedFresh, ...current.tracks];
   // 「新的排前面」与「按名称排序」是两种互斥的顺序观：订阅流要的是时间序（新的最前），
   // 排序规则要的是名字序。用户既然对这个歌单开了排序规则，就以规则为准重新排 ——
   // 否则点一次「拉取新投稿」就把顺序搅乱，规则名存实亡。
@@ -1204,6 +1237,165 @@ export function mergeUpTracks(playlistId: string, incoming: Track[]): {
   });
   updatePlaylist(next);
   return { playlist: next, added: fresh.length, dropped: dropped };
+}
+
+// ===== 曲目排序（歌单详情页：长按拖动 + 自动排序，2026-10-22） =====
+
+/**
+ * 自动排序键（歌单详情页「排序」菜单）：
+ *  · title     — 按歌名升序（中文拼音序，复用 compareByTitle）；
+ *  · duration  — 按时长降序（长在前，无时长 0 沉底）；
+ *  · playCount — 按播放量降序（高在前，无数据 0 沉底）；
+ *  · addedTime — 按加入歌单时间降序（新在前；无戳存量首排时物化，见
+ *    sortPlaylistTracks / materializeAddedAt）。
+ * 自动排序是**一次性动作**：不打开旧的 titleSorted 持续规则（那是历史遗留语义，
+ * 此后加歌自动按名插入会反过来破坏用户刚排好的顺序，不再扩展）。
+ */
+export type PlaylistSortKey = 'title' | 'duration' | 'playCount' | 'addedTime';
+
+/**
+ * 移动单曲到目标下标（歌单详情页「长按拖动排序」落库，2026-10-22）。
+ *
+ * 语义按 **trackId 定位、toIndex 落点**：from 由拖拽方在数据里查（切片下标即全量
+ * 下标 —— 详情页 tracks 是 playlist.tracks 的前缀切片），这里不接收 from 下标，
+ * 避免「传错下标删错歌」这类灾难；id 找不到 / 歌单不存在 / 原地移动 都返回 false
+ * 且**不落盘**。
+ *
+ * 与拖动排序手动顺序优先的原则一致：本函数会把 titleSorted 置 false
+ *（旧的「按名插入」规则若还开着，下一次加歌会把刚拖好的顺序搅乱）。
+ */
+export function movePlaylistTrack(playlistId: string, trackId: string, toIndex: number): boolean {
+  const current: Playlist | null = getPlaylist(playlistId);
+  if (!current) {
+    return false;
+  }
+  const fromIndex: number = current.tracks.findIndex((t: Track): boolean => t.id === trackId);
+  if (fromIndex < 0) {
+    return false;
+  }
+  const total: number = current.tracks.length;
+  // clamp：负值 / 越界一律收进合法区间（防御性，正常拖拽不会触发）
+  const target: number = Math.max(0, Math.min(Math.floor(toIndex), total - 1));
+  if (target === fromIndex) {
+    return false;
+  }
+  const tracks: Track[] = [...current.tracks];
+  const moved: Track = tracks.splice(fromIndex, 1)[0];
+  tracks.splice(target, 0, moved);
+  updatePlaylist(Object.assign({}, current, {
+    tracks: tracks,
+    updatedAt: new Date().toISOString(),
+    titleSorted: false
+  }));
+  return true;
+}
+
+/**
+ * 「按加入时间」排序前的存量物化（2026-10-22）：
+ * 老数据 / 拖动过的歌单没有 addedAt 戳，真实加入序已不可恢复，只能按加歌
+ * 方向推定 ——
+ *  · 普通歌单：加歌尾插（数组序 = 加入正序）→ 无戳条目按 index 升序补戳；
+ *  · 订阅 UP 歌单：拉新头插（数组序 = 加入倒序）→ 无戳条目按 index 降序补戳；
+ *  · 收藏夹镜像不进本函数（排序入口 canReorder 已门控）。
+ * 合成戳基准压到「比一切真戳更早」（base = 最早真戳 - (n+1) 秒，第 i 个 +1 秒
+ * 递增）：首排即得「新在前」，且此后重复排序 / 新加真戳歌的结果都稳定（幂等）。
+ * 全程对象拷贝盖章，不改原 Track 实例（可能与队列 / 最近播放共享引用）。
+ */
+function materializeAddedAt(playlist: Playlist, indexed: { track: Track; index: number }[]): void {
+  // 最早真戳（ms）；无任何真戳 → 用当前时间做锚（合成戳整体落在「现在之前」）
+  let minStampedMs: number = Date.now();
+  let hasStamp: boolean = false;
+  for (let i = 0; i < indexed.length; i++) {
+    const s: string = indexed[i].track.addedAt ?? '';
+    if (s.length > 0) {
+      const ms: number = Date.parse(s);
+      if (!Number.isNaN(ms) && (!hasStamp || ms < minStampedMs)) {
+        minStampedMs = ms;
+        hasStamp = true;
+      }
+    }
+  }
+  const unstamped: { track: Track; index: number }[] =
+    indexed.filter((e: { track: Track; index: number }): boolean => (e.track.addedAt ?? '').length === 0);
+  if (unstamped.length === 0) {
+    return;
+  }
+  const upSub: boolean = isUpSubscription(playlist);
+  unstamped.sort((a: { track: Track; index: number }, b: { track: Track; index: number }): number => {
+    return upSub ? b.index - a.index : a.index - b.index;
+  });
+  const baseMs: number = minStampedMs - (unstamped.length + 1) * 1000;
+  for (let i = 0; i < unstamped.length; i++) {
+    // 写回 indexed 对应槽位（unstamped 持的是同一 entry 引用）
+    unstamped[i].track = Object.assign({}, unstamped[i].track, {
+      addedAt: new Date(baseMs + i * 1000).toISOString()
+    });
+  }
+}
+
+/**
+ * 歌单曲目自动排序（歌单详情页「排序」菜单落库，2026-10-22）。
+ * 排序方向见 PlaylistSortKey 注释；同值条目保持原相对顺序（排序稳定性由
+ * 下标兜底，同 compareByTitle 的做法，不依赖引擎 sort 稳定性）。
+ * @returns 排序后的歌单；id 不存在返回 null。
+ */
+export function sortPlaylistTracks(playlistId: string, key: PlaylistSortKey): Playlist | null {
+  const current: Playlist | null = getPlaylist(playlistId);
+  if (!current) {
+    return null;
+  }
+  const indexed: { track: Track; index: number }[] = [];
+  for (let i = 0; i < current.tracks.length; i++) {
+    indexed.push({ track: current.tracks[i], index: i });
+  }
+  // addedTime：先给无戳存量条目物化补合成时间戳（见 materializeAddedAt）
+  if (key === 'addedTime') {
+    materializeAddedAt(current, indexed);
+  }
+  // 比较器统一 (a, b) => number：值大的排前面（降序），同值按下标保原序。
+  indexed.sort((a: { track: Track; index: number }, b: { track: Track; index: number }): number => {
+    if (key === 'addedTime') {
+      // addedAt 降序（ISO 定宽定格式，字典序 = 时间序）；同戳 / 残留无戳保原序
+      const av: string = a.track.addedAt ?? '';
+      const bv: string = b.track.addedAt ?? '';
+      if (av.length > 0 && bv.length > 0 && av !== bv) {
+        return av < bv ? 1 : -1;
+      }
+      if (av.length > 0 && bv.length === 0) {
+        return -1;
+      }
+      if (av.length === 0 && bv.length > 0) {
+        return 1;
+      }
+      return a.index - b.index;
+    }
+    let primary: number = 0;
+    if (key === 'duration') {
+      primary = (b.track.duration || 0) - (a.track.duration || 0);
+    } else if (key === 'playCount') {
+      primary = (b.track.playCount || 0) - (a.track.playCount || 0);
+    }
+    if (primary !== 0) {
+      return primary;
+    }
+    if (key === 'duration' || key === 'playCount') {
+      // 降序键同值：保原相对顺序
+      return a.index - b.index;
+    }
+    // title：走拼音比较器（内含同名保原序）
+    return compareByTitle(a.track, b.track, a.index, b.index);
+  });
+  const tracks: Track[] = [];
+  for (let i = 0; i < indexed.length; i++) {
+    tracks.push(indexed[i].track);
+  }
+  const next: Playlist = Object.assign({}, current, {
+    tracks: tracks,
+    updatedAt: new Date().toISOString(),
+    titleSorted: false
+  });
+  updatePlaylist(next);
+  return next;
 }
 
 /**
@@ -1236,7 +1428,10 @@ export function subscribeUpPlaylist(
     upMid: upMid,
     upName: upName
   });
-  const kept: Track[] = tracks.slice(0, PLAYLIST_MAX_ITEMS);
+  // 首批同批盖章加入时间戳（同批同戳 → 批内保 pubdate 序）：「按加入时间」排序靠它
+  const stamp: string = new Date().toISOString();
+  const kept: Track[] = tracks.slice(0, PLAYLIST_MAX_ITEMS)
+    .map((t: Track): Track => Object.assign({}, t, { addedAt: stamp }));
   const dropped: number = Math.max(0, tracks.length - kept.length);
   const withTracks: Playlist = Object.assign({}, created, { tracks: kept });
   updatePlaylist(withTracks);
@@ -1290,6 +1485,14 @@ export function applyFavMirror(
   const cover: string = serverTracks.length > 0 ? serverTracks[0].coverUrl : '';
   const existing: Playlist | null = getFavMirrorByMediaId(mediaId);
 
+  /**
+   * 第三道防线（2026-10-22）：`serverTracks` 为空时**一律禁止删除**。
+   * 上层 FavSyncManager 已按「emptySuspect」门控过一次，这里再拦一次 ——
+   * 「0 条」既可能是用户清空，也可能是风控把响应拦成空，二者从数据上无法区分，
+   * 而误删的代价是整张歌单消失。所以宁可少删（下次同步再对齐），不可错删。
+   */
+  const canDelete: boolean = allowDelete && serverTracks.length > 0;
+
   // 未推送成功的本地意图（见上方 guards 说明）
   const delSet: Set<string> = new Set<string>(guards.pendingDelete);
   const addSet: Set<string> = new Set<string>(guards.pendingAdd);
@@ -1320,7 +1523,7 @@ export function applyFavMirror(
   let added: number = 0;
   let removed: number = 0;
 
-  if (!allowDelete) {
+  if (!canDelete) {
     // 只增不减：新条目前置，本地原有条目（含顺序）原样保留
     const fresh: Track[] = [];
     for (let i = 0; i < serverTracks.length; i++) {
@@ -1536,7 +1739,8 @@ export function importPlaylistsFromText(text: string): PlaylistImportResult {
         badTrack = true;
         break;
       }
-      tracks.push({ ...slimTrack(t), localFilePath: '' });
+      // addedAt = 导入时刻（跨设备的真实加入时间不可信；同批同戳 → 批内保文件序）
+      tracks.push({ ...slimTrack(t), localFilePath: '', addedAt: now });
     }
     if (badTrack) {
       skipped++;
@@ -1597,10 +1801,13 @@ export const LibraryStore = {
   nextPlaylistNameForTrack,
   getPlaylist,
   updatePlaylist,
+  movePlaylist,
   renamePlaylist,
   deletePlaylist,
   addTrackToPlaylist,
   removeTracksFromPlaylist,
+  movePlaylistTrack,
+  sortPlaylistTracks,
   sortAllPlaylistsByTitle,
   sortPlaylistByTitle,
   clearPlaylistTitleSort,

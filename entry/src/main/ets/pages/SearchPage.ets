@@ -45,6 +45,7 @@ import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { ComponentContent, CustomContentDialog, Chip, ChipSize } from '@kit.ArkUI';
 import { SearchStateHolder } from '../service/SearchStateHolder';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { SearchHistoryStore } from '../service/SearchHistoryStore';
 import {
   CONTENT_END_OFFSET,
@@ -1181,11 +1182,9 @@ export struct SearchPage {
       this.toast('这个 UP 缺少 mid，无法打开主页', 1800);
       return;
     }
-    NavStackHolder.upMid = mid;
-    NavStackHolder.upName = u.uname;
     // 头像一并带过去，UP 主页首帧就有图（否则要等主页自己再拉一次 card）
-    NavStackHolder.upFace = u.face_nft && u.face_nft.length > 0 ? u.face_nft : u.upic;
-    NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+    const face: string = u.face_nft && u.face_nft.length > 0 ? u.face_nft : u.upic;
+    NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, u.uname, face));
   }
 
   /**
@@ -1394,9 +1393,9 @@ export struct SearchPage {
         return;
       }
     }
-    NavStackHolder.upMid = mid;
-    NavStackHolder.upName = track.artist;
-    NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+    // 头像没有现成数据可传（曲目行不带 UP 头像）：传空串占位，
+    // UpSpacePage 用 CoverImage 兜占位图，loadCard 拿到真图后覆盖
+    NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, track.artist, ''));
   }
 
   private startDownload(track: Track): void {
@@ -1532,8 +1531,8 @@ export struct SearchPage {
   }
 
   /**
-   * 把多 P 合集整个保存为歌单。
-   * 先展开分 P，成功后弹层让用户确认歌单名（默认取音频标题），再一次性建单入库。
+   * 把多 P 合集（单视频分 P）或 B 站合集（ugc_season，多个独立视频）整个保存为歌单。
+   * 先展开条目，成功后弹层让用户确认歌单名（默认取音频标题），再一次性建单入库。
    */
   private loadCollection(track: Track): void {
     const bvid: string = track.bvid ? track.bvid : track.id;
@@ -1542,7 +1541,9 @@ export struct SearchPage {
       return;
     }
     this.toast('正在获取合集…', 1200);
-    BilibiliApi.expandVideoParts(bvid, track)
+    // 第三参 expandSeason=true：多 P 不存在时继续展开 ugc_season
+    //（播放 / 下载链路不传，防止下载单集被扩成整季）。此入口是用户显式要整季的唯一路径。
+    BilibiliApi.expandVideoParts(bvid, track, true)
       .then((list: Track[]): void => {
         if (list.length <= 1) {
           this.toast('该视频只有一个分 P', 1500);
@@ -1844,11 +1845,12 @@ export struct SearchPage {
       }
 
       if (this.showPlaylistPicker) {
+        // 全屏点击捕获层：只负责「点弹窗外关闭」，不带遮罩底色
+        //（2026-10-23 用户要求：加入歌单弹窗周围不要暗色/主题色遮罩）
         Column() {
         }
         .width('100%')
         .height('100%')
-        .backgroundColor($r('app.color.scrim'))
         .onClick((): void => {
           this.showPlaylistPicker = false;
           this.pickerTrack = null;

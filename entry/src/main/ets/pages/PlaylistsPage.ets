@@ -1,5 +1,6 @@
 /**
- * 歌单列表页：展示本地歌单，支持新建 / 重命名 / 删除歌单、进入详情
+ * 歌单列表页：展示本地歌单，支持新建 / 重命名 / 删除歌单、长按拖动排序
+ * （2026-10-22，所有类型歌单可拖：列表顺序是纯本地展示态）、进入详情
  * （订阅歌单除外：行点击进 UP 主页，订阅流以 UP 为核心）。
  * 数据来自 LibraryStore（内部有内存快照 + 异步落盘）。
  *
@@ -13,12 +14,17 @@ import {
   LibraryStore,
   PLAYLIST_MAX_ITEMS
 } from '../service/LibraryStore';
+import { UpSpaceCacheEntry, getUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { Playlist, Track } from '../model/MusicModels';
 import { toThumbUrl } from '../utils/TextUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { UpSpaceRouteParam, PlaylistDetailRouteParam } from '../service/NavRouteParams';
 import {
   CONTENT_END_OFFSET,
+  STORE_ACTIVE_TAB,
+  STORE_CURRENT_TRACK,
   STORE_LIBRARY_REV,
+  STORE_PICK_PLAYLIST_ADD,
   STORE_PL_BAR_ALL_SELECTED,
   STORE_PL_BAR_CAN_SELECT,
   STORE_PL_BAR_SELECTED_COUNT,
@@ -65,6 +71,11 @@ const PLAYLIST_ENQUEUE_GAP_MS: number = 350;
 
 /** 合并歌单预填名字的最大长度（超出截断加「…」，用户仍可自己改） */
 const MAX_MERGE_NAME_CHARS: number = 18;
+
+/** 「去歌单页选」点选提示条占用高度（vp）：顶部占位条目加高，列表内容整体下移避让 */
+const PICK_HINT_HEIGHT_VP: number = 60;
+/** 歌单页签下标（与 Index 的 TAB_PLAYLISTS 同值；模块私有常量跨文件不可引用） */
+const TAB_INDEX_PLAYLISTS: number = 1;
 
 /** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise */
 function delay(ms: number): Promise<void> {
@@ -113,6 +124,22 @@ export struct PlaylistsPage {
    * 已选中的歌单 id。@Watch 同步顶栏派生镜像（选中数 / 全选态），根栏工具条据此刷新。
    */
   @State @Watch('syncBarState') selectedIds: string[] = [];
+  /**
+   * 「去歌单页选」点选加入请求（seq 递增，STORE_PICK_PLAYLIST_ADD）：播放页
+   * ControlArea 菜单项在收起播放页 + 切页签的同时递增本键，本页 @Watch 消费 ——
+   * 快照当前曲目进入点选模式（2026-10-22 修「跳过去就停了」：旧实现只切页签，
+   * 歌单页没有任何承接动作，用户无从下手）。
+   */
+  @StorageProp(STORE_PICK_PLAYLIST_ADD) @Watch('onPickAddRequest') pickAddRequest: number = 0;
+  /** 点选加入模式中：整行点击 = 把快照曲目加入该歌单（单次点选即退出），顶部占位条目内嵌提示条 */
+  @State picking: boolean = false;
+  /** 点选加入的目标曲目（进入模式时快照，避免点选途中切歌错加） */
+  @State pickTrack: Track | null = null;
+  /**
+   * 当前活动页签（只读镜像）：切离歌单页签即取消点选模式 —— 该模式是「跳过来
+   * 选一下」的短命状态，留着不撤只会让人困惑（回到页签见莫名其妙的提示条）。
+   */
+  @StorageLink(STORE_ACTIVE_TAB) @Watch('onActiveTabChanged') activeTab: number = 0;
   /** 合并预览（弹窗里的汇总与风险提示；合并动作前由 LibraryStore.previewPlaylistMerge 填充） */
   @State mergeSourceCount: number = 0;
   @State mergeRawTotal: number = 0;
@@ -132,6 +159,13 @@ export struct PlaylistsPage {
 
   /** 按压中的歌单行 id：单指同一时刻只按一行，一个变量即可驱动任意行缩放 */
   @State pressedKey: string = '';
+  /**
+   * UP 订阅歌单行副行的投稿总数（upMid → card 的 archive_count，读自 UpSpaceCacheStore）。
+   * 值 0 / mid 缺失 = 未知（无缓存 / 旧缓存 / 被淘汰），副行回退显示已落库曲目数。
+   * 2026-10-23 用户需求：订阅条目副行显示 UP 投稿总数而非「N 首」——订阅只落库第一页
+   * 投稿（登录态 ≤50 条），后者会把几百个投稿的 UP 永远显示成「50 首」。
+   */
+  @State archiveCounts: Map<string, number> = new Map();
   /** 按压状态回写（与搜索页 TrackItem / 下载页同款）：Down 记录、Up/Cancel 只清自己 */
   private setPressed(type: TouchType, key: string): void {
     if (type === TouchType.Down) {
@@ -184,25 +218,139 @@ export struct PlaylistsPage {
     this.editorMergeController = this.buildEditorDialog('合并歌单');
     // 首次 refresh 是冷启动同步读（getSync + JSON.parse ×2：歌单 + 最近播放），
     // 延后一拍执行别卡首帧（做法同 SettingsPage 的缓存统计）。跑完缓存即热，
-    // onPageShow / onLibraryChanged 的后续 refresh 全走内存快照，无 IO；
+    // onLibraryChanged 的后续 refresh 全走内存快照，无 IO；
     // 首帧歌单列表短暂空态可接受，换的是首屏零磁盘读。
     setTimeout((): void => {
       this.refresh();
     }, 0);
   }
 
-  /** 切回本 Tab / 从子页返回时刷新（Tabs 的 TabContent 常驻，aboutToAppear 只触发一次） */
-  onPageShow(): void {
+  onLibraryChanged(): void {
     this.refresh();
   }
 
-  onLibraryChanged(): void {
-    this.refresh();
+  /** 进入点选加入模式：快照当前曲目（无曲目不进模式 —— 菜单只在有曲目时出现，正常到不了兜底分支） */
+  private onPickAddRequest(): void {
+    const t: Track | undefined = AppStorage.get<Track>(STORE_CURRENT_TRACK);
+    if (t === undefined || t === null) {
+      this.toast('还没有正在播放的曲目', 1500);
+      return;
+    }
+    // 打开播放页前可能停留在多选模式：一并退出，两种「整行点选」语义不能叠加
+    this.selecting = false;
+    this.selectedIds = [];
+    this.pickTrack = t;
+    this.picking = true;
+  }
+
+  /** 切离歌单页签：取消点选加入模式（见 activeTab 注释） */
+  private onActiveTabChanged(): void {
+    if (this.activeTab !== TAB_INDEX_PLAYLISTS) {
+      this.picking = false;
+    }
+  }
+
+  /** 点选加入落库：成功 / 失败都退出模式（单次点选语义，与快捷菜单一致） */
+  private addPickedTrack(p: Playlist): void {
+    const t: Track | null = this.pickTrack;
+    this.picking = false;
+    this.pickTrack = null;
+    if (t === null) {
+      return;
+    }
+    const updated: Playlist | null = LibraryStore.addTrackToPlaylist(p.id, t);
+    this.toast(updated ? `已加入「${p.name}」` : '加入歌单失败', 1500);
+  }
+
+  /** 提示条曲目名（点选模式的横幅文案用） */
+  private pickTrackTitle(): string {
+    return this.pickTrack !== null ? this.pickTrack.title : '';
   }
 
   private refresh(): void {
     this.playlists = LibraryStore.getPlaylists();
     this.syncBarState();
+    // UP 订阅歌单的投稿总数异步补齐（读的是 UpSpaceCacheStore 小缓存文件，
+    // 主线程零同步 IO）；到达前副行先显示回退值，毫秒级后被真值替换
+    this.loadUpArchiveCounts();
+  }
+
+  /**
+   * 读 UP 订阅歌单的投稿总数（archive_count）：每个订阅 upMid 查一次
+   * UpSpaceCacheStore 落盘缓存，全部到齐后**一次性整体赋值**新 Map ——
+   * 逐个 set 会触发多次列表重渲染，批量换表只刷一次。
+   *
+   * 每次刷新都重读：文件小（15~50KB）且 UP 订阅数有限，换来的是
+   * 「拉取新投稿返回」后副行数字自动跟上缓存里的新值。
+   * 无缓存 / 损坏 / 被淘汰（上限 12 个 UP）记 0 = 未知，副行回退 tracks.length。
+   */
+  private loadUpArchiveCounts(): void {
+    const mids: string[] = [];
+    const seen: Set<string> = new Set<string>();
+    for (let i = 0; i < this.playlists.length; i++) {
+      const p: Playlist = this.playlists[i];
+      if (!LibraryStore.isUpSubscription(p) || seen.has(p.upMid)) {
+        continue;
+      }
+      seen.add(p.upMid);
+      mids.push(p.upMid);
+    }
+    if (mids.length === 0) {
+      return;
+    }
+    const loads: Promise<UpSpaceCacheEntry | null>[] = [];
+    for (let i = 0; i < mids.length; i++) {
+      loads.push(getUpSpaceCache(mids[i]));
+    }
+    Promise.all<UpSpaceCacheEntry | null>(loads)
+      .then((entries: Array<UpSpaceCacheEntry | null>): void => {
+        const next: Map<string, number> = new Map<string, number>();
+        for (let i = 0; i < mids.length; i++) {
+          const entry: UpSpaceCacheEntry | null = entries[i];
+          next.set(mids[i], entry !== null ? entry.archiveCount : 0);
+        }
+        this.archiveCounts = next;
+      })
+      .catch((e: Error): void => {
+        console.error(`load up archive counts failed: ${e.message}`);
+      });
+  }
+
+  /**
+   * 行副行文案：UP 订阅歌单显示「N 个投稿」（N 优先取 UP 投稿总数 archive_count，
+   * 不受订阅首页 50 条上限；未知时回退已落库曲目数），其余歌单维持「N 首」。
+   * 口径与 UpSpacePage 头部元信息行（2026-10-23）一致。
+   */
+  private subLineOf(p: Playlist): string {
+    if (LibraryStore.isUpSubscription(p)) {
+      const cached: number | undefined = this.archiveCounts.get(p.upMid);
+      const count: number = (cached !== undefined && cached > 0) ? cached : p.tracks.length;
+      return `${count} 个投稿`;
+    }
+    return `${p.tracks.length} 首`;
+  }
+
+  /**
+   * 歌单列表「长按拖动排序」（2026-10-22，与详情页曲目拖动同期）。
+   *
+   * ForEach.onMove 官方拖拽路线（系统浮起/让位动画 + 拖到边缘自动滚动），下标
+   * 限定在 ForEach 数据内 —— 自动避开顶部空白占位条目。本地切片先对齐（与系统
+   * 已完成的视觉移动一致），再 LibraryStore.movePlaylist 落库 →
+   * persistPlaylists → REV bump → onLibraryChanged → refresh() 重读，
+   * 顺序与本地一致、无跳变。所有类型的歌单都可拖：列表顺序是纯本地展示态，
+   * 收藏夹同步 / 订阅拉新只改歌单内容、不重建列表顺序（详见 movePlaylist 注释）。
+   */
+  private onPlaylistMove(from: number, to: number): void {
+    if (from < 0 || from >= this.playlists.length) {
+      return;
+    }
+    const moved: Playlist = this.playlists[from];
+    const next: Playlist[] = [...this.playlists];
+    next.splice(from, 1);
+    const target: number = Math.max(0, Math.min(to, next.length));
+    next.splice(target, 0, moved);
+    this.playlists = next;
+    LibraryStore.movePlaylist(moved.id, target);
   }
 
   /**
@@ -894,10 +1042,45 @@ export struct PlaylistsPage {
               // 从栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目
               // 一起从模糊板下方穿过（与下载页同款改造）。
               ListItem() {
-                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
-                Row()
-                  .width('100%')
-                  .height(this.barTotalHeight())
+                // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高容器。
+                Column() {
+                  // 「去歌单页选」点选提示条（2026-10-22）：放在顶部占位条目内部而
+                  // 不是悬浮覆盖层 —— 占位高度随提示条 +PICK_HINT_HEIGHT_VP，列表
+                  // 内容整体下移，不会被遮住（悬浮方案会盖住第一行歌单）。
+                  if (this.picking) {
+                    Row() {
+                      Text(`「${this.pickTrackTitle()}」将加入你点选的歌单`)
+                        .fontSize(13)
+                        .fontColor(this.themeOn)
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .layoutWeight(1)
+                      Text('取消')
+                        .fontSize(14)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(this.themeOn)
+                        .height(36)
+                        .padding({ left: 12, right: 12 })
+                        .borderRadius(BUTTON_RADIUS_VP)
+                        .stateStyles({
+                          pressed: { .backgroundColor('rgba(255, 255, 255, 0.2)') },
+                          normal: { .backgroundColor(Color.Transparent) }
+                        })
+                        .onClick((): void => {
+                          this.picking = false;
+                        })
+                    }
+                    .width('100%')
+                    .padding({ left: 16, right: 8, top: 8, bottom: 8 })
+                    .backgroundColor(this.themePrimary)
+                    .borderRadius(BUTTON_RADIUS_VP + 4)
+                  }
+                }
+                .width('100%')
+                .height(this.barTotalHeight() + (this.picking ? PICK_HINT_HEIGHT_VP : 0))
+                .justifyContent(FlexAlign.End)
+                .padding({ left: 12, right: 12, bottom: 4 })
+                .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
               }
               ForEach(
                 this.playlists,
@@ -950,7 +1133,8 @@ export struct PlaylistsPage {
                         .lineHeight(21)
                       // 副行行高锁 17（13sp）：与歌单名 lineHeight(21) 一起构成高度
                       // 预算（2×21 + 4 + 17 = 63 ≤ 封面 64），见封面注释。
-                      Text(`${p.tracks.length} 首`)
+                      // UP 订阅歌单显示「N 个投稿」（投稿总数，非落库曲目数），见 subLineOf
+                      Text(this.subLineOf(p))
                         .fontSize(13)
                         .fontColor($r('app.color.text_secondary'))
                         .lineHeight(17)
@@ -995,6 +1179,12 @@ export struct PlaylistsPage {
                     this.setPressed(event.type, p.id);
                   })
                   .onClick((): void => {
+                    // 「去歌单页选」点选模式（2026-10-22）：整行 = 把快照曲目加入
+                    // 该歌单，单次点选即退出；判定放在最前（多选 / 订阅 / 详情都被它接管）
+                    if (this.picking) {
+                      this.addPickedTrack(p);
+                      return;
+                    }
                     // 多选模式下整行 = 勾选/取消，而不是进详情 / UP 主页
                     if (this.selecting) {
                       this.toggleSelected(p.id);
@@ -1005,24 +1195,28 @@ export struct PlaylistsPage {
                     // ⚠️ 用 helper 判定而非 upMid 非空：收藏夹镜像也有 upMid（fav_x），
                     // 但它没有「UP 主页」可去，必须走默认分支进 PlaylistDetail
                     if (LibraryStore.isUpSubscription(p)) {
-                      NavStackHolder.upMid = p.upMid;
-                      // getUserCard 失败时的兜底名
-                      NavStackHolder.upName = p.upName;
-                      // ⚠️ 必须显式清空：静态字段会残留上一个 UP 的头像；歌单行只有
+                      // getUserCard 失败时的兜底名；头像传空串：歌单行只有
                       // 视频封面（非 UP 头像）不能当占位，空串由 CoverImage 兜占位图
-                      NavStackHolder.upFace = '';
-                      NavStackHolder.stack.pushPath({ name: 'UpSpace' });
+                      NavStackHolder.stack.pushPathByName('UpSpace',
+                        new UpSpaceRouteParam(p.upMid, p.upName, ''));
                       return;
                     }
-                    NavStackHolder.selectedPlaylistId = p.id;
-                    NavStackHolder.stack.pushPath({ name: 'PlaylistDetail' });
+                    NavStackHolder.stack.pushPathByName('PlaylistDetail',
+                      new PlaylistDetailRouteParam(p.id));
                   })
                 }
               },
-              // key 含渲染字段：重命名（name）与订阅拉新（tracks.length）后 key 变化，
-              // 行才会销毁重建；只含 p.id 时复用旧行导致改名后仍显示旧名（重启才刷新）
-              (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
-            )
+               // key 含渲染字段：重命名（name）与订阅拉新（tracks.length）后 key 变化，
+               // 行才会销毁重建；只含 p.id 时复用旧行导致改名后仍显示旧名（重启才刷新）
+               (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
+             )
+                // 长按拖动排序（2026-10-22）：多选 / 点选加入模式下禁用（整行是
+                // 点选热区，长按拖动与点选手势打架），传 undefined = 不注册。
+                .onMove(this.selecting || this.picking
+                  ? undefined
+                  : (from: number, to: number): void => {
+                    this.onPlaylistMove(from, to);
+                  })
           }
           .layoutWeight(1)
           // 边界回弹（2026-10-08）：到顶/到底的反馈动效

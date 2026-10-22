@@ -322,5 +322,13 @@ export struct ShimmerProgressBar {
         this.onSeekEnd(sec);
       }
     })
+    // 消费型横向手势（2026-10-22 修「拖进度条整页横移」）：onTouch 只观察不消费、
+    // 不进手势仲裁 —— SM 形态下本组件在 PlayerInfoComponent 的 Swiper（封面页|
+    // 歌词页）子树内，横向拖动会穿透到 Swiper 的**内置翻页 PanGesture**（swiper.d.ts
+    // 明载 Swiper 翻页即内置 pan），整页跟着手指横移。此条 PanGesture 作为子节点
+    // 自定义手势参与仲裁、深于 Swiper 必胜 → 翻页永不启动；onTouch 与手势仲裁
+    // 互不影响，拖拽换算逻辑原样。方向锁 Horizontal：歌词页列表竖向滚动不受牵连。
+    // 取舍：进度条 32vp 命中区内的横向手势归进度条所有，想翻页需从条外起手。
+    .gesture(PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 1 }))
   }
 }

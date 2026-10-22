@@ -117,6 +117,14 @@ export interface Track {
   lastPosSec?: number;
   isLiked: boolean;
   likedAt: string;
+  /**
+   * 加入歌单时间（ISO 8601 串）。仅「歌单内曲目实例」有意义：由 LibraryStore
+   * 四条加歌路径盖章（addTrackToPlaylist / mergeUpTracks / subscribeUpPlaylist /
+   * importPlaylists），队列 / 最近播放 / 收藏中的曲目该字段为空。
+   * 歌单详情「排序→按加入时间」按它降序（新在前）；无戳存量条目首排时由
+   * sortPlaylistTracks 物化补合成戳。slimTrack 必须保留，否则重启后丢失。
+   */
+  addedAt?: string;
   audioUrl: string;
   audioQuality: number;
   /**
@@ -241,6 +249,10 @@ export function slimTrack(track: Track): Track {
     lastPosSec: track.lastPosSec ?? 0,
     isLiked: track.isLiked,
     likedAt: track.likedAt,
+    // 加入歌单时间要落盘（约 +25 字节/条，歌单分片存储无预算压力）：歌单详情
+    // 「按加入时间」排序靠它。最近播放条目无此字段（undefined 不参与 JSON
+    // 序列化，零字节成本）。
+    addedAt: track.addedAt,
     audioUrl: '',
     audioQuality: track.audioQuality,
     // 要落盘：重启后进播放页还能显示上次那首的真实码率（约 6~9 字节/条，
@@ -409,9 +421,25 @@ export function progressStyleLabelOf(style: string): string {
   return '经典';
 }
 
+/** 逐字片段（卡拉 OK 高亮用） */
+export interface LyricWord {
+  text: string;
+  /** 相对该行起始的偏移（ms） */
+  offset: number;
+  /** 持续时长（ms） */
+  duration: number;
+}
+
 export interface LyricLine {
+  /** 行起始时刻（秒）。静态歌词（无时间轴）也按 4s 均匀排布 */
   time: number;
   text: string;
+  /** 翻译（无则空串；网易云 tlyric / QQ trans） */
+  translation?: string;
+  /** 罗马音（无则空串；只有网易云提供） */
+  romaji?: string;
+  /** 逐字时间轴（无则空数组） */
+  words?: LyricWord[];
 }
 
 export interface LyricResult {
@@ -421,6 +449,12 @@ export interface LyricResult {
   trackName: string;
   artistName: string;
   sourceId: string;
+  /** 命中的歌词源（LyricSourceApi.SOURCE_*；旧缓存无此字段） */
+  source?: string;
+  /** 是否带翻译轨 */
+  hasTranslation?: boolean;
+  /** 是否带逐字轨 */
+  dynamic?: boolean;
 }
 
 export interface LyricCandidate {
@@ -430,8 +464,13 @@ export interface LyricCandidate {
   trackName: string;
   artistName: string;
   albumName: string;
+  /** 时长（秒） */
   duration: number;
   image: string;
+  /** 歌词源（netease / qq / oiapi） */
+  source?: string;
+  /** 源内 id（取歌词用；与 songId 同义但统一成字符串） */
+  remoteId?: string;
 }
 
 export type LyricStatus = 'idle' | 'loading' | 'ok' | 'unsynced' | 'empty';
@@ -551,6 +590,45 @@ export interface VideoDetail {
   videos: number;
   pages: VideoPageInfo[];
   pubdate: number;
+  /**
+   * B 站「合集」（ugc_season，2026-10-22 补）：多个**独立视频**的集合。
+   * 与多 P（pages，同一视频的分页）是两种形态：合集条目自带 bvid/cid，
+   * 各自独立解析音源。无合集的视频该字段缺省（view 响应里无此键）。
+   */
+  ugc_season?: UgcSeason;
+}
+
+/** 合集条目的分 P 信息（episode.page，结构与 VideoPageInfo 同源的精简版） */
+export interface SeasonEpisodePage {
+  cid: number;
+  part: string;
+  duration: number;
+}
+
+/** 合集条目：一个独立投稿视频（arc 里的字段摊平，只取构建 Track 需要的） */
+export interface SeasonEpisode {
+  bvid: string;
+  aid: number;
+  cid: number;
+  title: string;
+  /** 视频封面（arc.pic，可能是 http，使用前转 https） */
+  pic?: string;
+  /** 视频时长（秒，arc.duration） */
+  duration?: number;
+  author?: VideoOwner;
+  page?: SeasonEpisodePage;
+}
+
+export interface UgcSeasonSection {
+  episodes: SeasonEpisode[];
+}
+
+/** B 站「合集」（ugc_season）：标题 / 封面 / 分 section 的条目列表（多数只有一个 section） */
+export interface UgcSeason {
+  id: number;
+  title: string;
+  cover?: string;
+  sections?: UgcSeasonSection[];
 }
 
 export interface AudioStream {
@@ -590,10 +668,34 @@ export interface DashData {
   flac?: FlacStream;
 }
 
+/**
+ * durl 形态的播放流条目（老视频 / 服务端把 fnval 降级时的**唯一的**兜底）。
+ *
+ * 这一类响应**完全没有 dash 字段**：整段 mp4（音视频合一）以分段地址给出。
+ * 对只看音轨的播放器来说它照样能出声 —— 视频轨白白解码，但没有更好选择：
+ * 不接这条兜底，这类视频的表现就是「点哪首都播不出来」（2026-10-22 补，对齐 BBPlayer）。
+ */
+export interface DurlItem {
+  /** 分段序号，从 1 开始 */
+  order: number;
+  /**
+   * 该分段时长，**单位毫秒**（2026-10-22 实测：BV1GJ411x7h7 返回 212394，
+   * 对应 3 分 32 秒的视频里的一段）。用它算码率必须先 /1000。
+   */
+  length: number;
+  /** 该分段字节数 */
+  size: number;
+  url: string;
+  backup_url?: string[];
+}
+
 export interface PlayUrlData {
   quality: number;
   format: string;
-  dash: DashData;
+  /** 正常响应必有；**降级到 durl 形态时整体缺失**，使用处必须判空 */
+  dash?: DashData;
+  /** 老视频 / 降级响应的分段流；与 dash 互斥（dash 缺失时才有值） */
+  durl?: DurlItem[];
 }
 
 export interface MusicCenterItem {

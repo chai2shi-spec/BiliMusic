@@ -65,6 +65,14 @@ const WAKE_MIN_MS: number = 10;
  */
 const WAKE_MAX_MS: number = 1000;
 
+/**
+ * 副行（翻译 / 罗马音）字号比例：相对常规行字号。
+ * 翻译行必须明显小于主歌词，否则「两句一样大」会让人分不清哪句在唱。
+ */
+const SUB_TEXT_SCALE: number = 0.68;
+/** 副行与上一行文字之间的间距（vp） */
+const SUB_TEXT_GAP: number = 3;
+
 /** Area.width/height 是 Length（number|string|Resource），归一化成 number（vp） */
 function parseAreaLength(len: Length): number {
   if (typeof len === 'number') {
@@ -520,9 +528,12 @@ export struct LrcView {
           break;
         case LyricScrollEffect.LetterGradient:
           if (lyric.words && lyric.words.length > 0) {
+            // ⚠️ `this.lrcX` 是**左边界**（非当前行分支用 textAlign='start' 以它为起点），
+            // 这里切成 center 后必须自己换算中心点，否则整行会右移半个行宽
+            // （2026-10-22 启用逐字歌词时暴露：以前 words 恒为空，这段从没真正跑过）
             this.context.textAlign = 'center';
-            let startX_g = this.lrcX - textMetrics.width / 2;
-            let endX_g = startX_g + textMetrics.width;
+            let startX_g = this.lrcX;
+            let endX_g = this.lrcX + textMetrics.width;
             let gradY_g = this.lrcY - textMetrics.height / 2;
 
             let progress = 0;
@@ -550,9 +561,10 @@ export struct LrcView {
             }
 
             this.context.fillStyle = this.progressGrad(startX_g, gradY_g, endX_g, gradY_g, progress);
-            this.context.fillText(text, this.lrcX, this.lrcY, this.lrcWidth);
+            // center 模式下 x 要给中心点；lrcX 是左边界
+            this.context.fillText(text, this.lrcX + textMetrics.width / 2, this.lrcY, this.lrcWidth);
           } else {
-            this.context.textAlign = 'center';
+            this.context.textAlign = 'start';
             this.context.fillText(text, this.lrcX, this.lrcY, this.lrcWidth);
           }
           break;
@@ -616,6 +628,74 @@ export struct LrcView {
     return textMetrics.height;
   }
 
+  /**
+   * 副行（翻译 / 罗马音）占用的总高度。
+   * 必须与 `drawSubLines` 实际绘制的高度严格一致 —— 滚动定位（getOffset）
+   * 依赖它，两边不一致会表现为「每次换行都差半行」。
+   */
+  private getSubHeight(lyric: LrcEntry): number {
+    const subs: string[] | undefined = lyric.subLines;
+    if (subs === undefined || subs.length === 0) {
+      return 0;
+    }
+    const size: number = this.mNormalTextSize * SUB_TEXT_SCALE;
+    let count: number = 0;
+    for (let i = 0; i < subs.length; i++) {
+      if (subs[i].length > 0) {
+        count++;
+      }
+    }
+    return count * (size + SUB_TEXT_GAP);
+  }
+
+  /** 超宽文本按需截断（副行不折行，否则行高算式与滚动定位会脱钩） */
+  private fitText(text: string): string {
+    if (this.context.measureText(text).width <= this.lrcWidth) {
+      return text;
+    }
+    let lo: number = 0;
+    let hi: number = text.length;
+    while (lo < hi) {
+      const mid: number = (lo + hi) >> 1;
+      if (this.context.measureText(`${text.substring(0, mid)}…`).width <= this.lrcWidth) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    const keep: number = Math.max(0, lo - 1);
+    return `${text.substring(0, keep)}…`;
+  }
+
+  /**
+   * 绘制副行（翻译在前，罗马音在后），返回占用高度。
+   * 副行比主行更暗、更小：它是辅助信息，视觉权重必须低于主歌词。
+   */
+  private drawSubLines(lyric: LrcEntry, isCurrent: boolean): number {
+    const subs: string[] | undefined = lyric.subLines;
+    if (subs === undefined || subs.length === 0) {
+      return 0;
+    }
+    const size: number = this.mNormalTextSize * SUB_TEXT_SCALE;
+    this.context.font = this.fontWeight + ' ' + size + 'vp ' + this.fontFamily;
+    this.context.fillStyle = isCurrent ? this.mCurrentTextColor : this.mNormalTextColor;
+    this.context.globalAlpha = isCurrent ? 0.82 : 0.64;
+    this.context.textAlign = 'start';
+    this.context.textBaseline = 'bottom';
+    let used: number = 0;
+    for (let i = 0; i < subs.length; i++) {
+      const text: string = subs[i];
+      if (text.length === 0) {
+        continue;
+      }
+      this.lrcY = this.lrcY + size + SUB_TEXT_GAP;
+      this.context.fillText(this.fitText(text), this.lrcX, this.lrcY);
+      used += size + SUB_TEXT_GAP;
+    }
+    this.context.globalAlpha = 1;
+    return used;
+  }
+
   private drawLyricLine(lyric: LrcEntry, isCurrent: boolean): number {
     let lineHeight = 0;
     if (isCurrent) {
@@ -638,7 +718,9 @@ export struct LrcView {
     }
     // 发影用完即关：渐隐遮罩 fillRect 不能带 shadow，否则整屏泛光
     this.context.shadowBlur = 0;
-    return lineHeight;
+    // 副行（翻译 / 罗马音）画在主行下方，占用高度一并返回
+    const subHeight: number = this.drawSubLines(lyric, isCurrent);
+    return lineHeight + subHeight;
   }
 
   private drawContent(desOffsetY: number): void {
@@ -690,20 +772,23 @@ export struct LrcView {
     switch (this.lyricTopPosition) {
       case LyricTopPosition.Top:
         for (let i = 0; i <= line && i < this.mLrcEntryList.length; i++) {
+          const sub: number = this.getSubHeight(this.mLrcEntryList[i]);
           if (i === line) {
             offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, true) / 2
               - this.getLineHeight(this.mLrcEntryList[i].lineWords, false) / 2;
           } else {
-            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, false) + this.mDividerHeight;
+            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, false) + sub + this.mDividerHeight;
           }
         }
         break;
       case LyricTopPosition.Middle:
         for (let i = 0; i <= line && i < this.mLrcEntryList.length; i++) {
+          const sub: number = this.getSubHeight(this.mLrcEntryList[i]);
           if (i === line) {
-            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, true) / 2 + this.mDividerHeight;
+            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, true) / 2
+              + sub / 2 + this.mDividerHeight;
           } else {
-            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, false) + this.mDividerHeight;
+            offsetY += this.getLineHeight(this.mLrcEntryList[i].lineWords, false) + sub + this.mDividerHeight;
           }
         }
         break;

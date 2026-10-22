@@ -39,6 +39,7 @@ import {
   BILI_REFERER,
   PLAYER_TRANSITION_MS,
   STORE_PLAYER_OPEN,
+  STORE_PLAYER_CONTENT_EXIT,
   STORE_PLAYER_TRANSITIONING,
   AUDIO_Q_DOLBY,
   AUDIO_Q_HIRES,
@@ -93,6 +94,21 @@ export struct PlayerInfoComponent {
    * 做几何插值（2026-10-21 起点偏左下根治，见 GEOMETRY_ID_PLAYER_SURFACE 注释）。
    */
   @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
+
+  /**
+   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
+   * 复位不在任何隐式动画作用域内 → 本组件自持的两处内容（SM Swiper 指示点、
+   * LG/MD 标题块）单帧直接消失（2026-10-22 用户要求「除封面和背景的其他元素
+   * 直接消失」）。四个子内容层（顶栏 / 标题 / 控制区 / 歌词）各自订阅同一信号自理。
+   */
+  @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
+  /** 瞬隐状态：true = 收起中（指示点 / 标题块单帧 opacity 0）；重开时组件重挂载复位 */
+  @State contentHidden: boolean = false;
+
+  /** 瞬隐复位：自持内容单帧隐藏 */
+  private onContentExit(): void {
+    this.contentHidden = true;
+  }
 
   /**
    * LG 分栏左列圆盘边长上限（vp）：0 = 首帧未实测（宽度驱动，实测后收敛）。
@@ -535,6 +551,8 @@ export struct PlayerInfoComponent {
                   .width(StyleConstants.FULL_WIDTH)
                   .margin({ top: $r('app.float.music_info_margin_top') })
                   .alignItems(HorizontalAlign.Start)
+                  // 收起瞬隐：标题块与四个子内容层同批单帧消失（封面 / 背景不在此列）
+                  .opacity(this.contentHidden ? 0 : 1)
                   .onAreaChange((_old: Area, n: Area): void => {
                     this.lgTitleH = this.toVp(n.height);
                     this.recomputeLgDisc();
@@ -597,12 +615,12 @@ export struct PlayerInfoComponent {
                 })
             }
             .height(StyleConstants.FULL_HEIGHT)
-            .indicator(
-              new DotIndicator()
-                .top($r('app.float.options_padding'))
-                .selectedColor($r('app.color.select_swiper'))
-                .color($r('app.color.slider_track'))
-            )
+            // 收起瞬隐：指示点随 contentHidden 单帧消失（indicator 接受 boolean，
+            // false = 不渲染指示点，见 Swiper indicator 重载）
+            .indicator(this.contentHidden ? false : new DotIndicator()
+              .top($r('app.float.options_padding'))
+              .selectedColor($r('app.color.select_swiper'))
+              .color($r('app.color.slider_track')))
             .clip(false)
             .loop(false)
             // 边界回弹（2026-10-08）：Swiper 在当前 SDK 无 .edgeEffect 属性，

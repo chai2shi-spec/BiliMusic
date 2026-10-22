@@ -21,7 +21,6 @@ import {
   PREF_LOGIN_USER,
   PREF_LOGIN_REFRESH_TOKEN,
   PREF_LOGIN_VERIFIED_AT,
-  STORE_LOGIN_EVENT,
   STORE_LOGIN_REV
 } from '../common/Constants';
 import { fetchNavUser, revokeLogin } from '../api/BilibiliApi';
@@ -44,20 +43,6 @@ export interface LoginUser {
 
 let cachedUser: LoginUser | null = null;
 let initialized: boolean = false;
-/**
- * 「刚完成一次显式登录，待发自动同步信号」标记。
- *
- * 为什么需要它（顺序问题）：`persistLoginCookie`（登录成功落库）**早于**
- * `refreshLoginUser`（拉 nav 填 cachedUser），所以不能在 persistLoginCookie 里
- * 直接写 STORE_LOGIN_EVENT —— 那一刻 getLoginUser() 还是 null，收藏夹同步会
- * 因「用户信息未就绪」被跳过。改成：登录时置位，等 refreshLoginUser 成功
- * （cachedUser 已就绪）再发信号。
- *
- * 为什么不在 refreshLoginUser 里无条件发信号：冷启动时 SettingsPage 也会调
- * refreshLoginUser（恢复会话），那不该触发自动同步（产品决策：不做每次启动自动跑）。
- * 只有「本进程刚发生过显式登录」才置位，冷启动不会置位。
- */
-let pendingAutoSyncSignal: boolean = false;
 
 /**
  * 从扫码成功的回调 url 里解析登录 Cookie（**通道 a：老格式**）。
@@ -206,9 +191,6 @@ async function persistLoginCookie(cookie: string, refreshToken: string): Promise
   await AppPreferences.setLoginVerifiedAt(Date.now());
   HttpUtil.setLoginCookie(cookie);
   bumpLoginRev();
-  // 置位自动同步信号：等随后的 refreshLoginUser 把 cachedUser 填好再真正发出
-  //（见 pendingAutoSyncSignal 的注释——登录信号必须晚于用户信息就绪）
-  pendingAutoSyncSignal = true;
 }
 
 /**
@@ -314,12 +296,6 @@ export async function refreshLoginUser(): Promise<void> {
     await AppPreferences.setLoginUser<LoginUser>(next);
     // 确认有效（登录成功校验通过 / 后续 nav 校验通过）→ 记录时间戳，stale 态自动解除
     await AppPreferences.setLoginVerifiedAt(Date.now());
-    // 刚完成显式登录（本进程置过位）→ 用户信息已就绪，正式发出自动同步信号。
-    // 值取时间戳：每次登录都不同，@Watch 才能稳定触发（相同值不触发）。
-    if (pendingAutoSyncSignal) {
-      pendingAutoSyncSignal = false;
-      AppStorage.setOrCreate(STORE_LOGIN_EVENT, Date.now());
-    }
     if (changed) {
       bumpLoginRev();
     }

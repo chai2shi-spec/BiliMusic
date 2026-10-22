@@ -17,14 +17,15 @@ import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import common from '@ohos.app.ability.common';
-import { extractAudioFromVideo, expandVideoParts } from '../api/BilibiliApi';
+import { BiliApiError, extractAudioFromVideo, expandVideoParts, qualityDowngradePlan } from '../api/BilibiliApi';
 import { getLyricForTrack } from '../api/LyricsApi';
 import { LibraryStore } from '../service/LibraryStore';
 import { DownloadManager } from '../service/DownloadManager';
 import { BackgroundPlayback } from '../service/BackgroundPlayback';
 import { AudioRouteWatcher } from '../service/AudioRouteWatcher';
+import { upgradeBuvidCookie } from '../service/BiliDevice';
 import { AppPreferences } from '../preferences/AppPreferences';
-import { isUnmeteredNetwork } from '../utils/NetworkUtil';
+import { hasNetwork, isUnmeteredNetwork } from '../utils/NetworkUtil';
 import { BILI_REFERER } from '../common/Constants';
 import {
   AppSettings,
@@ -48,8 +49,6 @@ import {
   STORE_REPEAT_MODE,
   STORE_SHUFFLE,
   STORE_LOADING_AUDIO,
-  STORE_VOLUME,
-  STORE_MUTED,
   STORE_APP_FOREGROUND,
   STORE_PLAYBACK_SPEED,
   STORE_PLAYBACK_SPEED_ENABLED,
@@ -78,6 +77,23 @@ const PROGRESS_PUSH_INTERVAL_MS: number = 500;
  * 但换来了音源解析独占连接的窗口 —— 点歌成功率优先。
  */
 const EXPAND_PARTS_DELAY_MS: number = 1200;
+
+/**
+ * 风控自愈（升级 buvid + 自动重试一轮）的冷却间隔（ms）。
+ * 冷却闸门有两个作用：恢复链连发风控时不反复打 spi 升级接口；
+ * 拦住「重试 → 又撞风控 → 再重试」的递归（重试失败回来的那次 catch
+ * 落在冷却期内，自动转为常规失败收口）。
+ */
+const RISK_SELF_HEAL_COOLDOWN_MS: number = 30000;
+
+/**
+ * B 站风控 / 限流业务码（与 BilibiliApi 的 RETRYABLE_BIZ_CODES 同族）。
+ * extractAudioFromVideo 内部已做过 ~2.45s 退避重试，还能冒到播放层的是
+ * **持续性**风控拒绝 —— 最典型根因是本地兜底假 buvid 被服务端盯死
+ * （见 BiliDevice.initBuvidCookie 的兜底说明）。备用直链 / 降档重试
+ * 对它都无解，唯一对症的自愈路径是升级成官方 buvid 后重试。
+ */
+const RISK_CONTROL_CODES: number[] = [-352, -412, -509, -799];
 
 /**
  * 「预取下一首音源」的延迟毫秒数。
@@ -121,6 +137,14 @@ const RECENT_PROGRESS_THROTTLE_MS: number = 10000;
  * 就认定卡死，由 recoverFromStall 主动换备用直链 / 重解析。
  */
 const PREPARE_TIMEOUT_MS: number = 20000;
+
+/**
+ * 恢复链里「重解析」的最大次数（2026-10-22）。
+ *
+ * 3 次对应 qualityDowngradePlan 的前 3 档：第 1 次原档（直链过期最常见）、
+ * 第 2/3 次逐级降档。次数再多收益极低 —— 都到第 3 次了，问题基本不在「重试」上。
+ */
+const RECOVER_RELOAD_MAX: number = 3;
 
 /** 播放内核日志的统一 hilog domain / tag：`hdc shell hilog -x | grep BiliMusic` 即可过滤 */
 const LOG_DOMAIN: number = 0x065B;
@@ -307,8 +331,13 @@ export class MusicPlayer {
   private shuffledQueue: Track[] = [];
   private repeatMode: RepeatMode = RepeatMode.NONE;
   private isShuffled: boolean = false;
-  private volume: number = 80;
-  private isMuted: boolean = false;
+  /**
+   * 独立音量通路已整体移除（2026-10-22，用户反馈「音量比其他音乐 App 小」）：
+   * 旧 volume/isMuted 字段 + setVolume/setMuted/applyVolumeOnPrepared 是死代码
+   * （无 UI 调用方、无持久化），但默认 80 仍把每首歌压到 0.8 倍振幅
+   * （约 -1.9dB），比恒走 1.0 的其他 App 小。现恒定 AVPlayer 默认音量 1.0，
+   * 音量只由系统媒体音量控制，与其他 App 完全一致。
+   */
   /** 当前播放倍速（档位见 PLAYBACK_SPEED_OPTIONS；换源重建 AVPlayer 后由 applySpeedOnPrepared 重补） */
   private playbackSpeed: number = 1.0;
   private shouldAutoplay: boolean = false;
@@ -317,6 +346,28 @@ export class MusicPlayer {
   private prepareWatchdogTimer: number = -1;
   /** 本轮加载已尝试过的备用直链条数（loadAndPlay 每轮归零）。见 recoverFromStall。 */
   private triedBackupCount: number = 0;
+  /**
+   * 恢复链的**降档**游标（loadAndPlay 每轮归零，2026-10-22）。
+   *
+   * 每次 reloadCurrentSource 失败后 +1，实际解析用它去 qualityDowngradePlan 里取档位：
+   * 第 1 次重试仍用原档（最常见原因是直链过期，换档等于白白降音质），
+   * 第 2 次起逐级降档 —— 专治「某一档音轨本身播不了」（flac 解码失败 /
+   * 该档全部 CDN 拒绝 / 该档被风控），旧实现会在同一坏档上重试三次、次次失败。
+   */
+  private qualityStep: number = 0;
+  /** 恢复链是否正在推进（防 reload 失败回调与 error 回调同时触发导致叠加执行） */
+  private recovering: boolean = false;
+  /**
+   * 本轮加载的恢复链是否已走到「重试耗尽」并提示过用户。
+   * 防止 ③ 之后的残余 error 反复弹同一条提示（真机上 error 可能连发多次）。
+   * loadAndPlay 每轮归零。
+   */
+  private recoverExhausted: boolean = false;
+  /**
+   * 上次风控自愈（升级 buvid + 自动重试）的时间戳，0 = 本会话还没触发过。
+   * 冷却语义见 RISK_SELF_HEAL_COOLDOWN_MS / healBuvidForRiskControl。
+   */
+  private lastRiskControlSelfHealAt: number = 0;
   private playerState: string = 'idle';
   private loadToken: number = 0;
   /**
@@ -485,12 +536,8 @@ export class MusicPlayer {
       }
     }
 
-    // 恢复音量 / 静音态。播放器实例在首次换源时才创建，
-    // 这些配置由状态机在合法时机统一应用到新实例上
-    //（applyVolumeOnPrepared；漏了这步会「切歌后音量变回 100%」）。
-    this.volume = (AppStorage.get(STORE_VOLUME) as number) ?? 80;
-    this.isMuted = (AppStorage.get(STORE_MUTED) as boolean) ?? false;
-    // 倍速值同批恢复：镜像由 EntryAbility 在 loadContent 前首发，这里读到的一定是真值
+    // 独立音量 / 静音态恢复已随音量通路移除（2026-10-22，见 volume 移除注释）。
+    // 倍速值恢复：镜像由 EntryAbility 在 loadContent 前首发，这里读到的一定是真值
     this.playbackSpeed = (AppStorage.get(STORE_PLAYBACK_SPEED) as number) ?? 1.0;
 
     this.startAudioRouteWatch();
@@ -671,11 +718,7 @@ export class MusicPlayer {
         });
       } else if (state === 'prepared') {
         this.cancelPrepareWatchdog();
-        // setVolume 只在 prepared/playing/paused/completed 合法；旧实现在新播放器的
-        // idle 态设置，部分系统版本直接报 5400102「unsupport volume operation」。
-        // 挪到 prepared：新实例一就绪就把用户当前音量/静默补上。
-        this.applyVolumeOnPrepared(player);
-        // 倍速同款补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
+        // 倍速补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
         this.applySpeedOnPrepared(player);
         // 「与其他应用同时播放」同款补应用：换源每次重建 AVPlayer，prepared 且
         // 首次 play 前是 SDK 要求的 audioInterruptMode 生效窗口
@@ -1165,6 +1208,26 @@ export class MusicPlayer {
   }
 
   /**
+   * 恢复链里这一次重解析该用哪个档位（2026-10-22 双保险）。
+   *
+   * 语义：`qualityStep` 从 0 开始，每次重解析失败后 +1 —— 第 1 次仍用用户偏好档
+   * （直链过期是最常见原因，换档等于白降音质），第 2 次起沿 qualityDowngradePlan
+   * 逐级下降，直到 64K。降档后 sourceCache 的键（含档位段）自然分裂，
+   * 不会拿到上一档的旧结果。
+   *
+   * ⚠️ 与 currentPlayQualityId 的分工：**首播必须用偏好档**（否则用户设了无损却
+   * 听到 64K），只有「已经失败过」的路径才允许降档。
+   */
+  private recoveryQualityId(): number {
+    const plan: number[] = qualityDowngradePlan(this.currentPlayQualityId());
+    const idx: number = Math.min(this.qualityStep, plan.length - 1);
+    if (idx > 0) {
+      plogWarn(`recovery quality downgraded: ${plan[0]} -> ${plan[idx]} (step ${this.qualityStep})`);
+    }
+    return plan[idx];
+  }
+
+  /**
    * 音源已挂上后，安排一次「下一首直链」的预取。
    * 每次成功加载都会重新调度（旧的定时器被清掉），预取的永远是**当前曲目的下一首**。
    */
@@ -1368,10 +1431,21 @@ export class MusicPlayer {
     };
   }
 
-  private async reloadCurrentSource(): Promise<void> {
+  /**
+   * 重新解析当前曲目的音源并换源。
+   *
+   * @returns true = 新音源已交给播放器；false = 解析或挂载失败
+   *          （**调用方必须据此继续降级**，见 recoverFromStall）
+   *
+   * ⚠️ 返回值是 2026-10-22 补的：旧版是 `Promise<void>`，失败只在内部
+   * `console.error` 一行，调用方永远等不到「失败」这个事实 —— 于是恢复链在
+   * 第 2 级就**断掉**：备用直链用完 + 重解析失败（断网 / -404 / 该档音轨全挂）
+   * ＝ 加载圈停下、没有任何声音、也没有任何提示，用户只能反复点歌。
+   */
+  private async reloadCurrentSource(): Promise<boolean> {
     const track: Track | null = this.currentTrackSnapshot();
     if (!track) {
-      return;
+      return false;
     }
     // ⚠️ 这里**绝不能**写成 `++this.loadToken` 去抢占 token。
     // 抢占会把正在进行的 `loadAndPlay`（用户刚点的那首歌）直接作废：
@@ -1384,27 +1458,44 @@ export class MusicPlayer {
       // refresh=true：走到重试说明播放器报了 error，最常见的原因就是缓存里的
       // 直链已过期（CDN 签名失效）。必须绕过缓存重新解析，否则会拿同一条过期
       // 链接重试三次、次次失败。新结果会回写缓存。
-      // 档位用用户偏好（2026-10-20 修复）：此前硬编码 0 = 按带宽最大取，
-      // 大会员账号会在恢复梯度里拿到 flac/杜比 —— 档位与首播不一致（缓存分裂），
-      // 且若该档直链/解码有问题，梯度永远无法降级到可播的 192K。
+      //
+      // 档位（2026-10-22 起）走降档阶梯：第 1 次仍用用户偏好档，第 2 次起逐级降低。
+      // 旧版恒用偏好档，若坏在「这一档音轨本身」（flac 解码失败 / 该档 CDN 全拒），
+      // 三次重试全打在同一档上，永远出不了声。
+      const qualityId: number = this.recoveryQualityId();
       const source = await extractAudioFromVideo(track.bvid || track.id, {
         aid: track.aid,
         cid: track.cid
-      }, this.currentPlayQualityId(), true);
+      }, qualityId, true);
       if (token !== this.loadToken) {
-        return;
+        // 已被更新的点歌取代：不是失败，由获胜方负责收尾
+        return false;
       }
       const updated: Track = this.mergeTrack(track, source);
       this.setStore(STORE_CURRENT_TRACK, updated);
       this.lastPlayableTrack = updated;
-      // 换源统一走「重建播放器」：见 switchSource 注释
-      await this.switchSource(updated.audioUrl, token);
+      // 换源统一走「重建播放器」：见 switchSource 注释。
+      // quiet=true：这是恢复链内部的一次尝试，失败由 recoverFromStall 继续降级，
+      // 不能在这里就弹「加载失败」（链走完还没成，③ 会给用户明确交代）
+      const attached: boolean = await this.switchSource(updated.audioUrl, token, true);
       this.isPreparing = false;
+      if (attached) {
+        plogInfo(`reload source ok (quality=${source.audioQuality}, step=${this.qualityStep})`);
+      }
+      return attached;
     } catch (e) {
       // 失败必须解除准备态，否则 timeUpdate 会被永久抑制、进度条卡死
       this.isPreparing = false;
-      console.error(`reload audio failed: ${JSON.stringify(e)}`);
       this.setStore(STORE_LOADING_AUDIO, false);
+      // 不要 JSON.stringify(e)：Error 的 message/stack 不可枚举，序列化只有 {}
+      const detail: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      plogWarn(`reload audio failed (step=${this.qualityStep}): ${detail}`);
+      if (this.isRiskControlError(e)) {
+        // 重解析撞上风控：升级 buvid（自带冷却闸门）。恢复链若还有重试额度，
+        // 下一次 reload 会落在（可能已升级的）新指纹上
+        this.healBuvidForRiskControl();
+      }
+      return false;
     }
   }
 
@@ -1441,17 +1532,35 @@ export class MusicPlayer {
 
   /**
    * 统一的「播放卡死 / 出错」恢复入口（error 处理器与 prepare 看门狗共用）。
-   * 恢复梯度由轻到重，每级失败自动降级到下一级：
+   * 恢复梯度由轻到重，**每一级失败都会自动落到下一级**（2026-10-22 修）：
+   * ⓪ 断网短路：网络都没了就直说，别再跑 20 秒的三级重试；
    * ① 备用直链：playurl 每条音轨都带 backupUrl（最多用 3 条）。主直链被 CDN
    *    拒绝 / 挂死时直接换链重挂，**不发任何网络请求**，秒级恢复；
-   * ② 重解析：refresh 直链重走 view + playurl（最常见原因是直链签名过期）；
+   * ② 重解析：refresh 直链重走 view + playurl（最常见原因是直链签名过期），
+   *    第 2 次起**逐级降档**（治「这一档音轨本身播不了」）；
    * ③ 重试耗尽：明确提示用户，不再让界面停在假「播放中」。
+   *
+   * ⚠️ 旧版最大的缺陷是「② 失败后链就断了」：reloadCurrentSource 是 Promise<void>，
+   * 内部 catch 只打一行日志就结束 —— 备用直链用完 + 重解析失败（断网 / -404 /
+   * 该档全挂）时，界面表现为「加载圈停了、没声音、没提示」。现在 reload 返回
+   * boolean，失败即继续走本函数（retryCount 已 +1，所以必然收敛到 ③）。
    */
   private recoverFromStall(): void {
     const track: Track | null = this.currentTrackSnapshot();
     if (!track) {
       // 界面上已没有曲目（清空队列等场景）：没有可恢复的对象
       plogWarn('recoverFromStall skipped: no current track');
+      return;
+    }
+    // ⓪ 断网短路：三级梯度每级都要等超时，断网时纯属干等。
+    // 不清 retryCount / triedBackupCount —— 网络恢复后用户点播放走的是完整的新一轮
+    // loadAndPlay（两个游标都在那里归零）。
+    if (!hasNetwork()) {
+      plogWarn('recover skipped: no network');
+      this.isPreparing = false;
+      this.setStore(STORE_LOADING_AUDIO, false);
+      this.setStore(STORE_IS_PLAYING, false);
+      this.notifyHint('网络未连接，请检查网络后重试');
       return;
     }
     const token: number = this.loadToken;
@@ -1463,30 +1572,73 @@ export class MusicPlayer {
       plogWarn(`recover via backup url #${this.triedBackupCount}: ${urlHostOf(backupUrl)}`);
       this.isPreparing = true;
       this.setStore(STORE_LOADING_AUDIO, true);
-      this.switchSource(backupUrl, token)
+      // quiet=true：备用链失败要继续降级，不在中途弹提示（理由同 reloadCurrentSource）
+      this.switchSource(backupUrl, token, true)
         .then((attached: boolean): void => {
-          if (attached && token === this.loadToken) {
-            this.isPreparing = false;
+          if (token !== this.loadToken) {
+            return;
           }
+          if (attached) {
+            this.isPreparing = false;
+            return;
+          }
+          // 备用链也挂不上：继续下一级（旧版直接放弃，界面停在加载中）
+          this.recoverFromStall();
         })
         .catch((e: Error): void => {
-          console.error(`switch to backup url failed: ${e.message}`);
+          plogWarn(`switch to backup url failed: ${e.message}`);
+          this.recoverFromStall();
         });
       return;
     }
-    // ② 重新解析直链（refresh=true，绕过缓存）
-    if (this.retryCount < 3) {
+    // ② 重新解析直链（refresh=true，绕过缓存；第 2 次起降档）
+    if (this.retryCount < RECOVER_RELOAD_MAX) {
+      if (this.recovering) {
+        // 上一轮 reload 还没落地（error 回调与 prepare 看门狗可能在同一瞬间各来一次）：
+        // 不叠加发起、也不预支重试额度 —— 等它走完，失败时自己会回来继续降级
+        plogWarn('recover reload already in flight, skip duplicate');
+        return;
+      }
       this.retryCount++;
-      plogWarn(`recover via reload, attempt ${this.retryCount}/3`);
-      this.reloadCurrentSource().catch((e: Error): void => {
-        console.error(`reloadCurrentSource failed: ${e.message}`);
-      });
+      // 第 1 次仍用偏好档（直链过期最常见，换档等于白降音质），第 2/3 次逐级降档
+      this.qualityStep = this.retryCount - 1;
+      plogWarn(`recover via reload, attempt ${this.retryCount}/${RECOVER_RELOAD_MAX}, ` +
+        `quality step ${this.qualityStep}`);
+      this.recovering = true;
+      this.reloadCurrentSource()
+        .then((ok: boolean): void => {
+          this.recovering = false;
+          if (ok) {
+            return;
+          }
+          if (token !== this.loadToken) {
+            // 本轮已被更新的点歌取代：不做任何收尾，新加载有自己的梯度
+            return;
+          }
+          // ⚠️ 这一句就是「恢复链不中断」的关键：重解析失败也继续降级
+          this.recoverFromStall();
+        })
+        .catch((e: Error): void => {
+          this.recovering = false;
+          plogWarn(`reloadCurrentSource threw: ${e.message}`);
+          this.recoverFromStall();
+        });
       return;
     }
     // ③ 重试耗尽：必须给用户一个明确交代。否则界面只是悄悄停在暂停态，
     // 用户完全不知道发生了什么（表现为「点了没反应」）。
+    this.recovering = false;
+    this.isPreparing = false;
+    this.setStore(STORE_LOADING_AUDIO, false);
+    this.setStore(STORE_IS_PLAYING, false);
+    if (this.recoverExhausted) {
+      // 本轮已经交代过了：残余 error 只留日志，不再重复弹提示
+      plogWarn('recover exhausted again (already notified), stay silent');
+      return;
+    }
+    this.recoverExhausted = true;
     plogWarn('recover exhausted: all backups and reloads failed');
-    this.notifyHint('音频加载失败，请稍后重试');
+    this.notifyHint('音频加载失败，请检查网络或稍后重试');
   }
 
   /**
@@ -1502,8 +1654,12 @@ export class MusicPlayer {
    * 前把旧实例的监听 off 掉并 release()，再 createAVPlayer()。这样
    * ①旧实例的错误根本传不出来，②新实例天然处于 idle（setMediaSource 永远合法），
    * 整个「哪条错误属于谁」的歧义就不存在了。这里照做。
+   *
+   * @param quiet true = 失败时**不弹提示**（恢复链内部用）。
+   *        恢复链会连续试「备用直链 → 重解析 ×3」，每一步都弹一次
+   *        「音频加载失败」就是在撒谎 —— 最后往往还播上了。只在整条链走完（③）弹一次。
    */
-  private async switchSource(url: string, token: number): Promise<boolean> {
+  private async switchSource(url: string, token: number, quiet: boolean = false): Promise<boolean> {
     if (token !== this.loadToken) {
       // 加载已被更新的点歌取代：不再重建播放器、不碰任何状态，收尾由获胜方负责
       return false;
@@ -1511,11 +1667,13 @@ export class MusicPlayer {
     if (url.length === 0) {
       // 直链为空时 setMediaSource 不会报错但也不会有任何声音，
       // 用户只看到「点了歌、封面歌名都换了，就是没声」。这里明确失败并留日志。
-      console.error('switchSource with empty url');
+      plogWarn('switchSource with empty url');
       this.isPreparing = false;
       this.setStore(STORE_LOADING_AUDIO, false);
       this.setStore(STORE_IS_PLAYING, false);
-      this.notifyHint('音频地址为空，请稍后重试');
+      if (!quiet) {
+        this.notifyHint('音频地址为空，请稍后重试');
+      }
       return false;
     }
     const player: media.AVPlayer | null = await this.ensurePlayer();
@@ -1525,6 +1683,7 @@ export class MusicPlayer {
       this.isPreparing = false;
       this.setStore(STORE_LOADING_AUDIO, false);
       this.setStore(STORE_IS_PLAYING, false);
+      // 播放器建不出来是「设备侧」问题，恢复链再试也无解 → 这条不静默
       this.notifyHint('播放器初始化失败，请重开应用后再试');
       return false;
     }
@@ -1546,8 +1705,9 @@ export class MusicPlayer {
           'Mozilla/5.0 (Linux; HarmonyOS) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile'
       });
     } catch (e) {
-      console.error(`createMediaSourceWithUrl failed: ${JSON.stringify(e)}`);
-      this.failLoad('音频加载失败，请稍后重试');
+      const detail: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      plogWarn(`createMediaSourceWithUrl failed: ${detail}`);
+      this.failLoad('音频加载失败，请稍后重试', quiet);
       return false;
     }
     plogInfo(`attach main url: ${urlHostOf(url)}`);
@@ -1563,7 +1723,7 @@ export class MusicPlayer {
     if (!attached) {
       // setMediaSource 明确拒绝（url 非法 / 头部被拒 / 状态不对）：
       // failLoad 统一收口（解除准备态、清 loading、停播放态、提示用户）
-      this.failLoad('音频加载失败，请稍后重试');
+      this.failLoad('音频加载失败，请稍后重试', quiet);
       return false;
     }
     // true = 音源已经交给播放器（音频这一侧已经有着落），
@@ -1735,11 +1895,44 @@ export class MusicPlayer {
     }
   }
 
-  private failLoad(message: string): void {
+  /**
+   * 加载失败统一收口：解除准备态、清 loading、停播放态、（可选）提示用户。
+   *
+   * @param quiet true = 不弹提示。恢复链内部专用（见 switchSource 的 quiet 说明）。
+   */
+  private failLoad(message: string, quiet: boolean = false): void {
     this.isPreparing = false;
     this.setStore(STORE_LOADING_AUDIO, false);
     this.setStore(STORE_IS_PLAYING, false);
-    this.notifyHint(message);
+    if (!quiet) {
+      this.notifyHint(message);
+    }
+  }
+
+  /** 判定解析错误是否为 B 站风控 / 限流（码表见 RISK_CONTROL_CODES） */
+  private isRiskControlError(e: Object): boolean {
+    return e instanceof BiliApiError && RISK_CONTROL_CODES.indexOf(e.code) >= 0;
+  }
+
+  /**
+   * 风控自愈：把 buvid Cookie 升级成官方指纹（兜底假 buvid 被风控盯死的对症解）。
+   * 升级是异步的、不阻塞任何链路；完成后由后续解析 / AppContainer 的延迟重试
+   * 自然用上新指纹。返回 false = 冷却期内已自愈过，调用方据此不再叠加自动重试。
+   */
+  private healBuvidForRiskControl(): boolean {
+    if (Date.now() - this.lastRiskControlSelfHealAt < RISK_SELF_HEAL_COOLDOWN_MS) {
+      return false;
+    }
+    this.lastRiskControlSelfHealAt = Date.now();
+    plogWarn('risk control detected, upgrading buvid cookie');
+    upgradeBuvidCookie()
+      .then((): void => {
+        plogInfo('buvid cookie upgraded after risk control');
+      })
+      .catch((e: Error): void => {
+        plogWarn(`buvid upgrade after risk control failed: ${e.message}`);
+      });
+    return true;
   }
 
   /** 关闭本地播放文件句柄。重复调用安全（换源 / 回收播放器都会走到这里） */
@@ -1759,8 +1952,8 @@ export class MusicPlayer {
    * 新建一个干净的 AVPlayer。
    * 先把旧实例的监听**全部摘掉**再 release —— 摘监听是关键，否则旧实例在释放过程中
    * 上报的 error 会被当成「新音源加载失败」，弹出一个莫名其妙的提示。
-   * 新实例是全新默认值，音量 / 音频流类型改由状态机在**合法时机**补上
-   * （见 applyRendererInfoInInitialized / applyVolumeOnPrepared）。
+   * 新实例是全新默认值，音频流类型改由状态机在**合法时机**补上
+   * （见 applyRendererInfoInInitialized）。
    */
   /**
    * 串行化入口：同一时刻只允许一个「摘监听 → release 旧的 → createAVPlayer 新的」
@@ -1825,23 +2018,9 @@ export class MusicPlayer {
   }
 
   /**
-   * 补应用音量 / 静默到播放器。setVolume 的合法窗口是
-   * prepared/playing/paused/completed —— idle 态调用报 5400102
-   * 「unsupport volume operation」（线上日志同款错误）。
-   * 改到 stateChange('prepared') 再补：新实例一就绪，用户当前音量立刻生效。
-   */
-  private applyVolumeOnPrepared(player: media.AVPlayer): void {
-    try {
-      player.setVolume(this.isMuted ? 0 : this.volume / 100);
-    } catch (e) {
-      console.error(`setVolume on prepared failed: ${JSON.stringify(e)}`);
-    }
-  }
-
-  /**
-   * 补应用倍速到播放器。setSpeed 的合法窗口是 prepared/playing/paused/completed
-   * （同 setVolume）。换源每次都重建 AVPlayer，倍速必须在新实例 prepared 时重补，
-   * 否则「切歌后倍速悄悄变回 1.0」（同当年音量丢失 bug 的根因）。
+    * 补应用倍速到播放器。setSpeed 的合法窗口是 prepared/playing/paused/completed。
+    * 换源每次都重建 AVPlayer，倍速必须在新实例 prepared 时重补，
+    * 否则「切歌后倍速悄悄变回 1.0」（同当年音量丢失 bug 的根因）。
    * 开关关闭或倍速为 1.0 时不调——1.0 是系统默认，多调一次反而多一条
    * speedDone 噪音日志；关闭态强制不补，防止异常脏值在重启后复活倍速。
    */
@@ -1966,6 +2145,11 @@ export class MusicPlayer {
     this.retryCount = 0;
     // 备用直链计数跟着每轮点歌一起归零：新一轮加载重新拥有完整的恢复梯度
     this.triedBackupCount = 0;
+    // 降档游标与「恢复进行中」标志同样归零：新一轮点歌必须从用户偏好档、
+    // 从恢复链第 0 级重新开始（否则上一首降档到 64K 会传染给下一首）
+    this.qualityStep = 0;
+    this.recovering = false;
+    this.recoverExhausted = false;
     // 旧歌的进度 / 时长先存一份：下面会立刻清零给新歌腾显示位，
     // 加载失败回滚时靠它把旧歌的显示还原（见 recoverAfterLoadFailure）
     this.preLoadProgress = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
@@ -2095,6 +2279,18 @@ export class MusicPlayer {
       console.error(`load audio failed (attached=${attached}): ${detail}`);
       this.setStore(STORE_LOADING_AUDIO, false);
       this.setStore(STORE_IS_PLAYING, false);
+      if (!attached && this.isRiskControlError(e)) {
+        if (this.healBuvidForRiskControl()) {
+          // 升级已发起：自动重试一轮。冷却闸门保证这条递归最多一层 ——
+          // 重试仍撞风控时，那次 catch 落在冷却期内，转为下面的常规失败收口。
+          this.notifyHint('触发 B 站风控，正在自动恢复，请稍后重试');
+          this.loadAndPlay(track, autoplay, startAt).catch((retryErr: Error): void => {
+            plogWarn(`risk-control retry threw: ${retryErr.message}`);
+          });
+          return;
+        }
+        // 冷却期内：不再叠加自动重试
+      }
       if (!attached) {
         this.recoverAfterLoadFailure(track, seqBeforeLoad);
       } else {
@@ -2215,9 +2411,13 @@ export class MusicPlayer {
       const back: string = fallback.title.length > 0 ? fallback.title : '上一首';
       this.notifyHint(`「${title}」无法播放，已切回「${back}」`);
     } else {
-      // 没有发生界面回滚（界面本来就还停在用户点的那首上），无需打扰用户：
-      // 留日志即可。真正播不出来的歌会由 AVPlayer 的 error 链路统一给出提示。
-      console.error(`audio unavailable without rollback: ${failed.id}`);
+      // 2026-10-22 修正：这种情况**必须**给提示。旧注释写「真正播不出来的歌会由
+      // AVPlayer 的 error 链路统一给出提示」，但解析层失败（view/playurl 抛错、
+      // 服务端 404、无音轨）时**根本没有 AVPlayer 参与**，也就永远不会有 error 回调
+      // —— 界面停在用户点的那首、loading 圈消失、没有声音、也没有任何说明，
+      // 这正是「点了没反应」最典型的一种。标题已写明是哪一首，重复点它不会更糟。
+      plogWarn(`audio unavailable without rollback: ${failed.id}`);
+      this.notifyHint(`「${title}」暂时无法播放，请稍后重试`);
     }
   }
 
@@ -2723,26 +2923,6 @@ export class MusicPlayer {
     this.setRepeatMode(shuffle ? RepeatMode.SHUFFLE : RepeatMode.NONE);
   }
 
-  setVolume(v: number): void {
-    this.volume = Math.max(0, Math.min(100, v));
-    this.setStore(STORE_VOLUME, this.volume);
-    // setVolume 只在 prepared/playing/paused/completed 合法；idle 态调用报
-    // 5400102「unsupport volume operation」（冷启动先拖音量条就会踩中）。
-    // 值先存进 this.volume，播放器一进 prepared 由 applyVolumeOnPrepared 补上。
-    if (this.avPlayer && this.playerHoldsSource()) {
-      this.avPlayer.setVolume(this.isMuted ? 0 : this.volume / 100);
-    }
-  }
-
-  setMuted(muted: boolean): void {
-    this.isMuted = muted;
-    this.setStore(STORE_MUTED, muted);
-    // 同 setVolume：只在合法状态下操作播放器，idle/initialized 态先记账后补
-    if (this.avPlayer && this.playerHoldsSource()) {
-      this.avPlayer.setVolume(muted ? 0 : this.volume / 100);
-    }
-  }
-
   /**
    * 设置播放倍速（档位见 PLAYBACK_SPEED_OPTIONS，非法值归 1.0）。
    * persist=false 供设置页关开关时复用运行时归位逻辑——偏好里两个字段由
@@ -2760,7 +2940,7 @@ export class MusicPlayer {
         console.error(`persist playbackSpeed failed: ${e.message}`);
       });
     }
-    // setSpeed 只在 prepared/playing/paused/completed 合法（同 setVolume）；
+    // setSpeed 只在 prepared/playing/paused/completed 合法；
     // idle/initialized 态先记账，prepared 后由 applySpeedOnPrepared 补上
     if (this.avPlayer && this.playerHoldsSource()) {
       try {

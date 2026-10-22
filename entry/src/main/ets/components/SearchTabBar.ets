@@ -28,6 +28,7 @@
 
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { NAV_H_PADDING } from '../utils/NavTitleStyle';
 import {
   makeBiliSegmentColors,
   SegmentColors
@@ -136,7 +137,8 @@ export struct SearchInputBar {
         .margin({ left: 8 })
     }
     .width('100%')
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    // 水平基线统一 NAV_H_PADDING(16)：搜索行与标题行、页签行、列表内容同一条左缘
+    .padding({ left: NAV_H_PADDING, right: NAV_H_PADDING, top: 8, bottom: 8 })
   }
 }
 
@@ -201,7 +203,9 @@ export struct SearchTabsBar {
         .height(32)
     }
     .height(49.6)
-    .padding({ top: 17.6, left: 12, right: 12 })
+    // 水平基线统一 NAV_H_PADDING(16)（与搜索行、标题行对齐；竖向 17.6 是页签行
+    // 与上方搜索行的呼吸间距，不属于水平栅格，保持不动）
+    .padding({ top: 17.6, left: NAV_H_PADDING, right: NAV_H_PADDING })
     .onClick((): void => {
       TabScrollerHolder.searchCloseHistory();
     })

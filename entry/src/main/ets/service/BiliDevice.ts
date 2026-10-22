@@ -16,7 +16,12 @@
 import { HttpUtil } from '../utils/HttpUtil';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { md5 } from '../utils/CryptoUtil';
-import { BILI_API, PREF_BUVID, PREF_BUVID_COOKIE } from '../common/Constants';
+import {
+  BILI_API,
+  PREF_BUVID,
+  PREF_BUVID_COOKIE,
+  PREF_BUVID_OFFICIAL
+} from '../common/Constants';
 
 /**
  * buvid：首次生成后持久化，之后复用（等价 PiliPlus 的 generateBuvid / Pref.buvid）。
@@ -111,28 +116,53 @@ export function initBuvidCookie(): void {
       AppPreferences.setString(PREF_BUVID_COOKIE, full);
     }
     HttpUtil.setBaseCookie(full);
+    // 诊断（2026-10-22 平板登录修复）：启动即留痕 buvid 来源（official / fallback）
+    // 与 Cookie 串长度指纹 —— 风控类问题（二维码早失效 / playurl 偶发拦截）的
+    // 定位起点。旧安装首次运行时标记位缺省会显示 fallback，下一次
+    // upgradeBuvidCookie 成功后即纠正。
+    console.info(`[BiliDevice] init buvid source=` +
+      `${isBuvidFallback() ? 'fallback' : 'official'} cookieLen=${full.length}`);
     return;
   }
   const fallback: string = getBuvid();
   const cookie: string = completeVisitorCookie(`buvid3=${fallback}infoc; buvid4=${fallback}`);
   HttpUtil.setBaseCookie(cookie);
   AppPreferences.setString(PREF_BUVID_COOKIE, cookie);
+  console.info(`[BiliDevice] init buvid source=fallback(fresh) cookieLen=${cookie.length}`);
+}
+
+/**
+ * buvid 是否仍为本地兜底假值（2026-10-22 平板登录修复）。
+ *
+ * 背景：新装机（典型：平板）持久化里没有官方 buvid，initBuvidCookie 用本地
+ * MD5 兜底值顶上（能过 412，但非 finger/spi 官方下发）。带着假指纹请求
+ * passport 登录接口 / playurl 是「二维码约 3s 被提前作废、偶发播放拦截」的
+ * 共同根因候选。官方值与兜底值形态不可区分（都是 XY 开头、infoc 结尾），
+ * 故用持久化标记位判定：upgradeBuvidCookie 成功时置 true。
+ */
+export function isBuvidFallback(): boolean {
+  return !AppPreferences.getBoolean(PREF_BUVID_OFFICIAL, false);
 }
 
 /**
  * 用官方 finger/spi 接口换取正规 buvid 并持久化。
  * 失败时保留本地兜底值，不影响首屏。
+ * 成功时置 PREF_BUVID_OFFICIAL 标记：isBuvidFallback() 即转 false，
+ * AppContainer 的延迟重试升级随之停摆（成功一次即止）。
  */
 export async function upgradeBuvidCookie(): Promise<void> {
   try {
     const resp: SpiResponse = await HttpUtil.requestJson<SpiResponse>(`${BILI_API}/x/frontend/finger/spi`);
     if (resp.code !== 0 || !resp.data || resp.data.b_3.length === 0) {
+      console.warn(`upgrade buvid: spi rejected code=${resp.code}, keep fallback`);
       return;
     }
     const cookie: string = completeVisitorCookie(`buvid3=${resp.data.b_3}; buvid4=${resp.data.b_4}`);
     HttpUtil.setBaseCookie(cookie);
     AppPreferences.setString(PREF_BUVID_COOKIE, cookie);
-    console.info('buvid upgraded from finger/spi');
+    await AppPreferences.setBoolean(PREF_BUVID_OFFICIAL, true);
+    // 诊断指纹：仅 buvid3 长度与来源标记，不输出指纹值（与 cookieFingerprint 脱敏口径一致）
+    console.info(`buvid upgraded from finger/spi (buvid3Len=${resp.data.b_3.length})`);
   } catch (e) {
     // 离线或风控下 spi 不可用，保留本地兜底值
     console.warn(`upgrade buvid failed, keep fallback: ${JSON.stringify(e)}`);
