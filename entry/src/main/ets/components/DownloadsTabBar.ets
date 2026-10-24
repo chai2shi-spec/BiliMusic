@@ -1,5 +1,5 @@
 /**
- * 下载页顶栏内容（HarmonyX 根栏移植，2026-10-10；留白整改同日）。
+ * 下载页顶栏内容（2026-10-10；留白整改同日）。
  *
  * 标题行按钮 + 多选工具条都由根 HdsNavigation titleBar 的 stackBuilder 承载
  * （Index.immersiveTitleBarContent 下载页分支）——bottomBuilder 槽退役，
@@ -164,6 +164,35 @@ export struct DlControlBar {
         })
         .onClick((): void => {
           TabScrollerHolder.dlRetrySelected();
+        })
+      // 加入歌单（选中）：空选区置灰；有选中时转 Track 开「加入歌单」弹层选目标歌单
+      Text('加入歌单')
+        .fontSize(13)
+        .fontColor(this.selectedCount > 0 ? this.themeDeep : $r('app.color.text_disabled'))
+        .height(44)
+        .padding({ left: 12, right: 12 })
+        .borderRadius(8)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .onClick((): void => {
+          TabScrollerHolder.dlAddSelectedToPlaylist();
+        })
+      // 导出选中（2026-10-24）：选区任务经系统保存对话框导出到文件管理（m4a/flac）；
+      // 空选区置灰；非破坏性操作，与「加入歌单」同色
+      Text('导出选中')
+        .fontSize(13)
+        .fontColor(this.selectedCount > 0 ? this.themeDeep : $r('app.color.text_disabled'))
+        .height(44)
+        .padding({ left: 12, right: 12 })
+        .borderRadius(8)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .onClick((): void => {
+          TabScrollerHolder.dlExportSelected();
         })
       Text(this.selectedCount > 0 ? `删除选中(${this.selectedCount})` : '删除选中')
         .fontSize(13)

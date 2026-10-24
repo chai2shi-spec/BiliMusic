@@ -105,8 +105,7 @@ import {
   HdsBarLayoutMode,
   DividerShowType,
   HdsNavigationTitleMode,
-  TitleBarStyleOptions,
-  hdsMaterial
+  TitleBarStyleOptions
 } from '@kit.UIDesignKit';
 import window from '@ohos.window';
 import common from '@ohos.app.ability.common';
@@ -125,13 +124,18 @@ import { SettingsPage } from './SettingsPage';
 import { LazyDest, preloadAllLazyPages } from '../service/LazyPageRegistry';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { PlayBar } from '../components/PlayBar';
+import { SubPagePlayBar } from '../components/SubPagePlayBar';
 import { NavRail } from '../components/NavRail';
 import { AppToast, showAppToast } from '../components/AppToast';
 import { AppDialogHost } from '../components/AppAlertDialog';
 import { MaterialCompat } from '../utils/MaterialCompat';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 import { watchNetwork } from '../utils/NetworkUtil';
 import { BreakpointSystem } from '../common/utils/BreakpointSystem';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+// 2026-10-23 平板模式宽度适配：根顶栏收窄上限与各页内容列统一走 840 口径
+//（TwoColumnLayout.contentMaxWidth，见 immersiveTitleBarNarrow 注释）。
+import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import {
   STORE_QUEUE,
   STORE_MINI_BAR_EXPANDED,
@@ -154,16 +158,31 @@ import {
   MINI_BAR_ANIM_TO_EXPAND,
   MINI_BAR_ANIM_TO_COLLAPSE,
   STORE_MINI_BAR_AUTO_EXPAND,
+  STORE_MAIN_MINI_BAR_WIDTH,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_OVERLAY_MOUNTED,
   STORE_PLAYER_CLOSE_REQUEST,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_PLAYER_TRANSITIONING,
+  STORE_PLAYER_CLOSE_ANIM,
+  STORE_PLAYER_COVER_STYLE,
+  STORE_PLAYER_GT_OFF,
+  STORE_PLAYER_SLIDE_OUT,
+  STORE_PLAYER_SLIDE_OFFSET,
+  STORE_PLAYER_SLIDE_ALPHA,
+  STORE_PLAYER_SLIDE_CLOSE_REQUEST,
+  STORE_PLAYER_DRAG_ACTIVE,
+  STORE_PLAYER_SLIDE_IN,
   PLAYER_TRANSITION_MS,
   STORE_FOLD_EXPANDED,
-  STORE_WINDOW_WIDTH_VP
+  STORE_WINDOW_WIDTH_VP,
+  STORE_WINDOW_HEIGHT_VP,
+  STORE_SAFE_LEFT,
+  STORE_SAFE_RIGHT,
+  STORE_SUB_PAGE_ACTIVE
 } from '../common/Constants';
-import { PLAYER_MAIN_CURVE } from '../common/constants/InteractionConstants';
+import { PLAYER_MAIN_CURVE, PLAYER_SLIDE_CURVE, SLIDE_CLOSE_MS, IMMERSIVE_FX_EXIT_MS } from '../common/constants/InteractionConstants';
+import { PLAYER_CLOSE_STYLE_SLIDE, PLAYER_COVER_STYLE_DISC, PLAYER_COVER_STYLE_IMMERSIVE } from '../model/MusicModels';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
@@ -206,31 +225,16 @@ const TABLET_TAB_FADE_OFFSET_VP: number = 16;
 const TABLET_TAB_FADE_START_DELAY_MS: number = 20;
 
 /**
- * 根 HdsNavigation 统一标题栏（HarmonyX 移植，2026-10-10）：
+ * 根 HdsNavigation 统一标题栏（2026-10-10）：
  * 根栏**四页签常显**（titleMode MINI + hideBackButton + divider OFF），
  * stackBuilder 承载整块顶栏内容 —— 行 1（56 标题行 / 搜索行）+ 行 2 溢出渲染
- * （position y=56 + clip(false) + hitTestBehavior Transparent，HarmonyX
+ * （position y=56 + clip(false) + hitTestBehavior Transparent，
  * ImmersiveTitleBarContent 同款手法），bottomBuilder 槽整体退役。
  */
 const TAB_SEARCH: number = 0;
 const TAB_PLAYLISTS: number = 1;
 const TAB_DOWNLOADS: number = 2;
 const TAB_SETTINGS: number = 3;
-/**
- * 顶栏滚动模糊时机（2026-10-22 收紧 20 → 8）。
- *
- * 语义：模糊强度 = clamp(offset, start, end) 在 start→end 之间线性插值
- * （COMMON_BLUR / GRADIENT_BLUR 语义相同，默认终点均为 8vp）。
- * 区间越短，「半糊」的过渡帧越少，越早进入稳定满载状态。
- * 旧值 20vp 的问题：慢滚时要在 20vp 内持续插值，视觉上是「慢慢显形」（还行），
- * 但**快滑时这段插值被压缩进 1~2 帧**，等于把一次渐变硬切成跳变，
- * 与「材质被系统丢掉一帧」叠加后就是用户看到的闪烁。
- *
- * 权衡：8vp ≈ SDK 默认终点。再小（≤4）会变成「一碰就满糊」，
- * 起糊突兀、失去渐入质感；6~12 是可调区间。
- */
-const TAB_BLUR_START_VP: number = 0;
-const TAB_BLUR_END_VP: number = 8;
 /**
  * 屏幕竖向滑动（parallelGesture）判定收/放意图的触发阈值（vp）：
  * 上滑超过 → 展开、下滑超过 → 收起；一次手势只触发一次。
@@ -293,8 +297,9 @@ struct Index {
   /**
    * 窗口内容区宽度（vp）：悬浮胶囊「居中 sideMargin」公式的输入（Constants 的
    * STORE_WINDOW_WIDTH_VP 注释）。EntryAbility 首帧前首发（冷启动首帧即正确，
-   * 不闪「贴左 → 居中」），本页 HdsTabs.onAreaChange 持续回写 —— 折叠开合 /
-   * 分屏 / 转屏后组件重排即触发，宽度变 → 居中量自动重算。
+   * 不闪「贴左 → 居中」），本页 bindAvoidArea 挂 windowSizeChange 持续回写
+   * （applyWindowSize）—— 折叠开合 / 分屏 / 转屏后窗口 rect 变化即触发，
+   * 宽度变 → 居中量自动重算。
    */
   @StorageLink(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
 
@@ -343,6 +348,17 @@ struct Index {
   currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
 
   /**
+   * 当前横竖屏（2026-10-23 平板模式宽度适配）：BreakpointSystem 注册的
+   * orientation 媒体查询写入（IS_LANDSCAPE 键，Index 常驻注册一次全程有效，
+   * 各列表页同款 @StorageProp 订阅）。两处消费：
+   * ① isTabletShell —— 平板壳仅横屏挂载，平板竖屏（含宽度落 lg 的 13" 板）
+   *   走 phoneShell，与阔折叠展开观感一致；
+   * ② immersiveTitleBarNarrow —— 根顶栏收窄上限与内容列同口径
+   *   （TwoColumnLayout.contentMaxWidth：两列激活 840，否则 600/720）。
+   */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
+
+  /**
    * 折叠屏展开态（2026-10-22 折叠态适配层重写）：service/FormFactorHolder 在
    * EntryAbility.onCreate 首发的全局唯一真源（@StorageProp 只读）。它与宽度断点
    * **正交**，共同决定壳形态（见 isTabletShell）—— 折叠屏展开时窗口宽度可能落在
@@ -352,13 +368,21 @@ struct Index {
   @StorageProp(STORE_FOLD_EXPANDED) isFoldExpanded: boolean = false;
 
   /**
-   * 是否挂平板壳（2026-10-22 壳选择解耦）：**lg 宽度 且 未处于折叠屏展开态**。
-   * 折叠屏开合全程（sm↔md↔lg）恒走 phoneShell，同壳不重挂 —— HdsTabs 与四页
-   * 实例存活、页内瞬时状态保留；只有真平板 / 非折叠设备的大窗口才进 NavRail 壳。
+   * 是否挂平板壳（2026-10-22 壳选择解耦；2026-10-23 平板竖屏模式）：**lg 宽度
+   * 且 未处于折叠屏展开态 且 横屏**。折叠屏开合全程（sm↔md↔lg）恒走 phoneShell，
+   * 同壳不重挂 —— HdsTabs 与四页实例存活、页内瞬时状态保留；只有真平板 /
+   * 非折叠设备的**横屏**大窗口才进 NavRail 壳。
+   *
+   * 2026-10-23 平板竖屏（用户指令「增加竖屏模式（与阔折叠一致）」）：平板竖屏
+   * 即使宽度落 lg（13" 板 ~960vp），NavRail(96)+内容列 840≈936 会把 960 塞满、
+   * 几无留白 —— 竖屏一律走 phoneShell（HdsTabs 沉浸光感胶囊底栏），与阔折叠
+   * 展开观感完全一致。代价：竖屏落 lg 的平板横↔竖旋转跨壳整树重挂（页内瞬时
+   * 状态丢失）—— md↔lg 本就跨壳重挂，行为一致，接受。
    */
   private isTabletShell(): boolean {
     return !this.isFoldExpanded
-      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG;
+      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG
+      && this.isLandscape;
   }
 
   /**
@@ -403,50 +427,244 @@ struct Index {
    * 收起逆向镜像：TopArea 收起按钮（STORE_PLAYER_CLOSE_REQUEST seq）或
    * onBackPress → closePlayer。
    */
-  /** 播放页 overlay 是否挂载（根 Stack 条件渲染，打开置 true / 收起动画结束回 false） */
-  @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) playerOverlayMounted: boolean = false;
+  /**
+   * 播放页 overlay 是否挂载（根 Stack 条件渲染，打开置 true / 收起动画结束回 false）。
+   * @Watch 挂/卸载双时机驱动播放页横竖屏自动旋转（2026-10-24）：
+   *   · 挂载 → 窗口切 AUTO_ROTATION（跟随传感器四向自动旋转，不受控制中心
+   *     旋转开关限制）—— 播放页已备横竖两套版式，随设备姿态随转随切；
+   *   · 卸载（收起动画落定后）→ 复原 UNSPECIFIED（跟随系统默认方向），
+   *     壳层与各 Tab 页回归系统横竖屏状态。
+   */
+  @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) @Watch('onPlayerOverlayMountedChanged') playerOverlayMounted: boolean = false;
+
+  /**
+   * 播放页横竖屏自动旋转（2026-10-24）：横竖屏切换按钮删除后播放页失去旋转入口，
+   * 改为 overlay 在场期间窗口跟随传感器自动旋转，卸载复原系统默认。卸载选收起
+   * 动画落定后的时机与旧旋转锁解除同因：收起瞬间恢复会与收起 morph 动画并行
+   * 旋转，geometryTransition 配对按中途框计算必跳变。失败仅记日志不阻断播放。
+   */
+  private onPlayerOverlayMountedChanged(): void {
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    const target: window.Orientation = this.playerOverlayMounted
+      ? window.Orientation.AUTO_ROTATION
+      : window.Orientation.UNSPECIFIED;
+    window.getLastWindow(ctx)
+      .then((win: window.Window): Promise<void> => {
+        return win.setPreferredOrientation(target);
+      })
+      .then((): void => {
+        console.info(`player window orientation -> ${this.playerOverlayMounted ? 'AUTO_ROTATION' : 'UNSPECIFIED'}`);
+      })
+      .catch((err: BusinessError): void => {
+        console.error(`setPreferredOrientation failed: ${err.code} ${err.message}`);
+      });
+  }
+
   /** 播放页展开态：驱动页签图标淡出（tabItem opacity 绑定） */
   @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
   /** 收起请求信号（TopArea 收起按钮 seq 递增写入，@Watch 消费 → closePlayer） */
   @StorageProp(STORE_PLAYER_CLOSE_REQUEST) @Watch('onCloseRequest') playerCloseRequest: number = 0;
 
   /**
-   * 收起播放页（2026-10-22 内容层瞬隐规格）：两段式。
-   * ① STORE_PLAYER_CONTENT_EXIT 递增在 animateTo 闭包【外】执行 —— 四个内容层
-   *   组件 @Watch 复位入场状态时不在任何隐式动画作用域内 → 属性单帧跳变，
-   *   顶栏 / 标题块 / 控制区 / 歌词 / 指示点**直接消失**（用户 2026-10-22 要求
-   *   「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
-   * ② 唯一的主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE）闭包内只写
+   * 播放页收起动画风格（2026-10-24 三风格收起动画改版，AppSettings.closeAnimStyle
+   * 的运行时镜像，EntryAbility 启动首发 / 设置页切换重发）：closePlayer 据此分流 ——
+   *   · morph / morph_swipe：柔退收起（内容反向错峰淡出 + 背景末端渐隐 + 封面回飞）；
+   *   · slide：下滑收起（所有入口整页加速下滑淡出）。
+   * morph_swipe 的手势部分在 PlayerPage（跟手位移/回弹本地自理，松手过阈值经
+   * STORE_PLAYER_SLIDE_CLOSE_REQUEST 请求本页统一收起）。
+   */
+  @StorageProp(STORE_PLAYER_CLOSE_ANIM) closeAnimStyle: string = '';
+  /** 整页下滑收起终态动画位移（vp）：slideOutClose 的 animateTo 闭包内一次写入终值 */
+  @StorageProp(STORE_PLAYER_SLIDE_OFFSET) slideOffset: number = 0;
+  /** 手势下拉松手过阈值的收起请求（PlayerPage seq 递增写入，@Watch 消费 → slideOutClose） */
+  @StorageProp(STORE_PLAYER_SLIDE_CLOSE_REQUEST) @Watch('onSlideCloseRequest') slideCloseRequest: number = 0;
+  /**
+   * 手势拖拽/回弹进行中（PlayerPage 手势生命周期写入）：closePlayer 的下滑分流
+   * 兜底 —— 回弹动画（AppStorage 终值已瞬写归 0/1）进行中的 250ms 窗口内，
+   * STORE_PLAYER_SLIDE_OFFSET 兜不住「页面视觉仍位移非 0」，靠本标志强制走下滑
+   * 收起（此时 morph 配对目标框按中途值计算必漂移）。
+   */
+  @StorageProp(STORE_PLAYER_DRAG_ACTIVE) dragActive: boolean = false;
+  /** 窗口内容区高度（vp）：EntryAbility 首帧前首发，bindAvoidArea 的
+    * windowSizeChange 监听持续回写（applyWindowSize，2026-10-24 横屏排查实锤
+    * HdsTabs.onAreaChange 转屏后不触发，回写链路移交窗口级监听）；下滑收起
+    * 终点距离 + 播放页横屏分支判定共用 */
+  @StorageLink(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
+
+  /**
+   * 二级页在顶标志（2026-10-23 二级页悬浮播放栏，NavStackHolder willShow/didShow
+   * 双写）：push 出的 NavDestination 盖住整个壳（含 HDS 悬浮胶囊 / tabletPlayBar），
+   * 二级页底部播放栏由根 Stack 全局单实例 SubPagePlayBar 接管 —— 本标志 + 队列
+   * 非空时挂载；同时 barFloatingStyle 摘除 miniBar（key 变化受控重建）、
+   * tabletPlayBar 同步卸载 —— 全窗口同一时刻只有一套 GEOMETRY_ID_PLAYER_DISC /
+   * _SURFACE 锚点（geometryTransition id 全窗口必须唯一，双锚点会互相配对错乱），
+   * 摘除与挂载在同一次重渲染内完成。二级页互推（如歌单详情 → UP 主页）标志
+   * 恒 true，栏全程在场不闪。
+   */
+  @StorageProp(STORE_SUB_PAGE_ACTIVE) subPageActive: boolean = false;
+
+  /** 全屏档收起预熔窗口重入守卫：特效柔退 150ms 排程期内吞掉重复收起请求 */
+  private morphClosePending: boolean = false;
+
+  /**
+   * 收起播放页（2026-10-24 三风格收起动画改版）：按 STORE_PLAYER_CLOSE_ANIM 分流。
+   *
+   * ── 下滑分支（slide 风格全部入口 / 页面已被手势拖离原位）→ slideOutClose ──
+   * 整页 350ms 加速下滑 + 渐隐，放弃封面 morph 飞行；松手位移 >1vp 时一律走本分支
+   * （位移非 0 时 geometryTransition 配对目标框按中途值计算，morph 必漂移）。
+   *
+   * ── 柔退分支（morph / morph_swipe 的按键与返回收起）两段式 ──
+   * ① STORE_PLAYER_CONTENT_EXIT 递增在主动画闭包【外】执行 —— 四个内容层组件
+   *   与本页自持内容 @Watch 消费时 seq 不在任何主动画作用域内，各层自建
+   *   animateTo 做**反向错峰柔退**（LAYER_EXIT_*，顶栏先、控制区/歌词后，
+   *   各 200ms EaseIn；替代 2026-10-22 的「单帧瞬隐」规格）。
+   * ② 全屏档预熔窗口（2026-10-24 封面模糊过渡改版）：immersive 风格在主动画前
+   *   等 IMMERSIVE_FX_EXIT_MS=300ms —— 封面特效层（底部渐变模糊+主色溶解，
+   *   CoverDisc onContentExit 柔退）渐隐渲染完才翻 playerOpen 触发回飞，否则
+   *   特效随翻转帧蒸发=「直接消失」；窗口内 morphClosePending 吞重复收起。
+   *   disc/square（meltWindowMs=0）零行为改动，仍同 tick 起飞。
+   * ③ 唯一的主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE）闭包内只写
    *   STORE_PLAYER_OPEN=false —— 同帧驱动：
-   *   · 背景面 geometryTransition 收回迷你栏透明锚点矩形；
+   *   · 背景面 geometryTransition 收回迷你栏透明锚点矩形，离场透明度由
+   *     PlayerInfoComponent 背景面的非对称 transition 接管：PLAYER_BG_EXIT_CURVE
+   *     前 ~65% 恒持 1、末端渐隐到 0（2026-10-24 用户拍板「末端渐隐」，替代
+   *     「收缩到迷你栏位置那一刻单帧消失」的硬切）；
    *   · CoverDisc 内容 if 消失 ↔ PlayBar 迷你唱片 if 出现 → 封面回飞归位；
    *   · 页签图标 opacity 恢复。
-   * 700ms 后卸载 overlay 并复位连点防护标志。
+   * 动画完成（onFinish，2026-10-24 修末端跳变）后卸载 overlay 并复位连点防护标志。
    */
   private closePlayer(): void {
     if (!this.playerOpen) {
       return;
     }
+    // 预熔窗口内（全屏档特效柔退未完成）吞掉重复收起请求（按键+按钮竞态）：
+    // seq 重复递增会重启柔退、双重排程回飞。
+    if (this.morphClosePending) {
+      return;
+    }
+    // 上滑展开进行中（slide 风格打开，350ms 窗口）吞掉收起请求：反向打断需处理
+    // 「上滑 animateTo 被新动画取代后 onFinish 是否回调」的框架不确定性 —— 若被
+    // 早回调会在滑出中途把 GT_OFF 复位，引发迷你唱片斜飞竞态；窗口极短，吞请求
+    // 是最稳解（morph 风格的打开中断照旧可反向收起，不受影响）。
+    if ((AppStorage.get<boolean>(STORE_PLAYER_TRANSITIONING) ?? false)
+      && (AppStorage.get<boolean>(STORE_PLAYER_SLIDE_IN) ?? false)) {
+      return;
+    }
+    if (this.closeAnimStyle === PLAYER_CLOSE_STYLE_SLIDE || this.slideOffset > 1 || this.dragActive) {
+      this.slideOutClose();
+      return;
+    }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
-    // ① 内容层瞬隐：seq 递增在主动画闭包外（各层 @Watch 复位不参与隐式动画）。
+    // ① 内容层柔退信号：seq 递增在主动画闭包外（各层 @Watch 内自建退场 animateTo）。
     const exitSeq: number = (AppStorage.get<number>(STORE_PLAYER_CONTENT_EXIT) ?? 0) + 1;
     AppStorage.setOrCreate(STORE_PLAYER_CONTENT_EXIT, exitSeq);
-    // ② 主动画：背景面收回 + 封面回飞 + 页签恢复（内容层已瞬隐，不随行）。
+    // ② 全屏档预熔窗口：等特效层 300ms 柔退渲染完再回飞（总收起 1000ms）；
+    // 窗口与柔退时长同源（IMMERSIVE_FX_EXIT_MS），改时长只动一个常量。
+    const styleNow: string = AppStorage.get<string>(STORE_PLAYER_COVER_STYLE) ?? PLAYER_COVER_STYLE_DISC;
+    const meltWindowMs: number = styleNow === PLAYER_COVER_STYLE_IMMERSIVE ? IMMERSIVE_FX_EXIT_MS : 0;
+    if (meltWindowMs > 0) {
+      this.morphClosePending = true;
+      setTimeout((): void => {
+        this.morphClosePending = false;
+        this.startCloseFlight();
+      }, meltWindowMs);
+    } else {
+      this.startCloseFlight();
+    }
+  }
+
+  /**
+   * 收起主动画（原 closePlayer 第②步原样抽取）：唯一 animateTo（700ms /
+   * PLAYER_MAIN_CURVE）闭包内只写 STORE_PLAYER_OPEN=false —— 背景面收回 +
+   * 封面回飞 + 页签恢复同帧驱动。卸载改挂 onFinish（与打开侧 playEnterTransition
+   * 同款）：渲染动画从下一帧起算、掉帧时被拉长，旧 setTimeout(700ms) 按墙钟触发
+   * 会在动画完成前销毁飞行节点（大封面在 overlay 内），封面末端闪跳落位；
+   * onFinish = 渲染动画真实完成时刻，掉帧不再提前切断飞行。中断安全：收起期间
+   * TRANSITIONING 阻断 openPlayer、预熔窗口内 morphClosePending 挡重复收起、
+   * 打开中被收起打断时收起动画自身的 onFinish 兜底复位。
+   */
+  private startCloseFlight(): void {
     this.getUIContext().animateTo(
-      { duration: PLAYER_TRANSITION_MS, curve: PLAYER_MAIN_CURVE },
+      {
+        duration: PLAYER_TRANSITION_MS,
+        curve: PLAYER_MAIN_CURVE,
+        onFinish: (): void => {
+          AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, false);
+          AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
+          this.morphClosePending = false;
+        }
+      },
       (): void => {
         AppStorage.setOrCreate(STORE_PLAYER_OPEN, false);
       }
     );
+  }
+
+  /**
+   * 下滑收起原语（slide 风格全部入口 + 手势过阈值释放共用，2026-10-24）：
+   * 整页 350ms 加速下滑（PLAYER_SLIDE_CURVE，重力感）+ 渐隐，onFinish 卸载。
+   *
+   * ① 先摘 geometryTransition（STORE_PLAYER_GT_OFF=true）：必须**渲染一帧**后再
+   *   翻转 STORE_PLAYER_OPEN —— 否则被移除/出现的配对节点仍带着旧 id，迷你唱片
+   *   会从半滑出的封面位置反向配对飞行（斜飞回栏）。setTimeout(32) ≈ 2 帧，
+   *   保证摘除先于状态翻转渲染；期间 TRANSITIONING 已置位，阻断 openPlayer。
+   * ② animateTo 闭包一次写入各 AppStorage 终值（渲染层对 PlayerPage 根节点的
+   *   translate/opacity 逐帧插值，无逐帧写 AppStorage）：
+   *   · STORE_PLAYER_OPEN=false —— 迷你唱片 / 页签图标在滑动页下方复原
+   *     （GT 已摘除，无配对飞行）；
+   *   · STORE_PLAYER_SLIDE_OFFSET=窗口高 / STORE_PLAYER_SLIDE_ALPHA=0 —— 整页
+   *     下滑渐隐；背景面靠 STORE_PLAYER_SLIDE_OUT 守卫保持挂载。
+   * ③ onFinish 复位全部标志与终态值（SLIDE_OFFSET/ALPHA 回 0/1，下次打开干净）。
+   */
+  private slideOutClose(): void {
+    // 幂等双闸：未展开不收；GT 已摘除说明一次下滑收起已在途（拖拽中按键收起与
+    // 松手 seq 请求可能几乎同时到达），二次进入会重复排程 animateTo 打架。
+    if (!this.playerOpen) {
+      return;
+    }
+    if (AppStorage.get<boolean>(STORE_PLAYER_GT_OFF) === true) {
+      return;
+    }
+    AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
+    AppStorage.setOrCreate(STORE_PLAYER_GT_OFF, true);
+    AppStorage.setOrCreate(STORE_PLAYER_SLIDE_OUT, true);
     setTimeout((): void => {
-      AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, false);
-      AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
-    }, PLAYER_TRANSITION_MS);
+      // 竞态兜底：32ms 间隙内窗口被卸载等极端情况，animateTo 仍安全（闭包只写
+      // AppStorage），onFinish 的复位幂等。
+      this.getUIContext().animateTo(
+        {
+          duration: SLIDE_CLOSE_MS,
+          curve: PLAYER_SLIDE_CURVE,
+          onFinish: (): void => {
+            AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, false);
+            AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, false);
+            AppStorage.setOrCreate(STORE_PLAYER_GT_OFF, false);
+            AppStorage.setOrCreate(STORE_PLAYER_SLIDE_OUT, false);
+            AppStorage.setOrCreate(STORE_PLAYER_DRAG_ACTIVE, false);
+            AppStorage.setOrCreate(STORE_PLAYER_SLIDE_OFFSET, 0);
+            AppStorage.setOrCreate(STORE_PLAYER_SLIDE_ALPHA, 1);
+          }
+        },
+        (): void => {
+          AppStorage.setOrCreate(STORE_PLAYER_OPEN, false);
+          AppStorage.setOrCreate(STORE_PLAYER_SLIDE_OFFSET, this.windowHeightVp);
+          AppStorage.setOrCreate(STORE_PLAYER_SLIDE_ALPHA, 0);
+        }
+      );
+    }, 32);
   }
 
   /** TopArea 收起按钮的跨层信号（seq 递增） */
   private onCloseRequest(): void {
     this.closePlayer();
+  }
+
+  /** PlayerPage 手势下拉松手过阈值的跨层信号（seq 递增 → 统一下滑收起） */
+  private onSlideCloseRequest(): void {
+    this.slideOutClose();
   }
 
   /**
@@ -738,9 +956,19 @@ struct Index {
           this.mainWindow = win;
           // 不依赖 EntryAbility 那次同步读写是否读早了，这里再校准一次
           this.applyAvoidArea(win);
+          this.applyWindowSize(win);
           win.on('avoidAreaChange', (data: window.AvoidAreaOptions): void => {
             console.info(`avoidAreaChange: type=${data.type}`);
             this.applyAvoidArea(win);
+          });
+          // 窗口尺寸变化（转屏 / 折叠开合 / 分屏）→ 回写宽高。
+          // ⚠️ 2026-10-24 横屏排查实锤：HdsTabs.onAreaChange 在转屏后**不会**回调，
+          // 窗口宽高（STORE_WINDOW_WIDTH_VP / _HEIGHT_VP）旋转后陈旧（模拟器
+          // 日志：转屏后 bp/isLandscape 均翻转而 windowHeightVp 恒为竖屏旧值），
+          // 播放页紧凑横屏分支因此永不命中。窗口级 windowSizeChange 与
+          // avoidAreaChange 同管线（后者旋转后实测有回调），才是可靠写点。
+          win.on('windowSizeChange', (): void => {
+            this.applyWindowSize(win);
           });
         })
         .catch((err: BusinessError): void => {
@@ -759,11 +987,38 @@ struct Index {
     }
     try {
       win.off('avoidAreaChange');
+      win.off('windowSizeChange');
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`unbindAvoidArea failed: ${msg}`);
     }
     this.mainWindow = null;
+  }
+
+  /**
+   * 读窗口 windowRect → px 转 vp → 回写 AppStorage 宽高
+   * （STORE_WINDOW_WIDTH_VP / STORE_WINDOW_HEIGHT_VP，@StorageLink 直写）。
+   *
+   * 写点：bindAvoidArea 挂接时校准一次 + windowSizeChange 持续回写
+   * （EntryAbility 启动首发兜底冷启动首帧）。取**整窗 rect**而非任何组件
+   * area：下滑收起终点 / 播放页横屏分支阈值都按整窗语义消费。
+   */
+  private applyWindowSize(win: window.Window): void {
+    try {
+      const ui: UIContext = this.getUIContext();
+      const rect: window.Rect = win.getWindowProperties().windowRect;
+      const wVp: number = ui.px2vp(rect.width);
+      const hVp: number = ui.px2vp(rect.height);
+      if (wVp > 0) {
+        this.windowWidthVp = wVp;
+      }
+      if (hVp > 0) {
+        this.windowHeightVp = hVp;
+      }
+    } catch (e) {
+      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      console.error(`applyWindowSize failed: ${msg}`);
+    }
   }
 
   /**
@@ -789,11 +1044,17 @@ struct Index {
       const navBarBottomVp: number = ui.px2vp(sys.bottomRect.height);
       const indicatorBottomVp: number = ui.px2vp(indicator.bottomRect.height);
       const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);
+      // 水平安全区（2026-10-24 播放页横屏方案）：横屏下状态栏侧边条带避让，
+      // 与 EntryAbility.writeSafeArea 同口径；竖屏两值通常为 0，纯增量发布。
+      const leftVp: number = ui.px2vp(sys.leftRect.width);
+      const rightVp: number = ui.px2vp(sys.rightRect.width);
       AppStorage.setOrCreate(STORE_SAFE_TOP, topVp);
       AppStorage.setOrCreate(STORE_SAFE_BOTTOM, bottomVp);
       AppStorage.setOrCreate(STORE_NAV_BAR_BOTTOM, navBarBottomVp);
       AppStorage.setOrCreate(STORE_NAV_INDICATOR_BOTTOM, indicatorBottomVp);
-      console.info(`avoidArea: top=${topVp}vp bottom=${bottomVp}vp navBar=${navBarBottomVp}vp indicator=${indicatorBottomVp}vp`);
+      AppStorage.setOrCreate(STORE_SAFE_LEFT, leftVp);
+      AppStorage.setOrCreate(STORE_SAFE_RIGHT, rightVp);
+      console.info(`avoidArea: top=${topVp}vp bottom=${bottomVp}vp navBar=${navBarBottomVp}vp indicator=${indicatorBottomVp}vp left=${leftVp}vp right=${rightVp}vp`);
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`applyAvoidArea failed: ${msg}`);
@@ -859,7 +1120,8 @@ struct Index {
     const key: string = `${this.navBarBottom}|${this.navIndicatorBottom}`
       + `|${this.useExquisiteMaterial ? 1 : 0}`
       + `|${this.themePrimary}|${this.barLayout}|${this.queue.length > 0 ? 1 : 0}`
-      + `|${expandedNow ? 1 : 0}|${sideMargin ?? 0}`;
+      + `|${expandedNow ? 1 : 0}|${sideMargin ?? 0}`
+      + `|${this.subPageActive ? 1 : 0}`;
     if (this.cachedFloatingStyle !== null && this.cachedFloatingStyleKey === key) {
       return this.cachedFloatingStyle;
     }
@@ -894,14 +1156,19 @@ struct Index {
         }
         : undefined,
       systemMaterialEffect: {
-        materialType: hdsMaterial.MaterialType.IMMERSIVE,
-        materialLevel: this.useExquisiteMaterial
-          ? hdsMaterial.MaterialLevel.EXQUISITE
-          : hdsMaterial.MaterialLevel.ADAPTIVE
+        // P0（2026-10-24 沉浸光感改造）：材质类型/档位抽入 MaterialTokens 令牌，
+        // 与 SubPagePlayBar / HdsTitleBarStyle 同源（本步零观感变化，值不变）。
+        materialType: MaterialTokens.BAR_MATERIAL_TYPE,
+        materialLevel: MaterialTokens.materialLevel()
       },
       lightColor: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA)
     };
-    if (this.queue.length > 0) {
+    // 互斥（2026-10-23 二级页悬浮播放栏）：二级页在顶时摘除 miniBar（反正被
+    // push 出的 NavDestination 盖住），由根 Stack 的 SubPagePlayBar 接管二级页
+    // 播放栏 —— 全窗口同一时刻只有一套 GEOMETRY_ID_PLAYER_DISC / _SURFACE
+    // 锚点（geometryTransition id 全窗口必须唯一）。返回首页 subPageActive
+    // 翻 false → key 变化 → 新样式对象 → HdsTabs 受控重建，miniBar 随胶囊恢复。
+    if (this.queue.length > 0 && !this.subPageActive) {
       const mini: HdsTabsMiniBar = {
         miniBarBuilder: (): void => {
           this.PlayBarHost();
@@ -945,6 +1212,16 @@ struct Index {
         },
         onBarStyleChange: (miniBarStyle: HdsBarStyle, tabBarStyle: HdsBarStyle,
           miniBarWidth: number, tabBarWidth: number, mode: HdsTabsBarChangeMode): void => {
+          // 实测回传（2026-10-24 修「二级页播放栏宽 ≠ 一级页底栏宽」）：HDS
+          // 上报的 miniBar 槽位宽发布到全局存储，SubPagePlayBar 直接采用 ——
+          // HDS 默认宽不可从源码推导（编译产物 + previewer mock），本回调的
+          // miniBarWidth 实参是真机唯一可靠口径。真机实测（Mate 80 Pro Max，
+          // sm）：收起态上报 miniW=328 与展开态同值（= tabW 全宽胶囊标准宽，
+          // 非圆盘视觉宽）—— 槽位宽是常量、与展开/收起态无关，两种状态均
+          // 发布；仅过滤无效值（0 / 负）。
+          if (miniBarWidth > 0) {
+            AppStorage.setOrCreate(STORE_MAIN_MINI_BAR_WIDTH, miniBarWidth);
+          }
           // 诊断日志（折叠屏「点 miniBar 不跳转」排查）：HDS 上报的样式 / 触发模式 / 宽度
           console.info(`[Index] onBarStyleChange: mini=${miniBarStyle}, tab=${tabBarStyle}, mode=${mode}, miniW=${miniBarWidth}, tabW=${tabBarWidth}, bp=${this.currentBreakpoint}`);
           const current: HdsBarStyle = this.miniBarExpandedNow() ? HdsBarStyle.EXPAND : HdsBarStyle.COLLAPSE;
@@ -1077,17 +1354,25 @@ struct Index {
   /**
    * 根标题栏样式：统一委托 HdsTitleBarStyle.styleOptions（2026-10-12 收敛）。
    *
-   * 顶部导航栏滚动联动渐进模糊（2026-10-22 用户指定重开）：GRADIENT_BLUR
-   * 渐变模糊 + TAB_BLUR_*_VP（0→8vp）起止偏移线性过渡，搭配 ADAPTIVE/SMOOTH
-   * 材质光感；滚动偏移由 HdsNavigation bindToScrollable 绑定链自动监听驱动，
-   * 无需手动监听滚动事件。两档决策与简史见 HdsTitleBarStyle 类头。
+    * 顶部导航栏滚动联动渐进模糊：滚动效果类型经 MaterialTokens 令牌（⑧起
+    * IMMERSIVE_GRADIENT_BLUR 沉浸渐变）+ 起止偏移 0→20vp 线性过渡（2026-10-23
+    * 规格落地全站归一，TAB_BLUR_*_VP 常量已删，走助手默认值），搭配 IMMERSIVE
+    * 材质光感（P1 起与底部胶囊同源）；滚动偏移由 HdsNavigation
+    * bindToScrollable 绑定链自动监听驱动，无需手动监听滚动事件。两档决策与
+    * 简史见 HdsTitleBarStyle 类头。
    *
    * （历史：2026-10-11 沉浸档曾内联在本方法，与助手两份配置反复人工对齐易
    * 漂移；2026-10-12 收敛为单行委托。2026-10-22 当日多次变更：取消滚动模糊
-   * → 调整材质档位 → 重开 GRADIENT_BLUR，TAB_BLUR_*_VP 实参恢复为样式输入。）
+   * → 调整材质档位 → 重开 GRADIENT_BLUR（区间曾收紧 0→8）。）
    */
   private titleBarStyle(): TitleBarStyleOptions {
-    return HdsTitleBarStyle.styleOptions(TAB_BLUR_START_VP, TAB_BLUR_END_VP);
+    // ⑩（2026-10-24 自绘原型）：根栏关 HDS 滚动效果（第三参 false），让位
+    // 自绘渐变模糊层（TopGradientBlurOverlay），防双重模糊。
+    // ⑫（2026-10-24 推广）：自绘层已从 SearchPage 推广到全部四个页签
+    //（搜索 / 歌单 / 下载 / 设置，各页自挂 overlay + onDidScroll 驱动），
+    // 原型期「其余页签滚动模糊暂缺」代价已消除；
+    // 九个子页仍走 styleOptions() 默认参不动。
+    return HdsTitleBarStyle.styleOptions(undefined, undefined, false);
   }
 
   /**
@@ -1149,14 +1434,14 @@ struct Index {
   }
 
   /**
-   * 根栏 stackBuilder 全量内容（HarmonyX ImmersiveTitleBarContent 移植）：
+   * 根栏 stackBuilder 全量内容：
    * 行 1 = 标题行 / 搜索行（SearchInputBar，56 锁高）；行 2 = 页签行 / 工具条，
    * position(y = NAV_TITLE_BAR_HEIGHT) 溢出渲染到标题栏下方。
    * ⚠️ stackBuilder 容器原点在状态栏下方（avoidLayoutSafeArea），行 2 的
    * 容器内 y=56 = 屏幕绝对 safeTop + 56 —— 与各页 contentStartOffset 让位公式
    * 逐像素一致（换容器不换几何）。
    * 外层 Stack：clip(false) 让行 2 画出容器边界；hitTestBehavior(Transparent)
-   * 让行 2 未覆盖的空白区点击穿透到下方列表（HarmonyX 同款行为）。
+   * 让行 2 未覆盖的空白区点击穿透到下方列表。
    * （2026-10-19 顶栏切换动画方案 B + C2 已按用户要求回退为 if/else 硬切。）
    */
   @Builder
@@ -1217,10 +1502,15 @@ struct Index {
    * 内层 Column constraintSize(contentMaxWidth)，让顶栏内容与内容列同宽对齐；
    * 两侧空白区 hitTestBehavior(Transparent) 穿透点击到下方页面
    * （与内层 Stack 同款行为）。
-   * 2026-10-21 折叠屏回归：md（phoneShell）顶栏也经本包装（contentMaxWidth(md)
-   * =600 与内容列对齐）；仅 sm 直用 immersiveTitleBarContent（shell 的
-   * stackBuilder 内按断点分流，sm 行为零变化）。
-   */
+    * 2026-10-21 折叠屏回归：md（phoneShell）顶栏也经本包装（contentMaxWidth(md)
+    * =600 与内容列对齐）；仅 sm 直用 immersiveTitleBarContent（shell 的
+    * stackBuilder 内按断点分流，sm 行为零变化）。
+    * 2026-10-23 平板模式宽度适配（用户「条目和上方导航栏要适配宽度」）：上限
+    * 从 contentMaxWidth(600/720) 改为 TwoColumnLayout.contentMaxWidth —— 与
+    * 各页内容列完全同口径（两列激活 840 / 否则 600/720），根治平板横屏
+    * 「顶栏 720 vs 条目 840」错位；顺带修复阔折叠展开横屏的同款
+    * 「600 vs 840」错位。sm 回退 600（窗口 <600vp，天然无操作）零变化。
+    */
   @Builder
   immersiveTitleBarNarrow() {
     Row() {
@@ -1229,7 +1519,7 @@ struct Index {
       }
       .width('100%')
       .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
     }
     .width('100%')
     .height('100%')
@@ -1261,11 +1551,22 @@ struct Index {
       // 2026-10-22 折叠态适配层重写：lg 判定再叠加「未处于折叠屏展开态」
       // （isTabletShell，见该方法的注释）—— 阔折叠展开宽度落 lg（≥840vp）时
       // 同样走 phoneShell，彻底根治「展开进了平板模式」；壳选择 = 宽度 × 折叠态。
+      // 2026-10-23 平板竖屏模式：isTabletShell 再叠加「横屏」—— 平板竖屏
+      //（含宽度落 lg）与阔折叠展开一致走 phoneShell；壳选择 = 宽度 × 折叠态 ×
+      // 横竖屏（见 isTabletShell 注释）。
       // AppToast / AppDialogHost 全局宿主挂分支外，两种形态共用。
       if (this.isTabletShell()) {
         this.tabletShell()
       } else {
         this.phoneShell()
+      }
+
+      // 二级页沉浸光感悬浮播放栏（2026-10-23，全部推送子页）：二级页在顶且队列
+      // 非空时挂载，盖在壳之上、播放页 overlay 之下（overlay 打开时被其盖住）；
+      // 同帧互斥摘除 miniBar / tabletPlayBar（见 subPageActive 注释）。栏外空白
+      // 区点击穿透（组件外层 Transparent），列表照常可点可滚。
+      if (this.queue.length > 0 && this.subPageActive) {
+        SubPagePlayBar()
       }
 
       // 播放页 overlay（2026-10-21 组件状态切换动画）：PlayBar.openPlayer 挂载、
@@ -1351,15 +1652,6 @@ struct Index {
           .barFloatingStyle(this.barFloatingStyle())
           .width('100%')
           .height('100%')
-          // HdsTabs 实铺宽度持续回写（STORE_WINDOW_WIDTH_VP）：折叠开合 / 分屏 /
-          // 转屏后组件重排即触发，宽度变 → barFloatingStyle 的居中 sideMargin
-          // 自动重算（EntryAbility 首发保证冷启动首帧就有正确值，不闪跳）。
-          .onAreaChange((_old: Area, cur: Area): void => {
-            const w: Length = cur.width;
-            if (typeof w === 'number' && w > 0) {
-              this.windowWidthVp = w;
-            }
-          })
           // 屏幕滑动收/放（2026-10-14 需求，用户澄清为全屏手势）：上滑展开、
           // 下滑收起，超过 SCREEN_PAN_TRIGGER_VP 判定一次意图
           // （screenPanConsumed 防连发）。parallelGesture = 与子组件手势**并行
@@ -1387,23 +1679,27 @@ struct Index {
           // 固定栏（材质 Row 内部 padding.top = safeTop），让材质从 y=0 铺起覆盖状态栏。
           // NavDestination 子页不参与 HdsTabs 布局，本来就不受这里的 padding 影响。
         }
-        // 根标题栏（HarmonyX 移植）：stackBuilder 承载整块顶栏内容（行 1 + 行 2
+        // 根标题栏：stackBuilder 承载整块顶栏内容（行 1 + 行 2
         // 溢出渲染），bottomBuilder 槽整体退役 —— 其「随滚动跳动」根因
         // （bindToScrollable 隐式显隐管线位移）从物理上消除。
         // avoidLayoutSafeArea 与子页同口径（栏顶 = safeTop，覆盖式渲染）；
         // divider OFF：行 2 自带 0.5vp 底缘线的页面不再由根栏画分割线。
         // 2026-10-21 折叠屏回归：md 也走本壳 —— 顶栏经 immersiveTitleBarNarrow
-        // 收窄到 contentMaxWidth(md)=600 居中，与内容列对齐（A5 同款逻辑，
-        // 原平板形态验证过）；sm 直用 immersiveTitleBarContent，零改动。
+        // 收窄到与内容列同宽居中（A5 同款逻辑，原平板形态验证过）；sm 直用
+        // immersiveTitleBarContent，零改动。2026-10-23：收窄口径统一为
+        // TwoColumnLayout.contentMaxWidth（两列激活 840 / 否则 600/720），
+        // 平板竖屏（本壳新客）与阔折叠展开横屏的顶栏均与条目列对齐。
         .titleBar({
           avoidLayoutSafeArea: true,
           style: this.titleBarStyle(),
           content: {
             stackBuilder: (): void => {
               // 2026-10-22 壳选择解耦：phoneShell 下**非 sm** 一律走收窄顶栏 ——
-              // md（折叠展开 / 小平板竖屏）与折叠展开落 lg 宽度（阔折叠大屏）
-              // 同待遇，immersiveTitleBarNarrow 的 maxWidth 走 contentMaxWidth
-              // 按断点取值（md 600 / lg 720），与内容列同宽；sm 直用全宽顶栏，零改动。
+              // md（折叠展开 / 小平板竖屏）与折叠展开落 lg 宽度（阔折叠大屏）、
+              // 平板竖屏落 lg（2026-10-23 竖屏模式新客）同待遇，
+              // immersiveTitleBarNarrow 的 maxWidth 走 TwoColumnLayout.
+              // contentMaxWidth 按断点×横竖屏取值（两列激活 840 / 否则 600/720），
+              // 与内容列同宽；sm 直用全宽顶栏，零改动。
               if (this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_SM) {
                 this.immersiveTitleBarNarrow();
               } else {
@@ -1477,8 +1773,11 @@ struct Index {
             .opacity(this.tabFadeOpacity)
             .translate({ x: this.tabFadeOffsetX })
 
-            // 底部常驻播放条：队列空不渲染（浮岛不占布局位，列表自然铺到底）
-            if (this.queue.length > 0) {
+            // 底部常驻播放条：队列空不渲染（浮岛不占布局位，列表自然铺到底）；
+            // 二级页在顶时同步摘除（2026-10-23 互斥，见 subPageActive 注释）——
+            // 推送页盖住内容列期间由根 Stack 的 SubPagePlayBar 接管，避免
+            // 双 GEOMETRY_ID_PLAYER_DISC 锚点。
+            if (this.queue.length > 0 && !this.subPageActive) {
               this.tabletPlayBar()
             }
           }
@@ -1487,8 +1786,9 @@ struct Index {
         }
         // 根标题栏：与手机形态同配置（stackBuilder 顶栏内容 / 渐进模糊样式 /
         // divider OFF）；avoidLayoutSafeArea 让栏顶落在状态栏下方。
-        // A5：平板形态顶栏内容经 immersiveTitleBarNarrow 收窄到 contentMaxWidth
-        // 居中，与内容列对齐（手机形态不受影响）。
+        // A5：平板形态顶栏内容经 immersiveTitleBarNarrow 收窄到
+        // TwoColumnLayout.contentMaxWidth（平板横屏两列激活 840）居中，
+        // 与内容列对齐（手机形态不受影响）。
         .titleBar({
           avoidLayoutSafeArea: true,
           style: this.titleBarStyle(),

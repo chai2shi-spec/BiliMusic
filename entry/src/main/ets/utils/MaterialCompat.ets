@@ -13,7 +13,13 @@
  * - **uiMaterial 通路**（`uiMaterial.ImmersiveMaterial` + `.systemMaterial()`）：
  *   给自绘组件（Row / Column 等）用。低版本或运行时能力缺失时返回 undefined，
  *   调用方再用 `MaterialCompat.effect()` 走 backgroundEffect 模拟毛玻璃。
- *   当前工程暂无自绘组件使用，保留作为后续自绘控件的兜底通路。
+ *   ⚠️ 官方《沉浸光感常见问题》生效范围（2026-10-24 真机实锤）：「其他组件」的
+ *   systemMaterial 仅在 Navigation/NavDestination 标题栏或横向 Tabs 底部
+ *   TabBar（barPosition=End）内生效，其他区域**静默不渲染**——自绘 Row 直接
+ *   挂 .systemMaterial() 就是全透明。当前工程无 uiMaterial 消费方：二级页
+ *   悬浮播放栏（SubPagePlayBar）2026-10-24 终版走 HDS 内部材质通路（二号
+ *   HdsTabs miniBar + systemMaterialEffect，与首页胶囊同源），普通 Tabs
+ *   barFloatingStyle.systemMaterial 载体（B案）真机生效但观感不达预期已弃。
  */
 
 // ⚠️ @ohos.arkui.uiMaterial 整个模块 26.0.0 才有：API 23/24 设备上静态 import 会在
@@ -59,6 +65,36 @@ export class CompatUtils {
 export class MaterialCompat {
   /** 能力日志只打一次的标记 */
   private static capabilityLogged: boolean = false;
+  /** hasImmersiveMaterial 结果缓存（能力在运行期不变，null = 未探测） */
+  private static hasImmersiveCache: boolean | null = null;
+
+  /**
+   * 本机是否真正能渲染 systemMaterial 沉浸材质（sdkApiVersion ≥ 26 +
+   * 运行时注入了 ImmersiveStyle + 设备上报 isImmersiveMaterialSupported），
+   * 与 immersiveMaterial() 返回非 undefined 的判定完全同源。
+   *
+   * 调用方据此决定组件链式背景色的取值：材质可用时必须给**透明**底
+   * （官方 FAQ「背景色遮挡材质效果」：不透明 backgroundColor 画在材质层
+   * 之上，玻璃被完全盖住），不可用时回落实色兜底。结果缓存，能力运行期
+   * 不变，重复调用零开销。
+   */
+  static hasImmersiveMaterial(): boolean {
+    if (MaterialCompat.hasImmersiveCache !== null) {
+      return MaterialCompat.hasImmersiveCache;
+    }
+    let ok: boolean = false;
+    if (CompatUtils.isImmersiveSupported()) {
+      try {
+        if (typeof uiMaterial.ImmersiveStyle !== 'undefined' && uiMaterial.isImmersiveMaterialSupported()) {
+          ok = true;
+        }
+      } catch (e) {
+        console.error(`[MaterialCompat] probe hasImmersiveMaterial failed: ${JSON.stringify(e)}`);
+      }
+    }
+    MaterialCompat.hasImmersiveCache = ok;
+    return ok;
+  }
 
   /**
    * 一次性输出设备沉浸材质能力四要素（hilog 可查）：

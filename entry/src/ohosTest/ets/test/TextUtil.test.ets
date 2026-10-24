@@ -1,5 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import {
+  artistSegments,
   toHttpsUrl,
   toThumbUrl,
   cleanTitle,
@@ -13,13 +14,13 @@ import { LyricCandidate } from '../../../main/ets/model/MusicModels';
 // TextUtil 纯函数单测：URL 规范化/缩略图、标题清洗、LRC 解析、候选打分。
 // 这些函数无 UI / 存储依赖，是歌词搜索链路里最值得回归测试的部分。
 
-function makeCandidate(name: string, duration: number): LyricCandidate {
+function makeCandidate(name: string, duration: number, artist: string = '周杰伦'): LyricCandidate {
   return {
     id: '1',
     songId: '1',
     mid: '',
     trackName: name,
-    artistName: '周杰伦',
+    artistName: artist,
     albumName: '',
     duration: duration,
     image: ''
@@ -104,6 +105,34 @@ export default function textUtilTest() {
       const normal: number = scoreCandidate(makeCandidate('晴天', 270), ctx);
       const karaoke: number = scoreCandidate(makeCandidate('晴天 伴奏', 270), ctx);
       expect(karaoke).assertLess(normal);
+    });
+
+    it('artistSegmentsSplitsAndCleans', 0, () => {
+      // 多歌手按分隔符拆开并逐段清洗；去重；空串返回空数组
+      const segs: string[] = artistSegments('周杰伦 / 费玉清');
+      expect(segs.length).assertEqual(2);
+      expect(segs[0]).assertEqual('周杰伦');
+      expect(segs[1]).assertEqual('费玉清');
+      expect(artistSegments('')).assertDeepEquals([]);
+      expect(artistSegments('【官方】')).assertDeepEquals([]);
+    });
+
+    it('scoreCandidateRewardsArtistMatch', 0, () => {
+      // 2026-10-23 修匹配：本机 artist 与候选歌手命中 → +240；
+      // 候选歌手不同且不在标题里 → 无此加分。两者标题、时长一致，只有歌手差异。
+      const ctx: ScoreContext = {
+        rawTitle: '晴天',
+        clean: '晴天',
+        duration: 269,
+        quoted: [],
+        artist: '周杰伦'
+      };
+      const hit: number = scoreCandidate(makeCandidate('晴天', 270, '周杰伦'), ctx);
+      const miss: number = scoreCandidate(makeCandidate('晴天', 270, '某某翻唱'), ctx);
+      expect(hit - miss).assertEqual(240);
+      // 不传 artist（旧调用方 / 旧行为）→ 不加分、不影响原分值
+      const ctxNoArtist: ScoreContext = { rawTitle: '晴天', clean: '晴天', duration: 269, quoted: [] };
+      expect(scoreCandidate(makeCandidate('晴天', 270, '某某翻唱'), ctxNoArtist)).assertEqual(490);
     });
   });
 }

@@ -3,6 +3,8 @@
  * 对应原 React 项目的 src/types/index.ts 与 services 中的数据结构。
  */
 
+import util from '@ohos.util';
+
 /**
  * 播放模式。
  *
@@ -200,24 +202,18 @@ export function buildTrack(partial: Partial<Track>): Track {
 /** Preferences 单值上限为 8192 字节，留出余量按 6000 收口 */
 export const PREF_VALUE_BUDGET_BYTES: number = 6000;
 
+/** 共享的 UTF-8 编码器（无状态，模块级单例避免每次分配） */
+const utf8Encoder: util.TextEncoder = new util.TextEncoder();
+
 /**
- * 估算 UTF-8 字节数。
+ * 精确 UTF-8 字节数。
  * 不能直接用 `str.length`：上限按字节算，中文一字占 3 字节，
  * 用字符数估算会高估剩余容量，写入照样会超限失败。
+ * 2026-10-23 性能审查：改用 @ohos.util TextEncoder 精确编码 ——
+ * 旧手算版把增补平面字符（emoji 等 >0xFFFF）算成 2×3=6 字节，实际只占 4。
  */
 export function utf8Length(s: string): number {
-  let bytes: number = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c: number = s.charCodeAt(i);
-    if (c < 128) {
-      bytes += 1;
-    } else if (c < 2048) {
-      bytes += 2;
-    } else {
-      bytes += 3;
-    }
-  }
-  return bytes;
+  return utf8Encoder.encodeInto(s).length;
 }
 
 /**
@@ -345,6 +341,20 @@ export const PROGRESS_STYLE_PULSE: string = 'pulse';
 /** 播放页进度条样式（AppSettings.progressStyle）：律动频谱条 —— 曲目 id 播种的伪随机竖条 + 头部律动 + 落位亮波 */
 export const PROGRESS_STYLE_WAVE: string = 'wave';
 
+/** 播放页收起动画风格（AppSettings.closeAnimStyle）：柔退 —— 内容层反向错峰淡出 + 背景末端渐隐 + 封面 geometryTransition 回飞（打开侧 morph 不变） */
+export const PLAYER_CLOSE_STYLE_MORPH: string = 'morph';
+/** 播放页收起动画风格（AppSettings.closeAnimStyle）：柔退+手势 —— 柔退基础上，手机 SM 形态非竖滚区域支持竖向下拉跟手收起（松手过阈值下滑淡出，不足回弹） */
+export const PLAYER_CLOSE_STYLE_MORPH_SWIPE: string = 'morph_swipe';
+/** 播放页收起动画风格（AppSettings.closeAnimStyle）：下滑收起 —— 所有收起入口整页加速下滑淡出（松手/按键同款），放弃封面 morph 飞行 */
+export const PLAYER_CLOSE_STYLE_SLIDE: string = 'slide';
+
+/** 播放页封面风格（AppSettings.playerCoverStyle）：唱片 —— 圆形封面 + 20s/圈旋转（现状默认） */
+export const PLAYER_COVER_STYLE_DISC: string = 'disc';
+/** 播放页封面风格（AppSettings.playerCoverStyle）：方卡极简 —— 方形圆角大封面不旋转 + 主色净底渐变背景（无模糊图无噪点） */
+export const PLAYER_COVER_STYLE_SQUARE: string = 'square';
+/** 播放页封面风格（AppSettings.playerCoverStyle）：全屏沉浸 —— 封面满屏宽、上沿顶到状态栏（无圆角无投影），封面底部渐变模糊 + 主色溶解过渡到下方主色纵向渐变背景（2026-10-24 改版，替代旧硬切；同日过渡动画改版：特效层随展开飞行渐显、收起先柔退渐隐再回飞，不再瞬间出现/消失） */
+export const PLAYER_COVER_STYLE_IMMERSIVE: string = 'immersive';
+
 export interface AppSettings {
   sidebarState: string; // 手机端固定为 'auto'
   playQuality: string;
@@ -363,6 +373,10 @@ export interface AppSettings {
   barLayout: string;
   /** 播放页进度条样式：PROGRESS_STYLE_CLASSIC（经典）/ SHIMMER（流光）/ PULSE（波点）/ WAVE（频谱） */
   progressStyle: string;
+  /** 播放页收起动画风格：PLAYER_CLOSE_STYLE_MORPH（柔退）/ MORPH_SWIPE（柔退+手势）/ SLIDE（下滑） */
+  closeAnimStyle: string;
+  /** 播放页封面风格：PLAYER_COVER_STYLE_DISC（唱片）/ SQUARE（方卡）/ IMMERSIVE（全屏） */
+  playerCoverStyle: string;
   /** 迷你播放栏进度指示显示开关（底部直线 + 收起态圆环；设置 → 外观；默认开） */
   miniBarProgress: boolean;
   /**
@@ -375,8 +389,10 @@ export interface AppSettings {
   speedEnabled: boolean;
   /** 倍速值（档位见 PLAYBACK_SPEED_OPTIONS；开关关闭时由设置页归 1.0） */
   playbackSpeed: number;
-  /** 与其他应用同时播放（设置 → 播放；默认关）：开启后播放不被其他应用音频打断（audioInterruptMode = INDEPENDENT_MODE），也不抢占对方 */
+  /** 与其他应用同时播放（设置 → 播放；默认关）：开启后激活 AudioSession（CONCURRENCY_MIX_WITH_OTHERS，与其他应用音频双向混音），关闭停用会话恢复默认焦点行为 */
   audioMixEnabled: boolean;
+  /** 在 B 站打开原视频（设置 → 播放；默认开）：开启后播放页功能行出现跳转 B 站客户端入口 */
+  openInBilibiliEnabled: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -392,11 +408,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   themeColor: 'pink',
   barLayout: BAR_LAYOUT_HORIZONTAL,
   progressStyle: PROGRESS_STYLE_CLASSIC,
+  closeAnimStyle: PLAYER_CLOSE_STYLE_MORPH_SWIPE,
+  playerCoverStyle: PLAYER_COVER_STYLE_DISC,
   miniBarProgress: true,
   miniBarAutoExpand: true,
   speedEnabled: false,
   playbackSpeed: 1.0,
-  audioMixEnabled: false
+  audioMixEnabled: false,
+  openInBilibiliEnabled: true
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -419,6 +438,28 @@ export function progressStyleLabelOf(style: string): string {
     return '频谱';
   }
   return '经典';
+}
+
+/** 播放页收起动画风格显示标签（设置页后缀 / toast 用；未知值回落「柔退」） */
+export function closeStyleLabelOf(style: string): string {
+  if (style === PLAYER_CLOSE_STYLE_MORPH_SWIPE) {
+    return '柔退+手势';
+  }
+  if (style === PLAYER_CLOSE_STYLE_SLIDE) {
+    return '下滑';
+  }
+  return '柔退';
+}
+
+/** 播放页封面风格显示标签（设置页后缀 / toast 用；未知值回落「唱片」） */
+export function coverStyleLabelOf(style: string): string {
+  if (style === PLAYER_COVER_STYLE_SQUARE) {
+    return '方卡';
+  }
+  if (style === PLAYER_COVER_STYLE_IMMERSIVE) {
+    return '全屏';
+  }
+  return '唱片';
 }
 
 /** 逐字片段（卡拉 OK 高亮用） */

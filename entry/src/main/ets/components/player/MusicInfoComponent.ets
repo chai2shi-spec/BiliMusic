@@ -6,7 +6,7 @@
  * 数据源全部来自既有播放状态（STORE_CURRENT_TRACK），不引入新数据。
  */
 
-import { Track } from '../../model/MusicModels';
+import { PLAYER_COVER_STYLE_DISC, PLAYER_COVER_STYLE_IMMERSIVE, Track } from '../../model/MusicModels';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
@@ -22,13 +22,16 @@ import {
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_LOGIN_REV,
+  STORE_PLAYER_COVER_STYLE,
   formatTrackQuality
 } from '../../common/Constants';
 import { getLoginUser, LoginUser } from '../../service/LoginStore';
 import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_OFFSET_VP,
-  LAYER_DELAY_INFO
+  LAYER_DELAY_INFO,
+  LAYER_EXIT_DURATION_MS,
+  LAYER_EXIT_DELAY_INFO
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -52,11 +55,27 @@ export struct MusicInfoComponent {
   @StorageLink(STORE_LOGIN_REV) loginRev: number = 0;
 
   /**
+   * 封面风格（三档，设置页可切）：全屏档（immersive）下 PlayerInfoComponent 的
+   * SM 调用点去掉了本组件的左右内边距（封面满屏宽），标题块需在此补回边距，
+   * 否则歌名/歌手/音质文字贴屏幕边缘；其余两档调用点内边距原样，补 0。
+   */
+  @StorageProp(STORE_PLAYER_COVER_STYLE) coverStyle: string = PLAYER_COVER_STYLE_DISC;
+
+  /**
    * 圆盘边长上限（vp）：0 = 首帧尚未实测（先按旧的宽度驱动渲染，实测后收敛）。
    * 圆盘本身 aspectRatio(1) 宽变高，列宽接近列高的形态（宽折叠展开 / 折起外屏）
    * 会把控制区挤出屏幕；这里按「列高 − 标题块 − 控制区」的实测预算钳住它。
    */
   @State discSize: number = 0;
+
+  /**
+   * 是否在本页内渲染底部控制区（2026-10-23 SM 固定控制区改版）。
+   * 默认 true：折叠屏展开分支等既有调用不传参，行为不变。
+   * SM 手机 Swiper 里传 false —— 控制区移到 Swiper 外固定（见
+   * PlayerInfoComponent 的 SM 分支），右滑切歌词页时只有封面/歌词区域滑动，
+   * 控制区静止；同时本页圆盘预算不再扣减控制区高度（recomputeDisc）。
+   */
+  @Prop isShowControl: boolean = true;
 
   /**
    * 分层入场（方案 B）：**标题块**（歌名 / 歌手）延迟 `LAYER_DELAY_INFO` 淡入 + 上移。
@@ -76,12 +95,13 @@ export struct MusicInfoComponent {
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
-   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
-   * 复位不在任何隐式动画作用域内 → 标题块单帧直接消失（2026-10-22 用户要求
-   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
+   * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
+   * 仅柔退路径递增）：标题块 200ms EaseIn 柔退淡出 + 回沉（2026-10-24 三风格
+   * 收起改版，替代 2026-10-22 的单帧瞬隐；与 PlayerInfoComponent 自持标题块
+   * 同档 LAYER_EXIT_DELAY_INFO 错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
-  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把标题块点亮 */
+  /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把标题块点亮 */
   private exitRequested: boolean = false;
 
   /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
@@ -93,11 +113,20 @@ export struct MusicInfoComponent {
     this.titleOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
+  /** 柔退复位：标题块 200ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
-    this.titleOpacity = 0;
-    this.titleOffsetY = ENTRANCE_OFFSET_VP;
+    this.getUIContext().animateTo(
+      {
+        duration: LAYER_EXIT_DURATION_MS,
+        curve: Curve.EaseIn,
+        delay: LAYER_EXIT_DELAY_INFO
+      },
+      (): void => {
+        this.titleOpacity = 0;
+        this.titleOffsetY = ENTRANCE_OFFSET_VP;
+      }
+    );
   }
 
   aboutToAppear(): void {
@@ -135,18 +164,26 @@ export struct MusicInfoComponent {
   }
 
   /**
-   * 圆盘边长 = min(列宽, 列高 − 标题块 − 控制区)。
-   * 四项实测就位前不动（保持 0 = 宽度驱动）；预算为负时同样退回宽度驱动。
-   * 瘦长屏（普通手机）预算大于列宽，min 取列宽 —— 与旧行为完全一致，
-   * 只有空间不足的形态才会收缩圆盘。
+   * 圆盘边长 = min(列宽, 列高 − 标题块 [− 控制区])。
+   * 控制区不在页内（isShowControl=false，SM 固定控制区改版）→ 预算只减标题块；
+   * 在页内时沿用旧口径（列高 − 标题块 − 控制区）。
+   * 预算为负时退回宽度驱动。瘦长屏（普通手机）预算大于列宽，min 取列宽 ——
+   * 与旧行为完全一致，只有空间不足的形态才会收缩圆盘。
    */
   private recomputeDisc(): void {
-    if (this.colW <= 0 || this.colH <= 0 || this.titleH <= 0 || this.ctrlH <= 0) {
+    if (this.colW <= 0 || this.colH <= 0 || this.titleH <= 0) {
+      return;
+    }
+    // 页内带控制区时，控制区实测高度未就位前不动（保持 0 = 宽度驱动）
+    if (this.isShowControl && this.ctrlH <= 0) {
       // 暂留诊断日志，验证通过后可删
       console.info(`[MusicInfo] recompute skip: colW=${this.colW}, colH=${this.colH}, titleH=${this.titleH}, ctrlH=${this.ctrlH}`);
       return;
     }
-    this.discSize = Math.min(this.colW, this.colH - this.titleH - this.ctrlH);
+    const budget: number = this.isShowControl
+      ? this.colH - this.titleH - this.ctrlH
+      : this.colH - this.titleH;
+    this.discSize = budget > 0 ? Math.min(this.colW, budget) : this.colW;
     console.info(`[MusicInfo] discSize=${this.discSize} (colW=${this.colW}, colH=${this.colH}, titleH=${this.titleH}, ctrlH=${this.ctrlH})`);
   }
 
@@ -238,27 +275,37 @@ export struct MusicInfoComponent {
         Column() {
           this.CoverInfo()
           // 标题块包一层测高容器：@Builder 调用不能链属性，onAreaChange 挂在包装上
+          // 全屏档（immersive）：调用点左右内边距已去（封面满屏宽），此处补回
+          // common_padding，标题/歌手/音质文字不贴屏幕边缘；其余两档补 0 零影响。
           Column() {
             this.MusicInfo()
           }
+          .padding({
+            left: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? $r('app.float.common_padding') : 0,
+            right: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? $r('app.float.common_padding') : 0
+          })
           .onAreaChange((_old: Area, n: Area): void => {
             this.titleH = this.toVp(n.height);
             this.recomputeDisc();
           })
           // 分层入场（方案 B）：只挂 transform 系属性，不动 width/height/padding。
           // 这一层是「封面之外的容器」，所以不会影响 CoverDisc 的 geometryTransition 目标框。
-          // 收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换。
+          // 收起为柔退退场（onContentExit 的 200ms EaseIn 淡出 + 回沉）。
           .opacity(this.titleOpacity)
           .translate({ y: this.titleOffsetY })
           Blank()
-          // 控制区同样包一层测高容器，实测高度参与圆盘预算
-          Column() {
-            ControlAreaComponent()
+          // 控制区同样包一层测高容器，实测高度参与圆盘预算。
+          // SM 固定控制区改版（2026-10-23）：isShowControl=false 时不渲染 ——
+          // 控制区由 PlayerInfoComponent 放在 Swiper 外固定，本页不再内嵌一份。
+          if (this.isShowControl) {
+            Column() {
+              ControlAreaComponent()
+            }
+            .onAreaChange((_old: Area, n: Area): void => {
+              this.ctrlH = this.toVp(n.height);
+              this.recomputeDisc();
+            })
           }
-          .onAreaChange((_old: Area, n: Area): void => {
-            this.ctrlH = this.toVp(n.height);
-            this.recomputeDisc();
-          })
         }
         .height(StyleConstants.FULL_HEIGHT)
         .width(StyleConstants.FULL_WIDTH)
@@ -292,7 +339,7 @@ export struct MusicInfoComponent {
         .opacity(0.95)
         .fontWeight(FontWeight.Bold)
         .fontFamily(PlayerConstants.FONT_FAMILY_BOLD)
-        .maxLines(1)
+        .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
 
       Text(this.artistText())

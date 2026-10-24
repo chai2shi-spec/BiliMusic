@@ -2,7 +2,7 @@
  * UP 主主页（站内）：显示 UP 的资料 + 投稿列表，并可把投稿**订阅成持续更新的歌单**。
  *
  * 为什么是站内页而不是跳 B 站：订阅要在 App 内落成可维护的歌单，
- * 跳出去就没法「拉取新投稿」，也就没有 C 方案的意义。
+ * 跳出去就没法持续更新订阅，也就没有 C 方案的意义。
  *
  * 数据来源（2026-10-03 匿名态实测，均可用）：
  *  · 资料 `getUserCard`（x/web-interface/card）—— **不要用 space/wbi/acc/info**，
@@ -13,35 +13,40 @@
  * upName 兜底、upFace 首帧占位），与 PlaylistDetail 同套约定。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 返回行 + UP 资料头部区，批 1 样板同款）；侧滑返回是 Navigation 级能力，不受影响。
+ * 标题行 + UP 资料头部区，批 1 样板同款；返回键为 HDS 默认键）；侧滑返回是 Navigation 级能力，不受影响。
  *
  * 布局与 **PlaylistDetail 完全同款**（2026-10-06 对齐）：
  *  · 头部区「96vp 头像 + 28fp 大标题 + 元信息 + 播放全部/订阅按钮」整体在栏内，
- *    UP 昵称只在头部区显示一次，返回行仅一颗返回键；
+ *    UP 昵称只在头部区显示一次，标题行为空占位（返回键为 HDS 默认键）；
  *  · 列表走「首个空白占位 ListItem」**穿透模式**（下载页同款）——视口铺满全屏，
  *    首项从标题栏底部起排，滚动时条目从沉浸材质下穿过，滚动模糊由 HDS scrollEffectOpts 接管；
  *  · 非列表分支（骨架 / 失败 / 空态）没有占位条目，各自补 padding top。
  *
  * 缓存策略（2026-10-09）：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
- * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有两个显式动作才联网：
- *  · 头部「拉取新投稿」：取最新投稿 → 并入订阅歌单 + 本页列表同步换新 + 重写缓存；
- *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料。
+ * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有显式动作才联网：
+ *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料；
+ *  · 头部「订阅投稿」（仅未订阅时）：取投稿建歌单，成功后本页列表与缓存一并换新。
+ * 本页已取消「拉取新投稿」（2026-10-23）：订阅歌单的更新入口在歌单详情页
+ * （PlaylistDetail 的「拉取新投稿」按钮）。
  * 无缓存（首次进入）仍走 loadCard + loadPage(1) 联网加载，成功后落盘。
  *
- * 投稿搜索（2026-10-23，A+B 混合）：头部搜索框输入即**本地过滤**已加载列表
- * （标题/歌手匹配，离线可用）；Enter /「搜索」按钮走 `searchUpVideosByKeyword`
- * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿，可覆盖未加载页，3 页上限）。
+ * 投稿搜索（2026-10-23，A+B 混合；同日阶梯化）：头部搜索框输入即**本地过滤**
+ * 已加载列表（标题/歌手匹配，离线可用）；Enter /「搜索」按钮走远程搜索阶梯：
+ * 空间接口 keyword 服务端搜索为主（`searchSpaceVideosByKeyword`，结果 = TA 的
+ * 投稿里匹配关键词的全部），被风控 / 0 命中时落回 `searchUpVideosByKeyword`
+ * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿，修复前行为）。
  * 渲染源三态切换见 displayTracks()；搜索态不落缓存、不参与翻页。
  */
 
 import * as BilibiliApi from '../api/BilibiliApi';
 import { SpaceVideo } from '../api/BilibiliApi';
 import { Track, buildTrack } from '../model/MusicModels';
-import { LibraryStore, UpSubscribeResult } from '../service/LibraryStore';
+import { LibraryStore, UpSubscribeResult, PLAYLIST_MAX_ITEMS } from '../service/LibraryStore';
 import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { UpSpaceRouteParam, NavRouteParamReader } from '../service/NavRouteParams';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
@@ -54,11 +59,20 @@ import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import {
   ButtonMaterialModifier,
-  makeButtonMaterialModifier
+  makeButtonMaterialModifier,
+  TextInputMaterialModifier,
+  makeTextInputMaterialModifier
 } from '../utils/HeaderBarMaterial';
+import { MaterialCompat } from '../utils/MaterialCompat';
 import { common } from '@kit.AbilityKit';
 import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import {
+  PairOf,
+  PairDataSource,
+  TWO_COL_GAP_VP,
+  TwoColumnLayout
+} from '../common/utils/TwoColumnList';
 import {
   NAV_TRANSITION_MS,
   BUTTON_RADIUS_VP,
@@ -67,21 +81,15 @@ import {
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /** 每页投稿数：匿名 30；登录态走空间接口可吃满 50（该接口 ps 上限） */
 const PAGE_SIZE_ANON: number = 30;
 const PAGE_SIZE_LOGGED_IN: number = 50;
 /** 失败后「重试」的冷却（ms）：B 站这类接口按 IP 限流，连点只会继续被拒 */
 const RETRY_COOLDOWN_MS: number = 4000;
-
-/**
- * 顶栏滚动模糊时机（基准口径 = 关于页）：
- * 首条内容自静止位上移 30vp 起雾 → 80vp 满显影。
- * ⚠️ −C 补偿路径已验证失败（2026-10-09 真机签名②：负值被 HDS 钳制，起雾仍在条目出屏后），
- * 第三参已回退；待 RecentPage 的 padding 让位迁移（回退 B）真机通过后同法迁移本页。
- */
-const UP_BLUR_START_VP: number = 30;
-const UP_BLUR_END_VP: number = 80;
 
 /**
  * UP 资料头部区（bottomBuilder 承载）实测前的估计高度：头像行 + 元信息行 + padding。
@@ -133,7 +141,8 @@ export struct UpSpacePage {
   @State fans: number = 0;
   /** UP 投稿总数（card 的 archive_count，缓存持久化）；0 = 未知（旧缓存 / 卡片失败） */
   @State archiveCount: number = 0;
-  @State tracks: Track[] = [];
+  /** @Watch 驱动列表数据源同步（见 reloadListSource）：三态渲染源任一变化都整表重载 */
+  @State @Watch('onListSourceChanged') tracks: Track[] = [];
   @State loading: boolean = false;
   @State loadingMore: boolean = false;
   @State page: number = 1;
@@ -159,16 +168,16 @@ export struct UpSpacePage {
   @State refreshing: boolean = false;
   // ===== 投稿搜索（2026-10-23：本地过滤 + B 站按 mid 过滤搜索，A+B 混合）=====
   /** 搜索框文本：输入即本地过滤已加载列表（onChange 重算）；Enter/「搜索」触发 B 站搜索 */
-  @State searchKeyword: string = '';
+  @State @Watch('onListSourceChanged') searchKeyword: string = '';
   /** 本地过滤结果（keyword 变化即时重算；keyword 为空 = 不过滤，此数组为空占位） */
-  @State filteredTracks: Track[] = [];
+  @State @Watch('onListSourceChanged') filteredTracks: Track[] = [];
   /** B 站搜索在途（footer 显示「正在 B 站搜索…」） */
   @State remoteSearching: boolean = false;
   /**
    * B 站搜索结果（**null = 不在远程搜索态**，这是态开关本体；
    * 非 null 时空数组也有效 = 「B 站确实没搜到该 UP 的相关投稿」）。
    */
-  @State remoteResults: Track[] | null = null;
+  @State @Watch('onListSourceChanged') remoteResults: Track[] | null = null;
   /** B 站搜索失败原因（人话，describeError 翻译；空串 = 没失败） */
   @State remoteFailReason: string = '';
   /** 搜索竞态令牌：只认最新一次搜索/清除（照 SearchPage.searchToken 纪律，旧响应丢弃） */
@@ -187,6 +196,11 @@ export struct UpSpacePage {
    * 普通成员即可（不驱动 UI，只在提示文案里被读一次）。
    */
   private lastCollectError: string = '';
+  /**
+   * `collectTracks()` 全量翻页是否中途失败、只拿到部分（订阅提示用）。
+   * false = 拉齐了，或走的是单页兜底链（没有「一半」态）。
+   */
+  private lastCollectPartial: boolean = false;
 
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
@@ -197,6 +211,13 @@ export struct UpSpacePage {
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时投稿条目两列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
+
+  /** 横屏宽屏（窗口 ≥600vp 的横屏）时条目两列显示；竖屏 / 窄窗口单列不变 */
+  private isTwoCol(): boolean {
+    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  }
   /**
    * UP 资料头部区实测高（vp，bottomBuilder 内层根节点 onAreaChange 回写，随元信息行数浮动）。
    * ⚠️ 初值必须为 0（2026-10-08 同款教训）：列表带着初值一起挂载会让占位条目先按
@@ -207,8 +228,28 @@ export struct UpSpacePage {
   @State headerAreaHeight: number = 0;
   /** 投稿列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
   private listScroller: Scroller = new Scroller();
-  /** 头部按钮（播放全部 / 订阅·拉取新投稿）沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
+  /**
+   * 列表数据源（2026-10-23 性能审查）：LazyForEach 驱动源，与 displayTracks()
+   * 三态保持同步 —— 三态 @State（tracks / filteredTracks / remoteResults /
+   * searchKeyword）都挂 @Watch，任一变化走 reloadListSource 整表重载
+   * （reload 语义与三态切换天然匹配：切态必是整表换源）。
+   */
+  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  /** 两列视图数据源（无状态视图，FollowsPage.upPairs 同款）：trackSource 变化处显式 sync() */
+  private trackPairs: PairDataSource<Track> = new PairDataSource<Track>(this.trackSource);
+  /** 头部按钮（播放全部 / 订阅投稿 / 搜索）与搜索框沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
   private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
+  /** 搜索框（TextInput）沉浸光感材质修饰器：与 buttonMaterial 同档（THIN + interactive + lightEffect） */
+  private searchInputMaterial: TextInputMaterialModifier = makeTextInputMaterialModifier();
+  /**
+   * 搜索框底色：材质可用（26+）时**透明**——官方 FAQ「背景色遮挡材质效果」：
+   * 不透明 backgroundColor 画在材质层之上，玻璃完全被盖住（TextInput 通用背景层
+   * 在材质层上方；Button 内部把底色并入材质渲染所以按钮天生透明）。低版本材质
+   * 不可用时回落实色 bg_card 兜底，搜索框不至于变成隐形框。
+   */
+  private searchBoxBg(): ResourceColor {
+    return MaterialCompat.hasImmersiveMaterial() ? Color.Transparent : $r('app.color.bg_card');
+  }
 
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 头部区实测高。
@@ -218,11 +259,27 @@ export struct UpSpacePage {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.headerAreaHeight;
   }
 
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.listScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   private player: MusicPlayer = MusicPlayer.getInstance();
   /** 子页转场横移量：常驻 '0%'，转场代理按 push/pop 临时改写 */
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     // 路由入参（2026-10-22 传参改造）：显式参数类随 pushPathByName 入栈，
     // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
     const routeParam: UpSpaceRouteParam | null =
@@ -249,7 +306,7 @@ export struct UpSpacePage {
 
   /**
    * 缓存命中（2026-10-09）：直接恢复，不打任何接口 —— loadCard / loadPage 都跳过，
-   * 刷新只留两个显式出口：头部「拉取新投稿」按钮、列表下拉刷新（forceRefresh）。
+   * 刷新只留显式出口：列表下拉刷新（forceRefresh）与「订阅投稿」成功后的换新。
    * 头像用缓存真图（歌单入口传的是空串占位）；上拉翻页从缓存 page+1 续拉。
    * （2026-10-16 AppFreeze 加固）readText 移到异步任务里执行，读完再决定恢复 / 联网。
    */
@@ -286,7 +343,7 @@ export struct UpSpacePage {
     }
   }
 
-  /** 本地是否已有该 UP 的订阅歌单（决定按钮显示「订阅」还是「拉取新投稿」） */
+  /** 本地是否已有该 UP 的订阅歌单（决定头部是否继续显示「订阅投稿」按钮：已订阅则隐藏） */
   private refreshSubscriptionState(): void {
     const existing = LibraryStore.getPlaylistByUpMid(this.upMid);
     this.subscribed = existing !== null;
@@ -460,8 +517,6 @@ export struct UpSpacePage {
       // hasMore 按原始返回长度判定：去重后变短只说明页界有重叠，不代表没有下一页；
       // page 即使本页全被去重也要推进，否则会在同一页上死循环。
       this.hasMore = vlist.length >= this.pageSize();
-      // 增量追加（2026-10-19 修「加载第二页列表整体跳一下」）：翻页不再整表
-      // 重新赋值，fresh 逐条 push，ForEach 只 diff 新增 key，既有行零重渲染。
       if (pn === 1) {
         this.tracks = mapped;
       } else {
@@ -560,10 +615,10 @@ export struct UpSpacePage {
 
   /**
    * 下拉刷新：强制联网重拉第一页 + 资料（2026-10-09 缓存策略下进页不联网，
-   * 这是两个显式刷新出口之一；另一个是头部「拉取新投稿」按钮）。
+   * 这是本页仅存的显式刷新出口）。
    *
    * 有请求在途（loading / loadingMore）时直接收起刷新头，不叠加请求。
-   * catch 兜住后 then 必达：loading / refreshing 一定能复位（refreshSubscription
+   * catch 兜住后 then 必达：loading / refreshing 一定能复位（subscribe
    * 同款纪律 —— 缺了 catch 时链上任何一步抛异常，刷新头会永远转圈）。
    */
   private forceRefresh(): void {
@@ -601,10 +656,16 @@ export struct UpSpacePage {
     return this.tracks;
   }
 
+  /** 三态渲染源任一变化（@Watch）：同步列表数据源（整表重载 + 两列视图 sync） */
+  private onListSourceChanged(): void {
+    this.trackSource.reload(this.displayTracks());
+    this.trackPairs.sync();
+  }
+
   /**
    * 本地过滤（方案 A）：标题 / 歌手包含关键词（小写化匹配），输入即生效、离线可用。
    * keyword 为空 → 空数组（displayTracks 会退回全量列表）。
-   * tracks 换新 / 追加的三处（loadFirstMultiSource / loadPageViaSpace / refreshSubscription）
+   * tracks 换新 / 追加的三处（loadFirstMultiSource / loadPageViaSpace / subscribe）
    * 之后都要重跑一次，保证翻页新进来的条目也能出现在过滤视图里。
    */
   private applyLocalFilter(): void {
@@ -634,8 +695,14 @@ export struct UpSpacePage {
   }
 
   /**
-   * B 站全量搜索（方案 B）：按关键词搜全站 → 按 `mid === upMid` 过滤出该 UP
-   * **全部历史投稿**中匹配的部分（不限已加载页；3 页 × 20 条上限）。
+   * 远程搜索（点「搜索」/ Enter）：空间内服务端搜索为主 → 全站搜索兜底的阶梯。
+   *
+   * ① 空间接口 keyword 搜索（`searchSpaceVideosByKeyword`，B 站空间页「搜索
+   *   TA 的投稿」同款）—— 结果 = TA 的投稿里匹配关键词的**全部**（按
+   *   page.count 精确翻页），根治旧路径「挤不进全站搜索前 60 条就缺失」；
+   * ② ①被风控（searchOk=false）或 0 命中时，落回全站搜索 + mid 过滤
+   *   （`fallbackToSitewideSearch`，修复前行为原样保留）—— 0 命中也再捞
+   *   一轮，防空间索引口径与全站不同导致误报「没搜到」。
    *
    * 竞态纪律（照 SearchPage）：token 只认最新；`clearSearch` / 再次输入都会令旧响应作废。
    * `searchOk=false`（搜索接口自己被拒）与 0 命中分开提示，别让用户把限流当成「没搜到」。
@@ -649,6 +716,33 @@ export struct UpSpacePage {
     const token: number = this.searchToken;
     this.remoteSearching = true;
     this.remoteFailReason = '';
+    BilibiliApi.searchSpaceVideosByKeyword(this.upMid, kw)
+      .then((res: BilibiliApi.UpVideosSearchResult): void => {
+        if (token !== this.searchToken) {
+          return;
+        }
+        if (res.searchOk && res.list.length > 0) {
+          this.remoteSearching = false;
+          this.remoteResults = this.mapAll(res.list);
+          console.info(`[UpSearch] via=space n=${this.remoteResults.length}`);
+          return;
+        }
+        // 空间被风控（searchOk=false）或 0 命中 → 全站兜底
+        this.fallbackToSitewideSearch(kw, token);
+      })
+      .catch((): void => {
+        if (token !== this.searchToken) {
+          return;
+        }
+        this.fallbackToSitewideSearch(kw, token);
+      });
+  }
+
+  /**
+   * 阶梯第②步：全站搜索兜底（`searchUpVideosByKeyword`，修复前 runRemoteSearch
+   * 的主体原样搬入）。失败提示与旧版一致。
+   */
+  private fallbackToSitewideSearch(kw: string, token: number): void {
     BilibiliApi.searchUpVideosByKeyword(this.upMid, this.upName, kw)
       .then((res: BilibiliApi.UpVideosSearchResult): void => {
         if (token !== this.searchToken) {
@@ -660,6 +754,7 @@ export struct UpSpacePage {
           return;
         }
         this.remoteResults = this.mapAll(res.list);
+        console.info(`[UpSearch] via=sitewide n=${this.remoteResults.length}`);
       })
       .catch((e: Error): void => {
         if (token !== this.searchToken) {
@@ -706,17 +801,17 @@ export struct UpSpacePage {
   // ===== 订阅 =====
 
   /**
-   * 首次订阅：取该 UP 的投稿 → 建成订阅歌单。
+   * 首次订阅：取该 UP 的**全部**投稿（封顶 PLAYLIST_MAX_ITEMS）→ 建成订阅歌单。
    *
    * 刻意**先取数据再建歌单**：直接建一个空歌单的话，接口失败就会留下一个永远空着的壳。
-   * 取数据走 `collectUpVideos`（三级兜底，与列表页同一份策略），理由见 `loadPage` 注释。
+   * 取数据走 `collectUpVideosAll`（count 精确翻页 + 单页多源兜底），见 `collectTracks` 注释。
    */
   private subscribe(): void {
     if (this.subBusy) {
       return;
     }
     this.subBusy = true;
-    showAppToast('正在订阅…', 1200);
+    showAppToast('正在订阅，拉取全部投稿…', 1600);
     // 首次订阅歌单还没建，种子只能取自列表页已加载的曲目
     this.collectTracks(this.seedBvids(this.tracks))
       .then((mapped: Track[]): void => {
@@ -744,8 +839,8 @@ export struct UpSpacePage {
         this.failReason = '';
         this.saveToCache();
       })
-      // 与 refreshSubscription 同理：缺这个 catch 时，订阅失败会让 subBusy 永久卡死，
-      // 按钮再也点不动（见 refreshSubscription 里的注释）。
+      // 与 forceRefresh 同理：缺这个 catch 时，订阅失败会让 subBusy 永久卡死，
+      // 按钮再也点不动。
       .catch((e: Error): void => {
         console.error(`subscribe failed: ${e.message}`);
         showAppToast(`订阅失败：${e.message}`, 2000);
@@ -756,21 +851,36 @@ export struct UpSpacePage {
   }
 
   /**
-   * 取该 UP 的投稿（三级兜底），返回已映射成 Track 的列表。
+   * 取该 UP 的**全部**投稿（订阅用，封顶 `PLAYLIST_MAX_ITEMS`），返回已映射成 Track 的列表。
+   *
+   * 走 `collectUpVideosAll`：空间接口按响应里的 `page.count` 精确翻页；第 1 页失败
+   * 落回单页多源兜底（搜索反查 → related 扩散 → 空间老路，与旧订阅行为一致）；
+   * 中途翻页失败**保留已拉到的部分**（`lastCollectPartial` 置 true，提示文案据此
+   * 告诉用户「稍后再订阅可补齐」——歌单按 id 去重幂等，重复订阅不会灌重复条目）。
    *
    * `seeds` 是 related 扩散用的种子 bvid：首次订阅时歌单还没建，用**当前列表页已加载的**
-   * tracks；拉取新投稿时用**已订阅歌单**里的 tracks。没有种子时那一级自动跳过。
+   * tracks。没有种子时那一级自动跳过。
    *
    * 失败时**不抛**，而是把人话原因写进 `lastCollectError` 并返回空数组 ——
-   * 调用方（订阅 / 拉取新投稿）据此给用户一句能判断「该等还是该换网络」的提示，
-   * 而不是笼统的「稍后再试」（用户看到后者只会以为 App 坏了）。
+   * 调用方据此给用户一句能判断「该等还是该换网络」的提示。
    */
   private async collectTracks(seeds: string[]): Promise<Track[]> {
     this.lastCollectError = '';
+    this.lastCollectPartial = false;
     const res: BilibiliApi.UpVideosCollectResult =
-      await BilibiliApi.collectUpVideos(this.upMid, this.upName, seeds, this.pageSize());
+      await BilibiliApi.collectUpVideosAll(
+        this.upMid,
+        this.upName,
+        seeds,
+        PLAYLIST_MAX_ITEMS,
+        (fetched: number): void => {
+          // 每成功一页刷一次进度（替换式 toast，不堆积）；全量翻页可能要几秒到几十秒
+          showAppToast(`已拉取 ${fetched} 条…`, 1000);
+        }
+      );
     this.sourceVia = res.via;
     if (res.list.length > 0) {
+      this.lastCollectPartial = res.partial;
       return this.mapAll(res.list);
     }
     this.lastCollectError = res.reason.length > 0
@@ -787,88 +897,18 @@ export struct UpSpacePage {
     return mapped;
   }
 
-  /**
-   * 拉取新投稿：并入订阅歌单。
-   *
-   * 走 `collectTracks()`（三级兜底）而不是顺序翻空间接口 ——「找新投稿」这件事
-   * 搜索反查反而更合适：结果按 `pubdate` 重排后天然就是「最近的投稿」，
-   * 而空间接口要翻好几页、每页都要赌一次限流。
-   *
-   * ⚠️ 关于「只成功一次」：这不是限流。实测搜索接口连打 8 次 8/8 成功，流程每次都跑通了；
-   * 真实原因是**去重**——拉回来的还是同一批，`mergeUpTracks` 全去重掉 → added=0。
-   * 所以 added=0 的提示必须是「已是最新」，否则用户会当成故障。
-   */
-  private refreshSubscription(): void {
-    if (this.subBusy) {
-      return;
-    }
-    const existing = LibraryStore.getPlaylistByUpMid(this.upMid);
-    if (!existing) {
-      this.subscribe();
-      return;
-    }
-    this.subBusy = true;
-    showAppToast('正在拉取新投稿…', 1200);
-    // 已订阅 → 种子取自订阅歌单里的曲目
-    this.collectTracks(this.seedBvids(existing.tracks))
-      .then((collected: Track[]): void => {
-        if (collected.length === 0) {
-          // 有具体原因就说具体原因（多半是 B 站风控 -352 / -799 / 412），
-          // 让用户知道「等一会儿再来」而不是以为 App 坏了
-          showAppToast(this.lastCollectError.length > 0
-            ? this.lastCollectError
-            : '没有拿到新投稿，稍后再试', 2200);
-          return;
-        }
-        const r = LibraryStore.mergeUpTracks(existing.id, collected);
-        this.subscribedCount = r.playlist ? r.playlist.tracks.length : this.subscribedCount;
-        if (r.added === 0) {
-          // 拿到了数据但全是已有的 = 确实没有新投稿，不是故障
-          showAppToast('已是最新 · 该 UP 还没有新投稿', 1800);
-        } else {
-          this.showSubscribeResult({
-            playlist: r.playlist ?? existing,
-            added: r.added,
-            dropped: r.dropped,
-            reused: true
-          });
-        }
-        // 拉新是用户显式刷新动作（2026-10-09）：本页列表同步换成刚取回的最新一页
-        // ——「已是最新」分支同样执行，列表与缓存都换成本次真实返回；
-        // collectTracks 内已写 sourceVia，据此恢复 hasMore（与 loadFirstMultiSource 同式）
-        this.tracks = collected;
-        // 本页列表同步换新后重跑本地过滤（keyword 为空时是 no-op）
-        this.applyLocalFilter();
-        this.page = 1;
-        this.hasMore = this.sourceVia === BilibiliApi.UP_VIA_SPACE
-          && collected.length >= this.pageSize();
-        this.loadFailed = false;
-        this.failReason = '';
-        this.saveToCache();
-      })
-      // ⚠️ 这个 catch 不能省：本页原来只有 `.then().then()`，链上任何一步抛异常
-      // （mapAll / mergeUpTracks / getPlaylistByUpMid）都会让两个 then 一起被跳过，
-      // `subBusy` 永久停在 true —— 按钮从此一直显示「处理中…」且 disabled，
-      // 表现就是「点了拉取新投稿，之后再点完全没反应」。
-      // 写法照 PlaylistDetail.refreshUpTracks：catch 兜住异常（返回 resolved），
-      // 后面的 then 必定执行，忙标记一定能复位。
-      .catch((e: Error): void => {
-        console.error(`refreshSubscription failed: ${e.message}`);
-        showAppToast(`拉取失败：${e.message}`, 2000);
-      })
-      .then((): void => {
-        this.subBusy = false;
-      });
-  }
-
   private showSubscribeResult(r: UpSubscribeResult): void {
     const parts: string[] = [];
     parts.push(r.added === 1 ? '新增 1 首' : `新增 ${r.added} 首`);
     if (r.dropped > 0) {
       parts.push(`已满 ${r.playlist.tracks.length} 首，更早的未收`);
     }
+    if (this.lastCollectPartial) {
+      // 全量翻页中途有页失败：已收部分先入库，再点一次订阅即可补齐（mergeUpTracks 按 id 去重幂等）
+      parts.push('网络不稳只拉到部分，稍后再订阅可补齐');
+    }
     const prefix: string = r.reused ? '已更新订阅' : '已订阅';
-    showAppToast(`${prefix}，${parts.join('，')}`, 2000);
+    showAppToast(`${prefix}，${parts.join('，')}`, this.lastCollectPartial ? 3000 : 2000);
   }
 
   // ===== 曲目菜单（本页只给两项：播放队列 / 下载） =====
@@ -974,8 +1014,8 @@ export struct UpSpacePage {
    * 头部区元信息行：粉丝数 + 投稿数 / 订阅状态。
    *
    * 用方法而不是预计算的 @State 字段（与 PlaylistDetail 的做法不同，是刻意的）：
-   * 本页的粉丝数 / 投稿数 / 订阅状态在 loadCard、loadPage、subscribe、
-   * refreshSubscription 四处各自变化，预计算要在每个点都记得刷新一次，漏一处就显示旧值。
+    * 本页的粉丝数 / 投稿数 / 订阅状态在 loadCard、loadPage、subscribe 三处各自变化，
+    * 预计算要在每个点都记得刷新一次，漏一处就显示旧值。
    * 这里是纯字符串拼接，直接调方法永远拿到最新值。
    * ⚠️ @Builder 体内**不声明局部变量**，所以走方法调用而不是在 build 里拼。
    */
@@ -1002,8 +1042,8 @@ export struct UpSpacePage {
 
   /**
    * 头部区（整体钉在悬浮固定栏内，不随列表滚动）—— 与 PlaylistDetail.PlaylistHeader 同款：
-   * 左侧 96vp 圆角头像 + 右侧 28fp 大标题 + 元信息行；头像行下方是操作按钮行
-   * （播放全部 / 订阅·拉取新投稿）。
+   * 左侧 96vp 圆角头像 + 右侧 28fp 大标题 + 元信息行；头像行下方是操作行
+   * （2026-10-23 合并为单行：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
    *
    * 头像尺寸与圆角对齐歌单封面（96 / 12）：两个详情页的头部视觉语言一致，
    * 进哪个页都是同一套「大图 + 大标题」。
@@ -1042,9 +1082,14 @@ export struct UpSpacePage {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 操作按钮行：与 PlaylistDetail 同款（主按钮粉、次按钮 brand_surface）。
-      // 播放全部：有投稿才显示；订阅入口常驻 —— 它是本页的核心动作，
-      // 放在头部区比挤在返回行右侧更显眼（返回行只留返回键，与歌单详情一致）。
+      // 操作行（2026-10-23 合并）：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（含框内 ×
+      // 清除）+ 搜索按钮，单行排布。原独立搜索行已并入本行。
+      // · 播放全部：有投稿才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
+      // · 订阅投稿：本页核心动作，仅未订阅时显示 —— 订阅成功后 subscribed=true
+      //   自动消失（2026-10-23 用户需求：本页取消「拉取新投稿」，订阅歌单的更新
+      //   入口收敛到歌单详情页的「拉取新投稿」按钮）。
+      // · 清除不再用独立按钮：搜索框内右侧 × 承接（点击调 clearSearch，
+      //   有关键词或处于远程结果态时才出现）。
       Row({ space: 8 }) {
         if (this.tracks.length > 0) {
           Button('播放全部', { type: ButtonType.Normal })
@@ -1059,9 +1104,8 @@ export struct UpSpacePage {
               this.player.playAll(this.tracks);
             })
         }
-        if (this.upMid.length > 0) {
-          Button(this.subBusy ? '处理中…' : (this.subscribed ? '拉取新投稿' : '订阅投稿'),
-            { type: ButtonType.Normal })
+        if (this.upMid.length > 0 && !this.subscribed) {
+          Button(this.subBusy ? '处理中…' : '订阅投稿', { type: ButtonType.Normal })
             .fontSize(13)
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
@@ -1070,43 +1114,55 @@ export struct UpSpacePage {
             .attributeModifier(this.buttonMaterial)
             .enabled(!this.subBusy)
             .onClick((): void => {
-              if (this.subscribed) {
-                this.refreshSubscription();
-              } else {
-                this.subscribe();
-              }
+              this.subscribe();
             })
         }
-      }
-      .width('100%')
-      .margin({ top: 12 })
-      .alignItems(VerticalAlign.Center)
-
-      // 搜索框行（2026-10-23）：输入即过滤**已加载**的投稿（本地，离线可用）；
-      // Enter / 「搜索」按钮发起 B 站全站搜索（按 mid 过滤回该 UP 的投稿，
-      // 能覆盖未加载页）。「清除」只在有关键词或处于远程结果态时出现。
-      // 行高恒定（40 + 上边距 12），头部区实测高度自适配，无需特殊处理。
-      Row({ space: 8 }) {
-        TextInput({ placeholder: '搜索 TA 的投稿', text: this.searchKeyword })
-          .layoutWeight(1)
-          .height(40)
-          .fontSize(14)
-          .fontColor($r('app.color.text_primary'))
-          .placeholderColor($r('app.color.text_tertiary'))
-          .placeholderFont({ size: 14 })
-          .backgroundColor($r('app.color.bg_card'))
-          .borderRadius(BUTTON_RADIUS_VP)
-          .padding({ left: 14, right: 14 })
-          .onChange((v: string): void => {
-            this.searchKeyword = v;
-            this.onKeywordChanged();
-          })
-          .onSubmit((): void => {
-            this.runRemoteSearch();
-          })
+        // 搜索框（2026-10-23）：输入即过滤**已加载**的投稿（本地，离线可用）；
+        // Enter / 「搜索」按钮发起远程搜索（空间接口 keyword 服务端搜索为主，
+        // 被风控 / 0 命中时全站搜索 + mid 过滤兜底，见 runRemoteSearch 阶梯）。
+        // 框内右侧 × = 清除（替代原独立「清除」按钮）。
+        Stack({ alignContent: Alignment.End }) {
+          TextInput({ placeholder: '搜索 TA 的投稿', text: this.searchKeyword })
+            .height(32)
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_tertiary'))
+            .placeholderFont({ size: 14 })
+            // 底色走 searchBoxBg()：26+ 材质可用时透明（不透明底会盖住材质层玻璃，
+            // 官方 FAQ 同款结论），低版本回落 bg_card 实色兜底。
+            .backgroundColor(this.searchBoxBg())
+            .borderRadius(BUTTON_RADIUS_VP)
+            // 沉浸光感材质（2026-10-23 用户需求）：26+ 渲染 systemMaterial 玻璃底
+            //（与同行按钮同档），低版本 no-op 走上方链式 bg_card 实色兜底。
+            .attributeModifier(this.searchInputMaterial)
+            // 右侧让位给框内 ×：文字滚动到最右时不被图标盖住
+            .padding({ left: 14, right: 34 })
+            .onChange((v: string): void => {
+              this.searchKeyword = v;
+              this.onKeywordChanged();
+            })
+            .onSubmit((): void => {
+              this.runRemoteSearch();
+            })
+          if (this.searchKeyword.trim().length > 0 || this.remoteResults !== null) {
+            Stack() {
+              SymbolGlyph($r('sys.symbol.xmark'))
+                .fontSize(14)
+                // SymbolGlyph.fontColor 按图层接收颜色数组，单色也传单元素数组
+                .fontColor([$r('app.color.text_tertiary')])
+            }
+            .width(24)
+            .height(24)
+            .margin({ right: 8 })
+            .onClick((): void => {
+              this.clearSearch();
+            })
+          }
+        }
+        .layoutWeight(1)
         Button(this.remoteSearching ? '搜索中' : '搜索', { type: ButtonType.Normal })
           .fontSize(13)
-          .height(40)
+          .height(32)
           .borderRadius(BUTTON_RADIUS_VP)
           .padding({ left: 16, right: 16 })
           .backgroundColor(this.themeSurface)
@@ -1118,18 +1174,6 @@ export struct UpSpacePage {
           .onClick((): void => {
             this.runRemoteSearch();
           })
-        if (this.searchKeyword.trim().length > 0 || this.remoteResults !== null) {
-          Button('清除', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(40)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 16, right: 16 })
-            .backgroundColor($r('app.color.bg_divider'))
-            .fontColor($r('app.color.text_secondary'))
-            .onClick((): void => {
-              this.clearSearch();
-            })
-        }
       }
       .width('100%')
       .margin({ top: 12 })
@@ -1145,7 +1189,7 @@ export struct UpSpacePage {
   /**
    * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp，不得超出——
    * 官方约束「不要超出标题栏的可用空间」，超出会溢出与内容区重叠）：
-   * 仅返回键 —— UP 昵称只在头部区 28fp 大标题显示一次，与歌单详情同约定。
+   * 空占位 —— UP 昵称只在头部区 28fp 大标题显示一次，与歌单详情同约定（返回键为 HDS 默认键）。
    * 材质与滚动模糊由 HDS titleBar 负责。
    */
   @Builder
@@ -1174,6 +1218,52 @@ export struct UpSpacePage {
       })
     }
     .width('100%')
+  }
+
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
+   * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
+   * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
+   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  upSpaceBarNarrow() {
+    Row() {
+      Column() {
+        this.upSpaceBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * UP 资料头部区收窄容器（2026-10-23 平板模式宽度适配）：同 upSpaceBarNarrow
+   * 口径 —— bottomBuilder 也横跨整列全宽，收窄后头部区与本页条目列同宽对齐；
+   * bottomBuilder 显式高度（实测 headerAreaHeight / 估计值垫底）不动，
+   * 内层 onAreaChange 实测载体原样保留（高度不受收窄影响）。
+   */
+  @Builder
+  upSpaceHeaderAreaNarrow() {
+    Row() {
+      Column() {
+        this.upSpaceHeaderArea()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   build() {
@@ -1264,9 +1354,9 @@ export struct UpSpacePage {
           // 列表会在 headerAreaHeight 实测前挂载并固化 safeTop + 56 的错误让位量
           // （首项被封面压住，真机复现）；必须直接判 headerAreaHeight > 0。
           } else if (this.headerAreaHeight > 0) {
-            // 下拉刷新（2026-10-09）：缓存策略下进页不联网，这里与「拉取新投稿」
-            // 并列为仅有的两个显式刷新出口。Refresh 只包列表（SearchPage 同款），
-            // 系统默认刷新头即可；layoutWeight 移交 Refresh，内层 List 补 height('100%')。
+             // 下拉刷新（2026-10-09）：缓存策略下进页不联网，这里是本页仅存的
+             // 显式刷新出口。Refresh 只包列表（SearchPage 同款），
+             // 系统默认刷新头即可；layoutWeight 移交 Refresh，内层 List 补 height('100%')。
             Refresh({ refreshing: $$this.refreshing }) {
               List({ scroller: this.listScroller }) {
                 // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
@@ -1280,25 +1370,63 @@ export struct UpSpacePage {
                     .width('100%')
                     .height(this.barTotalHeight())
                 }
-                // 条目渲染（SearchPage 同款）：渲染源走 displayTracks() 三态切换
-                // （远程搜索结果 / 本地过滤结果 / 全量已加载），@State 数组直接驱动
-                // ForEach，追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
-                ForEach(
-                  this.displayTracks(),
-                  (t: Track, index: number): void => {
-                    ListItem() {
-                      TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => {
-                          this.player.playOrToggle(tr);
-                        },
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
-                    }
-                  },
-                  (t: Track): string => t.id
-                )
+                // 条目渲染（2026-10-23 性能审查）：ForEach → LazyForEach，
+                // 渲染源走 displayTracks() 三态切换（远程搜索结果 / 本地过滤结果 /
+                // 全量已加载），@Watch（onListSourceChanged）把三态 @State 的变化
+                // 同步进 trackSource / trackPairs，按需建行、翻页不再全量重建。
+                // 横屏宽屏（2026-10-23 两列改造）：条目配对，每个 ListItem 左右两列。
+                if (this.isTwoCol()) {
+                  LazyForEach(
+                    this.trackPairs,
+                    (pair: PairOf<Track>, pIndex: number): void => {
+                      ListItem() {
+                        Row() {
+                          TrackItem({
+                            track: pair.first,
+                            entranceIndex: pIndex * 2,
+                            onPlay: (tr: Track): void => {
+                              this.player.playOrToggle(tr);
+                            },
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1)
+                          if (pair.second !== null) {
+                            TrackItem({
+                              track: pair.second,
+                              entranceIndex: pIndex * 2 + 1,
+                              onPlay: (tr: Track): void => {
+                                this.player.playOrToggle(tr);
+                              },
+                              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                            }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                          } else {
+                            // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+                            Blank().layoutWeight(1)
+                          }
+                        }
+                        .width('100%')
+                      }
+                    },
+                    (pair: PairOf<Track>): string =>
+                      `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  )
+                } else {
+                  LazyForEach(
+                    this.trackSource,
+                    (t: Track, index: number): void => {
+                      ListItem() {
+                        TrackItem({
+                          track: t,
+                          entranceIndex: index,
+                          onPlay: (tr: Track): void => {
+                            this.player.playOrToggle(tr);
+                          },
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        })
+                      }
+                    },
+                    (t: Track): string => t.id
+                  )
+                }
                 // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
                 // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
                 // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏骨架不动。
@@ -1341,7 +1469,7 @@ export struct UpSpacePage {
                         .fontColor($r('app.color.text_tertiary'))
                         .margin({ left: 8 })
                     } else if (!this.hasMore) {
-                      Text(this.subscribed ? '订阅已开启，可随时拉取新投稿' : '订阅该 UP 可持续获取新投稿')
+                      Text(this.subscribed ? '订阅已开启，可在歌单详情页拉取新投稿' : '订阅该 UP 可持续获取新投稿')
                         .fontSize(13)
                         .fontColor($r('app.color.text_tertiary'))
                     } else {
@@ -1362,6 +1490,7 @@ export struct UpSpacePage {
               .clip(false)
               // 边界回弹（2026-10-08）：到顶/到底的反馈动效；顶部下拉由 Refresh 刷新动画接管
               .edgeEffect(EdgeEffect.Spring)
+              .cachedCount(8)
               // 顶部 HDS 标题栏让位（Sumy 式穿透，与 PlaylistDetail 同款）：由 List
               // 首个空白占位 ListItem 负责（见上方占位注释，下载页同款），不再使用
               // contentStartOffset。
@@ -1370,6 +1499,15 @@ export struct UpSpacePage {
               .contentEndOffset(CONTENT_END_OFFSET)
               .onReachEnd((): void => {
                 this.onReachEnd();
+              })
+              // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已
+              // 应用后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+              .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+                this.syncTopBlurProgress();
+              })
+              .onScrollStop((): void => {
+                // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+                this.syncTopBlurProgress();
               })
             }
             .layoutWeight(1)
@@ -1385,41 +1523,54 @@ export struct UpSpacePage {
         // ⚠️ 不再整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
         // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）；
         // 非列表分支（骨架 / 失败 / 空态）各自补 padding top。
-        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // titleBar，UP 头部区属标题栏 bottomBuilder、随整栏一起盖），进度由
+        // 列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.barTotalHeight(),
+          updater: this.topBlurUpdater
+        })
       }
     }
     // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 标题栏宽度跟随本页内容列，大屏上与收窄后的列表左右对齐。
+    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    //（upSpaceBarNarrow / upSpaceHeaderAreaNarrow），标题行与 UP 头部区和
+    // 条目列同宽对齐（原「标题栏宽度跟随内容列」为不实声称，本轮根治）。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(UP_BLUR_START_VP, UP_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 标题行（stackBuilder，可用空间 56vp）：仅返回键
+        // 标题行（stackBuilder，可用空间 56vp）：空占位（返回键为 HDS 默认键；收窄容器内）
         stackBuilder: (): void => {
-          this.upSpaceBar();
+          this.upSpaceBarNarrow();
         },
-        // 标题行下方自定义区：UP 资料头部区（封面 / 昵称 / 订阅 / 拉新等）。
+        // 标题行下方自定义区：UP 资料头部区（封面 / 昵称 / 订阅 / 拉新等，
+        // 收窄容器内与条目列对齐）。
         // ⚠️ 头部区不能塞进 stackBuilder（会溢出 56vp 标题行、与列表内容重叠，
         // 真机复现），必须走 bottomBuilder；高度用实测值（未实测时估计值垫底）。
         bottomBuilder: {
           builder: (): void => {
-            this.upSpaceHeaderArea();
+            this.upSpaceHeaderAreaNarrow();
           },
           height: this.headerAreaHeight > 0 ? this.headerAreaHeight : UP_HEADER_ESTIMATE_HEIGHT,
           showType: BottomBuilderShowType.DIRECTLY_SHOW
         }
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     .translate({ x: this.navTransX })
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。

@@ -20,15 +20,16 @@
  * 单夹结果徽标三档：ok（state_success）/ partial（state_warning）/ failed（state_error）。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 返回行 + 标题，与 FollowsPage / RecentPage 同构）：avoidLayoutSafeArea 挡状态栏
+ * 标题，与 FollowsPage / RecentPage 同构；返回键为 HDS 默认键）：avoidLayoutSafeArea 挡状态栏
  * 重叠，材质与滚动模糊由 HDS 统一渲染（样式见 HdsTitleBarStyle）；
  * bottomBuilder 承载「上次同步 …」状态行（仅有列表时渲染，定高 28）。
  *
- * ⚠️ 同步是**双向**的（B 站取消收藏 → 本地移除），但只有当某收藏夹在服务端被
- * **完整**拉取成功时才允许删本地（断网 / 被风控的那一轮只增不减，不会误删）。
+ * ⚠️ 同步是**单向**的（B 站 → 本地）：本地对镜像歌单的改动不写回 B 站，会被下一轮
+ * 同步覆盖；B 站取消收藏 → 本地移除，但只有当某收藏夹在服务端被**完整**拉取成功时
+ * 才允许删本地（断网 / 被风控的那一轮只增不减，不会误删）。
  */
 
-import { FavSyncManager, FavSyncSummary, FavPushSummary } from '../service/FavSyncManager';
+import { FavSyncManager, FavSyncSummary } from '../service/FavSyncManager';
 import { FavFolderSyncState, FAV_SYNC_OK, FAV_SYNC_PARTIAL, FAV_SYNC_FAILED, loadFavSyncStates, getFavSyncState } from '../service/FavSyncStore';
 import { isFolderSelected, setFolderSelected } from '../service/FavSelectionStore';
 import { FavoriteFolder, FavoriteFoldersResult, getFavoriteFolders } from '../api/BilibiliApi';
@@ -53,8 +54,15 @@ import {
   STORE_THEME_ON
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import {
+  TWO_COL_GAP_VP,
+  TwoColumnLayout
+} from '../common/utils/TwoColumnList';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /** 「立即同步」冷却（ms）：收藏夹接口对高频请求敏感，连点只会继续被拒 */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -65,13 +73,6 @@ const RETRY_COOLDOWN_MS: number = 4000;
  * 必须与行内容定高一致。
  */
 const SYNC_STATUS_ROW_HEIGHT: number = 28;
-
-/**
- * 顶栏滚动模糊时机（基准口径 = 最近播放页）：首条内容自静止位上移 30vp 起雾
- * → 80vp 满显影。内容侧 padding 让位（F = raw），两参直接生效，无需补偿。
- */
-const FAVSYNC_BLUR_START_VP: number = 30;
-const FAVSYNC_BLUR_END_VP: number = 80;
 
 /** 时间戳 → 时钟文本：当天「10:23」，跨天「10-12 10:23」 */
 function formatClock(ms: number): string {
@@ -135,14 +136,10 @@ export struct FavSyncPage {
   @State foldersError: string = '';
   /** 最近一次同步时间（ms 时间戳，0 = 从未同步） */
   @State lastSyncAt: number = 0;
-  /** 待推送到 B 站的改动条数（本地选过删/加但还没发出去，含失败待重试的） */
-  @State pendingCount: number = 0;
   /** 同步冷却中：按钮禁用 */
   @State retryCooling: boolean = false;
   private retryLocked: boolean = false;
   private retryTimer: number = -1;
-  /** 本轮是「只推送」的轻量轮（用于结束时给对应的结果提示） */
-  private pushRoundActive: boolean = false;
 
   /** 登录态版本号：登录/登出后重查（本页无独立登录入口，仅跟随全局态） */
   @StorageProp(STORE_LOGIN_REV) @Watch('onLoginRevChanged') loginRev: number = 0;
@@ -157,11 +154,31 @@ export struct FavSyncPage {
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时卡片内行两列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
+
+  /** 横屏宽屏（窗口 ≥600vp 的横屏）时卡片内行两列显示；竖屏 / 窄窗口单列不变 */
+  private isTwoCol(): boolean {
+    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  }
 
   /** HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 状态行 28（有列表时） */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
       + (this.hasListContent() ? SYNC_STATUS_ROW_HEIGHT : 0);
+  }
+
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.scroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
   }
 
   /** 是否有任何可展示的列表内容（勾选行或历史状态，决定状态行 / 让位量） */
@@ -177,6 +194,9 @@ export struct FavSyncPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     this.refreshFromStore();
     this.checkLogin();
     // 拉收藏夹列表（登录态下）：未同步过的夹也要展示出来供勾选（2026-10-23）
@@ -221,11 +241,10 @@ export struct FavSyncPage {
     return undefined;
   }
 
-  /** 从持久化读同步状态列表 + 最近同步时间 + 待推送条数（纯本地，不发网络） */
+  /** 从持久化读同步状态列表 + 最近同步时间（纯本地，不发网络） */
   private refreshFromStore(): void {
     this.states = loadFavSyncStates();
     this.syncing = FavSyncManager.getInstance().isRunning();
-    this.pendingCount = FavSyncManager.getInstance().pendingCount();
     let latest: number = 0;
     for (let i = 0; i < this.states.length; i++) {
       if (this.states[i].lastSyncAt > latest) {
@@ -345,34 +364,8 @@ export struct FavSyncPage {
     this.refreshRowStates();
     // 由「进行中」翻转为「已结束」的这一次，给一句结果提示
     if (wasSyncing && !this.syncing) {
-      if (this.pushRoundActive) {
-        this.pushRoundActive = false;
-        this.announcePushDone();
-      } else {
-        this.announceDone();
-      }
+      this.announceDone();
     }
-  }
-
-  /** 只推送轮结束时的一句话（与完整同步的结果提示区分开） */
-  private announcePushDone(): void {
-    const p: FavPushSummary | null = FavSyncManager.getInstance().getLastPushSummary();
-    if (p === null) {
-      return;
-    }
-    if (p.needLogin) {
-      this.toast('登录已失效，请重新登录后再同步', 2400);
-      return;
-    }
-    if (p.blocked) {
-      this.toast(`有待同步的改动没能推送：${p.reason}`, 2600);
-      return;
-    }
-    if (p.pendingLeft > 0) {
-      this.toast(`已同步 ${p.pushed} 条，仍有 ${p.pendingLeft} 条待同步`, 2400);
-      return;
-    }
-    this.toast(p.pushed > 0 ? `已同步 ${p.pushed} 条改动到 B 站` : '没有待同步的改动', 2000);
   }
 
   /** 同步结束时把上一轮汇总转成一句话（只在真正跑完那一刻调用） */
@@ -453,28 +446,6 @@ export struct FavSyncPage {
     mgr.syncAll('manual');
   }
 
-  /**
-   * 「重试」：只重放待推送队列（本地 → B 站），不做完整拉取。
-   * 与「立即同步」区分开是因为：推送是用户已确认的本地意图，代价小、应当随时可补；
-   * 而完整拉取会打一遍所有收藏夹接口（风控敏感），不适合让用户随手连点。
-   */
-  private startPushRetry(): void {
-    const mgr: FavSyncManager = FavSyncManager.getInstance();
-    if (mgr.isRunning()) {
-      this.toast('正在同步中，请稍候', 1800);
-      return;
-    }
-    const user: LoginUser | null = getLoginUser();
-    if (user === null) {
-      this.needLogin = true;
-      return;
-    }
-    this.pushRoundActive = true;
-    this.syncing = true;
-    mgr.pushOnly('manual');
-    this.toast('正在重试待同步的改动…', 1800);
-  }
-
   /** 单夹结果 → 徽标文案 */
   private resultLabel(result: string): string {
     if (result === FAV_SYNC_FAILED) {
@@ -527,7 +498,7 @@ export struct FavSyncPage {
 
   /**
    * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp，不得超出——
-   * 官方约束「不要超出标题栏的可用空间」）：返回键 + 「收藏夹同步」标题。
+   * 官方约束「不要超出标题栏的可用空间」）：「收藏夹同步」标题（返回键为 HDS 默认键）。
    * 材质与滚动模糊由 HDS titleBar 负责。
    */
   @Builder
@@ -557,40 +528,49 @@ export struct FavSyncPage {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 「N 条待同步」行：本地已改但还没成功推到 B 站的写操作，可手动重试 */
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
+   * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
+   * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
+   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
   @Builder
-  pendingRow() {
+  syncBarNarrow() {
     Row() {
       Column() {
-        Text(`有 ${this.pendingCount} 条改动待同步到 B 站`)
-          .fontSize(13)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-        Text('离线或被限制时没能推送成功，可点右侧重试')
-          .fontSize(11)
-          .fontColor($r('app.color.text_tertiary'))
-          .width('100%')
-          .margin({ top: 3 })
+        this.syncBar()
       }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-
-      // 触达铁律：视觉可以小，命中区必须 ≥ 44vp
-      Row() {
-        Text('重试')
-          .fontSize(13)
-          .fontColor(this.themePrimary)
-      }
-      .height(44)
-      .padding({ left: 12, right: 12 })
-      .justifyContent(FlexAlign.Center)
-      .onClick((): void => {
-        this.startPushRetry();
-      })
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-    .alignItems(VerticalAlign.Center)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * 「上次同步 …」状态行收窄容器（2026-10-23 平板模式宽度适配）：同 syncBarNarrow
+   * 口径 —— bottomBuilder 也横跨整列全宽，收窄后状态行与本页条目列同宽对齐；
+   * bottomBuilder 显式高度（SYNC_STATUS_ROW_HEIGHT）不动。sm 天然无操作。
+   */
+  @Builder
+  syncStatusRowNarrow() {
+    Row() {
+      Column() {
+        this.syncStatusRow()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 「立即同步」按钮行（44vp 触达；进行中 / 冷却中禁用） */
@@ -753,16 +733,32 @@ export struct FavSyncPage {
               ListItem() {
                 this.syncButtonRow()
               }
-              if (this.pendingCount > 0) {
-                ListItem() {
-                  Row() {
-                    InsetCard() {
-                      this.pendingRow()
+              // 单向同步提示（2026-10-23 本地→B 站回推下线）：本地对镜像歌单的
+              // 改动不写回 B 站，会被下一轮同步覆盖 —— 必须在页面上讲清楚，
+              // 否则用户会以为本地删/加会同步到 B 站。
+              ListItem() {
+                Row() {
+                  InsetCard() {
+                    Column() {
+                      Text('同步为单向：B 站 → 本地')
+                        .fontSize(13)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor($r('app.color.text_primary'))
+                        .width('100%')
+                      Text('对收藏夹歌单的本地改动不会写回 B 站，下次同步会以 B 站为准覆盖。在 B 站收藏或取消收藏后，回到本页点「立即同步」即可拉取最新收藏。')
+                        .fontSize(11)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .width('100%')
+                        .margin({ top: 3 })
+                        .lineHeight(17)
                     }
+                    .alignItems(HorizontalAlign.Start)
+                    .width('100%')
+                    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
                   }
-                  .width('100%')
-                  .padding({ top: 8 })
                 }
+                .width('100%')
+                .padding({ top: 8 })
               }
               ListItem() {
                 SectionHeader({ headerText: '收藏夹' })
@@ -787,13 +783,29 @@ export struct FavSyncPage {
                 // 勾选列表（2026-10-23 手动选择性同步）：进页拉服务端列表，整行可点切换勾选
                 ListItem() {
                   InsetCard() {
-                    ForEach(this.rows, (r: FavRowItem, index: number): void => {
-                      if (index > 0) {
-                        CardDivider()
+                    // 横屏宽屏（2026-10-23 两列改造）：卡片内行改 Grid 两列
+                    //（columnsTemplate '1fr 1fr'，去 CardDivider —— 分隔线在两列
+                    // 下没有连续行可分）；竖屏维持单列 + 分隔线。
+                    if (this.isTwoCol()) {
+                      Grid() {
+                        ForEach(this.rows, (r: FavRowItem): void => {
+                          GridItem() {
+                            this.selectableFolderRow(r)
+                          }
+                        }, (r: FavRowItem): string => `${r.mediaId}_${r.selected}_${
+                          r.state ? `${r.state.lastResult}_${r.state.lastItemCount}_${r.state.lastSyncAt}` : 'none'}`)
                       }
-                      this.selectableFolderRow(r)
-                    }, (r: FavRowItem): string => `${r.mediaId}_${r.selected}_${
-                      r.state ? `${r.state.lastResult}_${r.state.lastItemCount}_${r.state.lastSyncAt}` : 'none'}`)
+                      .columnsTemplate('1fr 1fr')
+                      .columnsGap(TWO_COL_GAP_VP)
+                    } else {
+                      ForEach(this.rows, (r: FavRowItem, index: number): void => {
+                        if (index > 0) {
+                          CardDivider()
+                        }
+                        this.selectableFolderRow(r)
+                      }, (r: FavRowItem): string => `${r.mediaId}_${r.selected}_${
+                        r.state ? `${r.state.lastResult}_${r.state.lastItemCount}_${r.state.lastSyncAt}` : 'none'}`)
+                    }
                   }
                 }
               } else {
@@ -829,12 +841,25 @@ export struct FavSyncPage {
                 if (this.states.length > 0) {
                   ListItem() {
                     InsetCard() {
-                      ForEach(this.states, (s: FavFolderSyncState, index: number): void => {
-                        if (index > 0) {
-                          CardDivider()
+                      // 横屏宽屏（2026-10-23 两列改造）：同勾选卡片，Grid 两列去分隔线
+                      if (this.isTwoCol()) {
+                        Grid() {
+                          ForEach(this.states, (s: FavFolderSyncState): void => {
+                            GridItem() {
+                              this.folderRow(s)
+                            }
+                          }, (s: FavFolderSyncState): string => `${s.mediaId}_${s.lastResult}_${s.lastItemCount}_${s.lastSyncAt}`)
                         }
-                        this.folderRow(s)
-                      }, (s: FavFolderSyncState): string => `${s.mediaId}_${s.lastResult}_${s.lastItemCount}_${s.lastSyncAt}`)
+                        .columnsTemplate('1fr 1fr')
+                        .columnsGap(TWO_COL_GAP_VP)
+                      } else {
+                        ForEach(this.states, (s: FavFolderSyncState, index: number): void => {
+                          if (index > 0) {
+                            CardDivider()
+                          }
+                          this.folderRow(s)
+                        }, (s: FavFolderSyncState): string => `${s.mediaId}_${s.lastResult}_${s.lastItemCount}_${s.lastSyncAt}`)
+                      }
                     }
                   }
                 } else if (this.foldersError.length === 0) {
@@ -866,39 +891,60 @@ export struct FavSyncPage {
             .layoutWeight(1)
             .width('100%')
             .edgeEffect(EdgeEffect.Spring)
+            .cachedCount(8)
+            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+            .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+              this.syncTopBlurProgress();
+            })
+            .onScrollStop((): void => {
+              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              this.syncTopBlurProgress();
+            })
             // 标题栏让位已内移为首个 ListItem 占位（见 List 首项），不在 List 上加 padding。
           }
         }
         .width('100%')
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
-        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        // 大屏适配：内容列收窄居中；横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL）
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // titleBar，状态行属标题栏 bottomBuilder、随整栏一起盖），进度由列表
+        // onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.barTotalHeight(),
+          updater: this.topBlurUpdater
+        })
       }
     }
     // HDS 沉浸光感标题栏（FollowsPage / RecentPage 同款）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
+    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    //（syncBarNarrow / syncStatusRowNarrow），标题行与状态行和条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(FAVSYNC_BLUR_START_VP, FAVSYNC_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 标题行（stackBuilder，可用空间 56vp）：返回键 + 「收藏夹同步」标题
+        // 标题行（stackBuilder，可用空间 56vp）：「收藏夹同步」标题（返回键为 HDS 默认键）
+        //（收窄容器内）
         stackBuilder: (): void => {
-          this.syncBar();
+          this.syncBarNarrow();
         },
-        // 标题行下方自定义区（bottomBuilder 承载，仅有列表时配置）：
+        // 标题行下方自定义区（bottomBuilder 承载，仅有列表时配置，收窄容器内）：
         // 「上次同步 …」状态行。⚠️ bottomBuilder 高度不自适应，由参数显式给定。
         bottomBuilder: this.hasListContent() ? {
           builder: (): void => {
-            this.syncStatusRow();
+            this.syncStatusRowNarrow();
           },
           height: SYNC_STATUS_ROW_HEIGHT,
           showType: BottomBuilderShowType.DIRECTLY_SHOW
         } : undefined
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.scroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -906,6 +952,9 @@ export struct FavSyncPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由 contentStartOffset / plain padding 自理。

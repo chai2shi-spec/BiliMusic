@@ -11,8 +11,8 @@
  * 识别三路线（方案 §2）：链接直连（网易云 v6→v3 / QQ 一次全量，失败一律降级提示
  * 「改用文本粘贴」）→ 文本粘贴（主路径）→ 复核时手动搜索（路线 C，内置兜底）。
  *
- * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载返回行 +
- * 标题，与 FavSyncPage 同构）；内容让位走「下载页同款」顶部空白占位条目
+ * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载标题（返回键为 HDS
+ * 默认键），与 FavSyncPage 同构）；内容让位走「下载页同款」顶部空白占位条目
  * （List 首项，高度 = safeTop + 56），滚动时内容从沉浸材质下方穿过。
  */
 
@@ -43,6 +43,7 @@ import { PlaylistDetailRouteParam } from '../service/NavRouteParams';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { readText } from '../utils/ClipboardUtil';
+import { formatDurationText } from '../utils/TextUtil';
 import { InsetCard, CardDivider, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import {
@@ -62,6 +63,9 @@ import {
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
  * 向导 5 态（方案 §5.2）。匹配中 / 报告的实际进度数据来自 importState，
@@ -73,22 +77,6 @@ enum PagePhase {
   MATCHING = 2,
   REPORT = 3,
   REVIEW = 4
-}
-
-/** 顶栏滚动模糊时机（FavSyncPage 同款基准口径） */
-const IMPORT_BLUR_START_VP: number = 30;
-const IMPORT_BLUR_END_VP: number = 80;
-
-/** 秒 → m:ss / mm:ss（TrackItem.formatDuration 的本地轻量同款） */
-function formatDuration(sec: number): string {
-  if (!(sec > 0)) {
-    return '';
-  }
-  const s: number = Math.round(sec);
-  const m: number = Math.floor(s / 60);
-  const r: number = s % 60;
-  const rStr: string = r < 10 ? `0${r}` : `${r}`;
-  return `${m}:${rStr}`;
 }
 
 /** 播放量 → 1.2万 口径（与条目展示惯例一致） */
@@ -124,7 +112,7 @@ export struct PlaylistImportPage {
   @State recognizing: boolean = false;
   /** 识别结果（预览态展示、开始匹配的输入） */
   @State external: ExternalPlaylist | null = null;
-  /** 超出单歌单 500 首上限被截断 */
+  /** 超出单歌单 PLAYLIST_MAX_ITEMS 上限被截断 */
   @State truncated: boolean = false;
   /** 报告态：歌单名输入框（默认名来自识别结果或「导入歌单 MM-DD」） */
   @State playlistName: string = '';
@@ -140,12 +128,28 @@ export struct PlaylistImportPage {
   private reviewQueue: number[] = [];
   /** 列表滚动控制器 */
   private scroller: Scroller = new Scroller();
+
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.scroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
   /** 主按钮沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
   private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
   /** 子页转场横移量：常驻 '0%'，转场代理按 push/pop 临时改写 */
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     // 单例任务可能还在跑（用户离开后返回）：按任务阶段接续页面状态
     const st: ImportState = ImportTaskManager.getInstance().getState();
     if (st.phase === ImportPhase.MATCHING) {
@@ -560,7 +564,7 @@ export struct PlaylistImportPage {
     if (item.song.artist.length > 0) {
       parts.push(item.song.artist);
     }
-    const dur: string = formatDuration(item.song.durationSec);
+    const dur: string = formatDurationText(item.song.durationSec);
     if (dur.length > 0) {
       parts.push(dur);
     }
@@ -573,7 +577,7 @@ export struct PlaylistImportPage {
     if (c.artist.length > 0) {
       parts.push(c.artist);
     }
-    const dur: string = formatDuration(c.duration);
+    const dur: string = formatDurationText(c.duration);
     if (dur.length > 0) {
       parts.push(dur);
     }
@@ -586,12 +590,36 @@ export struct PlaylistImportPage {
   //
 
   /**
-   * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp）：返回键 + 标题。
+   * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp）：标题（返回键为 HDS 默认键）。
    * 材质与滚动模糊由 HDS titleBar 负责（HdsTitleBarStyle 统一）。
    */
   @Builder
   pageBar() {
     NavTitleRow({ title: '从外部导入歌单' })
+  }
+
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
+   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
+   *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
+   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  pageBarNarrow() {
+    Row() {
+      Column() {
+        this.pageBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   //
@@ -671,7 +699,7 @@ export struct PlaylistImportPage {
         .width('100%')
         .margin({ top: 6 })
       if (this.truncated) {
-        Text('超出单歌单 500 首上限，将只保留前 500 首')
+        Text(`超出单歌单 ${PLAYLIST_MAX_ITEMS} 首上限，将只保留前 ${PLAYLIST_MAX_ITEMS} 首`)
           .fontSize(13)
           .fontColor($r('app.color.state_error'))
           .width('100%')
@@ -703,17 +731,31 @@ export struct PlaylistImportPage {
           .margin({ top: 12 })
       }
       Row() {
-        Text(`✓ ${this.importState.strong}`)
-          .fontSize(13)
-          .fontColor($r('app.color.state_success'))
-        Text(`? ${this.importState.weak}`)
-          .fontSize(13)
-          .fontColor($r('app.color.state_warning'))
-          .margin({ left: 16 })
-        Text(`✕ ${this.importState.missing}`)
-          .fontSize(13)
-          .fontColor($r('app.color.state_error'))
-          .margin({ left: 16 })
+        Row({ space: 4 }) {
+          SymbolGlyph($r('sys.symbol.checkmark'))
+            .fontSize(13)
+            .fontColor([$r('app.color.state_success')])
+          Text(`${this.importState.strong}`)
+            .fontSize(13)
+            .fontColor($r('app.color.state_success'))
+        }
+        Row({ space: 4 }) {
+          // '?' 是纯 ASCII，Text 直渲即清晰锐利，无需符号组件（HMS 符号表无裸
+          // questionmark，questionmark_circle 又带圈与两侧不对齐）
+          Text(`? ${this.importState.weak}`)
+            .fontSize(13)
+            .fontColor($r('app.color.state_warning'))
+        }
+        .margin({ left: 16 })
+        Row({ space: 4 }) {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(13)
+            .fontColor([$r('app.color.state_error')])
+          Text(`${this.importState.missing}`)
+            .fontSize(13)
+            .fontColor($r('app.color.state_error'))
+        }
+        .margin({ left: 16 })
       }
       .margin({ top: 10 })
       Text('可返回上一页，匹配会继续进行；完成后回到本页查看报告')
@@ -1119,28 +1161,47 @@ export struct PlaylistImportPage {
           .layoutWeight(1)
           .width('100%')
           .edgeEffect(EdgeEffect.Spring)
+          .cachedCount(8)
+          // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+          // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+          .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+            this.syncTopBlurProgress();
+          })
+          .onScrollStop((): void => {
+            // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+            this.syncTopBlurProgress();
+          })
           // 标题栏让位已内移为首个 ListItem 占位（见 List 首项），不在 List 上加 padding。
         }
         .width('100%')
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // titleBar），进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater
+        // 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+          updater: this.topBlurUpdater
+        })
       }
     }
     // HDS 沉浸光感标题栏（FavSyncPage / FollowsPage 同款）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
+    // 2026-10-23 平板模式宽度适配：stackBuilder 走收窄容器（pageBarNarrow），
+    // 标题行与本页内容列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(IMPORT_BLUR_START_VP, IMPORT_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         stackBuilder: (): void => {
-          this.pageBar();
+          this.pageBarNarrow();
         }
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.scroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1148,6 +1209,9 @@ export struct PlaylistImportPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸口径）；
     // 内容层避让由顶部占位条目 / 尾部安全区占位自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])

@@ -70,6 +70,7 @@ import { BILI_REFERER, STORE_DOWNLOAD_PAUSED, STORE_DOWNLOAD_TASKS } from '../co
 import { HttpUtil } from '../utils/HttpUtil';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { isUnmeteredNetwork } from '../utils/NetworkUtil';
+import { audioFileExt } from '../utils/TextUtil';
 import { BackgroundPlayback } from './BackgroundPlayback';
 
 /**
@@ -78,8 +79,12 @@ import { BackgroundPlayback } from './BackgroundPlayback';
  * （rebuildGroups）+ 镜像动画重定目标，200ms（5Hz）在多 P 合集下载时
  * 与滚动帧竞争主线程。300ms（3.3Hz）脉冲开销降 40%，进度数字步进
  * 略粗但人眼无感；配套把动画窗口 DOWNLOAD_SMOOTH_MS 提到 250ms 保连续。
+ * 2026-10-23 性能审查：300 → 500。前台每份快照仍要走「全表拷贝 + 排序 +
+ * rebuildGroups + ForEach diff」整条流水线，2Hz 足够平滑（视觉连续性由
+ * 下载页 520ms 镜像插值 animateTo 兜底，ControlAreaComponent 同款手法），
+ * 批量下载时前台 CPU 占用再降一档。
  */
-const UI_NOTIFY_INTERVAL: number = 300;
+const UI_NOTIFY_INTERVAL: number = 500;
 /** 落库节流：避免每个数据分片都写一次 RDB */
 const DB_WRITE_INTERVAL: number = 800;
 /**
@@ -204,7 +209,13 @@ function describeError(e: Object): string {
  *
  * 为什么必须有这一步：B 站音频 CDN 在直链过期 / 被限流时，会返回 **HTTP 200 + 一段 HTML
  * 或 JSON 错误页**。此时下载流程「顺利」走完，文件也是一段合法字节，只是永远播不出来。
- * DASH 音频是 fMP4 容器，前 12 字节里第 4~7 字节恒为 ASCII `ftyp`，用它做魔数校验。
+ *
+ * 魔数按实际容器分四类判定（2026-10-24 下载格式正确化：此前只认 ftyp，把
+ * 无损档（30251，raw FLAC 字节）全部误杀成「Downloaded file is not valid audio」）：
+ *   · `ftyp`（offset 4~7）—— fMP4 容器：DASH 音轨（30280 等）本体即 m4a；
+ *   · `fLaC`（offset 0~3）—— Hi-Res 无损档的裸 FLAC 流；
+ *   · `ID3`（offset 0~2）—— 64K 档（audio/mpeg）带 ID3v2 头的 MP3；
+ *   · `0xFF 0xEx`（帧同步）—— 无 ID3 头的裸 MP3。
  */
 async function isValidAudioFile(path: string): Promise<boolean> {
   // （2026-10-16 AppFreeze 加固）探测改异步 fs：不再在主线程 statSync/openSync/readSync。
@@ -219,7 +230,17 @@ async function isValidAudioFile(path: string): Promise<boolean> {
     await fs.read(probe.fd, buf);
     const bytes: Uint8Array = new Uint8Array(buf);
     const tag: string = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
-    return tag === 'ftyp';
+    if (tag === 'ftyp') {
+      return true;
+    }
+    const magic: string = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (magic === 'fLaC') {
+      return true;
+    }
+    if (magic.substring(0, 3) === 'ID3') {
+      return true;
+    }
+    return bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0;
   } catch (e) {
     return false;
   } finally {
@@ -777,6 +798,28 @@ export class DownloadManager {
           task.url = source.audioUrl;
           task.audioQuality = source.audioQuality;
           task.audioBandwidth = source.audioBandwidth;
+          // （2026-10-24 下载格式正确化）按实际音源修正落盘扩展名（flac/mp3/m4a）。
+          // DASH 音轨本体即 m4a；无损档（30251）是 raw FLAC 字节、64K 档（30216）是
+          // 裸 MP3，建任务时的占位名（硬编码 .m4a）在这两档下名不副实。
+          // ⚠️ 扩展名变化 = 音源格式变化：半截文件的字节与新格式不兼容（m4a 前缀
+          // 续进 FLAC 文件 = 能播但内容错位的废片），必须丢弃重下，禁止 Range 续传跨格式拼接。
+          const audioExt: string = audioFileExt(source.audioQuality, source.audioMimeType);
+          const dirEnd: number = task.localFilePath.lastIndexOf('/');
+          const dirPart: string = dirEnd > 0
+            ? task.localFilePath.substring(0, dirEnd)
+            : `${this.context ? this.context.filesDir : ''}/downloads`;
+          const desiredPath: string = `${dirPart}/${this.safeName(track.id)}.${audioExt}`;
+          if (task.localFilePath !== desiredPath) {
+            if (task.downloadedBytes > 0) {
+              try {
+                await fs.unlink(task.localFilePath);
+              } catch (e) {
+                // 半截文件不存在（首次解析 / 上次已清理）—— 无需处理
+              }
+              task.downloadedBytes = 0;
+            }
+            task.localFilePath = desiredPath;
+          }
           // 换一首要重置三个计量：否则新任务沿用上一条的进度/速度读数。
           // ⚠️ 重试尝试**不重置 downloadedBytes**：停滞失败的半截文件被保留，
           // 这里的读数就是断点大小；重置会让进度条在续传前闪回 0%。
@@ -786,7 +829,10 @@ export class DownloadManager {
           }
           task.speed = 0;
           task.status = DownloadStatus.DOWNLOADING;
-          await updateDownloadStatus(task.id, DownloadStatus.DOWNLOADING);
+          // localFilePath 一并落库（2026-10-24）：updateDownloadStatus 对缺省参数
+          // 会把 '' 原样写进列，此前每次进入 DOWNLOADING 都把 DB 里的路径抹空、
+          // 靠 finishTask 兜底回填；路径修正后立即同步，中断重启不再拿到旧占位名。
+          await updateDownloadStatus(task.id, DownloadStatus.DOWNLOADING, task.localFilePath);
           this.notify();
 
           await this.downloadFile(source.audioUrl, task.localFilePath, task.id);

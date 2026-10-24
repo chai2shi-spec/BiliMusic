@@ -11,6 +11,7 @@
 import http from '@ohos.net.http';
 import hilog from '@ohos.hilog';
 import { BILI_REFERER } from '../common/Constants';
+import { BiliRequestGate } from './BiliRequestGate';
 
 export interface HttpRequestOptions {
   params?: Record<string, string | number>;
@@ -24,6 +25,15 @@ export interface HttpRequestOptions {
    * （对齐 BBPlayer 的裸 poll 请求）。
    */
   skipCookie?: boolean;
+  /**
+   * 只跳过**登录** Cookie（buvid 通道保留），等价「退出登录后的匿名请求」。
+   *
+   * 用途（2026-10-23「登录后不能播放」修复）：B 站对部分账号做**绑定登录 Cookie**
+   * 的风控 —— view/playurl 只要带 SESSDATA 就被拒（-352/-412/-799 或 HTTP 412），
+   * 不带反而正常（这正是「退出登录又能播放」的成因）。音源解析链撞到这类错误时，
+   * 用它把该次请求降级成匿名重发一轮，buvid 必须保留（缺它部分接口会 412）。
+   */
+  skipLoginCookie?: boolean;
   /** 跳过自动附加的 Referer 头（passport 轮询同样不需要）。 */
   skipReferer?: boolean;
   /**
@@ -98,12 +108,14 @@ export class HttpUtil {
     }
     if (options?.skipCookie !== true) {
       // 两条 Cookie 通道按序拼接：buvid 在前（缺它首页推荐会被 412 拦下），
-      // 登录态在后（有则所有请求自动带上 SESSDATA）
+      // 登录态在后（有则所有请求自动带上 SESSDATA）。
+      // skipLoginCookie 只摘登录通道（账号级风控的匿名降级重试用），
+      // buvid 必须保留 —— 匿名请求缺 buvid 同样会被 412。
       const cookieParts: string[] = [];
       if (HttpUtil.baseCookie.length > 0) {
         cookieParts.push(HttpUtil.baseCookie);
       }
-      if (HttpUtil.loginCookie.length > 0) {
+      if (HttpUtil.loginCookie.length > 0 && options?.skipLoginCookie !== true) {
         cookieParts.push(HttpUtil.loginCookie);
       }
       if (cookieParts.length > 0) {
@@ -120,7 +132,54 @@ export class HttpUtil {
     return header;
   }
 
+  /**
+   * 闸门风控信号判定与上报（仅 B 站域请求调用，见 BiliRequestGate 注释）：
+   *   · HTTP 412 / 403 / 429 —— 风控在 HTTP 层直接拦截（响应体不是 JSON）；
+   *   · 响应体前 64 字符含 `"code":-352/-412/-509/-799` —— 业务层风控码
+   *     （B 站响应体固定 `{"code":` 开头，前缀扫描无全量解析开销、无正文误报）；
+   *   · 其余 —— 干净成功，冷却阶梯复位。
+   */
+  private static reportGateRisk(responseCode: number, body: string): void {
+    if (responseCode === 412 || responseCode === 403 || responseCode === 429) {
+      BiliRequestGate.noteRisk();
+      return;
+    }
+    const prefix: string = body.length > 64 ? body.substring(0, 64) : body;
+    if (prefix.indexOf('"code":-352') >= 0 || prefix.indexOf('"code":-412') >= 0 ||
+      prefix.indexOf('"code":-509') >= 0 || prefix.indexOf('"code":-799') >= 0) {
+      BiliRequestGate.noteRisk();
+      return;
+    }
+    BiliRequestGate.noteSuccess();
+  }
+
+  /** 安全取响应体文本（非字符串形态返回空串，供风控前缀扫描，不参与业务解析） */
+  private static resultAsText(resp: http.HttpResponse): string {
+    if (typeof resp.result === 'string') {
+      return resp.result;
+    }
+    return '';
+  }
+
+  /**
+   * ⚠️ 2026-10-24 修「POST 发不出 body」—— requestText / requestTextWithCookies
+   * 两个入口都必须**同时**传 `extraData` 与 `body`：
+   *
+   * API 26 起 `HttpRequestOptions` 拆出了独立的 `body` 字段，文档写明
+   * 「body 与 extraData 同时配置时 **body 优先**，extraData 被忽略」。
+   * 只传 extraData 时，本机实测**请求体完全没发出去** —— 抓包证据：POST 请求头里
+   * 既无 content-length 也无 transfer-encoding，服务端收到 `bodyLen=0`，
+   * 于是 ExClimbWuzhi 恒答 `{"code":-400,"message":"请求错误"}`（而同样的 body
+   * 用 node 发是 code=0，排查了两轮才定位到这里）。
+   *
+   * 两个字段内容相同，引擎按优先级取其一，不会重复发送；低版本没有 `body`
+   * 字段时由 `extraData` 兜住，行为与旧版一致。
+   */
+
   static async requestText(url: string, options?: HttpRequestOptions): Promise<string> {
+    // 全局节流闸门（2026-10-24）：B 站域请求排队取名额（节流 + 并发上限 +
+    // 高优先插队 + 风控熔断），非 B 站 URL 直接放行（gated=false 不必 release）
+    const gated: boolean = await BiliRequestGate.acquire(url);
     const req: http.HttpRequest = http.createHttp();
     try {
       // 请求侧留痕（er/ 播放失败诊断报告的整改项）：resp 只打基础 URL，
@@ -133,9 +192,14 @@ export class HttpUtil {
         header: HttpUtil.buildHeader(options),
         queryParams: options?.params,
         extraData: options?.body ?? undefined,
+        body: options?.body ?? undefined,
         connectTimeout: 15000,
         readTimeout: 15000
       });
+      // 风控探测先于 >=400 抛错：412/403/429 的上报点在这里（body 仅作扫描用）
+      if (gated) {
+        HttpUtil.reportGateRisk(resp.responseCode, HttpUtil.resultAsText(resp));
+      }
       if (resp.responseCode >= 400) {
         throw new Error(`HTTP ${resp.responseCode} for ${url}`);
       }
@@ -145,6 +209,9 @@ export class HttpUtil {
       return resultText;
     } finally {
       req.destroy();
+      if (gated) {
+        BiliRequestGate.release(url);
+      }
     }
   }
 
@@ -164,6 +231,7 @@ export class HttpUtil {
    * （不向上抛看不懂的错，方案 §2B）。
    */
   static async probeRedirectLocation(url: string, options?: HttpRequestOptions): Promise<string> {
+    const gated: boolean = await BiliRequestGate.acquire(url);
     const req: http.HttpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await req.request(url, {
@@ -173,6 +241,9 @@ export class HttpUtil {
         readTimeout: 15000,
         maxRedirects: 0
       });
+      if (gated) {
+        HttpUtil.reportGateRisk(resp.responseCode, HttpUtil.resultAsText(resp));
+      }
       const location: string = HttpUtil.readHeader(resp, 'location');
       hilog.info(0x0000, 'BiliMusicHttp', 'probe %{public}s code=%{public}d location=%{public}s',
         url, resp.responseCode, location);
@@ -183,6 +254,9 @@ export class HttpUtil {
       return '';
     } finally {
       req.destroy();
+      if (gated) {
+        BiliRequestGate.release(url);
+      }
     }
   }
 
@@ -212,6 +286,7 @@ export class HttpUtil {
    * 实测格式异常（见 extractResponseCookies）降为兜底；详见该方法注释。
    */
   static async requestTextWithCookies(url: string, options?: HttpRequestOptions): Promise<HttpTextResult> {
+    const gated: boolean = await BiliRequestGate.acquire(url);
     const req: http.HttpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await req.request(url, {
@@ -219,9 +294,13 @@ export class HttpUtil {
         header: HttpUtil.buildHeader(options),
         queryParams: options?.params,
         extraData: options?.body ?? undefined,
+        body: options?.body ?? undefined,
         connectTimeout: 15000,
         readTimeout: 15000
       });
+      if (gated) {
+        HttpUtil.reportGateRisk(resp.responseCode, HttpUtil.resultAsText(resp));
+      }
       if (resp.responseCode >= 400) {
         // >=400 直接抛异常不打 resp 日志，会把关键诊断信息吞掉（曾导致一次 poll 失败无任何痕迹）
         hilog.warn(0x0000, 'BiliMusicHttp', 'HTTP %{public}d for %{public}s',
@@ -244,6 +323,9 @@ export class HttpUtil {
       return result;
     } finally {
       req.destroy();
+      if (gated) {
+        BiliRequestGate.release(url);
+      }
     }
   }
 

@@ -11,8 +11,9 @@
  *   - 「缺时长搜出的没有歌词」结论不可信，时长补回后清缓存重搜（信息键）。
  */
 
-import { Track, LyricLine, LyricResult, LyricWord } from '../../model/MusicModels';
+import { Track, LyricLine, LyricResult, LyricWord, LyricCandidate } from '../../model/MusicModels';
 import { LyricsApi, sourceLabel } from '../../api/LyricsApi';
+import { cleanTitle } from '../../utils/TextUtil';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
@@ -33,7 +34,9 @@ import {
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
-  LAYER_DELAY_CONTROL
+  LAYER_DELAY_CONTROL,
+  LAYER_EXIT_DURATION_MS,
+  LAYER_EXIT_DELAY_CONTROL
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -68,6 +71,18 @@ export struct LyricsComponent {
   @State showLyricSheet: boolean = false;
   /** 面板里的源信息：`网易云 · 62 行 · 含翻译` */
   @State lyricInfo: string = '';
+  /** 手动搜索区（长按弹窗内）：是否展开输入框 + 候选列表 */
+  @State lyricSearchExpanded: boolean = false;
+  /** 搜索关键词（展开时预填清洗后的歌名，可改成「歌名 歌手」） */
+  @State lyricSearchKeyword: string = '';
+  /** 三源并行搜索进行中（驱动「搜索中…」与按钮防重复点击） */
+  @State lyricSearching: boolean = false;
+  /** 搜索到的候选（上限 20 条；manual 搜索结果的落地走 pickLyricCandidate） */
+  @State lyricCandidates: LyricCandidate[] = [];
+  /** 搜索区状态文案：未找到 / 获取失败等提示（空串 = 无提示） */
+  @State lyricSearchMsg: string = '';
+  /** 正在取词的候选 id（`source:remoteId`）：行内转 LoadingProgress，防重复点选 */
+  @State lyricPickingId: string = '';
 
   /** 同曲守卫：封面等字段异步补全不应重置歌词 */
   private lastTrackKey: string = '';
@@ -85,9 +100,9 @@ export struct LyricsComponent {
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
-   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
-   * 复位不在任何隐式动画作用域内 → 歌词层单帧直接消失（2026-10-22 用户要求
-   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
+   * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
+   * 仅柔退路径递增）：歌词层 200ms EaseIn 柔退淡出（2026-10-24 三风格收起
+   * 改版，替代 2026-10-22 的单帧瞬隐；与控制区同批 LAYER_EXIT_DELAY_CONTROL）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /**
@@ -95,7 +110,7 @@ export struct LyricsComponent {
    * 封面落位后与控制区同批（LAYER_DELAY_CONTROL）淡入，只淡入不位移。
    */
   @State enterOpacity: number = 0;
-  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把歌词层点亮 */
+  /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把歌词层点亮 */
   private exitRequested: boolean = false;
 
   /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
@@ -106,10 +121,19 @@ export struct LyricsComponent {
     this.enterOpacity = 0;
   }
 
-  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
+  /** 柔退复位：歌词层 200ms EaseIn 淡出 + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
-    this.enterOpacity = 0;
+    this.getUIContext().animateTo(
+      {
+        duration: LAYER_EXIT_DURATION_MS,
+        curve: Curve.EaseIn,
+        delay: LAYER_EXIT_DELAY_CONTROL
+      },
+      (): void => {
+        this.enterOpacity = 0;
+      }
+    );
   }
 
   aboutToAppear(): void {
@@ -165,6 +189,22 @@ export struct LyricsComponent {
     return this.lyricOffsetMs > 0 ? `+${fixed}s` : `-${fixed}s`;
   }
 
+  /** 候选行副标题：`歌手 · 专辑 · 源`（空段跳过，避免「 · · 网易云」） */
+  private candidateSubtitle(cand: LyricCandidate): string {
+    const parts: string[] = [];
+    if (cand.artistName.length > 0) {
+      parts.push(cand.artistName);
+    }
+    if (cand.albumName.length > 0) {
+      parts.push(cand.albumName);
+    }
+    const label: string = sourceLabel(cand.source);
+    if (label.length > 0) {
+      parts.push(label);
+    }
+    return parts.join(' · ');
+  }
+
   /** 调整歌词偏移（正数 = 歌词延后显示） */
   private bumpOffset(deltaMs: number): void {
     const track: Track | null = this.currentTrack;
@@ -198,6 +238,92 @@ export struct LyricsComponent {
     this.lyricScrollEffect = LyricScrollEffect.Line;
     this.lyricInfo = '已跳过本曲歌词（重新获取可恢复）';
     this.showLyricSheet = false;
+  }
+
+  /** 复位手动搜索区（弹窗 onDisappear / 手选成功后共用）：回干净入口态 */
+  private resetLyricSearchSection(): void {
+    this.lyricSearchExpanded = false;
+    this.lyricSearchKeyword = '';
+    this.lyricSearching = false;
+    this.lyricCandidates = [];
+    this.lyricSearchMsg = '';
+    this.lyricPickingId = '';
+  }
+
+  /**
+   * 手动搜索歌词候选（三源并行，上限 20 条）。
+   * 空词 / 搜索中 / 无曲目一律 no-op；回来时曲目已切换则丢弃结果（搜索结果只属于发起时的曲目）。
+   */
+  private async runLyricSearch(): Promise<void> {
+    const track: Track | null = this.currentTrack;
+    if (track === null || this.lyricSearching) {
+      return;
+    }
+    const keyword: string = this.lyricSearchKeyword.trim();
+    if (keyword.length === 0) {
+      this.lyricSearchMsg = '先输入关键词，如「歌名 歌手」';
+      return;
+    }
+    this.lyricSearching = true;
+    this.lyricSearchMsg = '';
+    try {
+      const rows: LyricCandidate[] = await LyricsApi.searchLyricCandidates(keyword);
+      const now: Track | null = this.currentTrack;
+      if (now === null || now.id !== track.id) {
+        return;
+      }
+      this.lyricCandidates = rows;
+      if (rows.length === 0) {
+        this.lyricSearchMsg = '未找到，换个关键词试试';
+      }
+    } catch (err) {
+      const msg: string = err instanceof Error ? err.message : String(err);
+      console.error(`[Lyric] manual search failed: ${msg}`);
+      this.lyricSearchMsg = '搜索失败，请检查网络后重试';
+    } finally {
+      this.lyricSearching = false;
+    }
+  }
+
+  /**
+   * 用户点选某条候选 → 取词并落地（写 manual 缓存，之后自动搜索不覆盖）。
+   * 令牌守卫：取词期间切歌，旧弹窗在途结果不得覆盖新歌歌词。
+   */
+  private async pickLyricCandidate(cand: LyricCandidate): Promise<void> {
+    const track: Track | null = this.currentTrack;
+    if (track === null || this.lyricPickingId.length > 0) {
+      return;
+    }
+    this.lyricPickingId = cand.id;
+    this.lyricSearchMsg = '';
+    const token: number = ++this.lyricToken;
+    try {
+      const result: LyricResult | null = await LyricsApi.chooseLyricCandidate(track, cand);
+      if (token !== this.lyricToken) {
+        return;
+      }
+      if (result !== null) {
+        this.mLrcEntryList = this.toLrcEntries(result.lines);
+        this.lyricScrollEffect = result.dynamic === true
+          ? LyricScrollEffect.LetterGradient
+          : LyricScrollEffect.Line;
+        this.lyricInfo = this.buildInfoText(result);
+        this.showLyricSheet = false;
+      } else {
+        this.lyricSearchMsg = '获取歌词失败，换个候选试试';
+      }
+    } catch (err) {
+      if (token !== this.lyricToken) {
+        return;
+      }
+      const msg: string = err instanceof Error ? err.message : String(err);
+      console.error(`[Lyric] manual pick failed: ${msg}`);
+      this.lyricSearchMsg = '获取歌词失败，换个候选试试';
+    } finally {
+      // 纯 UI 行状态无条件复位：取词期间切歌（令牌失效）时若不复位，
+      // lyricPickingId 会永远卡在旧候选上，之后所有点选都被防重复守卫拦掉。
+      this.lyricPickingId = '';
+    }
   }
 
   onTrackChanged(): void {
@@ -347,6 +473,15 @@ export struct LyricsComponent {
    * 刻意不写成「带参 @Builder」：本项目铁律 —— 带参 Builder 按值传递，
    * 参数来自状态变量时内部不随状态刷新；且函数类型参数不能做状态变量。
    * 所以每个按钮都内联写，只有文案与颜色是常量。
+   *
+   * 配色（2026-10-23 修「浅色模式不可见」）：旧的硬编码白色系（Color.White /
+   * #99FFFFFF / #1AFFFFFF / #33FFFFFF / #CCFFFFFF）在系统浅色模式下被 sheet
+   * 的浅色背景吞掉。现全部改用 app.color.* 语义 token（base/dark 双份定义，
+   * 随系统深浅色自动切换），与 SettingsPage 弹窗、QueueSheet 的自适应口径一致；
+   * 唯一保留的 Color.White 是品牌色底上的白字（深浅色下均可见）。
+   *
+   * 手动搜索（2026-10-23 新增）：「搜索歌词」展开输入区 → 三源并行搜候选 →
+   * 点选落地并写 manual 缓存（用户的选择 > 算法，自动搜索不再覆盖）。
    */
   @Builder
   LyricSheetHost() {
@@ -355,10 +490,10 @@ export struct LyricsComponent {
         Text('歌词')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_primary'))
         Text(this.lyricInfo.length > 0 ? this.lyricInfo : '—')
           .fontSize(12)
-          .fontColor('#99FFFFFF')
+          .fontColor($r('app.color.text_secondary'))
       }
       .alignItems(HorizontalAlign.Start)
       .width(StyleConstants.FULL_WIDTH)
@@ -366,11 +501,11 @@ export struct LyricsComponent {
       Row() {
         Text('−0.5s')
           .fontSize(14)
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_primary'))
           .height(44)
           .padding({ left: 18, right: 18 })
           .borderRadius(22)
-          .backgroundColor('#1AFFFFFF')
+          .backgroundColor($r('app.color.press_overlay'))
           .textAlign(TextAlign.Center)
           .accessibilityText('歌词提前 0.5 秒')
           .onClick((): void => {
@@ -379,16 +514,16 @@ export struct LyricsComponent {
         Text(this.offsetText())
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_primary'))
           .layoutWeight(1)
           .textAlign(TextAlign.Center)
         Text('+0.5s')
           .fontSize(14)
-          .fontColor(Color.White)
+          .fontColor($r('app.color.text_primary'))
           .height(44)
           .padding({ left: 18, right: 18 })
           .borderRadius(22)
-          .backgroundColor('#1AFFFFFF')
+          .backgroundColor($r('app.color.press_overlay'))
           .textAlign(TextAlign.Center)
           .accessibilityText('歌词延后 0.5 秒')
           .onClick((): void => {
@@ -401,12 +536,12 @@ export struct LyricsComponent {
       Row({ space: 12 }) {
         Text('重置偏移')
           .fontSize(13)
-          .fontColor('#CCFFFFFF')
+          .fontColor($r('app.color.text_secondary'))
           .height(44)
           .layoutWeight(1)
           .borderRadius(12)
           .borderWidth(1)
-          .borderColor('#33FFFFFF')
+          .borderColor($r('app.color.bg_divider'))
           .textAlign(TextAlign.Center)
           .onClick((): void => {
             const track: Track | null = this.currentTrack;
@@ -429,21 +564,150 @@ export struct LyricsComponent {
           })
         Text('跳过本曲')
           .fontSize(13)
-          .fontColor('#CCFFFFFF')
+          .fontColor($r('app.color.text_secondary'))
           .height(44)
           .layoutWeight(1)
           .borderRadius(12)
           .borderWidth(1)
-          .borderColor('#33FFFFFF')
+          .borderColor($r('app.color.bg_divider'))
           .textAlign(TextAlign.Center)
           .onClick((): void => {
             void this.skipLyric();
           })
       }
       .width(StyleConstants.FULL_WIDTH)
+
+      // 手动搜索入口：全宽描边按钮，点击展开/收起搜索区
+      Text(this.lyricSearchExpanded ? '收起搜索' : '搜索歌词')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .height(44)
+        .width(StyleConstants.FULL_WIDTH)
+        .borderRadius(12)
+        .borderWidth(1)
+        .borderColor($r('app.color.bg_divider'))
+        .textAlign(TextAlign.Center)
+        .onClick((): void => {
+          if (this.lyricSearchExpanded) {
+            this.lyricSearchExpanded = false;
+            return;
+          }
+          this.lyricSearchExpanded = true;
+          // 展开预填：清洗后的歌名（用户可改成「歌名 歌手」组合词）
+          if (this.lyricSearchKeyword.length === 0) {
+            const track: Track | null = this.currentTrack;
+            if (track !== null) {
+              const cleaned: string = cleanTitle(track.title);
+              this.lyricSearchKeyword = cleaned.length > 0 ? cleaned : track.title;
+            }
+          }
+        })
+
+      if (this.lyricSearchExpanded) {
+        Column({ space: 12 }) {
+          Row({ space: 8 }) {
+            TextInput({ placeholder: '歌名 / 歌手，如「晴天 周杰伦」', text: this.lyricSearchKeyword })
+              .layoutWeight(1)
+              .height(40)
+              .fontSize(14)
+              .fontColor($r('app.color.text_primary'))
+              .placeholderColor($r('app.color.text_tertiary'))
+              .placeholderFont({ size: 14 })
+              .backgroundColor($r('app.color.bg_card'))
+              .borderRadius(12)
+              .padding({ left: 14, right: 14 })
+              .onChange((v: string): void => {
+                this.lyricSearchKeyword = v;
+              })
+              .onSubmit((): void => {
+                void this.runLyricSearch();
+              })
+            Text(this.lyricSearching ? '搜索中' : '搜索')
+              .fontSize(13)
+              .fontColor(Color.White)
+              .height(40)
+              .padding({ left: 16, right: 16 })
+              .borderRadius(12)
+              .backgroundColor(this.themePrimary)
+              .textAlign(TextAlign.Center)
+              .onClick((): void => {
+                void this.runLyricSearch();
+              })
+          }
+          .width(StyleConstants.FULL_WIDTH)
+          .alignItems(VerticalAlign.Center)
+
+          if (this.lyricSearching) {
+            Row({ space: 8 }) {
+              LoadingProgress()
+                .width(16)
+                .height(16)
+                .color($r('app.color.text_secondary'))
+              Text('三源并行搜索中…')
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+            }
+            .width(StyleConstants.FULL_WIDTH)
+            .alignItems(VerticalAlign.Center)
+          } else if (this.lyricSearchMsg.length > 0) {
+            Text(this.lyricSearchMsg)
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .width(StyleConstants.FULL_WIDTH)
+          }
+
+          if (this.lyricCandidates.length > 0) {
+            List({ space: 0 }) {
+              ForEach(this.lyricCandidates, (cand: LyricCandidate) => {
+                ListItem() {
+                  Row() {
+                    Column({ space: 2 }) {
+                      Text(cand.trackName)
+                        .fontSize(14)
+                        .fontColor($r('app.color.text_primary'))
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      Text(this.candidateSubtitle(cand))
+                        .fontSize(12)
+                        .fontColor($r('app.color.text_secondary'))
+                        .maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    }
+                    .alignItems(HorizontalAlign.Start)
+                    .layoutWeight(1)
+
+                    if (this.lyricPickingId === cand.id) {
+                      LoadingProgress()
+                        .width(16)
+                        .height(16)
+                        .color($r('app.color.text_secondary'))
+                        .margin({ left: 12 })
+                    }
+                  }
+                  .width(StyleConstants.FULL_WIDTH)
+                  .height(52)
+                  .alignItems(VerticalAlign.Center)
+                  .onClick((): void => {
+                    void this.pickLyricCandidate(cand);
+                  })
+                }
+              }, (cand: LyricCandidate): string => cand.id)
+            }
+            .width(StyleConstants.FULL_WIDTH)
+            .constraintSize({ maxHeight: 300 })
+            .divider({
+              strokeWidth: 1,
+              color: $r('app.color.bg_divider'),
+              startMargin: 0,
+              endMargin: 0
+            })
+          }
+        }
+        .width(StyleConstants.FULL_WIDTH)
+      }
     }
     .width(StyleConstants.FULL_WIDTH)
-    .padding({ left: 24, right: 24, top: 8, bottom: 28 })
+    .padding({ left: 24, right: 24, top: 16, bottom: 16 })
   }
 
   build() {
@@ -484,7 +748,7 @@ export struct LyricsComponent {
               .fontColor(Color.White)
               .fontWeight(PlayerConstants.FONT_WEIGHT_700)
               .fontFamily(PlayerConstants.FONT_FAMILY_BOLD)
-              .maxLines(1)
+              .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text(this.artistText())
               .fontSize(new BreakpointType<Resource>({
@@ -568,12 +832,18 @@ export struct LyricsComponent {
           })
       }
     }
-    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；收起为闭包外瞬隐（onContentExit 单帧置 0）
+    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；收起为柔退淡出（onContentExit 的 200ms EaseIn 退场）
     .opacity(this.enterOpacity)
     .bindSheet($$this.showLyricSheet, this.LyricSheetHost(), {
-      height: SheetSize.MEDIUM,
+      // FIT_CONTENT（2026-10-23 修「底部大片空白」）：内容只有 ~230vp，旧的 MEDIUM
+      // 半屏固定高在大屏真机上留下大片空白；贴合内容后与 SettingsPage 弹窗口径一致。
+      height: SheetSize.FIT_CONTENT,
       dragBar: true,
-      showClose: false
+      showClose: false,
+      // 弹窗关闭即复位搜索区（含手选成功关弹窗的路径）：下次打开是干净入口态
+      onDisappear: (): void => {
+        this.resetLyricSearchSection();
+      }
     })
   }
 }

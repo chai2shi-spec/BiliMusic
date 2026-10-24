@@ -43,6 +43,8 @@ export class BreakpointSystem {
   private smListener: mediaquery.MediaQueryListener | null = null;
   private mdListener: mediaquery.MediaQueryListener | null = null;
   private lgListener: mediaquery.MediaQueryListener | null = null;
+  /** 横竖屏监听（2026-10-23 两列列表改造）：横屏宽屏时列表条目两列显示 */
+  private landscapeListener: mediaquery.MediaQueryListener | null = null;
 
   private isBreakpointSM = (mediaQueryResult: mediaquery.MediaQueryResult): void => {
     if (mediaQueryResult.matches) {
@@ -62,6 +64,11 @@ export class BreakpointSystem {
     }
   };
 
+  /** 横竖屏变化：只写 AppStorage（IS_LANDSCAPE），各页 @StorageProp 订阅驱动两列分支 */
+  private onOrientationChange = (mediaQueryResult: mediaquery.MediaQueryResult): void => {
+    AppStorage.setOrCreate<boolean>(BreakpointConstants.IS_LANDSCAPE, mediaQueryResult.matches);
+  };
+
   private updateCurrentBreakpoint(breakpoint: string): void {
     if (this.currentBreakpoint !== breakpoint) {
       this.currentBreakpoint = breakpoint;
@@ -77,6 +84,10 @@ export class BreakpointSystem {
     this.mdListener.on('change', this.isBreakpointMD);
     this.lgListener = context.getMediaQuery().matchMediaSync(BreakpointConstants.RANGE_LG);
     this.lgListener.on('change', this.isBreakpointLG);
+    this.landscapeListener = context.getMediaQuery().matchMediaSync(BreakpointConstants.RANGE_LANDSCAPE);
+    this.landscapeListener.on('change', this.onOrientationChange);
+    // 横竖屏首发同步（与断点同款）：冷启动处于横屏时首帧即两列，不等 change 事件
+    AppStorage.setOrCreate<boolean>(BreakpointConstants.IS_LANDSCAPE, this.landscapeListener.matches);
     if (this.smListener.matches) {
       this.updateCurrentBreakpoint(BreakpointConstants.BREAKPOINT_SM);
     } else if (this.mdListener !== null && this.mdListener.matches) {
@@ -98,6 +109,10 @@ export class BreakpointSystem {
     if (this.lgListener !== null) {
       this.lgListener.off('change', this.isBreakpointLG);
       this.lgListener = null;
+    }
+    if (this.landscapeListener !== null) {
+      this.landscapeListener.off('change', this.onOrientationChange);
+      this.landscapeListener = null;
     }
   }
 }

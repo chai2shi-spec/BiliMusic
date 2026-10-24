@@ -55,6 +55,58 @@ export const LAYER_DELAY_TOP: number = 530;
 export const LAYER_DELAY_INFO: number = 470;
 /** 控制区（含歌词，同批）：底部区域最先被背景面盖住，最早淡入 */
 export const LAYER_DELAY_CONTROL: number = 400;
+
+/**
+ * ══════════ 收起分层柔退（2026-10-24 三风格收起动画改版）══════════
+ *
+ * morph 风格收起时内容层不再单帧瞬隐，改为**反向错峰柔和退场**（镜像入场节奏）：
+ * 背景收缩自顶部揭起 → 顶栏先退、标题块次之、控制区/歌词最后；各层 200ms
+ * EaseIn 加速淡出 + 复位位移（与 700ms 几何转场重叠，总退场 ~340ms）。
+ * seq（STORE_PLAYER_CONTENT_EXIT）仍在主动画闭包外递增，各层 @Watch 内
+ * **自建** animateTo 驱动退场；下滑收起路径不触发本组常量。
+ */
+/** 柔退单层时长（ms，EaseIn 加速离场） */
+export const LAYER_EXIT_DURATION_MS: number = 200;
+/** 顶栏柔退延迟（ms）：背景收缩自顶揭起，顶栏最先退 */
+export const LAYER_EXIT_DELAY_TOP: number = 0;
+/** 标题块柔退延迟（ms） */
+export const LAYER_EXIT_DELAY_INFO: number = 70;
+/** 控制区 / 歌词柔退延迟（ms）：与入场 LAYER_DELAY_CONTROL 同批语义 */
+export const LAYER_EXIT_DELAY_CONTROL: number = 140;
+/**
+ * 全屏档封面特效层（模糊+溶解）柔退时长（ms）：同时是 Index.closePlayer 的
+ * 预熔窗口宽度（两处必须同源，柔隐完成即回飞）。独立于内容层
+ * LAYER_EXIT_DURATION_MS(200) —— 初版 150ms EaseIn 用户反馈「消失太快」，
+ * 2026-10-24 调优定稿 300ms EaseInOut（全屏档 morph 收起总时长 =
+ * 本值 + 700ms 回飞 = 1000ms）。
+ */
+export const IMMERSIVE_FX_EXIT_MS: number = 300;
+/**
+ * 背景面收起末端渐隐曲线（2026-10-24 用户拍板「末端渐隐」，推翻 10-24 上午
+ * 「落位才消失」规格）：透明度 1→0 但曲线前 ~65% 恒持 ≈1、末端加速衰减 ——
+ * 背景面收缩接近迷你栏时融入下层页面，替代落位瞬间硬切。调早调晚改 x1。
+ */
+export const PLAYER_BG_EXIT_CURVE = curves.cubicBezierCurve(0.65, 0, 1, 1);
+/**
+ * 下滑收起（slide 风格 / 手势过阈值释放）：起步慢、越滑越快的重力感。
+ */
+export const PLAYER_SLIDE_CURVE = curves.cubicBezierCurve(0.4, 0, 1, 1);
+/** 下滑收起动画时长（ms） */
+export const SLIDE_CLOSE_MS: number = 350;
+/** 手势下拉松手收起判定阈值（vp，仅位移判定，不做速度判定） */
+export const SLIDE_DISMISS_THRESHOLD_VP: number = 120;
+/** 手势跟手最大压暗（0~1）：下拉进度映射透明度衰减的封顶 */
+export const SLIDE_DIM_MAX: number = 0.4;
+/** 手势不足阈值回弹时长（ms，EaseOut） */
+export const SLIDE_BACK_MS: number = 250;
+/**
+ * 上滑展开（2026-10-24 展开动画三风格区分，仅 slide 风格打开路径）：
+ * 整页从屏幕底部减速上滑 + 渐显，与下滑收起的「加速下滑」镜像 ——
+ * easeOutCubic（起步果断、到位时柔和收住），重力感对称。
+ */
+export const PLAYER_SLIDE_IN_CURVE = curves.cubicBezierCurve(0.33, 1, 0.68, 1);
+/** 上滑展开动画时长（ms），与 SLIDE_CLOSE_MS 对称 */
+export const SLIDE_OPEN_MS: number = 350;
 /**
  * 播放页主动画曲线（打开 / 收起共用）：果断起步 + 长尾柔和收住（iOS 全屏展开
  * 同款手感）。GT 配对（背景面 / 唱片）、页签图标淡出均由该曲线驱动。
@@ -86,8 +138,13 @@ export const ENTRANCE_STAGGER_MS: number = 35;
  * 2026-10-14 两轮实测结论：原下标闸门（ENTRANCE_INDEX_MAX=12 → 20）都会在
  * 「首屏预建批次（可视区 + 缓存区，约 16 条）」与「直出条目」之间露出断层
  * （第 13 条、抬闸后第 17 条先于上层出现）。取消闸门改为全员入场后，
- * 本封顶同时承担「批尾与窗外速入条目几乎同帧落定、不出现下层先亮」的职责，
- * 故从 420 收紧到 280（= 8 × 35）：批尾与速入的最大时间差被压到一个动画窗内。
+ * 本封顶承担「批尾与窗外速入条目几乎同帧落定、不出现下层先亮」的职责，
+ * 故从 420 收紧到 280（= 8 × 35）。
+ * 2026-10-24 回归修复（用户复现「第 21 条先于上层出现」）：LazyForEach +
+ * @Reusable 迁移后「同帧落定」的时序前提被打破（复用节点整行直出、窗外
+ * 懒建 0 延迟，都可能早于排队批尾）—— 改由 TrackItem 内的排队冲刷机制
+ * （TrackEntranceQueue.flushPending）硬保证不倒挂，本封顶只负责无人滚动时
+ * 错峰总时长有界，数值维持 280 不动。
  */
 export const ENTRANCE_DELAY_CAP_MS: number = 280;
 /**

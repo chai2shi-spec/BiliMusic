@@ -18,7 +18,7 @@ import { AppSettings } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { FormFactorHolder } from '../service/FormFactorHolder';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_WINDOW_WIDTH_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED } from '../common/Constants';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
@@ -137,6 +137,13 @@ export default class EntryAbility extends UIAbility {
         // 播放页进度条样式（设置页可切）同批首发：ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_PROGRESS_STYLE, settings.progressStyle);
+        // 播放页收起动画风格（设置页可切，三档：柔退 / 柔退+手势 / 下滑）同批首发：
+        // Index.closePlayer 据此分流收起实现，PlayerPage 据此决定挂不挂下拉手势。
+        AppStorage.setOrCreate(STORE_PLAYER_CLOSE_ANIM, settings.closeAnimStyle);
+        // 播放页封面风格（设置页可切，三档：唱片/方卡/全屏）同批首发：
+        // CoverDiscComponent 的封面形态与 SurfaceLayers 的背景分层据此分流，
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_PLAYER_COVER_STYLE, settings.playerCoverStyle);
         // 迷你栏进度指示开关（设置页可切）同批首发：PlayBar 的 @StorageProp
         // 初值只是占位，真值必须首帧 build 前就位，否则关开关的用户启动时
         // 会先看到进度条再消失。
@@ -149,9 +156,13 @@ export default class EntryAbility extends UIAbility {
         // MusicPlayer.init 恢复 playbackSpeed 字段的数据源。
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED_ENABLED, settings.speedEnabled);
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED, settings.playbackSpeed);
-        // 「与其他应用同时播放」开关同批首发：MusicPlayer 在 AVPlayer prepared 时
-        // 读它决定 audioInterruptMode（INDEPENDENT/SHARE），首播前必须就位。
+        // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
+        // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);
+        // 「在 B 站打开原视频」开关同批首发：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则关掉开关的
+        // 用户启动时会先看到跳转图标再消失。
+        AppStorage.setOrCreate(STORE_OPEN_IN_BILI_ENABLED, settings.openInBilibiliEnabled);
         // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
         //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
         AppContainer.initRest(this.context)
@@ -256,11 +267,17 @@ export default class EntryAbility extends UIAbility {
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
       const topVp: number = sys.topRect.height / density;
+      // 水平安全区（2026-10-24 播放页横屏方案）：横屏下状态栏若以侧边条带
+      // 上报，避让值在 leftRect / rightRect；竖屏两值通常为 0，纯增量发布。
+      const leftVp: number = sys.leftRect.width / density;
+      const rightVp: number = sys.rightRect.width / density;
       const navBarBottomVp: number = sys.bottomRect.height / density;
       const indicatorBottomVp: number = indicator.bottomRect.height / density;
       const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);
       AppStorage.setOrCreate(STORE_SAFE_TOP, topVp);
       AppStorage.setOrCreate(STORE_SAFE_BOTTOM, bottomVp);
+      AppStorage.setOrCreate(STORE_SAFE_LEFT, leftVp);
+      AppStorage.setOrCreate(STORE_SAFE_RIGHT, rightVp);
       AppStorage.setOrCreate(STORE_NAV_BAR_BOTTOM, navBarBottomVp);
       AppStorage.setOrCreate(STORE_NAV_INDICATOR_BOTTOM, indicatorBottomVp);
       // 窗口内容区宽度（vp）：悬浮胶囊「居中 sideMargin」公式的输入（见 Constants
@@ -268,6 +285,10 @@ export default class EntryAbility extends UIAbility {
       // 后续折叠开合 / 分屏 / 转屏由 Index 的 HdsTabs.onAreaChange 持续回写。
       const windowWidthVp: number = win.getWindowProperties().windowRect.width / density;
       AppStorage.setOrCreate(STORE_WINDOW_WIDTH_VP, windowWidthVp);
+      // 窗口内容区高度（vp）：下滑收起动画（2026-10-24）的终点距离与手势压暗
+      // 进度分母，与宽度同源同批写入（见 Constants 的 STORE_WINDOW_HEIGHT_VP 注释）。
+      const windowHeightVp: number = win.getWindowProperties().windowRect.height / density;
+      AppStorage.setOrCreate(STORE_WINDOW_HEIGHT_VP, windowHeightVp);
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`writeSafeArea failed: ${msg}`);

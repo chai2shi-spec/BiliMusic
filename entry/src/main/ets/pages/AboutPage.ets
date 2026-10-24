@@ -10,7 +10,7 @@
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，HdsNavigation 迁移批 1 样板页）：
  * 材质与滚动模糊由 HDS 统一渲染（样式见 HdsTitleBarStyle，设备不支持 IMMERSIVE 材质时
- * 自动走 GRADIENT_BLUR 兜底），内容用 stackBuilder 承载 aboutBar（44×44 返回键 + 标题）。
+ * 自动走玻璃色兜底档），内容用 stackBuilder 承载 aboutBar（标题；返回键为 HDS 默认键，2026-10-24 整改）。
  * 侧滑返回是 Navigation 级能力，不受影响。
  */
 
@@ -27,10 +27,9 @@ import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCard
 import { copyText } from '../utils/ClipboardUtil';
 import { showAppToast } from '../components/AppToast';
 import { NavTitleRow } from '../components/NavTitleRow';
-
-/** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
-const ABOUT_BLUR_START_VP: number = 30;
-const ABOUT_BLUR_END_VP: number = 80;
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /** App 图标显示边长（vp）与圆角（vp）：圆角比例对齐系统图标遮罩 */
 const APP_ICON_SIZE: number = 88;
@@ -53,12 +52,28 @@ export struct AboutPage {
   private aboutScroller: Scroller = new Scroller();
 
   /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.aboutScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
+  /**
    * 子页转场的横移量（相对页面自身宽度）：常驻 '0%'，
    * 转场代理里按 push/pop 方向临时改写（见 navTransitionDelegate）。
    */
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT)
       .then((info: bundleManager.BundleInfo): void => {
         this.appVersion = info.versionName.length > 0 ? `版本：${info.versionName}` : '';
@@ -113,12 +128,36 @@ export struct AboutPage {
   }
 
   /**
-   * 标题栏内容（titleBar 的 stackBuilder 承载）：返回行（返回键 + 「关于」标题）。
+   * 标题栏内容（titleBar 的 stackBuilder 承载）：「关于」标题（返回键为 HDS 默认键）。
    * 不放版本等文字 —— 页面主体里已经有大标题。
    */
   @Builder
   aboutBar() {
     NavTitleRow({ title: '关于' })
+  }
+
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
+   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
+   *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
+   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  aboutBarNarrow() {
+    Row() {
+      Column() {
+        this.aboutBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /**
@@ -261,32 +300,49 @@ export struct AboutPage {
         // 根 Stack 默认居中对齐，直接给 Scroll 挂上限即可。
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
         // 标题栏让位已内移为内容首部占位（见 Column 首子），不在滚动容器上加 padding。
+        // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
+        // 签名 (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
+        .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState): void => {
+          this.syncTopBlurProgress();
+        })
+        .onScrollStop((): void => {
+          // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+          this.syncTopBlurProgress();
+        })
       }
       .width('100%')
       .height('100%')
       .backgroundColor($r('app.color.bg_page'))
+
+      // [任务③·推广二级页] 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于 HDS
+      // titleBar），进度由 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动；
+      // 本页内容不足一屏时 Scroll 不可滚、进度恒 0（透明无副作用）。
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
-    // （设备不支持 IMMERSIVE 时自动走 GRADIENT_BLUR 兜底，见该文件注释）。
-    // 内容用 stackBuilder 承载 aboutBar：返回键 / 标题视觉与自绘时代一致，
-    // HDS 只接管容器与材质（任务书：「用 HDS 的标题栏容器 + 材质能力，装各页自己的顶栏内容」）。
+    // （设备不支持 IMMERSIVE 时自动走玻璃色兜底档，见该文件注释）。
+    // 内容用 stackBuilder 承载 aboutBarNarrow（2026-10-23 平板模式宽度适配：
+    // 收窄容器内标题与内容列同宽对齐）：标题视觉与自绘时代
+    // 一致，HDS 只接管容器与材质（任务书：「用 HDS 的标题栏容器 + 材质能力，
+    // 装各页自己的顶栏内容」）。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(ABOUT_BLUR_START_VP, ABOUT_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this，同旧 bar 槽写法）
         stackBuilder: (): void => {
-          this.aboutBar();
+          this.aboutBarNarrow();
         }
       }
     })
-    // ⚠️ 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键。此前 stackBuilder 自绘
-    // 返回键与默认返回键在标题栏左上角重叠（dumpLayout 实证：自绘键 [224,90][312,178]
-    // 压在默认键 [256,94][336,174] 上，两个 chevron 视觉重影、按压命中哪个键效果
-    // 就不一致——用户反馈「返回键按压效果错误」即此）。批 2 当年隐藏默认键被判
-    // 「破坏原样式」回退，实为双键重叠未被识别；现保留自绘键（44x44 + press_overlay，
-    // 九个子页统一），隐藏默认键。
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 史注：2026-10-22 曾因自绘键与默认键在标题栏左上角重叠（dumpLayout 实证：
+    // 自绘键 [224,90][312,178] 压在默认键 [256,94][336,174] 上）而 hideBackButton(true)
+    // 只留自绘键；本次自绘键整体移除，重叠根源消失，默认键恢复显示。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.aboutScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -294,6 +350,9 @@ export struct AboutPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由 plain padding 自理。

@@ -56,6 +56,9 @@
  *     · isPlaying=true  → play()    —— 等价 Playing，从暂停帧继续；
  *     · isPlaying=false → pause()   —— 等价 Paused，冻结当前角度**不复位**；
  *     · 切歌（track 变化）→ reset() —— 等价 Stopped，角度重置 0°，再按播放态决定是否续转。
+ *   性能（2026-10-23 转动卡顿修复）：onFrame → @State → build() 的逐帧重执行是
+ *   JS 层真实开销，两道削减 —— ① playerOpen=true（迷你唱片已摘除）一律 pause，
+ *   杜绝播放页打开期间本组件大树以 120Hz 空转重建；② onFrame 隔帧回写（≈60fps）。
  *
  * 播放进度指示（主题色）：
  *   · 圆环 —— 水平融合收起态：与圆盘同尺寸的兄弟节点叠在封面边缘（描边画在
@@ -74,7 +77,7 @@
  * miniBar 槽位（barFloatingStyle 不带 miniBar），胶囊退回纯页签形态。
  */
 
-import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
+import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL, PLAYER_CLOSE_STYLE_SLIDE } from '../model/MusicModels';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { toThumbUrl } from '../utils/TextUtil';
@@ -86,6 +89,12 @@ import {
   STORE_PLAYER_TRANSITIONING,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_OVERLAY_MOUNTED,
+  STORE_PLAYER_GT_OFF,
+  STORE_PLAYER_CLOSE_ANIM,
+  STORE_PLAYER_SLIDE_IN,
+  STORE_PLAYER_SLIDE_OFFSET,
+  STORE_PLAYER_SLIDE_ALPHA,
+  STORE_WINDOW_HEIGHT_VP,
   STORE_MINI_BAR_EXPANDED,
   STORE_MINI_BAR_ANIM_PHASE,
   MINI_BAR_ANIM_IDLE,
@@ -96,6 +105,7 @@ import {
   STORE_PROGRESS,
   STORE_DURATION,
   STORE_APP_FOREGROUND,
+  STORE_FLING_ACTIVE,
   STORE_THEME_PRIMARY,
   GEOMETRY_ID_PLAYER_DISC,
   GEOMETRY_ID_PLAYER_SURFACE,
@@ -126,6 +136,8 @@ const PLAY_ICON_SIZE: number = 32;
 const CTRL_SPACING: number = 8;
 const DISC_ROTATE_DEGREE: number = 360;
 const DISC_ROTATE_MS: number = 4000;
+/** onFrame 回写节流（ms）：120Hz 屏隔帧回写（≈60fps），逐帧重建开销减半 */
+const FRAME_WRITE_MIN_MS: number = 16;
 /** 收起态圆环进度描边宽（vp）：同尺寸叠在圆盘边缘、盖在封面上 */
 const RING_STROKE_VP: number = 2.5;
 /** 整行内容底边直线进度条厚度（vp） */
@@ -161,6 +173,14 @@ export struct PlayBar {
    * animator 帧回调 / @State 回写在 UI 冻结后空转；回前台在播时续转。
    */
   @StorageProp(STORE_APP_FOREGROUND) @Watch('onForegroundChanged') appForeground: boolean = true;
+  /**
+   * Fling（惯性/回弹）进行中（SearchPage 首页签 List 边界写入，F2 见
+   * design/Fling状态触发-两工程对照与AI实施规格.md）：Fling 期冻结唱片旋转、
+   * 把帧预算让给顶栏渐变模糊合成。@StorageLink 双向：aboutToDisappear
+   * 写回 false 兜底（抛行中离开首页防「永久停转」）。只并入 syncDiscAnim
+   * 的 spin 条件（自动尊重在播/前台/展开/overlay 门控），绝不复位角度。
+   */
+  @StorageLink(STORE_FLING_ACTIVE) @Watch('onFlingActiveChanged') flingActive: boolean = false;
   /**
    * miniBar 展开 / 收起态（Index 的 onBarStyleChange 写入，这里只读；默认折叠）。
    * 空闲时决定 Body 挂载与否（bodyVisible 的兜底分支）；动画进行中不介入
@@ -214,8 +234,35 @@ export struct PlayBar {
    * 播放页展开态（Index overlay 挂载后由 PlayerInfoComponent 主动画写 true）：
    * true 期间迷你唱片摘除（大唱片端 geometryTransition 配对飞行，圆→圆 morph）、
    * 槽位保留恒定占位（外包 Stack 定宽高，Body 布局零跳动）。
+   * @Watch（2026-10-23 转动卡顿修复）：true 期间唱片节点已摘除，animator 同步
+   * pause —— 否则本组件大树以 120Hz 逐帧空转重建，与播放页大封面的逐帧回写
+   * 同帧抢 JS 线程，是转动卡顿主因。
    */
-  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
+  @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
+
+  /**
+   * 播放页 overlay 挂载标志（2026-10-24 收起漂移修复）：旋转门控第二条件 ——
+   * 收起飞行窗口（playerOpen 已 false 但 overlay 仍挂载的 700ms）内迷你唱片
+   * 冻结在当前角度，杜绝配对交叉淡化端「边转边飞」的拖尾摆动；overlay 卸载
+   * （closePlayer 的 animateTo onFinish）时 @Watch 触发续转，角度延续不归零。
+   */
+  @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) @Watch('onPlayerOpenChanged') overlayMounted: boolean = false;
+
+  /**
+   * geometryTransition 摘除开关（2026-10-24 下滑收起，Index.slideOutClose 置位）：
+   * true 时迷你唱片 / 透明锚点的 GT id 换空串（无转场）—— 下滑路径 playerOpen
+   * 翻转不触发迷你唱片反向配对飞行（封面斜飞回栏的根治项）。
+   */
+  @StorageProp(STORE_PLAYER_GT_OFF) gtOff: boolean = false;
+
+  /**
+   * 上滑展开进行中（2026-10-24 展开动画三风格区分，openPlayer slide 分支预置）：
+   * 迷你唱片挂载守卫据此「盖住再隐藏」—— 上滑期间 playerOpen 已翻 true，但
+   * 页面尚未盖住迷你栏，唱片保持可见（旋转仍冻结：overlayMounted 门控）；
+   * slideInTransition 的 onFinish 复位本标志时页面已全屏盖住栏，唱片同帧摘除
+   * （其最后一次构建的 GT id 为空串 —— GT_OFF 期间构建，不与封面配对）。
+   */
+  @StorageProp(STORE_PLAYER_SLIDE_IN) slideIn: boolean = false;
 
   /** 唱片当前旋转角度（°）：animator 每帧回写，暂停时冻结在当前值 */
   @State rotateAngle: number = 0;
@@ -230,9 +277,20 @@ export struct PlayBar {
 
   /** 唱片旋转 animator：play=续转 / pause=冻结 / reset=归零（aboutToAppear 里创建） */
   private coverAnim: AnimatorResult | null = null;
+  /** onFrame 节流基准（ms）：与 FRAME_WRITE_MIN_MS 配合做隔帧回写 */
+  private lastFrameMs: number = 0;
 
   /** 收起态点击请求重新展开（宿主回调 HdsTabsController.applyMiniBarStyle） */
   onExpandRequest?: () => void = undefined;
+
+  /**
+   * 独立挂载模式（2026-10-23 二级页悬浮播放栏，SubPagePlayBar 内嵌用）：
+   * true 时本组件**脱离 HDS miniBar 槽位语义**，恒显整行内容（Body + 直线进度，
+   * 不显圆环）、封面恒 40vp、点按直达播放页 —— 与 tabletPlayBar 的「非 SM 下
+   * 天然成立」不同，SM 手机宽度下 bodyVisible / onEntryTap 的收起分支本会走到，
+   * 靠本标志强制整行。默认 false：首页胶囊 miniBar 槽位行为零变化。
+   */
+  @Prop standalone: boolean = false;
 
   /** 播放内核单例：控制键只调它的现成方法，绝不另写播放器 */
   private player: MusicPlayer = MusicPlayer.getInstance();
@@ -260,12 +318,16 @@ export struct PlayBar {
     try {
       this.coverAnim = this.getUIContext().createAnimator(this.discOptions());
       this.coverAnim.onFrame = (value: number): void => {
+        // 隔帧回写（≈60fps）：4s/圈每步 0.3°，视觉零差，逐帧重建开销减半
+        const now: number = Date.now();
+        if (now - this.lastFrameMs < FRAME_WRITE_MIN_MS) {
+          return;
+        }
+        this.lastFrameMs = now;
         this.rotateAngle = value;
       };
       // 挂载时可能已在播放中（isPlaying 初值即 true，@Watch 不会触发，需手动起转）
-      if (this.isPlaying && this.appForeground) {
-        this.coverAnim.play();
-      }
+      this.syncDiscAnim();
     } catch (e) {
       // animator 创建失败只影响唱片旋转，不影响播放控制
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
@@ -274,6 +336,9 @@ export struct PlayBar {
   }
 
   aboutToDisappear(): void {
+    // F2 兜底（规格 §F2）：抛行中离开首页（收起 miniBar / 进子页 / 关播放页）
+    // 会错过 onScrollStop，flingActive 若残留 true 圆盘永不复转 —— 摘除时写回 false。
+    AppStorage.setOrCreate(STORE_FLING_ACTIVE, false);
     if (this.coverAnim !== null) {
       this.coverAnim.finish();
       this.coverAnim = null;
@@ -290,13 +355,32 @@ export struct PlayBar {
     this.syncDiscAnim();
   }
 
-  /** 唱片旋转统一入口：前台且在播才续转，否则冻结在当前帧角度（绝不复位到 0） */
+  /** 一级页 Fling 起止（F2）：只走统一入口 syncDiscAnim（绝不复位角度） */
+  private onFlingActiveChanged(): void {
+    this.syncDiscAnim();
+  }
+
+  /** 播放页展开 → 迷你唱片已摘除，animator 冻结（@Watch playerOpen 统一走这里） */
+  private onPlayerOpenChanged(): void {
+    this.syncDiscAnim();
+  }
+
+  /**
+   * 唱片旋转统一入口：前台、在播、播放页未展开、且 overlay 未挂载（收起飞行
+   * 窗口，2026-10-24 漂移修复）才续转，否则冻结在当前帧角度（绝不复位到 0）
+   * —— playerOpen=true 期间节点已摘除，转 animator 只会让本组件大树以 120Hz
+   * 空转重建（2026-10-23 卡顿修复）；收起飞行期间冻结，配对交叉淡化两端均静止。
+   */
   private syncDiscAnim(): void {
     const anim: AnimatorResult | null = this.coverAnim;
     if (anim === null) {
       return;
     }
-    if (this.isPlaying && this.appForeground) {
+    const spin: boolean = this.isPlaying && this.appForeground && !this.playerOpen && !this.overlayMounted
+      && !this.flingActive;
+    // 低频门控日志（仅状态翻转时打，绝不逐帧）
+    console.info(`[PlayBar] spin=${spin} open=${this.playerOpen} play=${this.isPlaying} fg=${this.appForeground} fling=${this.flingActive}`);
+    if (spin) {
       anim.play();
     } else {
       anim.pause();
@@ -318,10 +402,9 @@ export struct PlayBar {
       console.error(`[PlayBar] animator reset failed: ${msg}`);
       return;
     }
-    // 后台切歌不起转：回前台时 onForegroundChanged 会按播放态补起转
-    if (this.isPlaying && this.appForeground) {
-      anim.play();
-    }
+    // 后台切歌不起转：回前台时 onForegroundChanged 会按播放态补起转；
+    // 播放页展开时迷你唱片已摘除，同样不起转（onPlayerOpenChanged 收起时补）
+    this.syncDiscAnim();
   }
 
   /**
@@ -391,6 +474,10 @@ export struct PlayBar {
    *   · 空闲 → 按展开态。
    */
   private bodyVisible(): boolean {
+    // 独立挂载（二级页悬浮栏）：恒显整行内容，不参与 HDS 槽位收起语义
+    if (this.standalone) {
+      return true;
+    }
     if (this.barLayout === BAR_LAYOUT_VERTICAL
       || this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_SM) {
       return true;
@@ -441,13 +528,23 @@ export struct PlayBar {
   }
 
   /**
-   * 打开全屏播放页（2026-10-21 改版：**组件状态切换动画，不再 pushPath 路由**）。
+   * 打开全屏播放页（2026-10-21 改版：**组件状态切换动画，不再 pushPath 路由**；
+   * 2026-10-24 展开动画三风格区分）。
    *
-   * 只做两件事：连点防护 → 挂载 Index 根 Stack 上的播放页 overlay。
-   * 主动画（背景面从迷你栏**真实视觉包围盒**向四周扩大 + 封面 geometryTransition
-   * 飞行 + 页签图标淡出）全部由 PlayerInfoComponent 在 overlay 挂载后的**单个
-   * animateTo** 驱动（见其 playEnterTransition）。
-   * 收起为逆向镜像（Index.closePlayer），返回不走路由栈 —— 播放页不再是 NavDestination。
+   * 按收起风格分流：
+   *   · morph / morph_swipe → 现状 morph 打开：只做连点防护 + 挂载 overlay，
+   *     主动画（背景面从迷你栏**真实视觉包围盒**向四周扩大 + 封面
+   *     geometryTransition 飞行 + 页签图标淡出）由 PlayerInfoComponent 的
+   *     playEnterTransition（单个 animateTo）驱动，零改动；
+   *   · slide → 上滑展开：挂载**前**预置屏下隐形起始态（SLIDE_OFFSET=窗高 /
+   *     SLIDE_ALPHA=0 / GT_OFF=true / SLIDE_IN=true），首帧渲染即在屏外，
+   *     PlayerInfoComponent.onAppear 检测到 slideIn 走 slideInTransition
+   *     （350ms 减速上滑 + 渐显）。预置必须先于 OVERLAY_MOUNTED —— 挂载后
+   *     再写会以「整页在原位」渲染一帧，起始帧错误。
+   *     窗口高度未就绪（h<=0，理论不可达）时不预置 → 走 morph 打开兜底。
+   *
+   * 收起为逆向镜像（Index.closePlayer 按风格分流），返回不走路由栈 ——
+   * 播放页不再是 NavDestination。
    */
   private openPlayer(): void {
     // 诊断日志（折叠屏「点 miniBar 不跳转」排查）：能打出这行说明点击已送达展开态条目
@@ -460,6 +557,17 @@ export struct PlayBar {
       return;
     }
     AppStorage.setOrCreate(STORE_PLAYER_TRANSITIONING, true);
+    // slide 风格：上滑展开起始态预置（见方法头注释）
+    const closeStyle: string = AppStorage.get<string>(STORE_PLAYER_CLOSE_ANIM) ?? '';
+    if (closeStyle === PLAYER_CLOSE_STYLE_SLIDE) {
+      const h: number = AppStorage.get<number>(STORE_WINDOW_HEIGHT_VP) ?? 0;
+      if (h > 0) {
+        AppStorage.setOrCreate(STORE_PLAYER_SLIDE_OFFSET, h);
+        AppStorage.setOrCreate(STORE_PLAYER_SLIDE_ALPHA, 0);
+        AppStorage.setOrCreate(STORE_PLAYER_GT_OFF, true);
+        AppStorage.setOrCreate(STORE_PLAYER_SLIDE_IN, true);
+      }
+    }
     // 挂载 overlay（Index 根 Stack 条件渲染 LazyDest('Player')，懒加载 + 预热复用）
     AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, true);
   }
@@ -477,6 +585,11 @@ export struct PlayBar {
    * 走不到，直接进播放页（无「点了没反应」死胡同）。
    */
   private onEntryTap(): void {
+    // 独立挂载（二级页悬浮栏）：无展开/收起语义，点按直达播放页
+    if (this.standalone) {
+      this.openPlayer();
+      return;
+    }
     if (!this.expanded && this.barLayout === BAR_LAYOUT_HORIZONTAL
       && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
       && this.onExpandRequest !== undefined) {
@@ -497,6 +610,10 @@ export struct PlayBar {
    *     收起行比展开矮，40vp 会被 `enableMiniBarClip`（默认 true）裁掉一圈（真机反馈）。
    */
   private coverSize(): number {
+    // 独立挂载（二级页悬浮栏）：容器高恒定（56vp 壳），封面恒 40vp
+    if (this.standalone) {
+      return COVER_SIZE;
+    }
     if (this.expanded || this.currentBreakpoint !== BreakpointConstants.BREAKPOINT_SM) {
       return COVER_SIZE;
     }
@@ -520,7 +637,8 @@ export struct PlayBar {
     Stack() {
       CoverImage({ url: toThumbUrl(this.coverUrl(), 96), imgWidth: this.discSizeVp, imgHeight: this.discSizeVp, imgRadius: this.discSizeVp / 2 })
         .rotate({ z: 1, angle: this.rotateAngle })
-        .geometryTransition(GEOMETRY_ID_PLAYER_DISC)
+        // GT 门控（2026-10-24 下滑收起）：gtOff=true 时 id 换空串，下滑路径不配对
+        .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_DISC)
 
       // 圆环进度：只在水平融合收起态显示（ringVisible），与圆盘同尺寸的兄弟节点
       // → 描边画在组件边界内侧、贴圆盘边缘，不触发 enableMiniBarClip 裁剪；
@@ -612,7 +730,9 @@ export struct PlayBar {
             // 「胶囊同款圆角」的几何，展开/收起飞行途中背景面四角即呈 28vp 圆角。
             .borderRadius(PLAYER_SURFACE_RADIUS_START_VP)
             .clip(true)
-            .geometryTransition(GEOMETRY_ID_PLAYER_SURFACE)
+            // GT 门控（2026-10-24 下滑收起）：gtOff=true 时 id 换空串，下滑路径
+            // 背景面不配对收回（背景面由 slideOut 守卫保持挂载、随整页滑走）
+            .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_SURFACE)
         }
 
         Row({ space: 8 }) {
@@ -620,8 +740,10 @@ export struct PlayBar {
           // （discSizeVp）—— 播放页打开（playerOpen=true）时唱片摘除参与
           // geometryTransition 页内配对（飞向播放页大圆盘），槽位占位恒定，
           // Body 布局零跳动；收起时唱片随 Index.closePlayer 的 animateTo 回飞归位。
+          // 上滑展开（slideIn）例外：唱片保持到页面盖住迷你栏（onFinish 复位
+          // slideIn）才摘除 —— 用户拍板「盖住再隐藏」；期间 GT id 已空串无配对。
           Stack() {
-            if (!this.playerOpen) {
+            if (!this.playerOpen || this.slideIn) {
               this.Disc()
             }
           }

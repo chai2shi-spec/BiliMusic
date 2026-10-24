@@ -5,13 +5,13 @@
  * 完整同步会覆盖手动顺序）。目标歌单 id 由路由参数 PlaylistDetailRouteParam 传入。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 返回行 + 头部区，批 1 样板同款）；栏内不放标题文字
- * （歌单名只在头部区 28fp 大标题显示一次），返回行仅一颗返回键。
+ * 标题行 + 头部区，批 1 样板同款；返回键为 HDS 默认键）；栏内不放标题文字
+ * （歌单名只在头部区 28fp 大标题显示一次），标题行为空占位。
  * avoidLayoutSafeArea 后栏顶 = safeTop，滚动时曲目从沉浸材质下穿过；
  * 侧滑返回是 Navigation 级能力，不受影响。
  *
  * 钉顶头部区：整个头部区「封面 + 28fp 大标题 + 元信息/简介 + 播放全部/拉取新投稿」
- * 接在返回行下，仅曲目列表滚动并从材质下透出；
+ * 接在标题行下，仅曲目列表滚动并从材质下透出；
  * 重命名 / 删除歌单入口在歌单列表页行内 ⋮ 菜单。
  */
 
@@ -49,11 +49,18 @@ import {
   STORE_THEME_DEEP
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import {
+  PairOf,
+  makePairs,
+  TWO_COL_GAP_VP,
+  TwoColumnLayout
+} from '../common/utils/TwoColumnList';
 import { showAppToast } from '../components/AppToast';
-import { enqueueFavOp, FAV_OP_DEL } from '../service/FavPushStore';
-import { FavSyncManager } from '../service/FavSyncManager';
 import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
  * 「拉取新投稿」每次最多收多少条。
@@ -75,16 +82,6 @@ const PD_REVEAL_PAGE_SIZE: number = 20;
  * 2026-10-22 头部区间距 top 12→4、bottom 16→8 后同步 -16。
  */
 const PLAYLIST_HEADER_ESTIMATE_HEIGHT: number = 174;
-
-/**
- * 顶栏滚动模糊时机（2026-10-09 用户定档）：
- *  · 内容区滚动 0~30vp：导航栏保持完全透明；
- *  · 30~80vp：沉浸玻璃材质渐变出现；
- *  · 超过 80vp：材质固定满强度。
- * 数值语义 = HDS blurEffectiveStart/EndOffset 的「内容区滚动偏移」（SDK：total scroll offset）。
- */
-const PD_BLUR_START_VP: number = 30;
-const PD_BLUR_END_VP: number = 80;
 
 @Component
 export struct PlaylistDetail {
@@ -115,6 +112,19 @@ export struct PlaylistDetail {
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.headerAreaHeight;
   }
+
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.listScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
   /** 媒体库变更信号：在别处（如弹层里）改到这个歌单时同步刷新 */
   @StorageLink(STORE_LIBRARY_REV) @Watch('onLibraryChanged') libraryRev: number = 0;
   /** 状态栏高度（vp）：标题栏要整体落在状态栏下方，由本页自己顶下来 */
@@ -126,7 +136,21 @@ export struct PlaylistDetail {
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时曲目条目两列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   private player: MusicPlayer = MusicPlayer.getInstance();
+
+  /**
+   * 横屏宽屏时两列显示（2026-10-23 两列改造）。
+   *
+   * ⚠️ 可拖动排序的本地歌单（canReorder()）**保持单列**：ForEach.onMove 的
+   * 长按拖动排序以 ListItem 为单位，配对后拖动会以「一对」为单位错乱 ——
+   * 有意取舍，不是遗漏。收藏夹镜像等不可排序歌单横屏照常两列。
+   */
+  private isTwoCol(): boolean {
+    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape)
+      && !this.canReorder();
+  }
 
   /**
    * 下载任务快照（2026-10-08）：订阅它只为派生「哪些曲目已下载完成」
@@ -163,6 +187,9 @@ export struct PlaylistDetail {
   @State descText: string = '';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     // 路由入参（2026-10-22 传参改造）：目标歌单 id 随 pushPathByName 入栈，
     // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
     const routeParam: PlaylistDetailRouteParam | null =
@@ -275,8 +302,13 @@ export struct PlaylistDetail {
     if (this.tracks.length >= all.length) {
       return;
     }
-    const next: number = Math.min(this.tracks.length + PD_REVEAL_PAGE_SIZE, all.length);
-    this.tracks = all.slice(0, next);
+    // 增量揭示（SearchPage.revealMoreRanking 同款）：push 揭示区间，
+    // 不再 slice 整表重新赋值，ForEach 只 diff 新增 key。
+    const from: number = this.tracks.length;
+    const next: number = Math.min(from + PD_REVEAL_PAGE_SIZE, all.length);
+    for (let i = from; i < next; i++) {
+      this.tracks.push(all[i]);
+    }
   }
 
   /**
@@ -573,13 +605,11 @@ export struct PlaylistDetail {
   }
 
   /**
-   * 「从歌单移除」的真实入口（2026-10-13 真双向）。
+   * 「从歌单移除」的真实入口。
    * 普通歌单：保持原行为（本地删，零影响）。
-   * 收藏夹镜像：**会真删 B 站账号里的收藏** → 必须先弹确认，确认后
-   *   ① 本地移除（立刻生效，UI 不等网络）
-   *   ② 入队一条「取消收藏」写意图（持久化，失败可重试）
-   *   ③ 立即尝试推送；失败就留队列，下次同步/冷启动自动重放
-   * 入队而非直接发请求，是因为：失败要能重试，且要阻止该曲目被下一轮拉取「复活」。
+   * 收藏夹镜像：同步是单向的（B 站 → 本地），本地移除**不会取消 B 站收藏**，
+   *   只动本地 —— 但要弹确认讲清楚「下次同步会重新出现」，避免用户误以为
+   *   删掉的就是 B 站收藏。
    */
   private confirmRemoveTrack(track: Track): void {
     const p: Playlist | null = this.playlist;
@@ -590,8 +620,8 @@ export struct PlaylistDetail {
       return;
     }
     showAppAlertDialog(this.getUIContext(), {
-      title: '从收藏夹移除',
-      message: `「${p.name}」是 B 站收藏夹的镜像。移除后会同时取消 B 站收藏，该操作将同步到你的 B 站账号，且无法在 App 内撤销。`,
+      title: '从收藏夹镜像移除',
+      message: `「${p.name}」是 B 站收藏夹的镜像。同步为单向（B 站 → 本地），移除不会取消 B 站收藏，下次同步这首歌会重新出现。`,
       primaryButton: {
         value: '取消',
         action: (): void => {
@@ -599,26 +629,11 @@ export struct PlaylistDetail {
         }
       },
       secondaryButton: {
-        value: '移除并取消收藏',
+        value: '仅本地移除',
         action: (): void => {
-          // ① 本地移除（立刻生效，UI 不等网络）
           LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
           this.load();
-          // ② 入队一条「取消收藏」写意图（持久化，失败可重试）
-          const mediaId: number = LibraryStore.favMediaIdOf(p);
-          enqueueFavOp({
-            mediaId: mediaId,
-            bvid: track.id,
-            aid: track.aid,
-            op: FAV_OP_DEL,
-            title: track.title,
-            createdAt: Date.now(),
-            attempts: 0,
-            lastError: ''
-          });
-          // ③ 立即尝试推送；失败就留队列，下次同步/冷启动自动重放
-          FavSyncManager.getInstance().pushOnly('ui-delete');
-          this.toast('已从本地移除，正在同步到 B 站…', 2000);
+          this.toast('已从本地移除（下次同步会重新出现）', 2000);
         }
       }
     });
@@ -790,7 +805,7 @@ export struct PlaylistDetail {
   /**
    * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp，不得超出——
    * 官方约束「不要超出标题栏的可用空间」，超出会溢出与内容区重叠）：
-   * 仅返回键，无标题 —— 歌单名只在头部区大标题显示一次。
+   * 空占位，无标题 —— 歌单名只在头部区大标题显示一次（返回键为 HDS 默认键）。
    * 材质与滚动模糊由 HDS titleBar 负责。
    */
   @Builder
@@ -820,6 +835,57 @@ export struct PlaylistDetail {
       })
     }
     .width('100%')
+  }
+
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
+   * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
+   * constraintSize（上限与本页内容列 constraintSize 完全同口径：两列 840 /
+   * 可排序歌单恒单列 600/720），标题行与条目列同宽对齐；两侧空白区
+   * hitTestBehavior(Transparent) 穿透点击。sm 回退 600（窗口 <600vp）
+   * 天然无操作，手机零变化。
+   */
+  @Builder
+  playlistBarNarrow() {
+    Row() {
+      Column() {
+        this.playlistBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: this.isTwoCol()
+        ? BreakpointConstants.CONTENT_MAX_WIDTH_TWOCOL
+        : BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * 歌单头部区收窄容器（2026-10-23 平板模式宽度适配）：同 playlistBarNarrow
+   * 口径 —— bottomBuilder 也横跨整列全宽，收窄后封面 / 歌单名 / 操作按钮与
+   * 曲目列同宽对齐；bottomBuilder 显式高度（实测 headerAreaHeight / 估计值
+   * 垫底）不动，内层 onAreaChange 实测载体原样保留（高度不受收窄影响）。
+   */
+  @Builder
+  playlistHeaderAreaNarrow() {
+    Row() {
+      Column() {
+        this.playlistHeaderArea()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: this.isTwoCol()
+        ? BreakpointConstants.CONTENT_MAX_WIDTH_TWOCOL
+        : BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   build() {
@@ -853,31 +919,75 @@ export struct PlaylistDetail {
               // 回调一次，落库与刷新见 onTrackMove。
               // 收藏夹镜像禁用：canReorder() 为 false 时传 undefined = 不注册，
               // 长按不浮起（顺序由 B 站服务端决定，完整同步会覆盖手动顺序）。
-              ForEach(
-                this.tracks,
-                (t: Track, index: number): void => {
-                  ListItem() {
-                    TrackItem({
-                      track: t,
-                      entranceIndex: index,
-                      // 已下载徽标（2026-10-08）：读 @State downloadedIds，
-                      // 下载完成的快照到达时可见行局部刷新出徽标（保留节点读
-                      // @State 是活的，与下载页「正在播放」同一机制）
-                      downloaded: this.isDownloaded(t),
-                      onPlay: (tr: Track): void => {
-                        this.player.playOrToggle(tr);
-                      },
-                      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                    })
-                  }
-                },
-                (t: Track): string => t.id
-              )
-                .onMove(this.canReorder()
-                  ? (from: number, to: number): void => {
-                    this.onTrackMove(from, to);
-                  }
-                  : undefined)
+              //
+              // 横屏宽屏（2026-10-23 两列改造）：不可排序歌单条目配对，每个
+              // ListItem 左右两列；可排序歌单（isTwoCol() 已含 !canReorder 门控）
+              // 走单列 + onMove，拖动排序不受影响。
+              if (this.isTwoCol()) {
+                ForEach(
+                  makePairs<Track>(this.tracks),
+                  (pair: PairOf<Track>, pIndex: number): void => {
+                    ListItem() {
+                      Row() {
+                        TrackItem({
+                          track: pair.first,
+                          entranceIndex: pIndex * 2,
+                          // 已下载徽标：读 @State downloadedIds，下载完成的
+                          // 快照到达时可见行局部刷新出徽标
+                          downloaded: this.isDownloaded(pair.first),
+                          onPlay: (tr: Track): void => {
+                            this.player.playOrToggle(tr);
+                          },
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        if (pair.second !== null) {
+                          TrackItem({
+                            track: pair.second,
+                            entranceIndex: pIndex * 2 + 1,
+                            downloaded: this.isDownloaded(pair.second),
+                            onPlay: (tr: Track): void => {
+                              this.player.playOrToggle(tr);
+                            },
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                        } else {
+                          // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                    }
+                  },
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                )
+              } else {
+                ForEach(
+                  this.tracks,
+                  (t: Track, index: number): void => {
+                    ListItem() {
+                      TrackItem({
+                        track: t,
+                        entranceIndex: index,
+                        // 已下载徽标（2026-10-08）：读 @State downloadedIds，
+                        // 下载完成的快照到达时可见行局部刷新出徽标（保留节点读
+                        // @State 是活的，与下载页「正在播放」同一机制）
+                        downloaded: this.isDownloaded(t),
+                        onPlay: (tr: Track): void => {
+                          this.player.playOrToggle(tr);
+                        },
+                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                      })
+                    }
+                  },
+                  (t: Track): string => t.id
+                )
+                  .onMove(this.canReorder()
+                    ? (from: number, to: number): void => {
+                      this.onTrackMove(from, to);
+                    }
+                    : undefined)
+              }
               // 加载更多状态条（SearchPage 同款）：本地切片即时揭示，没有加载中态，
               // 只区分「上拉加载更多」与「已经到底啦」。
               if (this.tracks.length > 0) {
@@ -902,10 +1012,20 @@ export struct PlaylistDetail {
             .layoutWeight(1)
             // 边界回弹（2026-10-08）：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
+            .cachedCount(8)
             // 列表末端常规留白 + 前端切片上拉加载（SearchPage 排行榜页签同款）。
             .contentEndOffset(CONTENT_END_OFFSET)
             .onReachEnd((): void => {
               this.onReachEnd();
+            })
+            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+            .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+              this.syncTopBlurProgress();
+            })
+            .onScrollStop((): void => {
+              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              this.syncTopBlurProgress();
             })
             // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
             //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
@@ -935,35 +1055,49 @@ export struct PlaylistDetail {
         // 关注/最近页同口径，见目的地链上的 ignoreLayoutSafeArea 声明）。
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp），
         // 根 Stack 默认居中对齐，直接给内容列挂上限即可。
-        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        // 横屏宽屏（2026-10-23 两列改造）：上限放宽到 840vp；可排序歌单
+        //（isTwoCol() 含 !canReorder 门控，恒单列）维持原收窄值。
+        .constraintSize({ maxWidth: this.isTwoCol()
+          ? BreakpointConstants.CONTENT_MAX_WIDTH_TWOCOL
+          : BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // titleBar，歌单头部区属标题栏 bottomBuilder、随整栏一起盖），进度由
+        // 列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.barTotalHeight(),
+          updater: this.topBlurUpdater
+        })
       }
     }
     // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 标题栏宽度跟随本页内容列，大屏上与收窄后的列表左右对齐。
+    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    //（playlistBarNarrow / playlistHeaderAreaNarrow），标题行与歌单头部区和
+    // 曲目列同宽对齐（原「标题栏宽度跟随本页内容列」为不实声称，本轮根治）。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(PD_BLUR_START_VP, PD_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 标题行（stackBuilder，可用空间 56vp）：仅返回键
+        // 标题行（stackBuilder，可用空间 56vp）：空占位（返回键为 HDS 默认键；收窄容器内）
         stackBuilder: (): void => {
-          this.playlistBar();
+          this.playlistBarNarrow();
         },
-        // 标题行下方自定义区：歌单头部区（封面 / 歌单名 / 简介 / 操作按钮）。
+        // 标题行下方自定义区：歌单头部区（封面 / 歌单名 / 简介 / 操作按钮，
+        // 收窄容器内与曲目列对齐）。
         // ⚠️ 头部区不能塞进 stackBuilder（会溢出 56vp 标题行、与列表内容重叠，
         // 真机复现），必须走 bottomBuilder；高度用实测值（未实测时估计值垫底）。
         bottomBuilder: {
           builder: (): void => {
-            this.playlistHeaderArea();
+            this.playlistHeaderAreaNarrow();
           },
           height: this.headerAreaHeight > 0 ? this.headerAreaHeight : PLAYLIST_HEADER_ESTIMATE_HEIGHT,
           showType: BottomBuilderShowType.DIRECTLY_SHOW
         }
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -971,6 +1105,9 @@ export struct PlaylistDetail {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。

@@ -85,6 +85,26 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.AboutPageWrapped);
       break;
     }
+    case 'PlaybackSettings': {
+      const m = await import('../pages/PlaybackSettingsPage');
+      builders.set(name, m.PlaybackSettingsPageWrapped);
+      break;
+    }
+    case 'DownloadSettings': {
+      const m = await import('../pages/DownloadSettingsPage');
+      builders.set(name, m.DownloadSettingsPageWrapped);
+      break;
+    }
+    case 'AppearanceSettings': {
+      const m = await import('../pages/AppearanceSettingsPage');
+      builders.set(name, m.AppearanceSettingsPageWrapped);
+      break;
+    }
+    case 'PlaylistBackup': {
+      const m = await import('../pages/PlaylistBackupPage');
+      builders.set(name, m.PlaylistBackupPageWrapped);
+      break;
+    }
     case 'Login': {
       const m = await import('../pages/LoginPage');
       builders.set(name, m.LoginPageWrapped);
@@ -95,9 +115,12 @@ async function loadByName(name: string): Promise<void> {
   }
 }
 
-/** 预热顺序：最常用的播放页 / 歌单详情优先，其余按导航入口热度排列。 */
+/** 预热顺序：最常用的播放页 / 歌单详情优先，其余按导航入口热度排列
+ *（2026-10-24 设置页二级菜单化：四个设置二级页排在跨平台导入之后，
+ * 设置入口预热到位后跳转无加载等待）。 */
 const PRELOAD_ORDER: string[] = ['Player', 'PlaylistDetail', 'Recent', 'Follows',
-  'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'About', 'Login'];
+  'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
+  'AppearanceSettings', 'DownloadSettings', 'PlaylistBackup', 'About', 'Login'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

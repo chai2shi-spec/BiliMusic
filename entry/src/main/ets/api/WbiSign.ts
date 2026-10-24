@@ -4,9 +4,32 @@
  * w_rid = md5(字典序排序后的 query + mixinKey)。nav 接口返回的 wbi_img 每日轮换，缓存 6 小时。
  */
 
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { util } from '@kit.ArkTS';
 import { HttpUtil } from '../utils/HttpUtil';
-import { md5 } from '../utils/CryptoUtil';
 import { BILI_API, BILI_REFERER } from '../common/Constants';
+
+/** 共享的 UTF-8 编码器（无状态，模块级单例避免每次分配） */
+const wbiEncoder: util.TextEncoder = new util.TextEncoder();
+
+/**
+ * MD5 摘要（hex 小写）。
+ * 2026-10-23 性能审查：WBI 签名路径从手写 JS 版 MD5 换成 @ohos.security.cryptoFramework
+ * 官方实现（createMd('MD5')，异步）—— 手写版每次签名要多跑一轮 64 轮位运算的
+ * 纯 TS 循环，官方实现走系统 native。WBI 输入经 encodeURIComponent 后必为 ASCII，
+ * 输出与手写版逐字节一致（node crypto 校验口径不变）。
+ */
+async function md5Hex(input: string): Promise<string> {
+  const md: cryptoFramework.Md = cryptoFramework.createMd('MD5');
+  await md.update({ data: wbiEncoder.encodeInto(input) });
+  const digest: cryptoFramework.DataBlob = await md.digest();
+  let hex: string = '';
+  for (let i: number = 0; i < digest.data.length; i++) {
+    const byte: number = digest.data[i];
+    hex += (byte < 16 ? '0' : '') + byte.toString(16);
+  }
+  return hex;
+}
 
 const MIXIN_KEY_ENC_TAB: number[] = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
@@ -65,5 +88,5 @@ export async function encodeWbi(params: Record<string, string | number>): Promis
     })
     .join('&');
 
-  return `${query}&w_rid=${md5(query + mixinKey)}`;
+  return `${query}&w_rid=${await md5Hex(query + mixinKey)}`;
 }

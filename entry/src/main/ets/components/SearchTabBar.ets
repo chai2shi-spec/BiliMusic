@@ -1,5 +1,5 @@
 /**
- * 搜索页顶栏内容件（HarmonyX 根栏移植，2026-10-10；2026-10-11 组件标准化迁移）。
+ * 搜索页顶栏内容件（2026-10-10；2026-10-11 组件标准化迁移）。
  *
  * 搜索行（SearchInputBar）与页签行（SearchTabsBar）都回到根 HdsNavigation
  * titleBar 的 stackBuilder（Index.immersiveTitleBarContent）：
@@ -14,7 +14,7 @@
  *   滑块同款换 CapsuleSegmentButtonV2（2026-10-10「与行 1 同一套视觉语言」
  *   约定保持）。
  *   ⚠️ 已知行为变化（用户确认接受）：HDS 材质只覆盖标题栏 [0, safeTop+56]，
- *   行 2 无磨砂背板 —— 滚动内容从行 2 下方穿过（HarmonyX 首页页签行同款）。
+ *   行 2 无磨砂背板 —— 滚动内容从行 2 下方穿过。
  *
  * - V1 容器 + V2 子组件（CapsuleSegmentButtonV2 是 @ComponentV2）单向数据流：
  *   点击 → onItemClicked → TabScrollerHolder 静态回调 → 页面写 AppStorage →
@@ -31,8 +31,11 @@ import { BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { NAV_H_PADDING } from '../utils/NavTitleStyle';
 import {
   makeBiliSegmentColors,
-  SegmentColors
+  SegmentColors,
+  SearchMaterialModifier,
+  makeSearchMaterialModifier
 } from '../utils/HeaderBarMaterial';
+import { MaterialCompat } from '../utils/MaterialCompat';
 import { SearchStateHolder } from '../service/SearchStateHolder';
 import {
   CapsuleSegmentButtonV2,
@@ -72,6 +75,18 @@ export struct SearchInputBar {
     return makeBiliSegmentColors();
   }
 
+  /** 搜索框沉浸光感材质修饰器：THIN + interactive + lightEffect（26+ 生效，低版本 no-op） */
+  private searchMaterial: SearchMaterialModifier = makeSearchMaterialModifier();
+  /**
+   * 搜索框底色：材质可用（26+）时**透明**——官方 FAQ「背景色遮挡材质效果」：
+   * 不透明 backgroundColor 画在材质层之上，玻璃完全被盖住（与 UP 主页搜索框
+   * TextInputMaterialModifier 同款结论）。低版本材质不可用时回落 bg_card 实色
+   * 兜底，搜索框不至于变成隐形框。
+   */
+  private searchBoxBg(): ResourceColor {
+    return MaterialCompat.hasImmersiveMaterial() ? Color.Transparent : $r('app.color.bg_card');
+  }
+
   build() {
     Row() {
       // Search 标准搜索框（2026-10-11 组件标准化迁移）：value 单向读 +
@@ -87,7 +102,12 @@ export struct SearchInputBar {
         // 与行内 13fp 设计语言一致（默认 16fp 占位在窄框内会截断）
         .placeholderFont({ size: 13 })
         .borderRadius(BUTTON_RADIUS_VP)
-        .backgroundColor($r('app.color.bg_card'))
+        // 底色走 searchBoxBg()：26+ 材质可用时透明（不透明底会盖住材质层玻璃，
+        // 官方 FAQ 同款结论），低版本回落 bg_card 实色兜底。
+        .backgroundColor(this.searchBoxBg())
+        // 沉浸光感材质（2026-10-23 用户需求）：与 UP 主页搜索框 / 各页按钮同档
+        //（THIN + interactive + lightEffect）；根栏 titleBar 内，材质生效范围内。
+        .attributeModifier(this.searchMaterial)
         .onSubmit((): void => {
           TabScrollerHolder.searchSubmit();
         })

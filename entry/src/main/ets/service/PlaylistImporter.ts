@@ -13,7 +13,7 @@
  *      （-352/-412/-509/-799），保留进度可续。旧版「串行 + 每首硬等 1.0~1.5s」已废弃，
  *      见下方 MATCH_CONCURRENCY 处的实测依据。
  *   ③ 落库：一次建单落盘（createPlaylist + updatePlaylist 两次 persist，禁止逐首
- *      addTrackToPlaylist —— 它每调一次全量重写所有分片，500 次 = I/O 灾难）。
+ *      addTrackToPlaylist —— 它每调一次全量重写所有分片，逐首调用 = I/O 灾难）。
  *
  * ⚠️ 隐私红线：请求网易云 / QQ 必须 skipCookie + skipReferer —— HttpUtil 默认会自动
  * 附加 B 站 Cookie（buvid + 登录态）与 B 站 Referer，绝不能发给第三方。
@@ -625,7 +625,7 @@ const WORD_CHAR_RE: RegExp = /[a-z0-9_]/;
 /**
  * 找 tag 在 s 中作为「独立词」出现的位置（手写替代 `new RegExp('\\b'+tag+'\\b')`）。
  *
- * 为什么不用正则：打分是热路径 —— 500 首 × 30 候选 × 34 个标签 ≈ 51 万次
+ * 为什么不用正则：打分是热路径 —— 10000 首 × 30 候选 × 34 个标签 ≈ 千万次
  * `new RegExp` 构造，真机上会明显拖慢匹配。手写扫描是纯 charAt 比较，零分配。
  */
 function indexOfStandalone(s: string, tag: string): number {
@@ -1144,7 +1144,7 @@ export class ImportTaskManager {
   }
 
   /**
-   * 落库（方案 §4）：收集全部 chosen → 按 bvid 去重 → 500 上限截断 →
+   * 落库（方案 §4）：收集全部 chosen → 按 bvid 去重 → PLAYLIST_MAX_ITEMS 上限截断 →
    * 重名加「导入」后缀 → createPlaylist + updatePlaylist 一次落盘（两次 persist，
    * 绝不逐首 addTrackToPlaylist）。成功后任务复位（快照清空回 IDLE）。
    */

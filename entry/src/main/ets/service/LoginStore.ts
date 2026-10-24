@@ -24,6 +24,7 @@ import {
   STORE_LOGIN_REV
 } from '../common/Constants';
 import { fetchNavUser, revokeLogin } from '../api/BilibiliApi';
+import { activateBuvid } from './BiliDevice';
 
 /** 登录用户信息（持久化为 JSON，字段来自 nav 接口归一化） */
 export interface LoginUser {
@@ -191,6 +192,11 @@ async function persistLoginCookie(cookie: string, refreshToken: string): Promise
   await AppPreferences.setLoginVerifiedAt(Date.now());
   HttpUtil.setLoginCookie(cookie);
   bumpLoginRev();
+  // 2026-10-24（移植 PiliPlus Accounts.set 的行为）：登录 = 换了一个身份，
+  // 服务端对「同一 buvid 突然变成登录态」的评分会重新计算，强制重报一次
+  // 设备激活让新身份从「已激活设备」起算。fire-and-forget（内部全兜住异常），
+  // 绝不阻塞登录成功跳转。
+  activateBuvid(true);
 }
 
 /**
@@ -345,10 +351,9 @@ export async function logout(): Promise<void> {
  * 那属于「凭据待重验」，不是「用户要退出」。
  */
 export async function clearLoginState(): Promise<void> {
-  await AppPreferences.remove(PREF_LOGIN_COOKIE);
-  await AppPreferences.remove(PREF_LOGIN_USER);
-  await AppPreferences.remove(PREF_LOGIN_REFRESH_TOKEN);
-  await AppPreferences.remove(PREF_LOGIN_VERIFIED_AT);
+  // 2026-10-23 性能审查：四个 key 攒一次 removeMany（单次 flush），
+  // 旧写法逐 key remove，登出要全量落盘 4 次。
+  await AppPreferences.removeMany([PREF_LOGIN_COOKIE, PREF_LOGIN_USER, PREF_LOGIN_REFRESH_TOKEN, PREF_LOGIN_VERIFIED_AT]);
   cachedUser = null;
   HttpUtil.clearLoginCookie();
   bumpLoginRev();

@@ -394,6 +394,13 @@ export class MusicPlayer {
   private coverCache: image.PixelMap | undefined;
   /** 封面缓存对应的曲目 id（缓存失效判定） */
   private coverCacheAssetId: string = '';
+
+  /** 安全释放封面 PixelMap：重复释放 / 释放失败只留日志（2026-10-23 审查修复 #3） */
+  private releaseCoverPixelMapSafe(p: image.PixelMap): void {
+    p.release().catch((e: BusinessError): void => {
+      console.error(`release cover pixelMap failed: ${e.code} ${e.message}`);
+    });
+  }
   /** 已上报到 AVSession 的歌词 LRC 文本：时长补报等元数据重报时带上，不重复拼装 */
   private lastLyricText: string = '';
   /** 歌词已尝试（或已上报）对应的曲目 id：同曲重报不重复拉取歌词 */
@@ -720,9 +727,6 @@ export class MusicPlayer {
         this.cancelPrepareWatchdog();
         // 倍速补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
         this.applySpeedOnPrepared(player);
-        // 「与其他应用同时播放」同款补应用：换源每次重建 AVPlayer，prepared 且
-        // 首次 play 前是 SDK 要求的 audioInterruptMode 生效窗口
-        this.applyInterruptModeOnPrepared(player);
         if (this.pendingSeekTo >= 0) {
           // 续播 / 切歌后定位：必须在 prepared 之后再 seek，否则 seek 会被丢弃
           const target: number = this.pendingSeekTo;
@@ -750,7 +754,9 @@ export class MusicPlayer {
             }
             this.playAfterSeekTimer = setTimeout((): void => {
               this.playAfterSeekTimer = -1;
-              if (this.playAfterSeekPending) {
+              // 2026-10-23 审查修复（#2）：双保险——万一定时器漏清（理论上已被
+              // detachAndClearPlayer 收掉），实例已被换掉也绝不补播
+              if (this.playAfterSeekPending && player === this.avPlayer) {
                 this.playAfterSeekPending = false;
                 this.seeking = false;
                 this.lastProgressBucket = -1;
@@ -961,6 +967,11 @@ export class MusicPlayer {
       try {
         const loaded: image.PixelMap | null = await this.loadCoverPixelMap(track.coverUrl);
         if (loaded !== null) {
+          // 2026-10-23 审查修复（#3）：换曲覆盖缓存前先释放旧 PixelMap——
+          // Native 内存不归 GC 管，覆盖引用不 release 就泄到进程退出
+          if (this.coverCache !== undefined) {
+            this.releaseCoverPixelMapSafe(this.coverCache);
+          }
           this.coverCache = loaded;
           this.coverCacheAssetId = track.id;
         }
@@ -1133,7 +1144,9 @@ export class MusicPlayer {
       }
       const data: ArrayBuffer = resp.result as ArrayBuffer;
       const src: image.ImageSource = image.createImageSource(data);
-      return await src.createPixelMap();
+      // 降采样解码：媒体胶囊缩略图只要 256px，避免整张原图解码占内存
+      const opts: image.DecodingOptions = { desiredSize: { width: 256, height: 256 } };
+      return await src.createPixelMap(opts);
     } catch (e) {
       console.error(`loadCoverPixelMap failed: ${JSON.stringify(e)}`);
       return null;
@@ -1560,6 +1573,11 @@ export class MusicPlayer {
       this.isPreparing = false;
       this.setStore(STORE_LOADING_AUDIO, false);
       this.setStore(STORE_IS_PLAYING, false);
+      // 2026-10-23 审查修复（#7）：本入口不止 error 处理器一条来路（prepare
+      // 看门狗也直达这里），那条路径没有先停长时任务——不补收尾的话通知栏
+      // 会残留一条无声音的「正在播放」，直到下一首正常出声才被冲掉。
+      this.updateSessionState();
+      this.syncBackgroundTask(false);
       this.notifyHint('网络未连接，请检查网络后重试');
       return;
     }
@@ -1572,6 +1590,14 @@ export class MusicPlayer {
       plogWarn(`recover via backup url #${this.triedBackupCount}: ${urlHostOf(backupUrl)}`);
       this.isPreparing = true;
       this.setStore(STORE_LOADING_AUDIO, true);
+      // 2026-10-23 审查修复（#11）：换备用直链会整建播放器，出错瞬间的播放
+      // 位置随旧实例一起丢失（新实例 prepared 从头开始）。先把进度登记进
+      // pendingSeekTo，新实例 prepared 后定位回出错位置续播（与续播同一机制）。
+      const resumeAt: number = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
+      if (resumeAt > 0) {
+        this.pendingSeekTo = resumeAt;
+        this.pendingAutoPlayAfterSeek = true;
+      }
       // quiet=true：备用链失败要继续降级，不在中途弹提示（理由同 reloadCurrentSource）
       this.switchSource(backupUrl, token, true)
         .then((attached: boolean): void => {
@@ -1605,6 +1631,13 @@ export class MusicPlayer {
       plogWarn(`recover via reload, attempt ${this.retryCount}/${RECOVER_RELOAD_MAX}, ` +
         `quality step ${this.qualityStep}`);
       this.recovering = true;
+      // 2026-10-23 审查修复（#11）：重解析同样走「重建播放器」，续播位置同样
+      // 会丢——与 ① 同款登记，prepared 后定位回出错位置续播。
+      const resumeAt: number = (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
+      if (resumeAt > 0) {
+        this.pendingSeekTo = resumeAt;
+        this.pendingAutoPlayAfterSeek = true;
+      }
       this.reloadCurrentSource()
         .then((ok: boolean): void => {
           this.recovering = false;
@@ -1631,6 +1664,10 @@ export class MusicPlayer {
     this.isPreparing = false;
     this.setStore(STORE_LOADING_AUDIO, false);
     this.setStore(STORE_IS_PLAYING, false);
+    // 2026-10-23 审查修复（#7）：同 ⓪——看门狗直达这条路径时没有别处收尾
+    // 长时任务与会话状态，必须在这里补上，否则通知栏残留假「正在播放」
+    this.updateSessionState();
+    this.syncBackgroundTask(false);
     if (this.recoverExhausted) {
       // 本轮已经交代过了：残余 error 只留日志，不再重复弹提示
       plogWarn('recover exhausted again (already notified), stay silent');
@@ -2037,19 +2074,39 @@ export class MusicPlayer {
   }
 
   /**
-   * 换源重建后补应用「与其他应用同时播放」打断模式（2026-10-21）。
-   * 读镜像开关（缺省 false 即关闭态）：开启 = INDEPENDENT_MODE（播放不被其他
-   * 应用音频打断、也不抢占对方），关闭 = SHARE_MODE（默认焦点行为）。
-   * audioInterruptMode 是 AVPlayer 可选属性（本 SDK 无 setAudioInterruptMode
-   * 方法），赋值失败（低版本设备不支持等）只影响混音开关，不影响播放本身。
+   * 「与其他应用同时播放」的真正实现（2026-10-23 修正）：AudioSession 并发模式。
+   *
+   * 旧实现把开关映射到 AVPlayer.audioInterruptMode = INDEPENDENT_MODE，但该属性只决定
+   * **应用内**多条音频流的焦点粒度（共享/独立打断单元——官方视频样例用它避免同应用
+   * 两个视频的声音混在一起），对**跨应用**的焦点抢占不生效，开关开了照样互相打断，
+   * 这正是「与其他应用同时播放失效」的根因。
+   *
+   * 跨应用混音的官方方案（FAQ「怎么在播放音频时不打断其他APP音频」+ 官方 AudioSessionSample）
+   * 是激活音频会话并声明并发策略：
+   *   · 开启：activateAudioSession({ concurrencyMode: CONCURRENCY_MIX_WITH_OTHERS })
+   *     —— 本应用申请焦点与其他应用后续申请焦点时**均**生效（双向混音，不抢也不被抢）；
+   *   · 关闭：deactivateAudioSession() —— 回落系统默认焦点策略（音乐与音乐互相打断）。
+   *
+   * 策略只对**激活后新起**的音频流生效，且系统可能超时自动停用会话，因此每次
+   * loadAndPlay 开头都要对账一次，保证每一首歌都起在正确的并发策略下。
+   * 对账绝不抛错——混音失败只影响开关本身，不能影响播放。
    */
-  private applyInterruptModeOnPrepared(player: media.AVPlayer): void {
+  private async ensureMixAudioSession(mix: boolean): Promise<void> {
     try {
-      const mix: boolean = AppStorage.get<boolean>(STORE_AUDIO_MIX_ENABLED) ?? false;
-      player.audioInterruptMode =
-        mix ? audio.InterruptMode.INDEPENDENT_MODE : audio.InterruptMode.SHARE_MODE;
+      const mgr: audio.AudioSessionManager = audio.getAudioManager().getSessionManager();
+      const activated: boolean = mgr.isAudioSessionActivated();
+      if (mix && !activated) {
+        const strategy: audio.AudioSessionStrategy = {
+          concurrencyMode: audio.AudioConcurrencyMode.CONCURRENCY_MIX_WITH_OTHERS
+        };
+        await mgr.activateAudioSession(strategy);
+        plogInfo('audio session activated: mix with others');
+      } else if (!mix && activated) {
+        await mgr.deactivateAudioSession();
+        plogInfo('audio session deactivated: mix off');
+      }
     } catch (e) {
-      console.error(`apply audioInterruptMode on prepared failed: ${JSON.stringify(e)}`);
+      console.error(`ensure mix audio session failed: ${JSON.stringify(e)}`);
     }
   }
 
@@ -2077,6 +2134,15 @@ export class MusicPlayer {
     // 旧实例名下的 prepare 看门狗一并取消：不取消的话，它超时触发时面对的
     // 已是新实例 / 新状态，recoverFromStall 会在错误的时机横插一脚
     this.cancelPrepareWatchdog();
+    // 2026-10-23 审查修复（#2）：旧实例名下的「seek 后补播」挂起与兜底定时器一并
+    // 取消——定时器闭包捕获的是旧实例，2.5s 内发生换源 / 重建时不取消的话，
+    // 它会对一个已 release 的实例调 play()，新实例的加载节奏被旧定时器搅乱。
+    // pendingSeekTo 不在此清：它属于「下一次 prepared 的定位意图」，与实例无关。
+    this.playAfterSeekPending = false;
+    if (this.playAfterSeekTimer !== -1) {
+      clearTimeout(this.playAfterSeekTimer);
+      this.playAfterSeekTimer = -1;
+    }
     // 旧实例从此不再出声，听歌计时游标必须一并复位，
     // 否则换源 / 重建播放器期间的静默空窗会被下一拍误计入时长
     this.lastListenTickAt = -1;
@@ -2138,6 +2204,14 @@ export class MusicPlayer {
 
   private async loadAndPlay(track: Track, autoplay: boolean, startAt: number = 0): Promise<void> {
     const token: number = ++this.loadToken;
+    // 「与其他应用同时播放」会话对账（见 ensureMixAudioSession）：AudioSession 并发
+    // 策略只对激活后**新起**的音频流生效，必须赶在音源解析 / 播放器重建之前就位。
+    // 混音开关关闭且会话未激活时这是一次纯本地的快速 no-op。
+    await this.ensureMixAudioSession(AppStorage.get<boolean>(STORE_AUDIO_MIX_ENABLED) ?? false);
+    if (token !== this.loadToken) {
+      // 对账等待期间被更新的点歌取代：静默作废，状态由获胜方接管
+      return;
+    }
     // 本次加载开始前的重建计数快照：recoverAfterLoadFailure 据此判断播放器
     // 握着的音源属于本次点歌还是上一首（见该方法的闸门说明）
     const seqBeforeLoad: number = this.playerRebuildSeq;
@@ -2954,22 +3028,15 @@ export class MusicPlayer {
   }
 
   /**
-   * 设置页切换「与其他应用同时播放」时对当前实例立即生效（best-effort，2026-10-21）。
-   * SDK 注明 audioInterruptMode「首次 play() 之前设置才能完全生效」，播放中切换
-   * 可能要等下次换源重建（prepared 钩子）才完全切换；playerHoldsSource 已排除
-   * idle/initialized/stop 等非法赋值窗口。
+   * 设置页切换「与其他应用同时播放」时对当前实例立即生效（best-effort，2026-10-23 修正）。
+   * AudioSession 并发策略只对**激活后新起**的音频流完全生效：正在出声的这一首
+   * 是 best-effort；本 App 每次切歌都重建 AVPlayer，loadAndPlay 开头的
+   * ensureMixAudioSession 对账保证下一首歌起必然完全生效。
    */
   setAudioMixEnabled(enabled: boolean): void {
-    const p: media.AVPlayer | null = this.avPlayer;
-    if (p === null || !this.playerHoldsSource()) {
-      return;
-    }
-    try {
-      p.audioInterruptMode =
-        enabled ? audio.InterruptMode.INDEPENDENT_MODE : audio.InterruptMode.SHARE_MODE;
-    } catch (e) {
-      console.error(`set audioInterruptMode failed: ${JSON.stringify(e)}`);
-    }
+    this.ensureMixAudioSession(enabled).catch((e: Error): void => {
+      console.error(`set audio mix enabled failed: ${e.message}`);
+    });
   }
 
   /**
@@ -3076,14 +3143,43 @@ export class MusicPlayer {
       return;
     }
     if (this.repeatMode === RepeatMode.ONE) {
-      if (this.avPlayer) {
+      const player: media.AVPlayer | null = this.avPlayer;
+      if (player) {
+        // 2026-10-23 审查修复（#10）：completed 态不再背靠背 seek(0)+play——
+        // 部分系统版本 seek 尚未生效就 play 会与 seek 竞态（play 被丢弃 /
+        // 重播起点错乱）。改走与续播同一套「挂起等 seekDone 再播」链路，
+        // seekDone 2.5s 不来则兜底播放（兜底时长与续播分支对齐）。
+        this.seeking = true;
+        this.seekStartedAt = Date.now();
+        this.playAfterSeekPending = true;
+        if (this.playAfterSeekTimer !== -1) {
+          clearTimeout(this.playAfterSeekTimer);
+        }
+        this.playAfterSeekTimer = setTimeout((): void => {
+          this.playAfterSeekTimer = -1;
+          if (this.playAfterSeekPending && player === this.avPlayer) {
+            this.playAfterSeekPending = false;
+            this.seeking = false;
+            this.lastProgressBucket = -1;
+            player.play().catch((e: BusinessError): void => {
+              console.error(`replay after seek (fallback timer) failed: ${e.code} ${e.message}`);
+            });
+          }
+        }, 2500);
         try {
-          this.avPlayer.seek(0);
-          this.avPlayer.play().catch((e: BusinessError): void => {
-            console.error(`replay failed: ${e.code} ${e.message}`);
-          });
+          player.seek(0);
         } catch (e) {
-          console.error(`replay threw: ${JSON.stringify(e)}`);
+          console.error(`replay seek threw: ${JSON.stringify(e)}`);
+          // seek 没发出去：撤掉挂起与兜底，回退成直接重播（宁可起点存疑也不能卡在无声）
+          this.seeking = false;
+          this.playAfterSeekPending = false;
+          if (this.playAfterSeekTimer !== -1) {
+            clearTimeout(this.playAfterSeekTimer);
+            this.playAfterSeekTimer = -1;
+          }
+          player.play().catch((e2: BusinessError): void => {
+            console.error(`replay fallback play failed: ${e2.code} ${e2.message}`);
+          });
         }
       }
       this.lastProgressBucket = 0;
@@ -3158,6 +3254,13 @@ export class MusicPlayer {
         console.error(`destroy avSession failed: ${JSON.stringify(e)}`);
       }
       this.session = null;
+    }
+    // 2026-10-23 审查修复（#3）：会话销毁后封面缓存已无消费方，最后释放一次
+    //（放在 session.destroy 之后：避免与 AVSession 内部对 mediaImage 的引用竞争）
+    if (this.coverCache !== undefined) {
+      this.releaseCoverPixelMapSafe(this.coverCache);
+      this.coverCache = undefined;
+      this.coverCacheAssetId = '';
     }
   }
 }

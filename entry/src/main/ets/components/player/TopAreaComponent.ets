@@ -17,7 +17,9 @@ import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { STORE_PLAYER_BG_DARK, STORE_PLAYER_CLOSE_REQUEST, STORE_PLAYER_CONTENT_EXIT, STORE_PLAYER_OPEN } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
-  LAYER_DELAY_TOP
+  LAYER_DELAY_TOP,
+  LAYER_EXIT_DURATION_MS,
+  LAYER_EXIT_DELAY_TOP
 } from '../../common/constants/InteractionConstants';
 
 @Component
@@ -31,9 +33,9 @@ export struct TopAreaComponent {
    */
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
-   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
-   * 复位不在任何隐式动画作用域内 → 顶栏单帧直接消失（2026-10-22 用户要求
-   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
+   * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
+   * 顶栏 200ms EaseIn 柔退淡出（2026-10-24 三风格收起改版，替代 2026-10-22 的
+   * 单帧瞬隐；首批退场 LAYER_EXIT_DELAY_TOP=0，与控制区/歌词错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把顶栏点亮 */
@@ -60,10 +62,19 @@ export struct TopAreaComponent {
     this.enterOpacity = 0;
   }
 
-  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
+  /** 柔退复位：顶栏 200ms EaseIn 淡出（首批，无延迟） + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
-    this.enterOpacity = 0;
+    this.getUIContext().animateTo(
+      {
+        duration: LAYER_EXIT_DURATION_MS,
+        curve: Curve.EaseIn,
+        delay: LAYER_EXIT_DELAY_TOP
+      },
+      (): void => {
+        this.enterOpacity = 0;
+      }
+    );
   }
 
   aboutToAppear(): void {
@@ -110,7 +121,7 @@ export struct TopAreaComponent {
     }
     .height($r('app.float.info_margin_top_sm'))
     .width(StyleConstants.FULL_WIDTH)
-    // 分层入场只挂 opacity；收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换
+    // 分层入场只挂 opacity；收起为柔退淡出（onContentExit 的 200ms EaseIn 退场）
     .opacity(this.enterOpacity)
   }
 }

@@ -24,6 +24,12 @@
 
 import { STORE_THEME_PRIMARY, STORE_THEME_SURFACE } from '../common/Constants';
 
+/**
+ * @Reusable（2026-10-23 性能审查）：行内封面随宿主列表（LazyForEach）复用 ——
+ * 复用时 url 经 @Prop 重赋值，@Watch onUrlChanged 复位失败标记，
+ * 数据链自洽，无需 aboutToReuse 额外处理。
+ */
+@Reusable
 @Component
 export struct CoverImage {
   /** 图片地址；空串直接渲染占位块 */

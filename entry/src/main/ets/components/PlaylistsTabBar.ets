@@ -1,11 +1,11 @@
 /**
- * 歌单页顶栏内容件（HarmonyX 根栏移植，2026-10-10）。
+ * 歌单页顶栏内容件（2026-10-10）。
  *
  * - 标题行按钮（PlTitleActions）：根栏 stackBuilder 行 1 歌单页分支右侧槽入
  *   （Index.tabTitleRow）；
  * - 多选工具条（PlSelectToolbar）：根栏 stackBuilder 行 2（Index 侧 position
  *   溢出渲染到标题栏下方，plSelecting 镜像门控），纯内容件——磨砂统一归根栏
- *   HDS（仅覆盖标题栏区，本行无背板，HarmonyX 页签行同款行为）。
+ *   HDS（仅覆盖标题栏区，本行无背板，页签行同款行为）。
  *
  * - 状态：@StorageProp 订阅 PlaylistsPage 推到 AppStorage 的镜像键
  *   （STORE_PL_BAR_*，唯一写入口 PlaylistsPage.syncBarState / refresh）。

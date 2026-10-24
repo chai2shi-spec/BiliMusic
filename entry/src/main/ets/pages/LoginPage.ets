@@ -25,12 +25,12 @@
  * gterr/gtready/gtok title 通道，失败一定会显示「重试 / 改用扫码登录」。
  *
  * 布局与转场复用 AboutPage 的模式：HDS 沉浸光感标题栏（HdsNavDestination.titleBar，
- * stackBuilder 承载返回行 + 标题、bottomBuilder 承载滑块切换行）、Stack 承载滚动内容
+ * stackBuilder 承载标题（返回键为 HDS 默认键）、bottomBuilder 承载滑块切换行）、Stack 承载滚动内容
  * + 极验整屏覆盖层、customTransition 横移转场。
  * ⚠️ 二维码轮询定时器与极验看门狗必须在 aboutToDisappear 清掉，离开页面后不能空转。
  */
 
-import { STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_ON } from '../common/Constants';
+import { STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_ON, STORE_THEME_DEEP } from '../common/Constants';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
@@ -42,7 +42,12 @@ import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { showAppToast } from '../components/AppToast';
 import { CapsuleSegmentButtonV2, LengthMetrics, SegmentButtonV2Items } from '@kit.ArkUI';
-import { makeBiliSegmentColors, SegmentColors } from '../utils/HeaderBarMaterial';
+import {
+  makeBiliSegmentColors,
+  SegmentColors,
+  ButtonMaterialModifier,
+  makeButtonMaterialModifier
+} from '../utils/HeaderBarMaterial';
 import {
   BiliApiError,
   fetchSmsCaptchaToken,
@@ -61,6 +66,9 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { AudioQuality, AppSettings } from '../model/MusicModels';
 import { HttpUtil } from '../utils/HttpUtil';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /** 二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
 const QR_POLL_INTERVAL_MS: number = 2000;
@@ -89,10 +97,6 @@ const TAB_SMS: number = 1;
  * bottomBuilder 高度不自适应（官方约束），必须与行内容定高一致。
  */
 const LOGIN_TABS_ROW_HEIGHT: number = 44;
-
-/** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
-const LOGIN_BLUR_START_VP: number = 30;
-const LOGIN_BLUR_END_VP: number = 80;
 
 /**
  * 短信卡底部上移占位（2026-10-22 键盘遮挡修复）：页面内容整体垂直居中，
@@ -327,10 +331,27 @@ export struct LoginPage {
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   /** 主题色深字色：短信登录按钮文字跟随切色刷新 */
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
+  /** 主题色深强调色：白底小字强调（过期/失败状态行、覆盖层取消文字），对比度达标（设计规范双粉策略） */
+  @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  /** 按钮沉浸光感材质修饰器：与全应用兄弟页按钮同款（低版本/不支持时 no-op，链式实色兜底） */
+  private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private loginScroller: Scroller = new Scroller();
+
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.loginScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
   /**
    * 子页转场的横移量（相对页面自身宽度）：常驻 '0%'，
    * 转场代理里按 push/pop 方向临时改写（见 navTransitionDelegate，与 AboutPage 同款）。
@@ -402,6 +423,9 @@ export struct LoginPage {
   private geetestConsumed: boolean = false;
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     // 平板登录诊断（2026-10-22）：若「二维码 3 秒换一张」实为页面被反复重挂
     //（startQrLogin 被重复触发而非 86038 早失效），短时间内出现多条本日志即可定位。
     console.info(`[Login] appear ts=${Date.now()}`);
@@ -920,7 +944,7 @@ export struct LoginPage {
     return undefined;
   }
 
-  /** 标题栏内容（titleBar 的 stackBuilder 承载）：返回行 + 「登录 B 站」标题 */
+  /** 标题栏内容（titleBar 的 stackBuilder 承载）：「登录 B 站」标题（返回键为 HDS 默认键） */
   @Builder
   loginBar() {
     NavTitleRow({ title: '登录 B 站' })
@@ -968,6 +992,51 @@ export struct LoginPage {
     .height(LOGIN_TABS_ROW_HEIGHT)
     .padding({ left: 16, right: 16, bottom: 4 })
     .alignItems(VerticalAlign.Center)
+  }
+
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
+   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
+   *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
+   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  loginBarNarrow() {
+    Row() {
+      Column() {
+        this.loginBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * 滑块切换行收窄容器（2026-10-23 平板模式宽度适配）：同 loginBarNarrow 口径 ——
+   * bottomBuilder 也横跨整列全宽，收窄后滑块行与本页内容列同宽对齐；
+   * bottomBuilder 显式高度（LOGIN_TABS_ROW_HEIGHT）不动。sm 天然无操作。
+   */
+  @Builder
+  loginTabsRowNarrow() {
+    Row() {
+      Column() {
+        this.loginTabsRow()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 二维码本体 + 过期蒙层（loading 态显示进度圈） */
@@ -1039,9 +1108,11 @@ export struct LoginPage {
         .fontColor($r('app.color.text_secondary'))
         .margin({ top: 6 })
       this.qrArea()
+      // 2026-10-24 风格对齐：过期/失败态小字改 themeDeep（白底 13px 品牌粉仅 2.2:1，
+      // 设计规范红线；themeDeep #C2185B 5.81:1 且随主题切换 —— 双粉策略）
       Text(this.statusText)
         .fontSize(13)
-        .fontColor(this.qrPhase === 'expired' ? this.themePrimary : $r('app.color.text_secondary'))
+        .fontColor(this.qrPhase === 'expired' ? this.themeDeep : $r('app.color.text_secondary'))
         .margin({ top: 16 })
       Text('二维码 3 分钟内有效，过期可刷新重试')
         .fontSize(11)
@@ -1051,22 +1122,29 @@ export struct LoginPage {
     .width('100%')
     .backgroundColor($r('app.color.bg_card'))
     .borderRadius(12)
-    .margin({ left: 12, right: 12, top: 10, bottom: 20 })
+    // 2026-10-24 风格对齐：左右让位 12→16（InsetCard 分组卡片规范，设置/歌单页同宽）
+    .margin({ left: 16, right: 16, top: 10, bottom: 20 })
     .alignItems(HorizontalAlign.Center)
   }
 
-  /** 短信页签主按钮：粉底胶囊（loading 态文案变化 + 禁用防重入） */
+  /**
+   * 短信页签主按钮：粉底胶囊（loading 态文案变化 + 禁用防重入）。
+   * 2026-10-24 风格对齐：字阶 15→16、圆角取 BUTTON_RADIUS_VP、补沉浸光感材质
+   * （buttonMaterial，全应用兄弟页按钮同款）与禁用态 dim 0.5（FavSyncPage 全宽 CTA 同款）。
+   */
   @Builder
   primaryButton(label: string, enabled: boolean, onTap: () => void) {
     Button(label, { type: ButtonType.Normal })
       .width('100%')
       .height(44)
-      .borderRadius(8)
+      .borderRadius(BUTTON_RADIUS_VP)
       .backgroundColor(this.themePrimary)
       .fontColor(this.themeOn)
-      .fontSize(15)
+      .fontSize(16)
       .fontWeight(FontWeight.Medium)
+      .attributeModifier(this.buttonMaterial)
       .enabled(enabled)
+      .opacity(enabled ? 1 : 0.5)
       .onClick((): void => {
         onTap();
       })
@@ -1137,13 +1215,15 @@ export struct LoginPage {
         .textAlign(TextAlign.Center)
         .margin({ top: 16 })
     }
+    // 2026-10-24 风格对齐：字阶 15→16、圆角取 BUTTON_RADIUS_VP、补沉浸光感材质
     Button('取消', { type: ButtonType.Normal })
       .width('100%')
       .height(44)
-      .borderRadius(8)
+      .borderRadius(BUTTON_RADIUS_VP)
       .backgroundColor($r('app.color.bg_divider'))
       .fontColor($r('app.color.text_primary'))
-      .fontSize(15)
+      .fontSize(16)
+      .attributeModifier(this.buttonMaterial)
       .margin({ top: 20, bottom: 22 })
       .onClick((): void => {
         this.backToPhone();
@@ -1206,16 +1286,24 @@ export struct LoginPage {
   geetestOverlay() {
     Column() {
       // 覆盖层自己的头（HDS 标题栏仍在上面，这里只做「取消」出口）
+      // 2026-10-24 风格对齐：「安全验证」16 Medium；「取消」改 DlControlBar 文字按钮
+      // 模式（13 / themeDeep 白底深粉 / 44vp 触达 / press_overlay 按压态）。
       Row() {
         Text('安全验证')
-          .fontSize(15)
+          .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.text_primary'))
         Blank()
         Text('取消')
-          .fontSize(15)
-          .fontColor(this.themePrimary)
-          .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+          .fontSize(13)
+          .fontColor(this.themeDeep)
+          .height(44)
+          .padding({ left: 12, right: 12 })
+          .borderRadius(8)
+          .stateStyles({
+            pressed: { .backgroundColor($r('app.color.press_overlay')) },
+            normal: { .backgroundColor(Color.Transparent) }
+          })
           .onClick((): void => {
             this.backToPhone();
           })
@@ -1227,23 +1315,26 @@ export struct LoginPage {
 
       if (this.geetestError.length > 0) {
         // 失败态：绝不留死白屏 —— 说明原因 + 重试 + 切回扫码
+        // 2026-10-24 风格对齐：主文案 16（WatchHistoryPage 失败态同款）、辅助行 13、
+        // 按钮字阶 13 + BUTTON_RADIUS_VP + 沉浸光感材质（兄弟页重试按钮同款）。
         Column() {
           Text(this.geetestError)
-            .fontSize(14)
+            .fontSize(16)
             .fontColor($r('app.color.state_error'))
             .textAlign(TextAlign.Center)
           Text('可以重试，或切换到扫码登录')
-            .fontSize(12)
+            .fontSize(13)
             .fontColor($r('app.color.text_secondary'))
             .textAlign(TextAlign.Center)
             .margin({ top: 8 })
           Button('重试', { type: ButtonType.Normal })
             .width(160)
             .height(40)
-            .borderRadius(8)
+            .borderRadius(BUTTON_RADIUS_VP)
             .backgroundColor(this.themePrimary)
             .fontColor(this.themeOn)
-            .fontSize(14)
+            .fontSize(13)
+            .attributeModifier(this.buttonMaterial)
             .margin({ top: 18 })
             .onClick((): void => {
               this.retryGeetest();
@@ -1251,10 +1342,11 @@ export struct LoginPage {
           Button('改用扫码登录', { type: ButtonType.Normal })
             .width(160)
             .height(40)
-            .borderRadius(8)
+            .borderRadius(BUTTON_RADIUS_VP)
             .backgroundColor($r('app.color.bg_divider'))
             .fontColor($r('app.color.text_primary'))
-            .fontSize(14)
+            .fontSize(13)
+            .attributeModifier(this.buttonMaterial)
             .margin({ top: 10 })
             .onClick((): void => {
               this.switchTab(TAB_QR);
@@ -1405,7 +1497,8 @@ export struct LoginPage {
               .padding({ left: 20, right: 20 })
               .backgroundColor($r('app.color.bg_card'))
               .borderRadius(12)
-              .margin({ left: 12, right: 12, top: 10, bottom: 20 })
+              // 2026-10-24 风格对齐：左右让位 12→16（与扫码卡同口径，InsetCard 规范）
+              .margin({ left: 16, right: 16, top: 10, bottom: 20 })
 
             // 短信卡上移占位（2026-10-22）：只加在短信页签，扫码页签维持原居中。
             Blank()
@@ -1423,6 +1516,23 @@ export struct LoginPage {
         // 大屏适配：内容列收窄居中（与 AboutPage 同款）
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
         // 标题栏让位已内移为内容首部占位（见 Column 首子），不在滚动容器上加 padding。
+        // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
+        // 签名 (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
+        .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState): void => {
+          this.syncTopBlurProgress();
+        })
+        .onScrollStop((): void => {
+          // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+          this.syncTopBlurProgress();
+        })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于极验
+        // 覆盖层、低于 HDS titleBar，滑块行属标题栏 bottomBuilder、随整栏一起盖），
+        // 进度由 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT + LOGIN_TABS_ROW_HEIGHT,
+          updater: this.topBlurUpdater
+        })
 
         // 极验整屏覆盖层：只在短信页签的 geetest 阶段挂载。
         // ⚠️ 必须写在 Stack 的**子节点块内**（不能写在 Stack 的属性之后 —— 那样会被
@@ -1439,29 +1549,32 @@ export struct LoginPage {
     }
     // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
+    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    //（loginBarNarrow / loginTabsRowNarrow），标题行与滑块行和内容列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(LOGIN_BLUR_START_VP, LOGIN_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 标题行（stackBuilder，可用空间 56vp）：返回键 + 「登录 B 站」标题
+        // 标题行（stackBuilder，可用空间 56vp）：「登录 B 站」标题（返回键为 HDS 默认键）
+        //（收窄容器内）
         stackBuilder: (): void => {
-          this.loginBar();
+          this.loginBarNarrow();
         },
-        // 标题行下方自定义区：滑块切换行（扫码登录 / 短信登录），恒配置。
+        // 标题行下方自定义区：滑块切换行（扫码登录 / 短信登录），恒配置
+        //（收窄容器内与内容列对齐）。
         // ⚠️ 滑块行不能塞进 stackBuilder（会溢出 56vp 标题行、与内容重叠，真机复现），
         // 必须走 bottomBuilder 显式高度。
         bottomBuilder: {
           builder: (): void => {
-            this.loginTabsRow();
+            this.loginTabsRowNarrow();
           },
           height: LOGIN_TABS_ROW_HEIGHT,
           showType: BottomBuilderShowType.DIRECTLY_SHOW
         }
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.loginScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1469,6 +1582,9 @@ export struct LoginPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由 plain padding 自理。

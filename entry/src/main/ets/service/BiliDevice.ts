@@ -8,23 +8,29 @@
  * 而 SearchPage 原实现把 popular 与 rcmd 串在同一个 try 里 await 后合并，
  * 一旦 rcmd 412 抛出，已经拿到的 popular 数据也一并丢弃 → 推荐位整块空白。
  *
- * 因此这里做两件事：
+ * 因此这里做三件事：
  *   1. initBuvidCookie()：同步保证 HttpUtil 带上 buvid（离线也能用本地生成的保底）；
- *   2. upgradeBuvidCookie()：后台向 /x/frontend/finger/spi 换取官方 buvid 并持久化。
+ *   2. upgradeBuvidCookie()：后台向 /x/frontend/finger/spi 换取官方 buvid 并持久化；
+ *   3. activateBuvid()：向风控指纹接口 ExClimbWuzhi 上报一次「设备已激活」
+ *      （2026-10-24 移植 PiliPlus）。**新 buvid 在服务端是「未激活」状态**，
+ *      取流容易被判异常 —— 换了 buvid 却不激活，等于换了个更可疑的指纹。
  */
 
+import http from '@ohos.net.http';
 import { HttpUtil } from '../utils/HttpUtil';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { md5 } from '../utils/CryptoUtil';
+import { buildWuzhiPayload } from '../utils/RiskShield';
 import {
   BILI_API,
   PREF_BUVID,
+  PREF_BUVID_ACTIVATED_FOR,
   PREF_BUVID_COOKIE,
   PREF_BUVID_OFFICIAL
 } from '../common/Constants';
 
 /**
- * buvid：首次生成后持久化，之后复用（等价 PiliPlus 的 generateBuvid / Pref.buvid）。
+ * buvid：首次生成后持久化，之后复用。
  *
  * 原先定义在 `api/BilibiliApi.ts` 的登录模块里，登录功能整体移除后迁到本模块 ——
  * buvid 与登录无关，是**首页能否出内容**的前置条件，不能跟着登录代码一起删掉。
@@ -163,8 +169,104 @@ export async function upgradeBuvidCookie(): Promise<void> {
     await AppPreferences.setBoolean(PREF_BUVID_OFFICIAL, true);
     // 诊断指纹：仅 buvid3 长度与来源标记，不输出指纹值（与 cookieFingerprint 脱敏口径一致）
     console.info(`buvid upgraded from finger/spi (buvid3Len=${resp.data.b_3.length})`);
+    // 换了新 buvid = 服务端眼里换了台新设备 → 必须重新上报一次激活。
+    // 不 await：激活失败不影响取流（只是少一层保险），不能拖慢调用方。
+    activateBuvid(true);
   } catch (e) {
     // 离线或风控下 spi 不可用，保留本地兜底值
     console.warn(`upgrade buvid failed, keep fallback: ${JSON.stringify(e)}`);
+  }
+}
+
+/** ExClimbWuzhi 响应：正常恒为 `{code:0, message:'0', ttl:1, data:{}}` */
+interface WuzhiResponse {
+  code: number;
+  message: string;
+}
+
+/** 从 `k=v; k=v` 形态的 Cookie 串里取单值（找不到返回空串） */
+function cookieValueOf(cookie: string, key: string): string {
+  const items: string[] = cookie.split(';');
+  const prefix: string = `${key}=`;
+  for (let i = 0; i < items.length; i++) {
+    const item: string = items[i].trim();
+    if (item.indexOf(prefix) === 0) {
+      return item.substring(prefix.length);
+    }
+  }
+  return '';
+}
+
+/**
+ * 当前 buvid 的特征串（buvid3 的 md5 前 8 位）。
+ * 只用于「对哪个 buvid 报过激活」的判等，**不是**凭据本身。
+ */
+function buvidFingerprint(): string {
+  const b3: string = cookieValueOf(HttpUtil.getBaseCookie(), 'buvid3');
+  if (b3.length === 0) {
+    return '';
+  }
+  return md5(b3).substring(0, 8);
+}
+
+/**
+ * 向风控指纹接口上报「本设备已激活」（2026-10-24 移植 PiliPlus `Request.buvidActive`）。
+ *
+ * 为什么必须做：`finger/spi` 只**下发** buvid，不激活它。服务端把新 buvid 当作
+ * 「一台还没跑过 JS 指纹采集的设备」，这类指纹在 playurl / 登录接口上更容易被
+ * 判为异常客户端。ExClimbWuzhi 是官方页面加载时自己调的接口，正常访问一次即
+ * 把该 buvid 标记为已激活。
+ *
+ * 去重策略：`PREF_BUVID_ACTIVATED_FOR` 里存「已上报的 buvid 特征串」。
+ *   · 特征串一致 → 直接返回（同一 buvid 每天重报反而是异常节奏）；
+ *   · buvid 被升级 / 自愈换掉 → 特征串变化 → 自动重新上报。
+ * `force=true` 用于「刚登录 / 刚换号」这类换身份场景（PiliPlus 在 Accounts.set 时也重报）。
+ *
+ * **绝不抛错**：激活是锦上添花，失败只留一条日志。断网启动 / 接口临时不可用
+ * 都不该影响首屏和播放。
+ */
+export async function activateBuvid(force: boolean = false): Promise<void> {
+  const fingerprint: string = buvidFingerprint();
+  if (fingerprint.length === 0) {
+    console.warn('[BiliDevice] activate skipped: no buvid3 in cookie');
+    return;
+  }
+  if (!force && AppPreferences.getString(PREF_BUVID_ACTIVATED_FOR, '') === fingerprint) {
+    return;
+  }
+  // payload 是**字符串里再套一层 JSON**：ExClimbWuzhi 的入参形如
+  // {"payload":"{\"3064\":1,...}"}。这里手写转义（只处理 `"` 与 `\`，payload
+  // 本身只含 ASCII 可见字符）—— 不用 JSON.stringify：ArkTS 的该签名只收
+  // Object，传 string 会编译不过，而包一层 interface 又比五行循环更难读。
+  const payload: string = buildWuzhiPayload();
+  let escaped: string = '';
+  for (let i = 0; i < payload.length; i++) {
+    const ch: string = payload.charAt(i);
+    if (ch === '"' || ch === '\\') {
+      escaped += '\\';
+    }
+    escaped += ch;
+  }
+  const body: string = `{"payload":"${escaped}"}`;
+  // 诊断（不含凭据）：-400「请求错误」通常意味着 body 没按服务端预期到达，
+  // 打长度 + 前缀即可区分「body 被引擎丢掉」与「payload 内容不合法」。
+  console.info(`[BiliDevice] activate bodyLen=${body.length} head=${body.substring(0, 48)}`);
+  try {
+    const resp: WuzhiResponse = await HttpUtil.requestJson<WuzhiResponse>(
+      `${BILI_API}/x/internal/gaia-gateway/ExClimbWuzhi`,
+      {
+        method: http.RequestMethod.POST,
+        headers: { 'Content-Type': 'application/json' },
+        body: body
+      });
+    if (resp.code !== 0) {
+      console.warn(`[BiliDevice] buvid activate rejected code=${resp.code}, retry next launch`);
+      return;
+    }
+    AppPreferences.setString(PREF_BUVID_ACTIVATED_FOR, fingerprint);
+    console.info(`[BiliDevice] buvid activated fp=${fingerprint} official=${!isBuvidFallback()}`);
+  } catch (e) {
+    // 断网 / 接口不可用：不写标记位，下次启动或下次 buvid 变更时会再试
+    console.warn(`[BiliDevice] buvid activate failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }
 }

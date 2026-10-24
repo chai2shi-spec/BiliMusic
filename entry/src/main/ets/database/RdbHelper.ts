@@ -65,6 +65,11 @@ export async function initRdb(context: common.Context): Promise<void> {
     { name: 'partNo', ddl: 'partNo INTEGER' },
     { name: 'partTotal', ddl: 'partTotal INTEGER' }
   ]);
+  // musicId 二级索引（2026-10-23 性能审查）：getDownloadByMusicId 是合集/歌单
+  // 入队查重的热路径（N 分 P 合集 = N 次查询），无索引时全表扫；
+  // IF NOT EXISTS 幂等，老库新库都安全。
+  await store.executeSql(
+    `CREATE INDEX IF NOT EXISTS idx_download_musicId ON ${TABLE_DOWNLOAD}(musicId)`);
 }
 
 export function getRdb(): relationalStore.RdbStore {

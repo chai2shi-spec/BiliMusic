@@ -22,6 +22,7 @@
 
 import { AppPreferences } from '../preferences/AppPreferences';
 import {
+  artistSegments,
   cleanTitle,
   queryCandidates,
   scoreCandidate,
@@ -205,7 +206,8 @@ function rankCandidates(
     rawTitle: track.title,
     clean: cleanTitle(track.title),
     duration: track.duration > 0 ? track.duration : 0,
-    quoted: []
+    quoted: [],
+    artist: track.artist
   };
   interface Scored {
     cand: LyricCandidate;
@@ -230,7 +232,8 @@ function isPlausible(cand: LyricCandidate, track: Track): boolean {
     rawTitle: track.title,
     clean: cleanTitle(track.title),
     duration: track.duration > 0 ? track.duration : 0,
-    quoted: []
+    quoted: [],
+    artist: track.artist
   };
   const score: number = scoreCandidate(cand, ctx);
   if (score >= MIN_ACCEPT_SCORE) {
@@ -401,7 +404,10 @@ function fetchCandidateResult(candidate: LyricCandidate): Promise<LyricResult | 
 
 /** 缓存用的「信息键」：标题 / 歌手 / 时长是否已知变化都要允许重搜 */
 function cacheKeyOf(track: Track): string {
-  return `${track.id}|${track.title}|${track.artist}|${track.duration > 0 ? 'd' : 'n'}`;
+  // v2（2026-10-23 歌词匹配修复：歌手参与搜索与打分、Top1 优先取词）。
+  // 旧 v1 键不再相等 → 存量自动缓存整体自动重搜一次；manual 缓存永远优先不受影响，
+  // 旧自动结果仍作重搜失败时的兜底（见 getLyricForTrack）。
+  return `v2|${track.id}|${track.title}|${track.artist}|${track.duration > 0 ? 'd' : 'n'}`;
 }
 
 function toEntry(
@@ -426,17 +432,48 @@ function toEntry(
 }
 
 /**
+ * 组装自动搜索关键词（歌名 + 歌手优先，仅歌名兜底）。
+ *
+ * 2026-10-23 修匹配：此前只用标题搜词，同名曲 / 翻唱 / 伴奏极易误中。
+ * 现在第一优先级是「标题关键词 + track.artist 首段」的组合词 ——
+ * artist 可能是 UP 主名（不是真实歌手），所以组合词排前面、仅歌名关键词跟在后面：
+ * 轮次机制天然形成「先试组合词、搜不到再回退仅歌名」的两级策略。
+ */
+function buildAutoQueries(track: Track): string[] {
+  const titleQueries: string[] = queryCandidates(track.title);
+  if (titleQueries.length === 0) {
+    const fallback: string = cleanTitle(track.title);
+    return fallback.length > 0 ? [fallback] : [];
+  }
+  const segs: string[] = artistSegments(track.artist);
+  if (segs.length === 0) {
+    return titleQueries;
+  }
+  const firstArtist: string = segs[0];
+  const out: string[] = [];
+  for (let i = 0; i < titleQueries.length && out.length < AUTO_QUERY_LIMIT; i++) {
+    // 关键词里已含歌手（如标题本身是「周杰伦 晴天」）→ 不重复拼
+    if (titleQueries[i].indexOf(firstArtist) >= 0) {
+      continue;
+    }
+    out.push(`${titleQueries[i]} ${firstArtist}`);
+  }
+  for (let i = 0; i < titleQueries.length; i++) {
+    if (out.indexOf(titleQueries[i]) < 0) {
+      out.push(titleQueries[i]);
+    }
+  }
+  return out;
+}
+
+/**
  * 自动搜索最优歌词。
- * 第一轮用前 2 个关键词 × 3 源；全空时第二轮换后面的关键词再试一次。
+ * 第一轮用前 2 个关键词 × 3 源（优先「歌名+歌手」组合）；全空时第二轮换后面的关键词再试。
  */
 async function autoSearch(track: Track): Promise<LyricResult | null> {
-  const queries: string[] = queryCandidates(track.title);
+  const queries: string[] = buildAutoQueries(track);
   if (queries.length === 0) {
-    const fallback: string = cleanTitle(track.title);
-    if (fallback.length === 0) {
-      return null;
-    }
-    queries.push(fallback);
+    return null;
   }
 
   const tried: Set<string> = new Set<string>();
@@ -482,11 +519,19 @@ async function autoSearch(track: Track): Promise<LyricResult | null> {
       continue;
     }
 
-    const tasks: Promise<LyricResult | null>[] = [];
-    for (let i = 0; i < plausible.length; i++) {
-      tasks.push(fetchCandidateResult(plausible[i]));
+    // Top1 优先取词（2026-10-23 修匹配）：旧实现所有候选一起竞速「先成功者胜」，
+    // 排名第 2/3 的错误候选只要响应更快就会抢走最优解。现在分数最高的候选先取，
+    // 失败才竞速其余 —— 代价是 Top1 挂掉时多等一轮（有 FETCH_TIMEOUT_MS 兜底），正确率优先。
+    let result: LyricResult | null = plausible.length > 0
+      ? await fetchCandidateResult(plausible[0])
+      : null;
+    if (result === null && plausible.length > 1) {
+      const restTasks: Promise<LyricResult | null>[] = [];
+      for (let i = 1; i < plausible.length; i++) {
+        restTasks.push(fetchCandidateResult(plausible[i]));
+      }
+      result = await raceFirstResult(restTasks);
     }
-    const result: LyricResult | null = await raceFirstResult(tasks);
     if (result !== null) {
       void writeLyricCache(toEntry(track, cacheKeyOf(track), result, false, null));
       console.info(`[Lyric] hit source=${result.source} lines=${result.lines.length}`

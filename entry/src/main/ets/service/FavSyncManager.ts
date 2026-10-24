@@ -1,33 +1,27 @@
 /**
- * 收藏夹同步管理器（B 站收藏夹 ⇄ 本地歌单镜像，2026-10-13 升级为**真双向**）。
+ * 收藏夹同步管理器（B 站收藏夹 → 本地歌单镜像）。
  *
- * 职责：串行编排一轮同步，分两阶段 ——
- *   **阶段 0 推送（本地 → B 站）**：重放 `FavPushStore` 队列里「用户显式动作」产生的写意图
- *     （手动删曲 → 取消收藏；手动加曲 → 收藏；手动清空 → 批量取消）。
- *   **阶段 1 拉取（B 站 → 本地）**：拉收藏夹列表 → 逐夹拉全内容 → 应用镜像（建/合并/双向删）
- *     → 清理 B 站已删除的收藏夹镜像 → 落状态 + 广播。
+ * （2026-10-23 单向同步改造：删除「本地 → B 站」推送阶段 —— 同步只有
+ * B 站 → 本地一个方向。本地对镜像歌单的改动**不会写回 B 站**，并会在下一轮
+ * 同步时被服务端状态覆盖；原 FavPushStore 待推送队列、写意图重放与
+ * 「N 条待同步」重试整体下线，相关提示已改为「单向同步」说明。）
  *
- * ⚠️ **必须先推后拉**：若先拉，`allowDelete=true` 会按服务端现状重写本地，
- *    把「用户刚删、还没推送到 B 站」的改动覆盖掉。guards 是第二道防线，顺序是第一道。
+ * 职责：串行编排一轮同步 —— 拉收藏夹列表 → 逐夹拉全内容 → 应用镜像
+ * （建/合并/双向删）→ 清理 B 站已删除的收藏夹镜像 → 落状态 + 广播。
  *
  * 串行队列照抄 service/DownloadManager.ts 的 running/pending/pump 思路：
- * 并发触发会被合并为「跑完再补一轮」，避免同一条被处理两次。**推送与拉取共用这一个队列**
- * （而不是各起一个 manager）—— 两者都写同一份镜像歌单数据，必须由同一个 owner 串行化。
+ * 并发触发会被合并为「跑完再补一轮」，避免同一次登录的多个信号重复处理。
  *
- * ⚠️⚠️ **核心安全不变量（改本文件前必读）**：
- *   1. 【拉取侧】「删除本地曲目」只在**本轮确认服务端数据完整**时才允许（allowDelete），
+ * ⚠️⚠️ 核心安全不变量（改本文件前必读）：
+ *   1. 「删除本地曲目」只在**本轮确认服务端数据完整**时才允许（allowDelete），
  *      判据三者全真：
  *        foldersOk（收藏夹列表拉到） && res.complete（该夹分页全部成功走完）
  *        && folder.mediaCount <= PLAYLIST_MAX_ITEMS
  *      任一条不满足 → 只增不减。**绝不能因为「返回 0 条」就删**：
  *      0 条 ≠ 用户清空了收藏夹，也可能只是风控把响应拦成空。判据必须是 complete 标志。
- *   2. 【拉取侧】收藏夹**列表**都拉不到时（foldersOk=false）→ 整轮不碰本地，一条都不动，
+ *   2. 收藏夹**列表**都拉不到时（foldersOk=false）→ 整轮不碰本地，一条都不动，
  *      更不做「清理已删除收藏夹」（否则会把「没拉到」误判成「收藏夹没了」而删整个镜像）。
- *   3. 【拉取侧】单夹失败不中断其它夹（标 partial），保证「能同步多少算多少」。
- *   4. 【推送侧】**绝不由自动轮次凭空生成删除**：队列里的 op 只来自用户显式动作
- *      （见 FavPushStore 文件头）。本管理器只负责**重放**，不负责发明。这条是「真双向」
- *      不会变成「静默批量删用户 B 站收藏」的根本保障。
- *   5. 【推送侧】`code=0` 才出队；失败留队列，**且靠 guards 阻止该条目被拉取复活**。
+ *   3. 单夹失败不中断其它夹（标 partial），保证「能同步多少算多少」。
  */
 
 import {
@@ -36,26 +30,12 @@ import {
   FavoriteFolder,
   FavoriteFoldersResult,
   FavResourceItem,
-  favoriteResource,
   getAllFavResources,
   getFavoriteFolders,
-  getVideoDetail,
-  isFavWriteRetryable,
-  mapFavItem,
-  unfavoriteResource
+  mapFavItem
 } from '../api/BilibiliApi';
 import { LibraryStore, PLAYLIST_MAX_ITEMS } from './LibraryStore';
-import {
-  clearFavOpsForMedia,
-  countFavPushOps,
-  FAV_OP_DEL,
-  FavPushGuards,
-  FavPushOp,
-  favPushGuardsFor,
-  loadFavPushOps,
-  updateFavPushOps
-} from './FavPushStore';
-import { getLoginCsrf, getLoginUser, isLoggedIn, LoginUser } from './LoginStore';
+import { getLoginUser, LoginUser } from './LoginStore';
 import { deselectedFolderIds } from './FavSelectionStore';
 import {
   FAV_SYNC_FAILED,
@@ -67,14 +47,11 @@ import {
   upsertFavSyncState
 } from './FavSyncStore';
 import { STORE_FAV_SYNC_REV } from '../common/Constants';
-import { Playlist, Track, VideoDetail } from '../model/MusicModels';
+import { Playlist, Track } from '../model/MusicModels';
 
 /**
- * 双向删除总开关（分阶段上线的安全闸，2026-10-13）。
- *
- * `true` = 双向：B 站取消收藏 → 本地移除（`applyFavMirror` 的 allowDelete 分支）。
- * 置回 `false` 即**一键回滚到「只增不减」**（拉取侧不再删任何本地条目；
- * 注意这不影响推送侧 —— 用户主动删曲仍会推回 B 站，那是显式意图）。
+ * 双向删除总开关（拉取侧：B 站取消收藏 → 本地移除，`applyFavMirror` 的
+ * allowDelete 分支）。置回 `false` 即**一键回滚到「只增不减」**。
  *
  * 前置验收（方案批次 3）：B 站取消收藏一首 → 本地移除；断网/风控那一轮 → 本地一条不删；
  * 已下载曲目的 localFilePath 不脱链。
@@ -91,18 +68,6 @@ const PAGE_GAP_MS: number = 350;
  * 3 个足够区分「单个大夹抖动」与「整体被拦」。
  */
 const FAV_RISK_ABORT_STREAK: number = 3;
-/** 写操作之间的间隔（ms）：写接口比读接口更容易被风控，间隔取与夹间隔同量级 */
-const WRITE_GAP_MS: number = 500;
-
-/**
- * 单条待推送 op 的最大尝试次数。达上限后**保留在队列里但不再自动重试**
- * （静默丢弃会让本地与 B 站长期不一致且用户不知情），由同步页展示为「同步失败」。
- */
-const MAX_PUSH_ATTEMPTS: number = 5;
-
-/** 轮次模式（ArkTS 禁 enum，用字符串常量） */
-const ROUND_FULL: string = 'full';
-const ROUND_PUSH: string = 'push';
 
 /** 一轮同步的汇总（供同步页展示与日志） */
 export interface FavSyncSummary {
@@ -123,29 +88,6 @@ export interface FavSyncSummary {
   deletedFolders: number;
   /** 整体失败/中止的人话原因；正常为空串 */
   reason: string;
-  /** ——— 以下为阶段 0（推送）的结果 ——— */
-  /** 本轮成功推送到 B 站的 op 数 */
-  pushed: number;
-  /** 本轮推送失败（可重试，已留队列）的 op 数 */
-  pushFailed: number;
-  /** 推送被阻塞（未登录 / 缺 CSRF / 会话失效），整轮推送中止 */
-  pushBlocked: boolean;
-  /** 队列剩余待推送总数 */
-  pendingLeft: number;
-}
-
-/** 阶段 0（推送）单独一轮的汇总（供 pushOnly 返回与同步页展示） */
-export interface FavPushSummary {
-  needLogin: boolean;
-  /** 本轮尝试的 op 数 */
-  attempted: number;
-  pushed: number;
-  failed: number;
-  /** csrf 缺失 / -101 / -111 → 整轮推送阻塞，需重新登录 */
-  blocked: boolean;
-  /** 队列剩余待推送总数 */
-  pendingLeft: number;
-  reason: string;
 }
 
 /** 单夹同步结果（内部） */
@@ -153,14 +95,6 @@ interface FavFolderOutcome {
   result: string;
   added: number;
   removed: number;
-}
-
-/** 单条 op 的推送结果（内部） */
-interface PushOutcome {
-  ok: boolean;
-  /** true = 认证类失败，应中止整轮（未登录 / csrf 失效），且不消耗 attempts */
-  blocked: boolean;
-  reason: string;
 }
 
 function emptySummary(): FavSyncSummary {
@@ -174,22 +108,6 @@ function emptySummary(): FavSyncSummary {
     added: 0,
     removed: 0,
     deletedFolders: 0,
-    reason: '',
-    pushed: 0,
-    pushFailed: 0,
-    pushBlocked: false,
-    pendingLeft: 0
-  };
-}
-
-function emptyPushSummary(): FavPushSummary {
-  return {
-    needLogin: false,
-    attempted: 0,
-    pushed: 0,
-    failed: 0,
-    blocked: false,
-    pendingLeft: 0,
     reason: ''
   };
 }
@@ -210,24 +128,11 @@ function isLoginInvalid(e: ESObject): boolean {
   return e instanceof BiliApiError && e.code === -101;
 }
 
-/** -111 = csrf（bili_jct）校验失败：同样是确定性错误，需重新登录换新凭据 */
-function isCsrfInvalid(e: ESObject): boolean {
-  return e instanceof BiliApiError && e.code === -111;
-}
-
-/** 认证类失败（不可通过重试恢复，且不应消耗 attempts） */
-function isAuthBlocking(e: ESObject): boolean {
-  return isLoginInvalid(e) || isCsrfInvalid(e);
-}
-
 export class FavSyncManager {
   private static instance: FavSyncManager | null = null;
   private running: boolean = false;
   private pending: string = '';
-  /** 待补那一轮的轮次模式（FULL 是超集，优先保留 FULL） */
-  private pendingMode: string = ROUND_FULL;
   private last: FavSyncSummary | null = null;
-  private lastPush: FavPushSummary | null = null;
 
   static getInstance(): FavSyncManager {
     if (FavSyncManager.instance === null) {
@@ -241,58 +146,29 @@ export class FavSyncManager {
     return this.running;
   }
 
-  /** 上一轮**完整**同步的汇总（未跑过返回 null） */
+  /** 上一轮完整同步的汇总（未跑过返回 null） */
   getLastSummary(): FavSyncSummary | null {
     return this.last;
   }
 
-  /** 最近一次**推送**（含 pushOnly 轻量轮）的汇总 */
-  getLastPushSummary(): FavPushSummary | null {
-    return this.lastPush;
-  }
-
-  /** 待推送队列条数（同步页「N 条待同步」） */
-  pendingCount(): number {
-    return countFavPushOps();
-  }
-
   /**
-   * 触发一轮**完整**同步：先推后拉（fire-and-forget）。
+   * 触发一轮同步（fire-and-forget）。
    * 重入：正在跑时记成 pending，跑完自动补一轮 —— 避免同一次登录的多次信号重复处理。
    */
   syncAll(reason: string): void {
-    this.kick(reason, ROUND_FULL);
-  }
-
-  /**
-   * 触发一轮**仅推送**的轻量轮（fire-and-forget）：只重放待推送队列，不拉取。
-   * 用于「用户删除后即时尝试」「冷启动重试」「同步页立即重试」。
-   */
-  pushOnly(reason: string): void {
-    this.kick(reason, ROUND_PUSH);
-  }
-
-  private kick(reason: string, mode: string): void {
     if (this.running) {
       this.pending = reason;
-      // FULL 是 PUSH 的超集：补跑时若任一方是 FULL，就补 FULL
-      this.pendingMode = (this.pendingMode === ROUND_FULL || mode === ROUND_FULL)
-        ? ROUND_FULL
-        : ROUND_PUSH;
       return;
     }
     this.running = true;
     this.bump();
-    this.runAndCleanup(reason, mode);
+    this.runAndCleanup(reason);
   }
 
-  private runAndCleanup(reason: string, mode: string): void {
-    this.run(reason, mode)
+  private runAndCleanup(reason: string): void {
+    this.run(reason)
       .then((s: FavSyncSummary): void => {
-        // 轻量轮不覆盖「上一轮完整同步」的汇总（否则同步页会把 0 个收藏夹当成结果）
-        if (mode === ROUND_FULL) {
-          this.last = s;
-        }
+        this.last = s;
       })
       .catch((e: ESObject): void => {
         console.error(`fav sync crashed: ${humanError(e)}`);
@@ -301,11 +177,9 @@ export class FavSyncManager {
         this.running = false;
         this.bump();
         const next: string = this.pending;
-        const nextMode: string = this.pendingMode;
         this.pending = '';
-        this.pendingMode = ROUND_FULL;
         if (next.length > 0) {
-          this.kick(next, nextMode);
+          this.syncAll(next);
         }
       });
   }
@@ -315,28 +189,10 @@ export class FavSyncManager {
     AppStorage.setOrCreate(STORE_FAV_SYNC_REV, cur + 1);
   }
 
-  /** 一轮同步主体：阶段 0 推送 → （完整轮才）阶段 1 拉取 */
-  private async run(reason: string, mode: string): Promise<FavSyncSummary> {
+  /** 一轮同步主体：拉收藏夹列表 → 逐夹同步 → 清理已删除夹 */
+  private async run(reason: string): Promise<FavSyncSummary> {
     const summary: FavSyncSummary = emptySummary();
 
-    // ——— 阶段 0：推送（本地 → B 站）———
-    const push: FavPushSummary = await this.pushPending(reason);
-    this.lastPush = push;
-    summary.pushed = push.pushed;
-    summary.pushFailed = push.failed;
-    summary.pushBlocked = push.blocked;
-    summary.pendingLeft = push.pendingLeft;
-
-    if (push.needLogin) {
-      summary.needLogin = true;
-      return summary;
-    }
-    if (mode === ROUND_PUSH) {
-      // 轻量轮到此为止：不拉取（尊重「只有登录后/手动才做全量同步」的产品决策）
-      return summary;
-    }
-
-    // ——— 阶段 1：拉取（B 站 → 本地）———
     const user: LoginUser | null = getLoginUser();
     if (user === null || !(user.mid > 0)) {
       // 有 Cookie 但用户信息还没拉到（nav 未回）→ 不碰本地，等下次
@@ -449,133 +305,7 @@ export class FavSyncManager {
     return summary;
   }
 
-  /**
-   * 阶段 0：重放待推送队列（本地 → B 站）。
-   *
-   * ⚠️ 只重放**用户显式动作**产生的 op，绝不自行生成删除（见文件头不变量 4）。
-   * 失败语义：认证类（-101/-111）→ 整轮阻塞且**不消耗 attempts**（重登后可重放）；
-   * 风控/网络 → attempts+1 留队列；达 `MAX_PUSH_ATTEMPTS` 后不再自动重试（保留待用户处理）。
-   */
-  private async pushPending(reason: string): Promise<FavPushSummary> {
-    const sum: FavPushSummary = emptyPushSummary();
-
-    if (!isLoggedIn()) {
-      sum.needLogin = true;
-      return sum;
-    }
-
-    const ops: FavPushOp[] = loadFavPushOps();
-    sum.attempted = ops.length;
-    sum.pendingLeft = ops.length;
-    if (ops.length === 0) {
-      return sum;
-    }
-
-    const csrf: string = getLoginCsrf();
-    if (csrf.length === 0) {
-      // 缺 CSRF 时发写请求必被 -111 拒，白烧一次；直接阻塞并提示重登
-      sum.blocked = true;
-      sum.reason = '缺少登录凭据（csrf），请重新登录后再同步';
-      console.warn('fav push: csrf missing, blocked');
-      return sum;
-    }
-
-    // 未成功的 op（含达上限的）整体回写；成功的自然不在其中
-    const remaining: FavPushOp[] = [];
-    let stop: boolean = false;
-
-    for (let i = 0; i < ops.length; i++) {
-      const op: FavPushOp = ops[i];
-
-      if (stop || op.attempts >= MAX_PUSH_ATTEMPTS) {
-        // 已阻塞，或已达重试上限 → 原样保留，不再尝试
-        remaining.push(op);
-        continue;
-      }
-
-      const r: PushOutcome = await this.pushOne(op, csrf);
-      if (r.ok) {
-        sum.pushed = sum.pushed + 1;
-      } else if (r.blocked) {
-        sum.blocked = true;
-        sum.reason = r.reason;
-        stop = true;                    // 认证类失败：整轮中止（不消耗 attempts）
-        remaining.push(op);
-      } else {
-        const nextOp: FavPushOp = Object.assign({}, op, {
-          attempts: op.attempts + 1,
-          lastError: r.reason
-        });
-        remaining.push(nextOp);
-        sum.failed = sum.failed + 1;
-      }
-
-      // 写操作之间留间隔（降风控）
-      if (i < ops.length - 1) {
-        await this.sleep(WRITE_GAP_MS);
-      }
-    }
-
-    updateFavPushOps(remaining);
-    sum.pendingLeft = remaining.length;
-    console.info(`fav push(${reason}): attempted=${sum.attempted} pushed=${sum.pushed} failed=${sum.failed} blocked=${sum.blocked} left=${sum.pendingLeft}`);
-    if (sum.blocked) {
-      // 阻塞时把本轮结果也记录下来，供同步页展示
-      this.lastPush = sum;
-    }
-    return sum;
-  }
-
-  /**
-   * 推送单条 op（内部）。`aid` 缺失时用 bvid 解析兜底 ——
-   * **绝不允许拿 aid=0 发请求**（那会取消到别的视频，比不删更糟）。
-   */
-  private async pushOne(op: FavPushOp, csrf: string): Promise<PushOutcome> {
-    let aid: number = 0;
-    const raw: string = op.aid ? op.aid.trim() : '';
-    if (raw.length > 0) {
-      const parsed: number = Number.parseInt(raw, 10);
-      if (!Number.isNaN(parsed) && parsed > 0) {
-        aid = parsed;
-      }
-    }
-
-    if (aid <= 0) {
-      // aid 兜底解析（有 viewCache，不重复发请求）
-      if (op.bvid.length === 0) {
-        return { ok: false, blocked: false, reason: '缺少 aid 且无 bvid，无法推送' };
-      }
-      try {
-        const detail: VideoDetail = await getVideoDetail(op.bvid);
-        aid = detail.aid > 0 ? detail.aid : 0;
-      } catch (e) {
-        return { ok: false, blocked: false, reason: `解析 aid 失败：${humanError(e)}` };
-      }
-      if (aid <= 0) {
-        return { ok: false, blocked: false, reason: '解析不到 aid，无法推送' };
-      }
-    }
-
-    try {
-      if (op.op === FAV_OP_DEL) {
-        await unfavoriteResource(aid, op.mediaId, csrf);
-      } else {
-        await favoriteResource(aid, op.mediaId, csrf);
-      }
-      return { ok: true, blocked: false, reason: '' };
-    } catch (e) {
-      if (isAuthBlocking(e)) {
-        return { ok: false, blocked: true, reason: humanError(e) };
-      }
-      if (isFavWriteRetryable(e)) {
-        return { ok: false, blocked: false, reason: humanError(e) };
-      }
-      // 未知业务码（接口变更 / 参数错）：标记失败留队列供排查，不当作成功
-      return { ok: false, blocked: false, reason: humanError(e) };
-    }
-  }
-
-  /** 处理单个收藏夹：拉全 → 映射 → 应用镜像（带拉取守卫）→ 落状态 */
+  /** 处理单个收藏夹：拉全 → 映射 → 应用镜像 → 落状态 */
   private async syncFolder(folder: FavoriteFolder, foldersOk: boolean): Promise<FavFolderOutcome> {
     const mediaId: number = folder.id;
     // media_id 缺失时绝不去请求 `media_id=0`（会拿到空响应 → 误判「收藏夹空了」/ 建出空镜像）
@@ -681,9 +411,7 @@ export class FavSyncManager {
       return { result: emptyOk ? FAV_SYNC_OK : FAV_SYNC_PARTIAL, added: 0, removed: 0 };
     }
 
-    // 拉取守卫：未推送成功的本地意图（防复活 / 防抹除）
-    const guards: FavPushGuards = favPushGuardsFor(mediaId);
-    const r = LibraryStore.applyFavMirror(folder.title, mediaId, tracks, allowDelete, guards);
+    const r = LibraryStore.applyFavMirror(folder.title, mediaId, tracks, allowDelete);
 
     // res.complete=false 只代表「没拉全」，不算失败（本地已按只增合并）→ 标 partial
     const result: string = (res.complete && !emptySuspect) ? FAV_SYNC_OK : FAV_SYNC_PARTIAL;
@@ -706,8 +434,6 @@ export class FavSyncManager {
   /**
    * 清理「B 站已删除」的收藏夹镜像。
    * ⚠️ 调用前置条件：folders 是本轮成功拉到的完整列表。调用方已保证。
-   * ⚠️ **不生成任何推送 op**：这是服务端驱动的清理，不是用户意图；
-   *    顺带清掉该夹残留的待推送 op（收藏夹都没了，再推 del 只会白报错）。
    */
   private pruneDeletedFolders(folders: FavoriteFolder[]): number {
     const live: Set<number> = new Set<number>();
@@ -732,7 +458,6 @@ export class FavSyncManager {
       if (mediaId > 0 && !live.has(mediaId)) {
         LibraryStore.deletePlaylist(mirrors[i].id);
         removeFavSyncState(mediaId);
-        clearFavOpsForMedia(mediaId);
         deleted = deleted + 1;
         console.info(`fav sync: pruned mirror for deleted folder ${mediaId}`);
       }

@@ -3,10 +3,10 @@
  * 搜索结果在本页签内展示；关键词与结果存于 SearchStateHolder，
  * 切换底部页签后返回不丢失。
  *
- * 顶栏（HarmonyX 根栏移植，2026-10-10）：搜索行 + 页签行回到根 HdsNavigation
+ * 顶栏（根栏移植，2026-10-10）：搜索行 + 页签行回到根 HdsNavigation
  * titleBar 的 stackBuilder（Index.immersiveTitleBarContent，行 1 / 行 2），
  * 页面不再自绘顶栏与磨砂（旧 SearchTopBar 已删除）。滚动模糊由根栏
- * bindToScrollable 统一驱动（0→16）。
+ * bindToScrollable 统一驱动（0→20，2026-10-23 规格落地全站归一）。
  * keyword / searchKind / tab 是页面与栏共享的 AppStorage 双向状态。
  * 搜索历史面板从**整栏下沿**弹出（用户确认保持现状），
  * 定位与列表让位都读 STORE_SEARCH_TABS_HEIGHT 实测镜像。
@@ -34,7 +34,7 @@ import { Playlist, Track, VideoDetail, VideoOwner, VideoStat, buildTrack } from 
 import { LibraryStore } from '../service/LibraryStore';
 import { TrackItem } from '../components/TrackItem';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
-import { MusicPlayer } from '../player/MusicPlayer';import { toHttpsUrl, toThumbUrl } from '../utils/TextUtil';
+import { MusicPlayer } from '../player/MusicPlayer';import { toHttpsUrl, toThumbUrl, stripHtmlTags } from '../utils/TextUtil';
 import { CoverImage } from '../components/CoverImage';
 import {
   DownloadManager,
@@ -50,15 +50,26 @@ import { SearchHistoryStore } from '../service/SearchHistoryStore';
 import {
   CONTENT_END_OFFSET,
   DEFAULT_PLAYLIST_NAME,
+  STORE_FLING_ACTIVE,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_NET_RETRY_REV,
   STORE_THEME_SURFACE,
   STORE_THEME_DEEP
 } from '../common/Constants';
+import { FlingSampler } from '../components/FlingSampler';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import {
+  PairOf,
+  PairDataSource,
+  TWO_COL_GAP_VP,
+  TwoColumnLayout
+} from '../common/utils/TwoColumnList';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import {
@@ -95,20 +106,14 @@ function parseDur(s: string | number | undefined): number {
   return 0;
 }
 
-/** 搜索结果的标题里带 <em class="keyword"> 高亮标签，必须剥掉。 */
-function stripHtml(s: string): string {
-  if (!s) {
-    return '';
-  }
-  return s.replace(/<[^>]+>/g, '');
-}
+/** 搜索结果的标题里有 <em class="keyword"> 高亮标签，必须剥掉（统一用 TextUtil.stripHtmlTags）。 */
 
 function mapSearch(item: SearchResultItem): Track {
   return buildTrack({
     id: item.bvid,
     bvid: item.bvid,
     aid: String(item.aid),
-    title: stripHtml(item.title),
+    title: stripHtmlTags(item.title),
     artist: item.author,
     // 搜索结果自带 mid（实测一直有），只是旧类型声明漏了 → 「进 UP 主主页」全靠它
     upMid: item.mid !== undefined ? String(item.mid) : '',
@@ -124,7 +129,7 @@ function mapPopular(v: PopularVideo): Track {
     id: v.bvid,
     bvid: v.bvid,
     aid: String(v.aid),
-    title: stripHtml(v.title),
+    title: stripHtmlTags(v.title),
     artist: v.owner?.name ?? '',
     // owner 在 API 层就已解析出 mid（getRecommendedFeed 里 owner 为 null 的条目已被剔除）
     upMid: v.owner && v.owner.mid ? String(v.owner.mid) : '',
@@ -148,7 +153,7 @@ function mapRankingV2(v: RankingVideoItem): Track {
     bvid: v.bvid,
     aid: String(v.aid),
     cid: v.cid ? String(v.cid) : '',
-    title: stripHtml(v.title),
+    title: stripHtmlTags(v.title),
     artist: owner ? owner.name : '',
     upMid: owner && owner.mid ? String(owner.mid) : '',
     coverUrl: toHttpsUrl(v.pic),
@@ -315,10 +320,23 @@ export struct SearchPage {
   /** 主题色运行时值：加入歌单弹层的歌单名与新建按钮跟随切色刷新 */
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
-  @State results: Track[] = SearchStateHolder.results;
-  @State recommend: Track[] = [];
-  @State ranking: Track[] = [];
-  @State center: Track[] = [];
+  @State @Watch('onListSourceChanged') results: Track[] = SearchStateHolder.results;
+  @State @Watch('onListSourceChanged') recommend: Track[] = [];
+  @State @Watch('onListSourceChanged') ranking: Track[] = [];
+  @State @Watch('onListSourceChanged') center: Track[] = [];
+  // ===== 列表数据源（2026-10-23 性能审查：ForEach → LazyForEach）=====
+  // 四页签数组 + UP 搜索结果都挂 @Watch('onListSourceChanged')：整表替换与 push
+  // 追加都会触发（V1 数组代理拦截 push），对应 ArrayDataSource 整表 reload +
+  // 两列 PairDataSource sync。reload 语义与页签数据流天然匹配：新搜索 / 切页签
+  // 必是整表换源；翻页 push 时 LazyForEach 只重建可视区，代价可控。
+  private resultSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  private resultPairs: PairDataSource<Track> = new PairDataSource<Track>(this.resultSource);
+  private recommendSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  private recommendPairs: PairDataSource<Track> = new PairDataSource<Track>(this.recommendSource);
+  private rankingSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  private rankingPairs: PairDataSource<Track> = new PairDataSource<Track>(this.rankingSource);
+  private centerSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  private centerPairs: PairDataSource<Track> = new PairDataSource<Track>(this.centerSource);
   @State loading: boolean = false;
   /** 是否已执行过一次搜索：用于区分「还没搜」和「搜了但没结果」，避免空态文案误导。 */
   @State searched: boolean = false;
@@ -338,12 +356,24 @@ export struct SearchPage {
    */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   /**
+   * [任务③·自绘原型] 顶栏渐变模糊层进度更新器：onDidScroll / onScrollStop
+   * 命令式驱动（不标 @State，滚动高频回调零重建），见 syncTopBlurProgress。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+  /**
    * 网络恢复重试信号（Index 的 watchNetwork 在「断过又恢复」时递增）。
    * @StorageProp 单向只读 —— 页面不改它，只借 @Watch 收通知。
    */
   @StorageProp(STORE_NET_RETRY_REV) @Watch('onNetRetry') netRetryRev: number = 0;
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中，见 build 里的 constraintSize */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时结果条目两列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
+
+  /** 横屏宽屏（窗口 ≥600vp 的横屏）时条目两列显示；竖屏 / 窄窗口单列不变 */
+  private isTwoCol(): boolean {
+    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  }
 
   /**
    * 结果列表滚动控制器：List 直接挂 TabScrollerHolder.search（唯一真源，身份恒定），
@@ -421,7 +451,49 @@ export struct SearchPage {
    */
   private collectionSaverController: CustomDialogController | undefined = undefined;
 
+  /**
+   * 列表数组变化（@Watch 携带属性名）：同步对应数据源。
+   * 初始赋值不触发 @Watch，会话恢复场景由 syncAllListSources（aboutToAppear）兜底。
+   */
+  private onListSourceChanged(propName: string): void {
+    if (propName === 'results') {
+      this.resultSource.reload(this.results);
+      this.resultPairs.sync();
+    } else if (propName === 'recommend') {
+      this.recommendSource.reload(this.recommend);
+      this.recommendPairs.sync();
+    } else if (propName === 'ranking') {
+      this.rankingSource.reload(this.ranking);
+      this.rankingPairs.sync();
+    } else if (propName === 'center') {
+      this.centerSource.reload(this.center);
+      this.centerPairs.sync();
+    } else if (propName === 'userResults') {
+      this.userSource.reload(this.userResults);
+      this.userPairs.sync();
+    }
+  }
+
+  /** 初值同步（@Watch 不触发初始赋值）：会话恢复的搜索结果等在挂载时补一次 */
+  private syncAllListSources(): void {
+    this.resultSource.reload(this.results);
+    this.resultPairs.sync();
+    this.recommendSource.reload(this.recommend);
+    this.recommendPairs.sync();
+    this.rankingSource.reload(this.ranking);
+    this.rankingPairs.sync();
+    this.centerSource.reload(this.center);
+    this.centerPairs.sync();
+    this.userSource.reload(this.userResults);
+    this.userPairs.sync();
+  }
+
   aboutToAppear(): void {
+    // 列表数据源初值同步（见 syncAllListSources 注释）
+    this.syncAllListSources();
+    // [任务③·自绘原型] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
+    this.syncTopBlurProgress();
     // 「保存合集为歌单」对话框（阶段 3）：按钮走 buttons 槽（无校验失败需保持
     // 打开的路径，可用自动关闭），点遮罩关闭时只清暂存数据，关闭由系统完成。
     this.collectionSaverController = new CustomDialogController({
@@ -494,6 +566,19 @@ export struct SearchPage {
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.searchTabsHeight;
+  }
+
+  /**
+   * [任务③·自绘原型] 按当前列表偏移校准自绘渐变模糊层进度：
+   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
+   * 边缘回弹负偏移归零 = 用户方案 ③ 死区）。onDidScroll 逐帧 + onScrollStop
+   * Idle 校准终态都走这里（用户方案 ②：Fling 期只命令式写 opacity 不写 @State）。
+   */
+  private syncTopBlurProgress(): void {
+    // currentOffset() 在 Scroller 尚未挂到 List（冷启动 aboutToAppear 早于 build）
+    // 时运行时返回 undefined，空防护防启动崩溃（jscrash 实锤），未挂载按偏移 0。
+    this.topBlurUpdater.setProgress(
+      (TabScrollerHolder.search.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
   }
 
   /**
@@ -753,8 +838,15 @@ export struct SearchPage {
       this.toast('还没有搜索内容', 1200);
       return;
     }
+    // seq 竞态保护（2026-10-23 审查修复）：刷新在途时提交新搜索（doSearch）或
+    // 再次刷新，旧响应必须整体丢弃；++searchSeq 同时使同关键词在途的上拉
+    // 翻页作废（刷新会整体置换结果集，翻页的增量 push 已无意义）。
+    const seq: number = ++this.searchSeq;
     try {
       const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE);
+      if (seq !== this.searchSeq) {
+        return;
+      }
       const list: Track[] = (resp.result || []).map(mapSearch);
       this.results = list;
       this.searchPage = 1;
@@ -762,6 +854,9 @@ export struct SearchPage {
       this.searched = true;
       SearchStateHolder.save(kw, list);
     } catch (e) {
+      if (seq !== this.searchSeq) {
+        return;
+      }
       console.error(`refreshSearch failed: ${JSON.stringify(e)}`);
       this.toast('刷新失败，请稍后重试', 1800);
     } finally {
@@ -894,15 +989,27 @@ export struct SearchPage {
       return;
     }
     this.loadingMore = true;
+    // seq 竞态保护（2026-10-23 审查修复）：翻页在途时提交新搜索（doSearch 会
+    // ++searchSeq）或下拉刷新，旧响应必须整体丢弃 —— 否则旧关键词的下一页会被
+    // push 进新结果数组、并被 SearchStateHolder.save 持久化成「混页」数据。
+    const seq: number = this.searchSeq;
     try {
       const next: number = this.searchPage + 1;
       if (this.searchKind === 'user') {
         const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, next, SEARCH_PAGE_SIZE);
+        if (seq !== this.searchSeq) {
+          return;
+        }
         const list: UserSearchResult[] = resp.result || [];
+        // 空页 ≠ 到底（2026-10-23 审查修复）：风控时接口同样返回空列表
+        //（HTTP 200 / code 0，见 doSearch 首页分支注释）。遇到空页只提示可重试，
+        // 不推进 searchPage、不锁定 searchTotalPages；真到底由服务端 numPages 判定。
+        if (list.length === 0) {
+          this.toast('这页没有加载出来，可能被限流，稍后再试', 2000);
+          return;
+        }
         this.searchPage = next;
-        // 按 mid 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
-        // 翻页时 B 站可能把同一条挪位置，不去重会重复；整表重新赋值会让 ForEach
-        // 全量 diff，push 只把 diff 限制在新增 key，既有行零重渲染。
+        // 按 mid 去重后增量 push：翻页时 B 站可能把同一条挪位置，不去重会重复。
         const seen: Set<string> = new Set<string>();
         for (let i = 0; i < this.userResults.length; i++) {
           seen.add(String(this.userResults[i].mid));
@@ -915,15 +1022,21 @@ export struct SearchPage {
             this.userResults.push(u);
           }
         }
-        if (list.length === 0) {
-          this.searchTotalPages = next;
-        } else if (resp.numPages > 0) {
+        if (resp.numPages > 0) {
           this.searchTotalPages = resp.numPages;
         }
         return;
       }
       const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, next, SEARCH_PAGE_SIZE);
+      if (seq !== this.searchSeq) {
+        return;
+      }
       const list: Track[] = (resp.result || []).map(mapSearch);
+      // 空页 ≠ 到底：理由同 user 分支（风控空页可重试，真到底看 numPages）。
+      if (list.length === 0) {
+        this.toast('这页没有加载出来，可能被限流，稍后再试', 2000);
+        return;
+      }
       this.searchPage = next;
       // 按 id 去重后增量 push（理由同上 user 分支）
       const seen: Set<string> = new Set<string>();
@@ -938,13 +1051,13 @@ export struct SearchPage {
         }
       }
       SearchStateHolder.save(kw, this.results);
-      if (list.length === 0) {
-        // 空页 = 到底：把总页数对齐到当前页，hasMore() 自然返回 false
-        this.searchTotalPages = next;
-      } else if (resp.numPages > 0) {
+      if (resp.numPages > 0) {
         this.searchTotalPages = resp.numPages;
       }
     } catch (e) {
+      if (seq !== this.searchSeq) {
+        return;
+      }
       console.error(`loadMoreSearch failed: ${JSON.stringify(e)}`);
       this.toast('加载更多失败，请稍后重试', 1800);
     } finally {
@@ -959,8 +1072,7 @@ export struct SearchPage {
       const feed: PopularVideo[] = await BilibiliApi.getRecommendedFeed(idx, RECOMMEND_FEED_PS);
       this.recommendFreshIdx = idx;
       const before: number = this.recommend.length;
-      // 按 id 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
-      // 整表重新赋值会让 ForEach 全量 diff，push 只把 diff 限制在新增 key。
+      // 按 id 去重后增量 push：推荐流翻页常回捞已出现过的视频。
       const seen: Set<string> = new Set<string>();
       for (let i = 0; i < this.recommend.length; i++) {
         seen.add(this.recommend[i].id);
@@ -988,8 +1100,6 @@ export struct SearchPage {
 
   /** 排行榜：接口已经一次给全，这里只是多放一屏，不发请求 */
   private revealMoreRanking(): void {
-    // 增量揭示（2026-10-19 修「加载第二页列表整体跳一下」）：push 揭示区间，
-    // 不再 slice 整表重新赋值，ForEach 只 diff 新增 key。
     const from: number = this.ranking.length;
     const next: number = Math.min(from + RANKING_PAGE_SIZE, this.rankingAll.length);
     for (let i = from; i < next; i++) {
@@ -1004,8 +1114,7 @@ export struct SearchPage {
       const list: MusicCenterItem[] =
         await BilibiliApi.getMusicComprehensiveRank(CENTER_PAGE_SIZE, next);
       const before: number = this.center.length;
-      // 按 id 去重后增量 push（2026-10-19 修「加载第二页列表整体跳一下」）：
-      // 整表重新赋值会让 ForEach 全量 diff，push 只把 diff 限制在新增 key。
+      // 按 id 去重后增量 push（分页可能跨页重复）。
       const fresh: Track[] = mapMusicCenterList(list);
       const seen: Set<string> = new Set<string>();
       for (let i = 0; i < this.center.length; i++) {
@@ -1208,7 +1317,9 @@ export struct SearchPage {
    */
   @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
   /** UP 主搜索结果（`searchKind === 'user'` 时渲染这个，其余时间忽略） */
-  @State userResults: UserSearchResult[] = [];
+  @State @Watch('onListSourceChanged') userResults: UserSearchResult[] = [];
+  private userSource: ArrayDataSource<UserSearchResult> = new ArrayDataSource<UserSearchResult>([]);
+  private userPairs: PairDataSource<UserSearchResult> = new PairDataSource<UserSearchResult>(this.userSource);
 
   /**
    * 切换搜索类型（滑块选段，根栏经持有器回调进来）；已在结果态时立刻用新类型重搜同一关键词。
@@ -1661,19 +1772,77 @@ export struct SearchPage {
 
             if (this.tab === 'search') {
               if (this.searchKind === 'user') {
-                // UP 主结果：List 里混排两种 ForEach 不行，所以拆成两个并列分支
-                ForEach(
-                  this.userResults,
-                  (u: UserSearchResult, index: number): void => {
+                // UP 主结果：List 里混排两种数据源不行，所以拆成两个并列分支。
+                // 横屏宽屏（2026-10-23 两列改造）：UP 行配对两列。
+                if (this.isTwoCol()) {
+                  LazyForEach(
+                    this.userPairs,
+                    (pair: PairOf<UserSearchResult>, pIndex: number): void => {
+                      ListItem() {
+                        Row() {
+                          Column() {
+                            this.UserResultRow(pair.first, pIndex * 2)
+                          }
+                          .layoutWeight(1)
+                          if (pair.second !== null) {
+                            Column() {
+                              this.UserResultRow(pair.second, pIndex * 2 + 1)
+                            }
+                            .layoutWeight(1)
+                            .margin({ left: TWO_COL_GAP_VP })
+                          } else {
+                            Blank().layoutWeight(1)
+                          }
+                        }
+                        .width('100%')
+                      }
+                    },
+                    (pair: PairOf<UserSearchResult>): string =>
+                      `${pair.first.mid}|${pair.second !== null ? pair.second.mid : 'x'}`
+                  )
+                } else {
+                  LazyForEach(
+                    this.userSource,
+                    (u: UserSearchResult, index: number): void => {
+                      ListItem() {
+                        this.UserResultRow(u, index)
+                      }
+                    },
+                    (u: UserSearchResult): string => `${u.mid}`
+                  )
+                }
+              } else if (this.isTwoCol()) {
+                LazyForEach(
+                  this.resultPairs,
+                  (pair: PairOf<Track>, pIndex: number): void => {
                     ListItem() {
-                      this.UserResultRow(u, index)
+                      Row() {
+                        TrackItem({
+                          track: pair.first,
+                          entranceIndex: pIndex * 2,
+                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        if (pair.second !== null) {
+                          TrackItem({
+                            track: pair.second,
+                            entranceIndex: pIndex * 2 + 1,
+                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                        } else {
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
                     }
                   },
-                  (u: UserSearchResult): string => `${u.mid}`
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
                 )
               } else {
-                ForEach(
-                  this.results,
+                LazyForEach(
+                  this.resultSource,
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
@@ -1688,38 +1857,129 @@ export struct SearchPage {
                 )
               }
             } else if (this.tab === 'recommend') {
-              ForEach(
-                this.recommend,
-                (t: Track, index: number): void => {
-                  ListItem() {
-                    TrackItem({
-                      track: t,
-                      entranceIndex: index,
-                      onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                    })
-                  }
-                },
-                (t: Track): string => t.id
-              )
+              if (this.isTwoCol()) {
+                LazyForEach(
+                  this.recommendPairs,
+                  (pair: PairOf<Track>, pIndex: number): void => {
+                    ListItem() {
+                      Row() {
+                        TrackItem({
+                          track: pair.first,
+                          entranceIndex: pIndex * 2,
+                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        if (pair.second !== null) {
+                          TrackItem({
+                            track: pair.second,
+                            entranceIndex: pIndex * 2 + 1,
+                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                        } else {
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                    }
+                  },
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                )
+              } else {
+                LazyForEach(
+                  this.recommendSource,
+                  (t: Track, index: number): void => {
+                    ListItem() {
+                      TrackItem({
+                        track: t,
+                        entranceIndex: index,
+                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                      })
+                    }
+                  },
+                  (t: Track): string => t.id
+                )
+              }
             } else if (this.tab === 'ranking') {
-              ForEach(
-                this.ranking,
-                (t: Track, index: number): void => {
+              if (this.isTwoCol()) {
+                LazyForEach(
+                  this.rankingPairs,
+                  (pair: PairOf<Track>, pIndex: number): void => {
+                    ListItem() {
+                      Row() {
+                        TrackItem({
+                          track: pair.first,
+                          entranceIndex: pIndex * 2,
+                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        if (pair.second !== null) {
+                          TrackItem({
+                            track: pair.second,
+                            entranceIndex: pIndex * 2 + 1,
+                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                        } else {
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                    }
+                  },
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                )
+              } else {
+                LazyForEach(
+                  this.rankingSource,
+                  (t: Track, index: number): void => {
+                    ListItem() {
+                      TrackItem({
+                        track: t,
+                        entranceIndex: index,
+                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                      })
+                    }
+                  },
+                  (t: Track): string => t.id
+                )
+              }
+            } else if (this.isTwoCol()) {
+              LazyForEach(
+                this.centerPairs,
+                (pair: PairOf<Track>, pIndex: number): void => {
                   ListItem() {
-                    TrackItem({
-                      track: t,
-                      entranceIndex: index,
-                      onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                    })
+                    Row() {
+                      TrackItem({
+                        track: pair.first,
+                        entranceIndex: pIndex * 2,
+                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                      }).layoutWeight(1)
+                      if (pair.second !== null) {
+                        TrackItem({
+                          track: pair.second,
+                          entranceIndex: pIndex * 2 + 1,
+                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+                      } else {
+                        Blank().layoutWeight(1)
+                      }
+                    }
+                    .width('100%')
                   }
                 },
-                (t: Track): string => t.id
+                (pair: PairOf<Track>): string =>
+                  `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
               )
             } else {
-              ForEach(
-                this.center,
+              LazyForEach(
+                this.centerSource,
                 (t: Track, index: number): void => {
                   ListItem() {
                     TrackItem({
@@ -1770,6 +2030,7 @@ export struct SearchPage {
           .height('100%')
           // 边界回弹（2026-10-08）：到底的反馈动效；顶部下拉由 Refresh 刷新动画接管。
           .edgeEffect(EdgeEffect.Spring)
+          .cachedCount(8)
           // Sumy 式穿透：顶部根栏让位由 List 首个空白占位 ListItem 负责（见上方
           // 占位注释，下载页同款迁移），不再使用 contentStartOffset —— 材质层有
           // 内容可模糊（浮出效果才可见）。
@@ -1779,6 +2040,27 @@ export struct SearchPage {
           .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
           .onReachEnd((): void => {
             this.onReachEnd();
+          })
+          // [Fling·F1/F2] 边界采样（规格 §F1/F2）：只在状态翻转时写一次 STORE_FLING_ACTIVE
+          // + 打 [Fling] 日志；回调 void 返回，绝不返回 ScrollResult（禁止的 F4a 吃帧）。
+          .onWillScroll((offset: number, state: ScrollState, source: ScrollSource): void => {
+            if (FlingSampler.note(state)) {
+              AppStorage.setOrCreate(STORE_FLING_ACTIVE, state === ScrollState.Fling);
+              console.info(`[Fling] state=${FlingSampler.stateName(state)} src=${source} off=${offset}`);
+            }
+          })
+          // [任务③·自绘原型] 逐帧驱动自绘渐变模糊层：onDidScroll 在偏移已应用
+          // 后回调（onWillScroll 是应用前，快滑时差一整帧会让模糊层滞后一跳）。
+          .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+            this.syncTopBlurProgress();
+          })
+          .onScrollStop((): void => {
+            FlingSampler.note(ScrollState.Idle);
+            AppStorage.setOrCreate(STORE_FLING_ACTIVE, false);
+            // [任务③·自绘原型] Idle 校准终态（用户方案 ②）：停点即精确值，
+            // 兜住 Fling 期任何丢帧 / 死区过滤累计的偏差。
+            this.syncTopBlurProgress();
+            console.info('[Fling] stop');
           })
         }
         .layoutWeight(1)
@@ -1815,7 +2097,17 @@ export struct SearchPage {
       // 否则条目在栏底被裁掉、永远滑不进模糊板下方。骨架/空态区各自补 barTotalHeight()。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp，见 BreakpointConstants）。
       // 根 Stack 默认居中对齐，直接给内容列挂上限即可，不需要额外包一层。
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+      // 横屏宽屏（2026-10-23 两列改造）：上限放宽到 840vp，两列每列行宽约 400vp+。
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+
+      // [任务③·自绘原型] 顶栏渐变模糊层：盖主内容列之上（z 序低于历史面板 /
+      // 歌单弹窗，低于 HDS titleBar），进度由列表 onDidScroll/onScrollStop 经
+      // topBlurUpdater 命令式驱动。根栏 HDS 滚动效果已由 Index.titleBarStyle
+      // 关闭（防双重模糊），本层承担全部渐变模糊观感。
+      TopGradientBlurOverlay({
+        barHeightVp: this.barTotalHeight(),
+        updater: this.topBlurUpdater
+      })
 
       // 搜索历史下拉：遮罩 + 面板，都从根栏整栏下沿（barTotalHeight）起排。
       // ⚠️ 页面层在根栏 z 序之下，面板够不着页签行 —— 从整栏下沿弹出而非贴搜索行
@@ -1840,7 +2132,7 @@ export struct SearchPage {
         }
         .width('100%')
         .height('100%')
-        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
         .hitTestBehavior(HitTestMode.None)
       }
 
@@ -2090,3 +2382,4 @@ export struct SearchPage {
     }
   }
 }
+

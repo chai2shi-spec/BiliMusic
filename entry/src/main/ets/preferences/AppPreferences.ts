@@ -12,7 +12,10 @@ import { ConfigurationConstant } from '@kit.AbilityKit';
 import {
   DEFAULT_APP_SETTINGS,
   AppSettings,
-  ThemeMode
+  ThemeMode,
+  PLAYER_COVER_STYLE_DISC,
+  PLAYER_COVER_STYLE_SQUARE,
+  PLAYER_COVER_STYLE_IMMERSIVE
 } from '../model/MusicModels';
 import {
   PREF_SETTINGS,
@@ -87,6 +90,38 @@ export async function remove(key: string): Promise<void> {
   await p.flush();
 }
 
+/**
+ * 批量写（2026-10-23 性能审查）：多个 key 共享一次 flush。
+ * 分片存储（recent_tracks_* / favorite_tracks_* / pl_tracks_*）一次落盘要写
+ * 十几个 key；旧路径每 key 各自 put + flush，而 flush 是全量落盘操作 ——
+ * 写 13 片就全量刷 13 次。这里逐 key put（只动内存缓存层），最后一次 flush。
+ */
+export async function putMany(values: Record<string, string>): Promise<void> {
+  const p = ensure();
+  const keys: string[] = Object.keys(values);
+  for (let i = 0; i < keys.length; i++) {
+    await p.put(keys[i], values[keys[i]]);
+  }
+  await p.flush();
+}
+
+/** 批量删（与 putMany 同理）：逐 key delete，最后一次 flush。 */
+export async function removeMany(keys: string[]): Promise<void> {
+  const p = ensure();
+  for (let i = 0; i < keys.length; i++) {
+    await p.delete(keys[i]);
+  }
+  await p.flush();
+}
+
+/** 封面风格白名单归一化：历史存量已删档（黑胶/磁带）及未知值回落默认唱片档 */
+function normalizeCoverStyle(style: string | undefined): string {
+  const valid: boolean = style === PLAYER_COVER_STYLE_DISC
+    || style === PLAYER_COVER_STYLE_SQUARE
+    || style === PLAYER_COVER_STYLE_IMMERSIVE;
+  return valid && style !== undefined ? style : DEFAULT_APP_SETTINGS.playerCoverStyle;
+}
+
 export function getSettings(): AppSettings {
   const stored: Partial<AppSettings> | null = getObject<Partial<AppSettings>>(PREF_SETTINGS);
   return {
@@ -102,16 +137,66 @@ export function getSettings(): AppSettings {
     themeColor: stored?.themeColor ?? DEFAULT_APP_SETTINGS.themeColor,
     barLayout: stored?.barLayout ?? DEFAULT_APP_SETTINGS.barLayout,
     progressStyle: stored?.progressStyle ?? DEFAULT_APP_SETTINGS.progressStyle,
+    closeAnimStyle: stored?.closeAnimStyle ?? DEFAULT_APP_SETTINGS.closeAnimStyle,
+    playerCoverStyle: normalizeCoverStyle(stored?.playerCoverStyle),
     miniBarProgress: stored?.miniBarProgress ?? DEFAULT_APP_SETTINGS.miniBarProgress,
     miniBarAutoExpand: stored?.miniBarAutoExpand ?? DEFAULT_APP_SETTINGS.miniBarAutoExpand,
     speedEnabled: stored?.speedEnabled ?? DEFAULT_APP_SETTINGS.speedEnabled,
     playbackSpeed: stored?.playbackSpeed ?? DEFAULT_APP_SETTINGS.playbackSpeed,
-    audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled
+    audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled,
+    openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled
   };
 }
 
 export async function saveSettings(s: AppSettings): Promise<void> {
   await setObject<AppSettings>(PREF_SETTINGS, s);
+}
+
+/**
+ * 逐字段拷贝 AppSettings（2026-10-24 设置页二级菜单化改造）。
+ *
+ * 原设置页的 copySettings 私有方法收编至此：设置页拆成主页面 + 四个二级子页后，
+ * 逐字段拷贝逻辑被多处共用，集中到本文件统一维护 —— AppSettings 新增必填字段时
+ * 只需改这一处（此前分散在各页漏字段会整包编译失败）。
+ */
+export function copyAppSettings(s: AppSettings): AppSettings {
+  return {
+    sidebarState: s.sidebarState,
+    playQuality: s.playQuality,
+    downloadQuality: s.downloadQuality,
+    downloadDir: s.downloadDir,
+    autoPlay: s.autoPlay,
+    autoPlayOnStart: s.autoPlayOnStart,
+    wifiOnlyDownload: s.wifiOnlyDownload,
+    wifiOnlyPlay: s.wifiOnlyPlay,
+    themeMode: s.themeMode,
+    themeColor: s.themeColor,
+    barLayout: s.barLayout,
+    miniBarProgress: s.miniBarProgress,
+    miniBarAutoExpand: s.miniBarAutoExpand,
+    speedEnabled: s.speedEnabled,
+    playbackSpeed: s.playbackSpeed,
+    audioMixEnabled: s.audioMixEnabled,
+    openInBilibiliEnabled: s.openInBilibiliEnabled,
+    progressStyle: s.progressStyle,
+    closeAnimStyle: s.closeAnimStyle,
+    playerCoverStyle: s.playerCoverStyle
+  };
+}
+
+/**
+ * 统一的设置更新入口（读 → 改 → 写 → 返回新值）。
+ *
+ * 各设置页的用法：`this.settings = AppPreferences.updateSettings(mut)`。
+ * getSettings 底层是 preferences getSync（内存缓存读，不碰磁盘 IO），
+ * 单次用户交互调用一次成本可忽略；saveSettings 落盘 fire-and-forget，
+ * 与设置页原有「写完不等待」的行为一致。
+ */
+export function updateSettings(mut: (s: AppSettings) => void): AppSettings {
+  const next: AppSettings = copyAppSettings(getSettings());
+  mut(next);
+  saveSettings(next);
+  return next;
 }
 
 /**
@@ -287,8 +372,12 @@ export const AppPreferences = {
   getBoolean,
   getObject,
   remove,
+  putMany,
+  removeMany,
   getSettings,
   saveSettings,
+  copyAppSettings,
+  updateSettings,
   applyThemeMode,
   getTotalListenSeconds,
   addListenSeconds,

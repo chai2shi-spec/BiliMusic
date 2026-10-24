@@ -8,6 +8,13 @@
  * 另有按钮通路（ButtonMaterialModifier）：给搜索 / 新建 / 选择等胶囊按钮用。
  * 按钮自带链式实色底作为兜底，修饰器低版本 no-op 即可，不需要塞 backgroundColor。
  *
+ * 自绘容器通路结论（2026-10-24，RowMaterialModifier 已随官方载体迁移退役）：
+ * 官方《沉浸光感常见问题》明确「其他组件」的 systemMaterial 仅在 Navigation/
+ * NavDestination 标题栏或横向 Tabs 底部 TabBar 生效，其他区域静默不渲染 ——
+ * 自绘 Row 直接挂 .systemMaterial() 真机透明正栽在这条生效范围上。二级页
+ * 悬浮播放栏已改走官方载体（见 SubPagePlayBar.ets，终版为二号 HdsTabs
+ * miniBar 通路），本文件不再提供自绘容器修饰器。
+ *
  * 分段按钮配色（SegmentColors / makeBiliSegmentColors，2026-10-11 组件标准化
  * 迁移）：CapsuleSegmentButtonV2 等标准组件的 B 站粉着色参数组——自绘
  * Stack+粉片 translate 滑片体系随本次迁移退役（原 ColumnMaterialModifier
@@ -25,6 +32,7 @@
 import { ColorMetrics } from '@kit.ArkUI';
 import lazy { uiMaterial } from '@kit.ArkUI';
 import { MaterialCompat, MaterialCompatStyle } from './MaterialCompat';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 import { STORE_THEME_PRIMARY, STORE_THEME_ON } from '../common/Constants';
 
 /**
@@ -40,7 +48,8 @@ export class HeaderBarMaterialModifier implements AttributeModifier<RowAttribute
     try {
       console.info('[HeaderBarMaterial] apply -> backgroundEffect frost (radius 40)');
       instance.backgroundEffect({
-        radius: 40,
+        // P0（2026-10-24 沉浸光感改造）：radius 抽入 MaterialTokens.FROST_RADIUS（值不变）
+        radius: MaterialTokens.FROST_RADIUS,
         saturation: 1.3,
         brightness: 1.0,
         color: $r('app.color.header_glass_tint')
@@ -92,6 +101,82 @@ export class ButtonMaterialModifier implements AttributeModifier<ButtonAttribute
  */
 export function makeButtonMaterialModifier(): ButtonMaterialModifier {
   return new ButtonMaterialModifier(
+    MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
+  );
+}
+
+/**
+ * 输入框沉浸光感材质的属性修饰器：与 ButtonMaterialModifier 同款通路（THIN +
+ * interactive + lightEffect），仅类型钉在 TextInputAttribute 上 —— ArkTS 无结构化
+ * 泛型复用，按钮版不能直接挂 TextInput，需要本平行类。
+ * 材质对象为 undefined（API < 26 / 运行时缺失）时 no-op，输入框自带的链式实色底
+ * 即兜底（UP 主页搜索框：bg_card）。
+ */
+export class TextInputMaterialModifier implements AttributeModifier<TextInputAttribute> {
+  private material: uiMaterial.ImmersiveMaterial | undefined;
+
+  constructor(material: uiMaterial.ImmersiveMaterial | undefined) {
+    this.material = material;
+  }
+
+  applyNormalAttribute(instance: TextInputAttribute): void {
+    const m: uiMaterial.ImmersiveMaterial | undefined = this.material;
+    if (m === undefined) {
+      return;
+    }
+    try {
+      instance.systemMaterial(m);
+    } catch (e) {
+      console.error(`apply textInput systemMaterial failed: ${JSON.stringify(e)}`);
+    }
+  }
+}
+
+/**
+ * 生成输入框用 THIN 档交互材质修饰器：
+ * UP 主页头部搜索框（与同行播放全部 / 订阅投稿 / 搜索按钮同档，玻璃观感统一）。
+ */
+export function makeTextInputMaterialModifier(): TextInputMaterialModifier {
+  return new TextInputMaterialModifier(
+    MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
+  );
+}
+
+/**
+ * Search 标准搜索框沉浸光感材质的属性修饰器：与 TextInputMaterialModifier 同款
+ * 通路（THIN + interactive + lightEffect），类型钉在 SearchAttribute 上 ——
+ * 首页搜索框是 Search 组件（非 TextInput），需要本平行类。
+ * ⚠️ 配套约束（官方 FAQ「背景色遮挡材质效果」）：挂本修饰器的 Search 链式
+ * backgroundColor 必须在材质可用时取**透明**（调用方配 MaterialCompat.hasImmersiveMaterial()
+ * 判断），不透明实色画在材质层之上会把玻璃完全盖住；材质不可用时修饰器 no-op，
+ * 链式实色兜底。
+ */
+export class SearchMaterialModifier implements AttributeModifier<SearchAttribute> {
+  private material: uiMaterial.ImmersiveMaterial | undefined;
+
+  constructor(material: uiMaterial.ImmersiveMaterial | undefined) {
+    this.material = material;
+  }
+
+  applyNormalAttribute(instance: SearchAttribute): void {
+    const m: uiMaterial.ImmersiveMaterial | undefined = this.material;
+    if (m === undefined) {
+      return;
+    }
+    try {
+      instance.systemMaterial(m);
+    } catch (e) {
+      console.error(`apply search systemMaterial failed: ${JSON.stringify(e)}`);
+    }
+  }
+}
+
+/**
+ * 生成 Search 搜索框用 THIN 档交互材质修饰器：
+ * 首页搜索行 SearchInputBar（根栏 titleBar 内，材质生效范围内）。
+ */
+export function makeSearchMaterialModifier(): SearchMaterialModifier {
+  return new SearchMaterialModifier(
     MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
   );
 }

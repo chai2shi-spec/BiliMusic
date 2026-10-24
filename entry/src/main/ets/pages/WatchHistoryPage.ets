@@ -40,7 +40,7 @@ import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
-import { stripHtmlTags, toThumbUrl, toHttpsUrl } from '../utils/TextUtil';
+import { stripHtmlTags, toThumbUrl, toHttpsUrl, formatDurationText } from '../utils/TextUtil';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
@@ -65,11 +65,20 @@ import {
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
+  PairOf,
+  PairDataSource,
+  TWO_COL_GAP_VP,
+  TwoColumnLayout
+} from '../common/utils/TwoColumnList';
+import {
   NAV_TRANSITION_MS,
   BUTTON_RADIUS_VP,
   LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
 import { NavTitleRow } from '../components/NavTitleRow';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /** 失败后「重试」的冷却（ms）：历史接口与 followings 同属风控敏感区，连点只会继续被拒 */
 const RETRY_COOLDOWN_MS: number = 4000;
@@ -87,27 +96,6 @@ const TAB_TOVIEW: number = 1;
  * bottomBuilder 高度不自适应（官方约束），必须与行内容定高一致。
  */
 const HISTORY_TABS_ROW_HEIGHT: number = 44;
-
-/** 顶栏滚动模糊时机（2026-10-09 全站定档）：滚动 0~30vp 完全透明 → 30~80vp 材质渐变 → >80vp 满强度 */
-const HISTORY_BLUR_START_VP: number = 30;
-const HISTORY_BLUR_END_VP: number = 80;
-
-/** 秒 → `m:ss`（超一小时 `h:mm:ss`）；非正数返回空串表示「没有时长」 */
-function formatProgress(seconds: number): string {
-  const total: number = Math.floor(seconds);
-  if (!(total > 0)) {
-    return '';
-  }
-  const h: number = Math.floor(total / 3600);
-  const m: number = Math.floor((total % 3600) / 60);
-  const s: number = total % 60;
-  const mm: string = m < 10 ? `0${m}` : `${m}`;
-  const ss: string = s < 10 ? `0${s}` : `${s}`;
-  if (h > 0) {
-    return `${h}:${mm}:${ss}`;
-  }
-  return `${m}:${ss}`;
-}
 
 /** 秒级时间戳 → 相对时间（刚刚 / x分钟前 / x小时前 / x天前，超 30 天给日期） */
 function relativeTime(tsSeconds: number): string {
@@ -154,6 +142,12 @@ export struct WatchHistoryPage {
   // ── 观看历史页签数据 ──
   @State historyItems: BiliHistoryItem[] = [];
   private historySource: ArrayDataSource<BiliHistoryItem> = new ArrayDataSource<BiliHistoryItem>([]);
+  /**
+   * 两列视图数据源（无状态视图，2026-10-23 两列改造）：读 historySource 现场
+   * 构造 PairOf，不缓存不注册 listener —— 数据变化处显式调 historyPairs.sync()
+   * （见 TwoColumnList.PairDataSource 注释）。
+   */
+  private historyPairs: PairDataSource<BiliHistoryItem> = new PairDataSource<BiliHistoryItem>(this.historySource);
   /** 下一页游标（0 = 没有更多） */
   private cursor: number = 0;
   /** 历史页签是否已成功加载过（页签来回切换不重复请求） */
@@ -162,6 +156,8 @@ export struct WatchHistoryPage {
   // ── 稍后再看页签数据 ──
   @State toviewItems: BiliToViewItem[] = [];
   private toviewSource: ArrayDataSource<BiliToViewItem> = new ArrayDataSource<BiliToViewItem>([]);
+  /** 两列视图数据源（同 historyPairs，读 toviewSource 现场配对） */
+  private toviewPairs: PairDataSource<BiliToViewItem> = new PairDataSource<BiliToViewItem>(this.toviewSource);
   /** 稍后再看是否已成功加载过（首次切换才请求） */
   private toviewLoaded: boolean = false;
 
@@ -187,6 +183,13 @@ export struct WatchHistoryPage {
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时条目两列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
+
+  /** 横屏宽屏（窗口 ≥600vp 的横屏）时条目两列显示；竖屏 / 窄窗口单列不变 */
+  private isTwoCol(): boolean {
+    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  }
 
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 段切换行 44。
@@ -196,6 +199,19 @@ export struct WatchHistoryPage {
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + HISTORY_TABS_ROW_HEIGHT;
+  }
+
+  /**
+   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
+   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.listScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
   }
 
   /** 列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
@@ -216,6 +232,9 @@ export struct WatchHistoryPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    this.syncTopBlurProgress();
     this.checkLoginAndLoad();
   }
 
@@ -292,6 +311,8 @@ export struct WatchHistoryPage {
       const data: BiliHistoryData = await getWatchHistory(0, HISTORY_PAGE_SIZE);
       this.historyItems = data.list;
       this.historySource.reload(data.list);
+      // 两列视图同步：横屏 LazyForEach 读 historyPairs，reload 后必须显式通知
+      this.historyPairs.sync();
       this.cursor = data.cursorMax;
       this.hasMore = data.list.length > 0 && data.cursorMax > 0;
       this.historyLoaded = true;
@@ -326,6 +347,8 @@ export struct WatchHistoryPage {
           this.historyItems.push(data.list[i]);
         }
         this.historySource.append(data.list);
+        // 两列视图同步：追加后配对数变化，显式整表通知（末尾按需重建，粒度同 reload）
+        this.historyPairs.sync();
       }
     } catch (err) {
       // 翻页失败不切失败态（首屏数据还在可看），提示一句即可
@@ -348,6 +371,8 @@ export struct WatchHistoryPage {
       const list: BiliToViewItem[] = await getToView();
       this.toviewItems = list;
       this.toviewSource.reload(list);
+      // 两列视图同步（同 historyPairs）
+      this.toviewPairs.sync();
       this.toviewLoaded = true;
       console.info(`toview load: ${list.length}`);
     } catch (err) {
@@ -410,6 +435,9 @@ export struct WatchHistoryPage {
       this.toviewItems = [];
       this.historySource.reload([]);
       this.toviewSource.reload([]);
+      // 两列视图同步：清空后配对视图归零
+      this.historyPairs.sync();
+      this.toviewPairs.sync();
       this.cursor = 0;
       this.hasMore = false;
       this.historyLoaded = false;
@@ -452,7 +480,7 @@ export struct WatchHistoryPage {
       return '已看完';
     }
     if (item.progress > 0) {
-      return `看到 ${formatProgress(item.progress)}`;
+      return `看到 ${formatDurationText(item.progress)}`;
     }
     return '刚开始看';
   }
@@ -633,7 +661,7 @@ export struct WatchHistoryPage {
   /**
    * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp，不得超出——
    * 官方约束「不要超出标题栏的可用空间」，超出会溢出与内容区重叠）：
-   * 返回键 + 「观看历史」标题。材质与滚动模糊由 HDS titleBar 负责。
+   * 「观看历史」标题（返回键为 HDS 默认键）。材质与滚动模糊由 HDS titleBar 负责。
    */
   @Builder
   historyBar() {
@@ -689,6 +717,51 @@ export struct WatchHistoryPage {
     .alignItems(VerticalAlign.Center)
   }
 
+  /**
+   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
+   * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
+   * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
+   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  historyBarNarrow() {
+    Row() {
+      Column() {
+        this.historyBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * 段切换行收窄容器（2026-10-23 平板模式宽度适配）：同 historyBarNarrow 口径 ——
+   * bottomBuilder 也横跨整列全宽，收窄后段切换行与本页条目列同宽对齐；
+   * bottomBuilder 显式高度（HISTORY_TABS_ROW_HEIGHT）不动。sm 天然无操作。
+   */
+  @Builder
+  historyTabsRowNarrow() {
+    Row() {
+      Column() {
+        this.historyTabsRow()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
   /** 一条观看历史行：封面 + 标题（UP · 进度）+ 相对时间 + 「⋯」 */
   @Builder
   historyRow(item: BiliHistoryItem) {
@@ -723,13 +796,15 @@ export struct WatchHistoryPage {
         .fontColor($r('app.color.text_tertiary'))
         .margin({ left: 8 })
 
-      Text('⋮')
-        .fontSize(22)
-        .fontColor($r('app.color.text_tertiary'))
+      Row() {
+        SymbolGlyph($r('sys.symbol.more'))
+          .fontSize(20)
+          .fontColor([$r('app.color.text_tertiary')])
+      }
         .width(44)
         .height(44)
         .borderRadius(22)
-        .textAlign(TextAlign.Center)
+        .justifyContent(FlexAlign.Center)
         .stateStyles({
           pressed: { .backgroundColor($r('app.color.press_overlay')) },
           normal: { .backgroundColor(Color.Transparent) }
@@ -781,18 +856,20 @@ export struct WatchHistoryPage {
       .layoutWeight(1)
       .margin({ left: 12 })
 
-      Text(formatProgress(v.duration))
+      Text(formatDurationText(v.duration))
         .fontSize(11)
         .fontColor($r('app.color.text_tertiary'))
         .margin({ left: 8 })
 
-      Text('⋮')
-        .fontSize(22)
-        .fontColor($r('app.color.text_tertiary'))
+      Row() {
+        SymbolGlyph($r('sys.symbol.more'))
+          .fontSize(20)
+          .fontColor([$r('app.color.text_tertiary')])
+      }
         .width(44)
         .height(44)
         .borderRadius(22)
-        .textAlign(TextAlign.Center)
+        .justifyContent(FlexAlign.Center)
         .stateStyles({
           pressed: { .backgroundColor($r('app.color.press_overlay')) },
           normal: { .backgroundColor(Color.Transparent) }
@@ -1018,25 +1095,88 @@ export struct WatchHistoryPage {
                   .height(this.barTotalHeight())
               }
               if (this.tab === TAB_HISTORY) {
-                LazyForEach(
-                  this.historySource,
-                  (item: BiliHistoryItem): void => {
-                    ListItem() {
-                      this.historyRow(item)
-                    }
-                  },
-                  (item: BiliHistoryItem): string => `${item.history.bvid}_${item.view_at}`
-                )
+                // 横屏宽屏（2026-10-23 两列改造）：historyRow 配对两列（左右槽各渲染
+                // 一次，行内按压/菜单/点击状态按行独立）；占位与尾部状态条保持整行宽。
+                if (this.isTwoCol()) {
+                  LazyForEach(
+                    this.historyPairs,
+                    (pair: PairOf<BiliHistoryItem>): void => {
+                      ListItem() {
+                        Row() {
+                          Column() {
+                            this.historyRow(pair.first)
+                          }
+                          .layoutWeight(1)
+                          if (pair.second !== null) {
+                            Column() {
+                              this.historyRow(pair.second)
+                            }
+                            .layoutWeight(1)
+                            .margin({ left: TWO_COL_GAP_VP })
+                          } else {
+                            // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+                            Blank().layoutWeight(1)
+                          }
+                        }
+                        .width('100%')
+                      }
+                    },
+                    (pair: PairOf<BiliHistoryItem>): string =>
+                      `${pair.first.history.bvid}_${pair.first.view_at}` +
+                      `|${pair.second !== null
+                        ? `${pair.second.history.bvid}_${pair.second.view_at}`
+                        : 'x'}`
+                  )
+                } else {
+                  LazyForEach(
+                    this.historySource,
+                    (item: BiliHistoryItem): void => {
+                      ListItem() {
+                        this.historyRow(item)
+                      }
+                    },
+                    (item: BiliHistoryItem): string => `${item.history.bvid}_${item.view_at}`
+                  )
+                }
               } else {
-                LazyForEach(
-                  this.toviewSource,
-                  (v: BiliToViewItem): void => {
-                    ListItem() {
-                      this.toviewRow(v)
-                    }
-                  },
-                  (v: BiliToViewItem): string => v.bvid
-                )
+                // 稍后再看页签两列改造（同观看历史页签）
+                if (this.isTwoCol()) {
+                  LazyForEach(
+                    this.toviewPairs,
+                    (pair: PairOf<BiliToViewItem>): void => {
+                      ListItem() {
+                        Row() {
+                          Column() {
+                            this.toviewRow(pair.first)
+                          }
+                          .layoutWeight(1)
+                          if (pair.second !== null) {
+                            Column() {
+                              this.toviewRow(pair.second)
+                            }
+                            .layoutWeight(1)
+                            .margin({ left: TWO_COL_GAP_VP })
+                          } else {
+                            Blank().layoutWeight(1)
+                          }
+                        }
+                        .width('100%')
+                      }
+                    },
+                    (pair: PairOf<BiliToViewItem>): string =>
+                      `${pair.first.bvid}|${pair.second !== null ? pair.second.bvid : 'x'}`
+                  )
+                } else {
+                  LazyForEach(
+                    this.toviewSource,
+                    (v: BiliToViewItem): void => {
+                      ListItem() {
+                        this.toviewRow(v)
+                      }
+                    },
+                    (v: BiliToViewItem): string => v.bvid
+                  )
+                }
               }
               // 尾部状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
               // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
@@ -1072,10 +1212,20 @@ export struct WatchHistoryPage {
             .layoutWeight(1)
             // 边界回弹：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
+            .cachedCount(8)
             // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
             //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
             .onReachEnd((): void => {
               this.loadHistoryMore();
+            })
+            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+            .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+              this.syncTopBlurProgress();
+            })
+            .onScrollStop((): void => {
+              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              this.syncTopBlurProgress();
             })
           }
         }
@@ -1084,8 +1234,17 @@ export struct WatchHistoryPage {
         .backgroundColor($r('app.color.bg_page'))
         // ⚠️ 不整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
         // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）
-        // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
-        .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）；
+        // 横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL），竖屏维持原值
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+
+        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于「加入歌单」
+        // 弹层、低于 HDS titleBar，段切换行属标题栏 bottomBuilder、随整栏一起盖），
+        // 进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        TopGradientBlurOverlay({
+          barHeightVp: this.barTotalHeight(),
+          updater: this.topBlurUpdater
+        })
 
         // 「加入歌单」选择弹层：盖在标题栏之上
         if (this.showPlaylistPicker) {
@@ -1095,13 +1254,15 @@ export struct WatchHistoryPage {
     }
     // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
+    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    //（historyBarNarrow / historyTabsRowNarrow），标题行与段切换行和条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(HISTORY_BLUR_START_VP, HISTORY_BLUR_END_VP),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 标题行（stackBuilder，可用空间 56vp）：返回键 + 标题
+        // 标题行（stackBuilder，可用空间 56vp）：标题（收窄容器内；返回键为 HDS 默认键）
         stackBuilder: (): void => {
-          this.historyBar();
+          this.historyBarNarrow();
         },
         // 标题行下方自定义区：段切换行（观看历史 / 稍后再看 + 播放全部），恒配置——
         // 含未登录空态（「去登录」按钮也在段切换行下方的空态里，段切换本身恒可见）。
@@ -1109,16 +1270,15 @@ export struct WatchHistoryPage {
         // 真机复现），必须走 bottomBuilder 显式高度。
         bottomBuilder: {
           builder: (): void => {
-            this.historyTabsRow();
+            this.historyTabsRowNarrow();
           },
           height: HISTORY_TABS_ROW_HEIGHT,
           showType: BottomBuilderShowType.DIRECTLY_SHOW
         }
       }
     })
-    // 双返回键修复（2026-10-22）：隐藏 HDS 默认返回键，只保留 stackBuilder 自绘键
-    // （默认键与自绘键在标题栏左上角重叠，两个 chevron 重影、按压效果错乱）
-    .hideBackButton(true)
+    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
+    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1126,6 +1286,9 @@ export struct WatchHistoryPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
+    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。

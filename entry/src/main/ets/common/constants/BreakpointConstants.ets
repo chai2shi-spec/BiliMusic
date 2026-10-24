@@ -53,4 +53,20 @@ export class BreakpointConstants {
     }
     return BreakpointConstants.CONTENT_MAX_WIDTH_SM;
   }
+
+  /**
+   * 横屏媒体查询（2026-10-23 两列列表改造）：窗口宽 > 高。
+   * BreakpointSystem 注册监听，命中状态写入 AppStorage（IS_LANDSCAPE 键）。
+   */
+  static readonly RANGE_LANDSCAPE: string = '(orientation: landscape)';
+  /** 当前横竖屏在 AppStorage 中的键（true = 横屏，缺省 false = 按竖屏处理） */
+  static readonly IS_LANDSCAPE: string = 'isLandscape';
+
+  /**
+   * 两列模式内容列上限（vp）：两列激活（横屏宽屏：折叠屏展开横屏 / 平板横屏 /
+   * 手机横屏；2026-10-23 扩展：平板竖屏亦两列）时列表条目两列显示，内容列
+   * 放宽到 840vp，保证每列约 400vp 以上的行宽；其余（折叠屏展开竖屏等）仍走
+   * contentMaxWidth（600/720）。判定见 TwoColumnLayout.isActive。
+   */
+  static readonly CONTENT_MAX_WIDTH_TWOCOL: number = 840;
 }

@@ -33,10 +33,16 @@ export class TabScrollerHolder {
   static dlRetrySelected: () => void = (): void => {};
   /** 「删除选中」：弹确认框后删任务与本地文件 */
   static dlRemoveSelected: () => void = (): void => {};
+  /** 「加入歌单（选中）」：选区任务转 Track 后开「加入歌单」选择弹层 */
+  static dlAddSelectedToPlaylist: () => void = (): void => {};
+  /** 「导出选中」（2026-10-24）：选中任务经系统保存对话框导出到文件管理 */
+  static dlExportSelected: () => void = (): void => {};
   /** 「全部开始」：恢复下载队列 */
   static dlResumeAll: () => void = (): void => {};
   /** 「全部暂停」：暂停下载队列 */
   static dlPauseAll: () => void = (): void => {};
+  /** 当前接管 dl* 回调的 DownloadsPage 实例号（-1 = 无人接管；销毁时归属校验用） */
+  static dlCallbacksOwner: number = -1;
 
   /** 歌单页列表控制器（PlaylistsPage 的 List 直挂此实例） */
   static playlists: Scroller = new Scroller();

@@ -12,6 +12,7 @@
 import { Track, RepeatMode } from '../model/MusicModels';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { toThumbUrl } from '../utils/TextUtil';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { CoverImage } from './CoverImage';
 import { showAppAlertDialog } from './AppAlertDialog';
 import { STORE_CURRENT_TRACK, STORE_QUEUE, STORE_REPEAT_MODE, STORE_THEME_PRIMARY } from '../common/Constants';
@@ -61,7 +62,8 @@ export function nextRepeatMode(mode: RepeatMode): RepeatMode {
 
 @Component
 export struct QueueSheet {
-  @StorageLink(STORE_QUEUE) queue: Track[] = [];
+  // 队列经 MusicPlayer.syncQueue() 整表重赋值（从不原地改），@Watch 触发即整表重载
+  @StorageLink(STORE_QUEUE) @Watch('onQueueChanged') queue: Track[] = [];
   @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
   @StorageLink(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
   /** 宿主的弹层开关：点条目 / 清空后由本组件置 false 关闭 */
@@ -70,6 +72,16 @@ export struct QueueSheet {
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
 
   private player: MusicPlayer = MusicPlayer.getInstance();
+  /** LazyForEach 数据源：reload 整表替换（队列每变必整表重赋值，无局部刷新需求） */
+  private queueSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+
+  aboutToAppear(): void {
+    this.queueSource.reload(this.queue);
+  }
+
+  private onQueueChanged(): void {
+    this.queueSource.reload(this.queue);
+  }
 
   private currentTrackId(): string {
     return this.currentTrack !== null ? this.currentTrack.id : '';
@@ -171,7 +183,7 @@ export struct QueueSheet {
         .justifyContent(FlexAlign.Center)
       } else {
         List() {
-          ForEach(this.queue, (track: Track, index: number): void => {
+          LazyForEach(this.queueSource, (track: Track, index: number): void => {
             ListItem() {
               Row({ space: 10 }) {
                 if (track.id === this.currentTrackId()) {
@@ -236,6 +248,7 @@ export struct QueueSheet {
         .layoutWeight(1)
         .scrollBar(BarState.Auto)
         .edgeEffect(EdgeEffect.Spring)
+        .cachedCount(8)
       }
     }
     .width('100%')

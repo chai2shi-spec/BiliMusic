@@ -71,6 +71,43 @@ export function cleanTitle(raw: string): string {
   return seg.length > 0 ? seg : raw.trim().slice(0, 40);
 }
 
+/**
+ * 音质档位 / mimeType → 音频文件扩展名（不含点），2026-10-24 下载格式正确化引入。
+ *
+ * B 站 DASH 音轨是 audio-only fMP4，字节层面与 .m4a 同构，原样落盘即是合法
+ * m4a（无需任何转码，两代参考实现一致）；需要别的扩展名的只有两档：
+ *   · 30251 Hi-Res（dash.flac.audio，raw FLAC 字节）→ flac；
+ *   · 30216 64K（mimeType audio/mpeg，裸 MP3 字节）→ mp3。
+ * 判定双保险：档位 code 优先（快、无字符串比较），mimeType 兜底 ——
+ * durl 兜底等路径 code 可能缺省，mimeType 始终有值。
+ */
+export function audioFileExt(audioQuality: number, mimeType: string): string {
+  const mime: string = mimeType.toLowerCase();
+  if (audioQuality === 30251 || mime.indexOf('flac') >= 0) {
+    return 'flac';
+  }
+  if (audioQuality === 30216 || mime.indexOf('mpeg') >= 0) {
+    return 'mp3';
+  }
+  return 'm4a';
+}
+
+/**
+ * 文件名清洗（2026-10-24 导出文件命名用）：去文件系统非法字符（\ / : * ? " < > |）
+ * 与控制字符，压缩空白，去首尾空格与结尾的点（结尾点在部分文件系统上是非法项）。
+ * 长度上限 120 —— 超长歌名不清会把系统保存对话框的文件名输入撑爆。
+ */
+export function sanitizeFileName(raw: string): string {
+  let s: string = raw.replace(/[\u0000-\u001F\u007F]/g, '');
+  s = s.replace(/[\\/:*?"<>|]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  s = s.replace(/\.+$/, '');
+  if (s.length > 120) {
+    s = s.slice(0, 120).replace(/\.+$/, '').trim();
+  }
+  return s;
+}
+
 function quotedTitles(raw: string): string[] {
   const out: string[] = [];
   const matches: RegExpMatchArray | null = raw.match(/[《<]([^》>]+)[》>]/g);
@@ -249,6 +286,33 @@ export interface ScoreContext {
   clean: string;
   duration: number;
   quoted: string[];
+  /**
+   * 本机曲目的歌手（`track.artist`）。可选：测试与旧调用方不传。
+   *
+   * B 站曲目的 artist 可能是「歌手-歌名」分 P 拆出的真实歌手，也可能是 UP 主名，
+   * 多歌手用 ` / ` 分隔 —— 打分时逐段比对（见 `artistSegments`），不做反向扣分。
+   */
+  artist?: string;
+}
+
+/**
+ * 把歌手串拆成可比对的段：按 `/` `、` `&` `,` 分隔，逐段清洗去噪。
+ * `'周杰伦 / 费玉清'` → `['周杰伦', '费玉清']`；空串 / 全噪返回空数组。
+ * 供歌词候选打分（歌手命中加分）与搜索词拼装（「歌名 歌手」组合词）共用。
+ */
+export function artistSegments(artist: string): string[] {
+  const out: string[] = [];
+  if (!artist) {
+    return out;
+  }
+  const rawParts: string[] = artist.split(/[/、&，,]/);
+  for (let i = 0; i < rawParts.length; i++) {
+    const seg: string = cleanSeg(rawParts[i]);
+    if (seg.length >= 2 && out.indexOf(seg) < 0) {
+      out.push(seg);
+    }
+  }
+  return out;
 }
 
 export function scoreCandidate(c: LyricCandidate, ctx: ScoreContext): number {
@@ -262,6 +326,19 @@ export function scoreCandidate(c: LyricCandidate, ctx: ScoreContext): number {
   let score: number = 0;
   score += normIncludes(ctx.rawTitle, c.trackName) ? 360 : dice(c.trackName, ctx.clean) * 180;
   score += normIncludes(ctx.rawTitle, c.artistName) ? 280 : 0;
+  // 歌手对比加分（2026-10-23 修匹配）：本机 artist 与候选歌手命中即加分。
+  // 只加分不扣分 —— B 站 artist 常是 UP 主名，扣分会误伤正确候选。
+  if (ctx.artist !== undefined && ctx.artist.length > 0) {
+    const segs: string[] = artistSegments(ctx.artist);
+    for (let i = 0; i < segs.length; i++) {
+      const seg: string = segs[i];
+      // dice ≥ 0.6 容忍「周杰伦 feat. 客串」类前后缀差异；normIncludes 覆盖包含关系
+      if (normIncludes(c.artistName, seg) || dice(c.artistName, seg) >= 0.6) {
+        score += 240;
+        break;
+      }
+    }
+  }
   score += quotedScore * 300;
   score += c.albumName && normIncludes(ctx.rawTitle, c.albumName) ? 40 : 0;
 
@@ -291,6 +368,32 @@ export function scoreCandidate(c: LyricCandidate, ctx: ScoreContext): number {
 }
 
 export { plainToLines };
+
+/**
+ * 时长文本（秒 → `m:ss`，超过一小时给 `h:mm:ss`）。
+ *
+ * 返回**空串**表示「没有时长」而不显示占位：`!(total > 0)` 的写法顺带把
+ * `NaN` / undefined / 0 全挡掉（音乐中心等无时长条目显示 `0:00` 会像信息错乱）。
+ *
+ * 2026-10-23 性能审查收敛点：此前 TrackItem / RecentPage / WatchHistoryPage /
+ * PlaylistImportPage 各持一份本地实现（细节漂移：PlaylistImportPage 用 round、
+ * 其余用 floor；RecentPage 无空串守卫），统一到 TextUtil 一份导出。
+ */
+export function formatDurationText(seconds: number): string {
+  const total: number = Math.floor(seconds);
+  if (!(total > 0)) {
+    return '';
+  }
+  const h: number = Math.floor(total / 3600);
+  const m: number = Math.floor((total % 3600) / 60);
+  const s: number = total % 60;
+  const mm: string = m < 10 ? `0${m}` : `${m}`;
+  const ss: string = s < 10 ? `0${s}` : `${s}`;
+  if (h > 0) {
+    return `${h}:${mm}:${ss}`;
+  }
+  return `${m}:${ss}`;
+}
 
 /**
  * 去掉标题里的 HTML 标签与转义残留。

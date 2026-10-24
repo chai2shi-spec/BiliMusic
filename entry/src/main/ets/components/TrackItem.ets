@@ -27,7 +27,7 @@
 
 import { Chip, ChipSize } from '@kit.ArkUI';
 import { Track, buildTrack } from '../model/MusicModels';
-import { toThumbUrl } from '../utils/TextUtil';
+import { toThumbUrl, formatDurationText } from '../utils/TextUtil';
 import { CoverImage } from './CoverImage';
 import { STORE_THEME_DEEP, STORE_THEME_SURFACE } from '../common/Constants';
 import {
@@ -44,27 +44,9 @@ import {
 const MORE_HIT: number = 44;
 
 /**
- * 时长文本（秒 → `m:ss`，超过一小时给 `h:mm:ss`）。
- *
- * 返回**空串**表示「没有时长」而不显示占位：音乐中心的条目普遍没有时长字段
- * （映射出来是 `0`），显示 `0:00` 会像信息错乱。`!(total > 0)` 的写法顺带把
- * `NaN` 也挡掉（`NaN > 0` 为 false）。
+ * 时长文本已收敛到 TextUtil.formatDurationText（2026-10-23 性能审查：
+ * 4 份本地实现统一，消除 round/floor 边界漂移）。
  */
-function formatDuration(seconds: number): string {
-  const total: number = Math.floor(seconds);
-  if (!(total > 0)) {
-    return '';
-  }
-  const h: number = Math.floor(total / 3600);
-  const m: number = Math.floor((total % 3600) / 60);
-  const s: number = total % 60;
-  const mm: string = m < 10 ? `0${m}` : `${m}`;
-  const ss: string = s < 10 ? `0${s}` : `${s}`;
-  if (h > 0) {
-    return `${h}:${mm}:${ss}`;
-  }
-  return `${m}:${ss}`;
-}
 
 /**
  * 发布时间文本（unix 秒 → B 站式混合格式）。
@@ -102,15 +84,56 @@ function formatPubdate(seconds: number): string {
 }
 
 /**
- * 入场时间窗（模块级共享）：列表首条（entranceIndex === 0）挂载时开窗，
- * 窗内创建的条目才算「首屏批次」参与错峰；窗外创建（滚动中 LazyForEach
+ * 入场时间窗 + 排队登记（模块级共享）：列表首条（entranceIndex === 0）挂载时
+ * 开窗，窗内创建的条目才算「首屏批次」参与错峰；窗外创建（滚动中 LazyForEach
  * 懒加载）的条目 0 延迟速入 —— 同样入场动画，只是不排队，拖动跟手。
+ *
+ * 2026-10-24 回归修复（用户复现「上滑后第 21 条已出现、前面还有没显示的」）：
+ * 2026-10-14 的断层修复成立前提是「所有条目同一批挂载、同批错峰」（ForEach 时代）。
+ * 2026-10-23 列表迁 LazyForEach + @Reusable 后前提被打破 —— 首屏错峰批次还在
+ * 预隐藏排队（等待下标 × 35ms 延迟）时，滚动途中 **复用节点绕过 aboutToAppear
+ * 整行直出**、**窗外懒建节点 0 延迟速入**，都先于上层排队条目亮起（下层先亮）。
+ * 修法：错峰延迟不再烘焙进 animateTo 的 delay（已排程无法撤销），改为**定时器
+ * 到点起播 + 排队登记**；任一条目以「窗外速入 / 复用直出」方式出现时立即
+ * **冲刷队列**，排队条目全部转为立即入场 —— 无论用户何时开始滚动，
+ * 条目亮起顺序都不会倒挂。
  */
-class TrackEntranceWindow {
+class TrackEntranceQueue {
   /** 开窗时刻（Date.now()）；0 = 从未开窗，按首屏批次对待（不依赖创建顺序） */
   static openedAt: number = 0;
+  /** 已冲刷：true 后起播的排队条目一律 0 延迟（断层既已出现，排队不再有意义） */
+  static flushed: boolean = false;
+  /** 排队条目的「立即入场」回调登记（冲刷时全部立即执行） */
+  static pending: Array<() => void> = [];
+
+  /** 冲刷：排队中的条目全部立即入场（各自回调内部回收定时器与登记项） */
+  static flushPending(): void {
+    const cbs: Array<() => void> = TrackEntranceQueue.pending;
+    TrackEntranceQueue.pending = [];
+    TrackEntranceQueue.flushed = true;
+    for (let i = 0; i < cbs.length; i++) {
+      cbs[i]();
+    }
+  }
+
+  static removePending(starter: () => void): void {
+    const idx: number = TrackEntranceQueue.pending.indexOf(starter);
+    if (idx >= 0) {
+      TrackEntranceQueue.pending.splice(idx, 1);
+    }
+  }
 }
 
+/**
+ * @Reusable（2026-10-23 性能审查）：列表页迁 LazyForEach 后启用节点复用 ——
+ * 滚动时滑出的行进复用池、滑入的行直接换数据，省掉整棵子树销毁重建。
+ * 复用安全性：所有外部数据经 @Prop 进来（复用时框架重赋值即刷新），
+ * 入场动画只在 aboutToAppear 预置；复用节点绕过 aboutToAppear 整行直出
+ * （错峰只播一次的语义由 aboutToReuse 复位保证，含排队中途回收的节点
+ * 复用后不渲染成空白行），且直出时冲刷首屏错峰排队（2026-10-24 回归修复，
+ * 见 TrackEntranceQueue 注释）；按压缩放是瞬时交互态、复用残留会被下一次触摸覆盖。
+ */
+@Reusable
 @Component
 export struct TrackItem {
   @Prop track: Track = buildTrack({});
@@ -151,7 +174,8 @@ export struct TrackItem {
    */
   @Prop entranceIndex: number = -1;
   /**
-   * 已下载徽标（2026-10-08）：true = 标题右侧显示「已下载」小字。
+   * 已下载徽标（2026-10-08）：true = 歌手行最右显示「已下载」小字
+   * （2026-10-23 用户要求：从标题行右侧移到副行行尾）。
    * 默认 false —— 本组件被搜索 / 最近播放 / UP 主页 / 歌单详情四页共用，
    * 只有歌单详情（订阅了下载快照）会传 true，其余页面零改动零影响。
    * 与下载页「正在播放」徽标同一套视觉（11 号 brand_deep 小字），保持全局一致。
@@ -173,25 +197,69 @@ export struct TrackItem {
   /** 是否属于首屏批次（窗内创建）：true = 按下标错峰；false = 窗外懒建，0 延迟速入 */
   private entranceInWindow: boolean = false;
 
+  /** 错峰排队定时器句柄：到点起播；冲刷 / 复用 / 销毁时回收 */
+  private entranceTimer: number = -1;
+  /** 本条目在排队登记表里的起播回调（销毁 / 起播后注销，防冲刷打到已卸载条目） */
+  private entranceStarter: (() => void) | null = null;
+
   aboutToAppear(): void {
     if (this.entranceIndex < 0) {
       return;
     }
     // 列表首条（重新）开窗：每个列表挂载 / 数据刷新时首条最先创建
     if (this.entranceIndex === 0) {
-      TrackEntranceWindow.openedAt = Date.now();
+      TrackEntranceQueue.openedAt = Date.now();
+      TrackEntranceQueue.flushed = false;
     }
     // 窗内＝首屏批次（错峰排队）；窗外＝滚动中懒加载（0 延迟速入，跟手）。
     // 两者都预隐藏入场 —— 不存在直接显示的条目，也就没有断层。
-    this.entranceInWindow = TrackEntranceWindow.openedAt !== 0 &&
-      Date.now() - TrackEntranceWindow.openedAt <= ENTRANCE_WINDOW_MS;
+    this.entranceInWindow = TrackEntranceQueue.openedAt !== 0 &&
+      Date.now() - TrackEntranceQueue.openedAt <= ENTRANCE_WINDOW_MS;
+    if (!this.entranceInWindow) {
+      // 窗外速入条目先冲刷排队批次（2026-10-24 回归修复）：它自己 0 延迟起播，
+      // 若不冲刷会先于上层仍在等待错峰延迟的排队条目亮起（下层先亮断层）。
+      TrackEntranceQueue.flushPending();
+    }
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
     this.enterOpacity = 0;
   }
 
+  /**
+   * 复用直出（@Reusable，2026-10-24 回归修复补充）：复用节点绕过
+   * aboutToAppear / onAppear 直接整行可见 —— 若首屏错峰批次还在排队，
+   * 本条会先于上层排队条目亮起，必须立即冲刷；同时把入场状态复位为
+   * 「已入场」：排队中途被回收进池的节点 enterOpacity 还停在 0
+   * （定时器未到点），不复位会在复用后渲染成空白行。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    if (this.entranceTimer >= 0) {
+      clearTimeout(this.entranceTimer);
+      this.entranceTimer = -1;
+    }
+    if (this.entranceStarter !== null) {
+      TrackEntranceQueue.removePending(this.entranceStarter);
+      this.entranceStarter = null;
+    }
+    TrackEntranceQueue.flushPending();
+    this.entranceDone = true;
+    this.enterOffsetY = 0;
+    this.enterOpacity = 1;
+  }
+
+  aboutToDisappear(): void {
+    if (this.entranceTimer >= 0) {
+      clearTimeout(this.entranceTimer);
+      this.entranceTimer = -1;
+    }
+    if (this.entranceStarter !== null) {
+      TrackEntranceQueue.removePending(this.entranceStarter);
+      this.entranceStarter = null;
+    }
+  }
+
   /** 本条目要显示的时长文本；返回空串＝该条目没有时长信息，整块不渲染 */
   private durationText(): string {
-    return formatDuration(this.track.duration);
+    return formatDurationText(this.track.duration);
   }
 
   /** 本条目要显示的发布时间文本；返回空串＝该条目没有发布时间，整块不渲染 */
@@ -204,9 +272,11 @@ export struct TrackItem {
    * 只动画 aboutToAppear 里**被预隐藏**的条目（enterOpacity === 0）——
    * 未预隐藏（未启用入场）的直接显示；这样任何被预隐藏的条目
    * 必然会被自己的 onAppear 动画回可见，不存在「卡在透明」的状态。
-   * 单条 normal(250ms) EaseOut。延迟：首屏批次 = 下标 × 35ms（封顶
-   * ENTRANCE_DELAY_CAP_MS，批尾共享封顶一起入场，总时长有界）；
-   * 窗外懒建条目 = 0（速入，拖动跟手，且与批尾封顶延迟几乎同帧落定）。
+   * 延迟策略（2026-10-24 回归修复）：首屏批次 = 定时器延迟下标 × 35ms
+   * （封顶 ENTRANCE_DELAY_CAP_MS）到点起播 —— **不烘焙进 animateTo 的
+   * delay**，那样一旦排程就无法在复用 / 窗外条目出现时撤销；同时登记
+   * 立即起播回调，队列被冲刷时提前起播。窗外懒建 / 已冲刷 = 0 延迟速入。
+   * 单条动画 normal(250ms) EaseOut。
    */
   private playEntrance(): void {
     if (this.entranceDone) {
@@ -219,12 +289,36 @@ export struct TrackItem {
     if (this.enterOpacity === 1) {
       return;
     }
+    const delay: number = this.entranceInWindow && !TrackEntranceQueue.flushed
+      ? Math.min(this.entranceIndex * ENTRANCE_STAGGER_MS, ENTRANCE_DELAY_CAP_MS)
+      : 0;
+    if (delay <= 0) {
+      this.startEntranceNow();
+      return;
+    }
+    // 排队：定时器到点起播；登记回调，任一窗外速入 / 复用直出条目
+    // 出现时冲 flushPending 提前起播（见 TrackEntranceQueue 注释）。
+    const starter: () => void = (): void => {
+      this.startEntranceNow();
+    };
+    this.entranceStarter = starter;
+    TrackEntranceQueue.pending.push(starter);
+    this.entranceTimer = setTimeout((): void => {
+      TrackEntranceQueue.removePending(starter);
+      this.startEntranceNow();
+    }, delay);
+  }
+
+  /** 立即入场（250ms 淡入落位）：排队到点 / 冲刷 / 速入共用同一动画 */
+  private startEntranceNow(): void {
+    if (this.entranceTimer >= 0) {
+      clearTimeout(this.entranceTimer);
+      this.entranceTimer = -1;
+    }
+    this.entranceStarter = null;
     this.getUIContext().animateTo({
       duration: ENTRANCE_DURATION_MS,
-      curve: Curve.EaseOut,
-      delay: this.entranceInWindow
-        ? Math.min(this.entranceIndex * ENTRANCE_STAGGER_MS, ENTRANCE_DELAY_CAP_MS)
-        : 0
+      curve: Curve.EaseOut
     }, (): void => {
       this.enterOffsetY = 0;
       this.enterOpacity = 1;
@@ -248,14 +342,12 @@ export struct TrackItem {
       }
 
       Column() {
-        // 标题行（2026-10-08 收进 Row）：右侧可挂「已下载」徽标 ——
-        // 标题用 layoutWeight(1) 吃满剩余宽度，徽标永不被挤掉。
-        // 顶对齐（2026-10-21 双行标题改版）：双行标题时徽标对齐第一行而不是
-        // 整块垂直居中；单行标题无视觉差异。
+        // 标题行：标题用 layoutWeight(1) 吃满剩余宽度。
+        // 显式 lineHeight(21) 锁行高（默认行高随字体浮动，会破坏
+        // 「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
         Row() {
           // 标题双行显示（2026-10-21 用户要求）：maxLines(2) + 第二行省略号，
-          // 长标题更完整；显式 lineHeight(21) 锁行高（默认行高随字体浮动，会
-          // 破坏「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
+          // 长标题更完整。
           Text(this.track.title)
             .fontSize(16)
             .fontColor($r('app.color.text_primary'))
@@ -263,28 +355,6 @@ export struct TrackItem {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
             .layoutWeight(1)
-          // 「已下载」徽标（2026-10-08）：与下载页「正在播放」同款视觉，
-          // 告诉用户这首已经存到本地（播放会直接走本地文件，不耗流量）。
-          // 阶段 5（2026-10-11）：小字徽标统一改用系统标准 Chip。
-          // ⚠️ Chip 是 @Builder 组件，**不能链式挂属性** → 外边距 / 命中策略挂在外层 Row。
-          // 文案本身可读，无需额外 accessibilityText。
-          if (this.downloaded) {
-            Row() {
-              Chip({
-                label: {
-                  text: '已下载',
-                  fontSize: 11,
-                  fontColor: this.themeDeep
-                },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                backgroundColor: this.themeSurface
-              })
-            }
-            .margin({ left: 6 })
-            // 装饰徽标：不参与命中测试，点它等同点整行（播放）
-            .hitTestBehavior(HitTestMode.None)
-          }
         }
         .width('100%')
         .alignItems(VerticalAlign.Top)
@@ -325,6 +395,27 @@ export struct TrackItem {
               .maxLines(1)
               .margin({ left: 8 })
           }
+          // 「已下载」徽标（2026-10-08，2026-10-23 用户要求移到歌手行最右）：
+          // 与下载页「正在播放」同款视觉，告诉用户这首已存到本地（播放走本地
+          // 文件，不耗流量）。阶段 5（2026-10-11）：小字徽标统一改用系统标准 Chip。
+          // ⚠️ Chip 是 @Builder 组件，**不能链式挂属性** → 外边距 / 命中策略挂在外层 Row。
+          // 装饰徽标：不参与命中测试，点它等同点整行（播放）。
+          if (this.downloaded) {
+            Row() {
+              Chip({
+                label: {
+                  text: '已下载',
+                  fontSize: 11,
+                  fontColor: this.themeDeep
+                },
+                size: ChipSize.SMALL,
+                allowClose: false,
+                backgroundColor: this.themeSurface
+              })
+            }
+            .margin({ left: 8 })
+            .hitTestBehavior(HitTestMode.None)
+          }
         }
         .width('100%')
         .margin({ top: 4 })
@@ -337,9 +428,9 @@ export struct TrackItem {
       // 并把原来 left:14 的 margin 收进自身宽度，避免热区与整行 onPlay 重叠。
       // 无障碍：图形字符读屏念不出来，必须补描述动作的文字
       Row() {
-        Text('⋯')
+        SymbolGlyph($r('sys.symbol.more'))
           .fontSize(20)
-          .fontColor($r('app.color.text_secondary'))
+          .fontColor([$r('app.color.text_secondary')])
       }
       .width(MORE_HIT)
       .height(MORE_HIT)

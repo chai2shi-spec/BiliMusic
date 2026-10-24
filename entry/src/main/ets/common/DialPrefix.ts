@@ -1,5 +1,5 @@
 /**
- * 国际电话区号列表（移植自 PiliPlus lib/common/dial_prefix.dart）。
+ * 国际电话区号列表。
  * 内容来源 https://passport.bilibili.com/web/generic/country/list
  */
 

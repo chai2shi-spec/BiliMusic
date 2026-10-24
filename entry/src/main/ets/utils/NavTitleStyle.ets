@@ -24,13 +24,10 @@ export const NAV_SUB_BAR_HEIGHT: number = 44;
 /** 顶栏水平基线（vp）：标题、搜索框、页签胶囊、列表内容共用 */
 export const NAV_H_PADDING: number = 16;
 
-/** 返回键命中区边长（vp）：不小于 44 的触控下限，圆角取其一半成正圆 */
+/** 返回键区域宽（vp）：2026-10-24 起不再自绘返回键，用作标题行首让出 HDS 默认键的占位宽 */
 export const NAV_BACK_SIZE: number = 44;
 
-/** 返回键图标字号（vp）：24 与系统返回键同档，26 在小屏上显笨重 */
-export const NAV_BACK_ICON_SIZE: number = 24;
-
-/** 返回键与标题之间的视觉间距（vp） */
+/** 返回键占位与标题之间的视觉间距（vp） */
 export const NAV_TITLE_GAP: number = 4;
 
 /** 顶栏文字动作按钮高（vp） */

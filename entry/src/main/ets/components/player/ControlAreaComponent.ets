@@ -2,6 +2,9 @@
  * 播放控制区（参考 audio-interaction-master 的 ControlAreaComponent 版式重做）。
  *
  * 版式自上而下：功能行（播放模式 / 播放列表）→ 进度条 + 双侧时间 → 三键控制行。
+ * 紧凑模式（compactMode，2026-10-23 阔折叠外屏）：功能行与进度区整体不挂载
+ *（条件渲染而非 visibility 隐藏——三种自绘进度条各有 createAnimator 无限循环，
+ * 隐藏挂载会留空转节点），只渲染三键行（聚拢左对齐）；进度插值一并跳过。
  * 控制调用全部走 MusicPlayer 单例；队列弹层复用共享组件 QueueSheet；
  * 按用户决策不引入收藏 / 静音按钮。
  *
@@ -22,8 +25,12 @@ import {
   speedLabelOf,
   PROGRESS_STYLE_SHIMMER,
   PROGRESS_STYLE_PULSE,
-  PROGRESS_STYLE_WAVE
+  PROGRESS_STYLE_WAVE,
+  VideoDetail,
+  VideoPageInfo
 } from '../../model/MusicModels';
+import { getVideoDetail } from '../../api/BilibiliApi';
+import common from '@ohos.app.ability.common';
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { QueueSheet, repeatLabelOf, modeIconOf, nextRepeatMode } from '../QueueSheet';
 import { StyleConstants } from '../../common/constants/StyleConstants';
@@ -51,6 +58,7 @@ import {
   STORE_REPEAT_MODE,
   STORE_PLAYBACK_SPEED_ENABLED,
   STORE_PLAYBACK_SPEED,
+  STORE_OPEN_IN_BILI_ENABLED,
   STORE_PROGRESS_STYLE,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
@@ -63,6 +71,8 @@ import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_OFFSET_VP,
   LAYER_DELAY_CONTROL,
+  LAYER_EXIT_DURATION_MS,
+  LAYER_EXIT_DELAY_CONTROL,
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
@@ -82,6 +92,8 @@ const FUNC_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 
 const FUNC_BUTTON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 40, md: 40, lg: 46 });
 /** 右组三个功能键之间的间距（视觉间距；各按钮自身命中区已由 BounceIconButton 保证） */
 const FUNC_GAP: number = 8;
+/** 紧凑模式三键行间距：三键聚拢左对齐时的呼吸间距（常规两端分布时不用，space=0） */
+const COMPACT_CTRL_GAP: number = 36;
 /** 倍速片字号：视觉体量对齐功能键图标（FUNC_ICON_SIZE 22/26），文字略小一档防喧宾夺主 */
 const SPEED_FONT_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 18, md: 18, lg: 20 });
 /** 倍速片行高 = 功能键图标字号（SymbolGlyph 的 em 盒高）：图标列与文字列同高同起点，垂直自然对齐 */
@@ -104,6 +116,18 @@ const PROGRESS_JUMP_SEC: number = 2;
 @Component
 export struct ControlAreaComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /**
+   * 紧凑模式（2026-10-23 阔折叠外屏，Pura X 折起 632×924vp → md 断点）：
+   * 功能行 / 进度区 / 时间行整体不挂载，仅渲染三键行（聚拢左对齐）。
+   * 默认 false：SM / MD / LG / 折叠展开四分支行为零变化。
+   */
+  @Prop compactMode: boolean = false;
+  /**
+   * 三键行居中（2026-10-24 紧凑横屏左列版式）：compactMode 且 centerMode 时
+   * 三键行由左对齐改居中（左列歌名/歌手/封面均居中，控制区同轴）。
+   * 默认 false：Pura X 外屏等既有 compactMode 调用点保持左对齐零变化。
+   */
+  @Prop centerMode: boolean = false;
   @StorageLink(STORE_PROGRESS) @Watch('onProgressTick') progress: number = 0;
   @StorageLink(STORE_DURATION) duration: number = 0;
   @StorageLink(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
@@ -128,6 +152,8 @@ export struct ControlAreaComponent {
   @State menuButtonScale: number = 1;
   /** 倍速总开关（设置页镜像）：关 = 功能行不渲染倍速片 */
   @StorageProp(STORE_PLAYBACK_SPEED_ENABLED) speedEnabled: boolean = false;
+  /** 「在 B 站打开原视频」开关（设置页镜像）：关 = 功能行不渲染跳转入口 */
+  @StorageProp(STORE_OPEN_IN_BILI_ENABLED) openInBiliEnabled: boolean = true;
   /** 当前倍速（MusicPlayer.setStore 写回 → 倍速片标签与菜单 ✓ 实时刷新） */
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
   /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
@@ -174,12 +200,12 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
 
   /**
-   * 收起时内容层瞬隐信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
-   * 复位不在任何隐式动画作用域内 → 控制区单帧直接消失（2026-10-22 用户要求
-   * 「除封面和背景的其他元素直接消失」，替代 2026-10-21 的俯冲退场）。
+   * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
+   * 仅柔退路径递增）：控制区 200ms EaseIn 柔退淡出 + 回沉（2026-10-24 三风格
+   * 收起改版，替代 2026-10-22 的单帧瞬隐；末批退场 LAYER_EXIT_DELAY_CONTROL）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
-  /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把控制区点亮 */
+  /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把控制区点亮 */
   private exitRequested: boolean = false;
 
   /** 收起复位：入场状态回隐藏态（幂等兜底，见 playerOpen 注释） */
@@ -191,11 +217,20 @@ export struct ControlAreaComponent {
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 瞬隐复位：入场状态回隐藏态（闭包外单帧生效） + 拦截在途延迟入场 */
+  /** 柔退复位：控制区 200ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
-    this.enterOpacity = 0;
-    this.enterOffsetY = ENTRANCE_OFFSET_VP;
+    this.getUIContext().animateTo(
+      {
+        duration: LAYER_EXIT_DURATION_MS,
+        curve: Curve.EaseIn,
+        delay: LAYER_EXIT_DELAY_CONTROL
+      },
+      (): void => {
+        this.enterOpacity = 0;
+        this.enterOffsetY = ENTRANCE_OFFSET_VP;
+      }
+    );
   }
 
   /**
@@ -204,7 +239,8 @@ export struct ControlAreaComponent {
    * 大跳（seek / 切歌）duration 0 直接落位。
    */
   private onProgressTick(): void {
-    if (this.dragging) {
+    // 紧凑模式不渲染进度区：插值动画没有渲染对象，跳过（少一个 520ms animateTo）
+    if (this.compactMode || this.dragging) {
       return;
     }
     const target: number = this.progress;
@@ -344,6 +380,55 @@ export struct ControlAreaComponent {
     }
   }
 
+  /**
+   * 在 B 站打开原视频：优先 `bilibili://video/{bvid}` 深链拉官方 App
+   * （appLinkingOnly，没装/未注册 scheme 会抛错）；失败降级
+   * `https://www.bilibili.com/video/{bvid}` 交给系统（浏览器必达，
+   * 装 App 时也可能经 App Linking 直跳）。分 P 曲目（id 形如 `BV…#cid`）
+   * 先查 `getVideoDetail` 把 cid 换算成 `?p=N` 精确定位，查询失败降级
+   * 不带 p（跳到 P1 也比跳不走强）。
+   */
+  private async openInBilibili(): Promise<void> {
+    const track: Track | null = this.currentTrack;
+    if (track === null) {
+      this.toast('还没有正在播放的曲目');
+      return;
+    }
+    const id: string = track.id;
+    if (!id.startsWith('BV')) {
+      this.toast('这条没有对应的 B 站视频');
+      return;
+    }
+    const sep: number = id.indexOf('#');
+    const bvid: string = sep >= 0 ? id.substring(0, sep) : id;
+    const cidStr: string = sep >= 0 ? id.substring(sep + 1) : '';
+    let pSuffix: string = '';
+    if (cidStr.length > 0) {
+      try {
+        const detail: VideoDetail = await getVideoDetail(bvid);
+        const idx: number = detail.pages.findIndex((pg: VideoPageInfo): boolean => pg.cid === Number(cidStr));
+        if (idx > 0) {
+          pSuffix = `?p=${idx + 1}`;
+        }
+      } catch (e) {
+        console.error(`getVideoDetail for p-param failed: ${JSON.stringify(e)}`);
+      }
+    }
+    const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    try {
+      await ctx.openLink(`bilibili://video/${bvid}`, { appLinkingOnly: true });
+      return;
+    } catch (e) {
+      console.error(`openLink scheme failed: ${JSON.stringify(e)}`);
+    }
+    try {
+      await ctx.openLink(`https://www.bilibili.com/video/${bvid}${pSuffix}`);
+    } catch (e) {
+      console.error(`openLink https failed: ${JSON.stringify(e)}`);
+      this.toast('无法打开 B 站页面');
+    }
+  }
+
   /** 「仅 WiFi 下载」拦下时的询问（与 SearchPage / UpSpacePage 同一套流程） */
   private confirmCellularDownload(track: Track): void {
     showAppAlertDialog(this.getUIContext(), {
@@ -474,252 +559,276 @@ export struct ControlAreaComponent {
 
   build() {
     Column() {
-      Row() {
-        // 左组：播放模式 + 倍速（开关开启时）。包一层 Row 保持 SpaceBetween
-        // 两端布局 —— 左组 2 键、右组 3 键，中间空隙自然居中。
-        Row({ space: FUNC_GAP }) {
-          BounceIconButton({
-            icon: modeIconOf(this.repeatMode),
-            iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-            buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
-            onTap: (): void => {
-              this.cycleRepeat();
-            }
-          })
+      // 紧凑模式（阔折叠外屏）：功能行整体不挂载 —— bindSheet 的队列弹层宿主
+      // 在功能行右组上，一并不挂载（外屏按用户决策只保留「信息 + 三键」）。
+      if (!this.compactMode) {
+        Row() {
+          // 左组：播放模式 + 倍速（开关开启时）。包一层 Row 保持 SpaceBetween
+          // 两端布局 —— 左组 2 键、右组 3 键，中间空隙自然居中。
+          Row({ space: FUNC_GAP }) {
+            BounceIconButton({
+              icon: modeIconOf(this.repeatMode),
+              iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
+              buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+              onTap: (): void => {
+                this.cycleRepeat();
+              }
+            })
 
-          // 倍速片：复用「加入歌单」的内联节点配方 —— bindMenu 必须挂点击落点的
-          // 最深层节点（挂外层包装会被内部手势竞争吃掉，见右组加入歌单的注释），
-          // 按压反馈用 onTouch 缩放（只回写状态不消费事件，不与菜单手势竞争）。
-          if (this.speedEnabled) {
-            Column() {
-              Text(speedLabelOf(this.playbackSpeed))
-                .fontSize(SPEED_FONT_SIZE.getValue(this.currentBreakpoint))
-                .lineHeight(SPEED_LINE_HEIGHT.getValue(this.currentBreakpoint))
-                .fontColor(Color.White)
-                .opacity(0.86)
-                .fontWeight(FontWeight.Medium)
+            // 倍速片：复用「加入歌单」的内联节点配方 —— bindMenu 必须挂点击落点的
+            // 最深层节点（挂外层包装会被内部手势竞争吃掉，见右组加入歌单的注释），
+            // 按压反馈用 onTouch 缩放（只回写状态不消费事件，不与菜单手势竞争）。
+            if (this.speedEnabled) {
+              Column() {
+                Text(speedLabelOf(this.playbackSpeed))
+                  .fontSize(SPEED_FONT_SIZE.getValue(this.currentBreakpoint))
+                  .lineHeight(SPEED_LINE_HEIGHT.getValue(this.currentBreakpoint))
+                  .fontColor(Color.White)
+                  .opacity(0.86)
+                  .fontWeight(FontWeight.Medium)
+              }
+              .width(SPEED_CHIP_WIDTH.getValue(this.currentBreakpoint))
+              .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
+              .scale({ x: this.speedButtonScale, y: this.speedButtonScale })
+              .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
+              .onTouch((event: TouchEvent): void => {
+                if (event.type === TouchType.Down) {
+                  this.speedButtonScale = PRESS_SCALE;
+                } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+                  this.speedButtonScale = 1;
+                }
+              })
+              .bindMenu(this.speedMenuItems())
+              .accessibilityText('播放倍速')
             }
-            .width(SPEED_CHIP_WIDTH.getValue(this.currentBreakpoint))
+          }
+
+          // 右组：下载 / 在 B 站打开（开关控制）/ 加入歌单 / 队列。
+          // 刻意包一层 Row 而不是往 SpaceBetween 里塞多个 —— 散开会把中间的
+          // 空隙拉得很宽，看起来像两组而不是一组功能键。
+          Row({ space: FUNC_GAP }) {
+            BounceIconButton({
+              icon: $r('sys.symbol.arrow_down_to_line'),
+              iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
+              buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+              onTap: (): void => {
+                this.downloadCurrent();
+              }
+            })
+
+            // 在 B 站打开原视频（设置 → 播放开关控制显隐，默认开）：
+            // 优先 bilibili:// 深链拉官方 App，未装/不支持降级 https 网页。
+            if (this.openInBiliEnabled) {
+              BounceIconButton({
+                icon: $r('sys.symbol.arrow_up_right'),
+                iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
+                buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+                onTap: (): void => {
+                  this.openInBilibili();
+                }
+              })
+                .accessibilityText('在 B 站打开原视频')
+            }
+
+            // 「加入歌单」：bindMenu 必须挂在点击落点的最深层节点上 ——
+            // 曾挂在 BounceIconButton 的外层包装节点，其内部 Column 的 onClick 在
+            // 非冒泡手势竞争中作为最深层胜出、吃掉点击，外层 bindMenu 永远不触发。
+            // 故此处内联与 TrackItem「⋯」同构的节点（视觉复刻 BounceIconButton：
+            // 白色 SymbolGlyph + 0.86 透明度 + 透明命中区），bindMenu 直接挂本节点，
+            // 按压反馈改用 onTouch 缩放 —— onTouch 只回写状态不消费事件，
+            // 不会与菜单的点击手势竞争（TrackItem 行已真机验证该共存方式）。
+            Column() {
+              SymbolGlyph($r('sys.symbol.plus'))
+                .fontSize(FUNC_ICON_SIZE.getValue(this.currentBreakpoint))
+                .fontColor([Color.White])
+                .opacity(0.86)
+            }
+            .width(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
             .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-            .scale({ x: this.speedButtonScale, y: this.speedButtonScale })
+            .scale({ x: this.menuButtonScale, y: this.menuButtonScale })
             .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
             .onTouch((event: TouchEvent): void => {
               if (event.type === TouchType.Down) {
-                this.speedButtonScale = PRESS_SCALE;
+                this.menuButtonScale = PRESS_SCALE;
               } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-                this.speedButtonScale = 1;
+                this.menuButtonScale = 1;
               }
             })
-            .bindMenu(this.speedMenuItems())
-            .accessibilityText('播放倍速')
+            .bindMenu(this.playlistMenuItems())
+            .accessibilityText('加入歌单')
+
+            BounceIconButton({
+              icon: $r('sys.symbol.list_bullet'),
+              iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
+              buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+              onTap: (): void => {
+                this.showQueueSheet = true;
+              }
+            })
           }
-        }
-
-        // 右组三个：下载 / 加入歌单 / 队列。
-        // 刻意包一层 Row 而不是往 SpaceBetween 里塞四个 —— 四个散开会把中间的
-        // 空隙拉得很宽，看起来像两组而不是一组功能键。
-        Row({ space: FUNC_GAP }) {
-          BounceIconButton({
-            icon: $r('sys.symbol.arrow_down_to_line'),
-            iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-            buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
-            onTap: (): void => {
-              this.downloadCurrent();
-            }
+          .bindSheet($$this.showQueueSheet, this.QueueSheetHost(), {
+            height: SheetSize.MEDIUM,
+            dragBar: true,
+            showClose: false
           })
-
-          // 「加入歌单」：bindMenu 必须挂在点击落点的最深层节点上 ——
-          // 曾挂在 BounceIconButton 的外层包装节点，其内部 Column 的 onClick 在
-          // 非冒泡手势竞争中作为最深层胜出、吃掉点击，外层 bindMenu 永远不触发。
-          // 故此处内联与 TrackItem「⋯」同构的节点（视觉复刻 BounceIconButton：
-          // 白色 SymbolGlyph + 0.86 透明度 + 透明命中区），bindMenu 直接挂本节点，
-          // 按压反馈改用 onTouch 缩放 —— onTouch 只回写状态不消费事件，
-          // 不会与菜单的点击手势竞争（TrackItem 行已真机验证该共存方式）。
-          Column() {
-            SymbolGlyph($r('sys.symbol.bookshelf_badge_plus'))
-              .fontSize(FUNC_ICON_SIZE.getValue(this.currentBreakpoint))
-              .fontColor([Color.White])
-              .opacity(0.86)
-          }
-          .width(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-          .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-          .scale({ x: this.menuButtonScale, y: this.menuButtonScale })
-          .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
-          .onTouch((event: TouchEvent): void => {
-            if (event.type === TouchType.Down) {
-              this.menuButtonScale = PRESS_SCALE;
-            } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-              this.menuButtonScale = 1;
-            }
-          })
-          .bindMenu(this.playlistMenuItems())
-          .accessibilityText('加入歌单')
-
-          BounceIconButton({
-            icon: $r('sys.symbol.list_bullet'),
-            iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-            buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
-            onTap: (): void => {
-              this.showQueueSheet = true;
-            }
-          })
-        }
-        .bindSheet($$this.showQueueSheet, this.QueueSheetHost(), {
-          height: SheetSize.MEDIUM,
-          dragBar: true,
-          showClose: false
-        })
-      }
-      .width(StyleConstants.FULL_WIDTH)
-      .justifyContent(FlexAlign.SpaceBetween)
-
-      Column() {
-        // 进度条四分支（设置 → 外观「播放页进度条样式」）：三种自绘样式共用
-        // value/max/拖拽回调契约，经典 Slider 保持原样（含未知值兜底）。
-        if (this.progressStyle === PROGRESS_STYLE_SHIMMER) {
-          ShimmerProgressBar({
-            value: this.dragging ? this.dragValue : this.sliderValue,
-            max: this.effectiveDuration(),
-            onSeekStart: (): void => {
-              this.onBarDragStart();
-            },
-            onSeekMove: (sec: number): void => {
-              this.onBarDragMove(sec);
-            },
-            onSeekEnd: (sec: number): void => {
-              this.onBarDragEnd(sec);
-            }
-          })
-            .margin({
-              left: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint),
-              right: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint)
-            })
-        } else if (this.progressStyle === PROGRESS_STYLE_PULSE) {
-          PulseDotProgressBar({
-            value: this.dragging ? this.dragValue : this.sliderValue,
-            max: this.effectiveDuration(),
-            onSeekStart: (): void => {
-              this.onBarDragStart();
-            },
-            onSeekMove: (sec: number): void => {
-              this.onBarDragMove(sec);
-            },
-            onSeekEnd: (sec: number): void => {
-              this.onBarDragEnd(sec);
-            }
-          })
-            .margin({
-              left: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint),
-              right: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint)
-            })
-        } else if (this.progressStyle === PROGRESS_STYLE_WAVE) {
-          WaveBarsProgressBar({
-            value: this.dragging ? this.dragValue : this.sliderValue,
-            max: this.effectiveDuration(),
-            onSeekStart: (): void => {
-              this.onBarDragStart();
-            },
-            onSeekMove: (sec: number): void => {
-              this.onBarDragMove(sec);
-            },
-            onSeekEnd: (sec: number): void => {
-              this.onBarDragEnd(sec);
-            }
-          })
-            .margin({
-              left: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint),
-              right: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint)
-            })
-        } else {
-          Slider({
-            min: 0,
-            max: Math.max(1, this.effectiveDuration()),
-            step: 1,
-            style: SliderStyle.OutSet,
-            value: this.dragging ? this.dragValue : this.sliderValue
-          })
-            .selectedColor($r('app.color.slider_select'))
-            .trackColor($r('app.color.slider_track'))
-            .scale({ x: this.trackScale, y: this.trackScale })
-            .onChange((value: number, mode: SliderChangeMode): void => {
-              if (mode === SliderChangeMode.Begin) {
-                // 按下：只动本地滑块并轻微放大，不写播放进度
-                this.dragging = true;
-                this.dragValue = value;
-                this.scaleUpTrack();
-                return;
-              }
-              if (mode === SliderChangeMode.Moving) {
-                this.dragValue = value;
-                return;
-              }
-              // 松手 / 点击定位：交给播放内核，进度条回弹
-              this.dragging = false;
-              if (this.effectiveDuration() > 0) {
-                this.player.seek(value);
-              }
-              this.bounceBackTrack(value);
-            })
-            .height($r('app.float.slider_height'))
-            .margin({
-              left: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint),
-              right: new BreakpointType<Resource>({
-                sm: $r('app.float.slider_margin_sm'),
-                md: $r('app.float.slider_margin_md'),
-                lg: $r('app.float.slider_margin_lg')
-              }).getValue(this.currentBreakpoint)
-            })
-        }
-        Row() {
-          Text(formatTime(this.dragging ? this.dragValue : this.sliderValue))
-            .fontColor($r('app.color.play_text_color'))
-            .fontSize($r('app.float.singer_title_sm'))
-            .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
-            .lineHeight('14vp')
-          Text(formatTime(this.effectiveDuration()))
-            .fontColor($r('app.color.play_text_color'))
-            .fontSize($r('app.float.singer_title_sm'))
-            .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
-            .lineHeight('14vp')
         }
         .width(StyleConstants.FULL_WIDTH)
         .justifyContent(FlexAlign.SpaceBetween)
       }
-      .margin({
-        top: $r('app.float.slider_margin_top'),
-        bottom: this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG ?
-        $r('app.float.slider_margin_bottom_lg') : $r('app.float.slider_margin_bottom')
-      })
 
-      Row() {
+      // 紧凑模式（阔折叠外屏）：进度区（四分支进度条 + 双侧时间行）不挂载 ——
+      // 三种自绘进度条各有 createAnimator 无限循环，visibility 隐藏会留空转节点。
+      if (!this.compactMode) {
+        Column() {
+          // 进度条四分支（设置 → 外观「播放页进度条样式」）：三种自绘样式共用
+          // value/max/拖拽回调契约，经典 Slider 保持原样（含未知值兜底）。
+          if (this.progressStyle === PROGRESS_STYLE_SHIMMER) {
+            ShimmerProgressBar({
+              value: this.dragging ? this.dragValue : this.sliderValue,
+              max: this.effectiveDuration(),
+              onSeekStart: (): void => {
+                this.onBarDragStart();
+              },
+              onSeekMove: (sec: number): void => {
+                this.onBarDragMove(sec);
+              },
+              onSeekEnd: (sec: number): void => {
+                this.onBarDragEnd(sec);
+              }
+            })
+              .margin({
+                left: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint),
+                right: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint)
+              })
+          } else if (this.progressStyle === PROGRESS_STYLE_PULSE) {
+            PulseDotProgressBar({
+              value: this.dragging ? this.dragValue : this.sliderValue,
+              max: this.effectiveDuration(),
+              onSeekStart: (): void => {
+                this.onBarDragStart();
+              },
+              onSeekMove: (sec: number): void => {
+                this.onBarDragMove(sec);
+              },
+              onSeekEnd: (sec: number): void => {
+                this.onBarDragEnd(sec);
+              }
+            })
+              .margin({
+                left: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint),
+                right: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint)
+              })
+          } else if (this.progressStyle === PROGRESS_STYLE_WAVE) {
+            WaveBarsProgressBar({
+              value: this.dragging ? this.dragValue : this.sliderValue,
+              max: this.effectiveDuration(),
+              onSeekStart: (): void => {
+                this.onBarDragStart();
+              },
+              onSeekMove: (sec: number): void => {
+                this.onBarDragMove(sec);
+              },
+              onSeekEnd: (sec: number): void => {
+                this.onBarDragEnd(sec);
+              }
+            })
+              .margin({
+                left: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint),
+                right: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint)
+              })
+          } else {
+            Slider({
+              min: 0,
+              max: Math.max(1, this.effectiveDuration()),
+              step: 1,
+              style: SliderStyle.OutSet,
+              value: this.dragging ? this.dragValue : this.sliderValue
+            })
+              .selectedColor($r('app.color.slider_select'))
+              .trackColor($r('app.color.slider_track'))
+              .scale({ x: this.trackScale, y: this.trackScale })
+              .onChange((value: number, mode: SliderChangeMode): void => {
+                if (mode === SliderChangeMode.Begin) {
+                  // 按下：只动本地滑块并轻微放大，不写播放进度
+                  this.dragging = true;
+                  this.dragValue = value;
+                  this.scaleUpTrack();
+                  return;
+                }
+                if (mode === SliderChangeMode.Moving) {
+                  this.dragValue = value;
+                  return;
+                }
+                // 松手 / 点击定位：交给播放内核，进度条回弹
+                this.dragging = false;
+                if (this.effectiveDuration() > 0) {
+                  this.player.seek(value);
+                }
+                this.bounceBackTrack(value);
+              })
+              .height($r('app.float.slider_height'))
+              .margin({
+                left: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint),
+                right: new BreakpointType<Resource>({
+                  sm: $r('app.float.slider_margin_sm'),
+                  md: $r('app.float.slider_margin_md'),
+                  lg: $r('app.float.slider_margin_lg')
+                }).getValue(this.currentBreakpoint)
+              })
+          }
+          Row() {
+            Text(formatTime(this.dragging ? this.dragValue : this.sliderValue))
+              .fontColor($r('app.color.play_text_color'))
+              .fontSize($r('app.float.singer_title_sm'))
+              .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
+              .lineHeight('14vp')
+            Text(formatTime(this.effectiveDuration()))
+              .fontColor($r('app.color.play_text_color'))
+              .fontSize($r('app.float.singer_title_sm'))
+              .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
+              .lineHeight('14vp')
+          }
+          .width(StyleConstants.FULL_WIDTH)
+          .justifyContent(FlexAlign.SpaceBetween)
+        }
+        .margin({
+          top: $r('app.float.slider_margin_top'),
+          bottom: this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG ?
+          $r('app.float.slider_margin_bottom_lg') : $r('app.float.slider_margin_bottom')
+        })
+      }
+
+      // 三键行（紧凑模式可变布局）：常规 = 全宽两端分布 + control_padding；
+      // 紧凑（阔折叠外屏）= 固定间距聚拢 + 左对齐（padding 清零对齐信息块左缘）。
+      Row({ space: this.compactMode ? COMPACT_CTRL_GAP : 0 }) {
         BounceIconButton({
           icon: $r('sys.symbol.backward_end_fill'),
           iconSize: PREVNEXT_ICON_SIZE.getValue(this.currentBreakpoint),
@@ -741,15 +850,17 @@ export struct ControlAreaComponent {
         })
       }
       .width(StyleConstants.FULL_WIDTH)
-      .justifyContent(FlexAlign.SpaceBetween)
+      .justifyContent(this.compactMode
+        ? (this.centerMode ? FlexAlign.Center : FlexAlign.Start)
+        : FlexAlign.SpaceBetween)
       .alignItems(VerticalAlign.Center)
       .padding({
-        left: $r('app.float.control_padding'),
-        right: $r('app.float.control_padding')
+        left: this.compactMode ? 0 : $r('app.float.control_padding'),
+        right: this.compactMode ? 0 : $r('app.float.control_padding')
       })
     }
     // 分层入场只挂 transform 系属性，不动 width/height/padding（改布局属性会触发整树重排）
-    // 收起为闭包外瞬隐（onContentExit 单帧置 0），无退场变换
+    // 收起为柔退退场（onContentExit 的 200ms EaseIn 淡出 + 回沉）
     .opacity(this.enterOpacity)
     .translate({ y: this.enterOffsetY })
   }
