@@ -9,7 +9,7 @@ export const BILI_PASSPORT: string = 'https://passport.bilibili.com';
 /**
  * B 站 App（iPhone 版）UA —— passport 登录链路专用（对齐 BBPlayer 的 PASSPORT_UA）。
  *
- * B 站按 UA 分流登录 Cookie 的下发方式（2026-10-07 日志确证）：
+ * B 站按 UA 分流登录 Cookie 的下发方式：
  *   · web UA（PC Chrome）：poll 成功走 crossDomain ticket 网页流程，登录 Cookie
  *     在 302 重定向中间跳的 Set-Cookie 里（ohos http 自动跟随重定向会把它吞掉）；
  *   · BiliApp UA：登录 Cookie 直接在 poll 响应的 Set-Cookie 里下发，无需跟进跳转。
@@ -32,7 +32,7 @@ export const BILI_APP_UA: string =
 export const BILI_APP_KEY: string = 'dfca71928277209b';
 export const BILI_APP_SEC: string = 'b5475a8825547a4fc26c7d518eaaa02e';
 /**
- * TV 端取流的 UA：必须带 `BiliDroid` 标记。实测（2026-10-24）去掉它后
+ * TV 端取流的 UA：必须带 `BiliDroid` 标记。实测去掉它后
  * `/x/tv/playurl` 返回 -400（服务端按 UA 判定客户端身份，签名对了也白搭）。
  */
 export const BILI_TV_UA: string =
@@ -76,6 +76,12 @@ export const DB_VERSION: number = 2;
 export const TABLE_DOWNLOAD: string = 'download_task';
 
 /**
+ * 桌面卡片 id 库（表 form_card）：Form 扩展进程与 UIAbility 进程双进程读写，
+ * 独立于主库（Form 进程不触碰下载表初始化链路），SQLite 多连接安全。
+ */
+export const CARD_DB_NAME: string = 'bilimusic_card.db';
+
+/**
  * 新建歌单时的**通用**默认名。
  *
  * 注意：「新建歌单并加入」**不用**它 —— 那种场景的名字取自条目歌名，
@@ -115,18 +121,20 @@ export const PREF_PLAYER_STATE: string = 'bilimusic_player_state';
 export const PREF_TOTAL_LISTEN_SECONDS: string = 'bilimusic_total_listen_seconds';
 /** 搜索历史：JSON 字符串数组，最近搜索的在前，最多 20 条（见 service/SearchHistoryStore.ts） */
 export const PREF_SEARCH_HISTORY: string = 'bilimusic_search_history';
+/** 常用搜索词：JSON 字符串数组，搜索初始页快捷入口的完整列表（默认词 + 用户新增，整体读写） */
+export const PREF_COMMON_WORDS: string = 'bilimusic_common_words';
 export const PREF_BUVID: string = 'bilimusic_buvid';
 /** 持久化后的 buvid Cookie 串（buvid3=...; buvid4=...） */
 export const PREF_BUVID_COOKIE: string = 'bilimusic_buvid_cookie';
 /**
- * buvid 是否已升级为官方值（finger/spi 下发，2026-10-22 平板登录修复）：
+ * buvid 是否已升级为官方值（finger/spi 下发）：
  * false / 缺省 = 仍是本地 MD5 兜底假值 —— 是登录二维码被风控提前作废与
  * playurl 偶发拦截的共同根因候选，AppContainer 启动后会延迟重试升级
  * （见 service/BiliDevice.ts 的 isBuvidFallback / upgradeBuvidCookie）。
  */
 export const PREF_BUVID_OFFICIAL: string = 'bilimusic_buvid_official';
 /**
- * 已向风控接口（ExClimbWuzhi）上报过指纹的 buvid 特征串（2026-10-24 移植 PiliPlus）。
+ * 已向风控接口（ExClimbWuzhi）上报过指纹的 buvid 特征串。
  *
  * 值 = 当前 buvid3 的 md5 前 8 位（**不存指纹本体**，与 cookieFingerprint 同一脱敏口径）。
  * 用途：新 buvid 在服务端是「未激活」状态，取流容易被判异常，必须上报一次；但
@@ -144,7 +152,7 @@ export const PREF_LOGIN_USER: string = 'bilimusic_login_user';
 /**
  * 登录撤销令牌（refresh_token）：passport 轮询成功时随 Cookie 一并下发。
  *
- * ⚠️ 2026-10-08 记录：目前**存了但从没用过** —— 全仓没有 `getLoginRefreshToken()`
+ * ⚠️ 目前**存了但从没用过** —— 全仓没有 `getLoginRefreshToken()`
  * 的调用方，也没有续期接口。B 站完整的续期链路是 5 步（含 RSA-OAEP 加密换
  * correspondPath + 解析 HTML 拿 refresh_csrf），工程量约等于一个完整功能，
  * 尚未开工。当前登录态完全依赖 SESSDATA 自然过期。
@@ -154,10 +162,9 @@ export const PREF_LOGIN_REFRESH_TOKEN: string = 'bilimusic_login_refresh_token';
 /**
  * 最近一次「登录态被服务端确认有效」的时间戳（ms，字符串存）。
  *
- * 用途（2026-10-08 配合消除静默降级）：nav 接口返回 -101 时，**不再直接清掉
- * 登录凭据**，而是把它归零并保留 Cookie ——凭据可能被风控临时拒绝，也可能只是
- * 网络抖动。设置页据此显示「登录已失效 · 点击重新登录」而不是悄悄变回未登录
- * （原实现直接 clearLoginState，用户完全不知情，refresh_token 也一并丢了）。
+ * 用途：nav 接口返回 -101 时，**不直接清掉登录凭据**，而是把它归零并保留
+ * Cookie —— 凭据可能被风控临时拒绝，也可能只是网络抖动。设置页据此显示
+ * 「登录已失效 · 点击重新登录」而不是悄悄变回未登录。
  *
  * 0 = 从未被确认过，或已被服务端拒绝过一次（即「待重新验证」态）。
  * 注意：`PREF_VALUE_BUDGET_BYTES` 与 8192 上限只约束 value 大小，这里存十位数毫秒，无风险。
@@ -172,7 +179,7 @@ export const STORE_QUEUE: string = 'queue';
 export const STORE_REPEAT_MODE: string = 'repeatMode';
 export const STORE_SHUFFLE: string = 'isShuffled';
 export const STORE_LOADING_AUDIO: string = 'loadingAudio';
-// 独立音量键 volume / isMuted 已随播放器音量通路移除（2026-10-22，音量恒走系统媒体音量）
+// 音量恒走系统媒体音量（无独立 volume / isMuted 键）
 
 /** 前后台标志（EntryAbility onForeground/onBackground 发布）：动画门控与后台落盘节流的依据 */
 export const STORE_APP_FOREGROUND: string = 'appForeground';
@@ -186,18 +193,26 @@ export const STORE_APP_FOREGROUND: string = 'appForeground';
  */
 export const STORE_SLEEP_TIMER_END: string = 'sleepTimerEnd';
 
+/**
+ * 桌面卡片拉起播放页：EntryAbility 解析卡片路由 want 后自增发布的序号。
+ * 卡片（Form 渲染进程）经 postCardAction router 拉起 UIAbility，onCreate /
+ * onNewWant 里 seq++；Index 侧 @StorageProp + @Watch（首次启动 @Watch 不
+ * 触发，aboutToAppear 补刀读当前值比对）后复刻 PlayBar.openPlayer 展开播放页。
+ */
+export const STORE_CARD_OPEN_PLAYER_SEQ: string = 'cardOpenPlayerSeq';
+
 // ===== 播放页共享元素转场（PlayBar ↔ PlayerPage 唱片一镜到底） =====
 /** 共享元素 id：底栏小唱片与播放页大唱片必须一致（组件状态切换动画中 geometryTransition 配对） */
 export const GEOMETRY_ID_PLAYER_DISC: string = 'player_cover';
 /**
  * 共享元素 id：迷你栏「透明锚点」与播放页背景面（全屏沉浸层）。
  *
- * 2026-10-21 起点偏左下缺陷的根治：实测证明 getRectangleById / FrameNode 位置 API
- * （含 WithTransform / ToScreen 变体）全部拿不到 HDS 托管内容被合成变换（缩放+平移）
- * 后的**真实视觉**矩形 —— 起点只对得上 HDS 宿主窗口内的逻辑布局值，差出一个
- * HDS 合成系数（真机 ~1.245×1.41、模拟器 ~1.089，且随设备/模式变化）。
- * geometryTransition 由**系统**做跨窗口坐标换算（唱片配对已真机验证起点精确），
- * 因此背景面的「从迷你栏原位向四周扩大」也交给 geometryTransition：
+ * getRectangleById / FrameNode 位置 API（含 WithTransform / ToScreen 变体）
+ * 拿不到 HDS 托管内容被合成变换（缩放+平移）后的**真实视觉**矩形 ——
+ * 只对得上 HDS 宿主窗口内的逻辑布局值，差出一个 HDS 合成系数
+ * （真机 ~1.245×1.41、模拟器 ~1.089，且随设备/模式变化）。
+ * geometryTransition 由**系统**做跨窗口坐标换算，因此背景面的
+ * 「从迷你栏原位向四周扩大」也交给 geometryTransition：
  *   · 迷你栏侧 —— PlayBar 槽位根 Stack 里一个**透明**锚点节点（不渲染任何像素，
  *     只提供几何），if (!playerOpen) 时在场；
  *   · 播放页侧 —— PlayerInfoComponent 全屏背景面，if (playerOpen) 时在场；
@@ -211,27 +226,26 @@ export const GEOMETRY_ID_PLAYER_SURFACE: string = 'player_surface_bg';
 /**
  * 背景面形变的**起点**圆角半径（vp）：= 迷你栏胶囊半高（布局高 56，实测）。
  * geometryTransition 在**绑定处**同步圆角（官方文档示例注释），配对两端显式
- * 挂 borderRadius 即参与形变 —— 展开过程中背景面四角呈胶囊同款圆角，而不是
- * 直角矩形从迷你栏长出（2026-10-21 用户要求「展开过程四角改为圆角」）。
+ * 挂 borderRadius 即参与形变 —— 展开过程中背景面四角呈胶囊同款圆角，
+ * 而不是直角矩形从迷你栏长出。
  */
 export const PLAYER_SURFACE_RADIUS_START_VP: number = 28;
 /**
  * 背景面形变的**终点**圆角半径（vp）：全屏态收平 —— 静止时四角若保留圆角，
  * 会露出底层页面底色，像渲染缺陷。系统对两端半径的处理（全程同步起点值 /
- * 按端点插值）均满足「过程圆角、终态收平」，模拟器中途帧验证见当轮记录。
+ * 按端点插值）均满足「过程圆角、终态收平」。
  */
 export const PLAYER_SURFACE_RADIUS_END_VP: number = 0;
 /**
  * 播放页展开/收起主动画时长（ms），曲线 PLAYER_MAIN_CURVE（cubicBezier(0.32,0.72,0,1)）——
  * 容器纵向延展、封面飞行、页签图标淡出共用同一 animateTo，必须严格一致；分层入场（LAYER_DELAY_*）以它为基线。
- * 2026-10-21 路由 push 改组件状态切换动画时从 300 调到 450（用户动效规格）；
- * 同日深夜参考华为音乐从 450 放慢到 700（用户反馈「太快了」）。
+ * 取值参考华为音乐播放页的动效节奏。
  */
 export const PLAYER_TRANSITION_MS: number = 700;
 /** 转场进行中标志：转场期间两边唱片的旋转动画暂停，结束后恢复（跨组件走 AppStorage） */
 export const STORE_PLAYER_TRANSITIONING: string = 'playerTransitioning';
 
-// ===== 播放页组件状态切换动画（2026-10-21：去 pushPath 路由，Index 根 Stack overlay 挂载） =====
+// ===== 播放页组件状态切换动画（Index 根 Stack overlay 挂载） =====
 /**
  * 播放页展开态：true = 全屏播放页打开。
  * 打开：PlayerInfoComponent 主动画 animateTo 内写 true（大唱片 if 出现、PlayBar 迷你唱片
@@ -245,12 +259,12 @@ export const STORE_PLAYER_OPEN: string = 'playerOpen';
  */
 export const STORE_PLAYER_OVERLAY_MOUNTED: string = 'playerOverlayMounted';
 
-// ===== 二级页悬浮播放条（2026-10-22：推送子页底部只保留播放栏，对齐华为音乐） =====
+// ===== 二级页悬浮播放条（推送子页底部只保留播放栏，对齐华为音乐） =====
 /**
  * 推送的 NavDestination 是否在导航栈顶（首页 navBar 时为 false）。
  * 由 NavStackHolder.setupInterception 的 willShow（随转场同步翻转）与
  * didShow（转场落定后的权威校正，兜 push 防抖在 willShow 内取消的边角）
- * 写入；Index 消费（2026-10-23 二级页悬浮播放栏上线）—— 为 true 且队列
+ * 写入；Index 消费 —— 为 true 且队列
  * 非空时在根 Stack 挂 SubPagePlayBar，同帧互斥摘除首页胶囊 miniBar
  * （barFloatingStyle）与 tabletPlayBar：全窗口同一时刻只有一套
  * GEOMETRY_ID_PLAYER_DISC / _SURFACE 锚点（id 全窗口必须唯一）。
@@ -264,9 +278,9 @@ export const STORE_PLAYER_CLOSE_REQUEST: string = 'playerCloseRequest';
 /**
  * 收起时内容层退场信号（seq 递增）：Index.closePlayer 在主动画（700ms /
  * PLAYER_MAIN_CURVE）闭包**外**写入，四个内容层组件与 PlayerInfoComponent 的
- * 自持内容（SM Swiper 指示点 / LG 标题块）@Watch 消费。2026-10-24 起消费侧
- * 从「单帧瞬隐」改为「分层柔退」：各层在 @Watch 内自建 animateTo（LAYER_EXIT_*
- * 错峰，见 InteractionConstants），与 700ms 几何转场重叠；seq 仍在闭包外递增
+ * 自持内容（SM Swiper 指示点 / LG 标题块）@Watch 消费，方式为「分层柔退」：
+ * 各层在 @Watch 内自建 animateTo（LAYER_EXIT_* 错峰，见 InteractionConstants），
+ * 与 700ms 几何转场重叠；seq 仍在闭包外递增
  * —— 收起被动画作用域合批时依旧能触发。封面 / 背景仍由闭包内的
  * STORE_PLAYER_OPEN=false 驱动 700ms 几何转场。下滑收起路径不递增本键
  * （内容随整页滑走，不单独退场）。
@@ -287,6 +301,13 @@ export const STORE_PLAYER_CLOSE_ANIM: string = 'playerCloseAnimStyle';
  * PlayerInfoComponent 的 SurfaceLayers 据此分流背景分层。
  */
 export const STORE_PLAYER_COVER_STYLE: string = 'playerCoverStyle';
+/**
+ * 条目展示（AppSettings.itemDisplayStyle 的运行时镜像，取值见 MusicModels 的
+ * ITEM_DISPLAY_LIST / ITEM_DISPLAY_GRID）：EntryAbility 启动首发、外观设置页
+ * 切换时重发。歌单页签 / 最近播放 / UP 主页 / 首页三页签 / 歌单详情（不可排序）/
+ * 搜索视频结果的 @StorageProp 订阅它，长条 ⇄ 大封面双列即时切换。
+ */
+export const STORE_ITEM_DISPLAY_STYLE: string = 'itemDisplayStyle';
 /**
  * geometryTransition 摘除标志：下滑收起（slide 风格 / 手势过阈值释放）开始时
  * 置 true、结束后复位。CoverDisc / PlayBar 迷你唱片 / 透明锚点等全部
@@ -319,7 +340,7 @@ export const STORE_PLAYER_SLIDE_CLOSE_REQUEST: string = 'playerSlideCloseRequest
  */
 export const STORE_PLAYER_DRAG_ACTIVE: string = 'playerDragActive';
 /**
- * 上滑展开进行中（2026-10-24 展开动画三风格区分，仅 slide 风格打开路径）：
+ * 上滑展开进行中（仅 slide 风格打开路径）：
  * PlayBar.openPlayer 在挂载 overlay **前**预置（与 SLIDE_OFFSET=窗高 / SLIDE_ALPHA=0
  * / GT_OFF=true 同批），使首帧渲染即处于屏下隐形位；PlayerInfoComponent
  * .slideInTransition 的 animateTo onFinish 复位（迷你唱片守卫 `!playerOpen ||
@@ -355,9 +376,9 @@ export const MINI_BAR_ANIM_TO_COLLAPSE: number = 2;
  * Index 的 onBarStyleChange 回写（miniBarWidth 实参；真机实测收起 / 展开
  * 两态上报同值 328 = sm 全宽胶囊标准宽 —— 槽位宽是常量、与展开收起无关，
  * 两种状态均发布，仅过滤 0 / 负无效值），SubPagePlayBar 只读订阅 ——
- * 二级页悬浮播放栏宽度直接采用一级页实测值，两级底栏恒同宽
- * （2026-10-24 修「二级页播放栏宽 ≠ 一级页底栏宽」：HDS 默认宽在编译产物
- * 里不可推导（previewer abc 为 mock 实现），实测回传是唯一可靠口径）。
+ * 二级页悬浮播放栏宽度直接采用一级页实测值，两级底栏恒同宽 ——
+ * HDS 默认宽在编译产物里不可推导（previewer abc 为 mock 实现），
+ * 实测回传是唯一可靠口径。
  * ⚠️ 只走 onBarStyleChange 通道：别在 HDS 托管的 miniBarBuilder 内容里挂
  * onAreaChange 回写（PlayBar 根节点注释有真机翻车存档）。
  */
@@ -401,6 +422,13 @@ export const STORE_MINI_BAR_AUTO_EXPAND: string = 'miniBarAutoExpandOn';
 export const STORE_PLAYBACK_SPEED_ENABLED: string = 'playbackSpeedEnabled';
 
 /**
+ * 响度均衡开关镜像（AppSettings.loudnessNormalizationEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，MusicPlayer prepared 挂点读取 ——
+ * 开启后按 LoudnessStore 记录把偏响的歌衰减到目标响度（只衰减不放大，默认关）。
+ */
+export const STORE_LOUDNESS_NORM_ENABLED: string = 'loudnessNormalizationEnabled';
+
+/**
  * 「在 B 站打开原视频」开关镜像（AppSettings.openInBilibiliEnabled 的运行时镜像）：
  * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
  * @StorageProp 订阅 —— 控制功能行跳转 B 站入口是否渲染（默认开）。
@@ -432,9 +460,8 @@ export const STORE_PLAYER_BG_DARK: string = 'playerBgDark';
 /**
  * 播放页沉浸背景主色（rgba 字符串，封面取色 dealColor 产物）。
  * PlayerInfoComponent 取色后写入（@StorageLink 双向发布）；
- * CoverDiscComponent 全屏档（immersive）只读订阅 —— 封面底部溶解层
- * （透明→主色渐变叠加）的目标色，与 SurfaceLayers 沉浸渐变同源同色，
- * 保证封面下沿与背景无缝衔接（2026-10-24 全屏档渐变模糊改版）。
+ * 封面底部溶解层（透明→主色渐变叠加）的目标色，与 SurfaceLayers 沉浸渐变
+ * 同源同色，保证封面下沿与背景无缝衔接。
  */
 export const STORE_PLAYER_IMAGE_COLOR: string = 'playerImageColor';
 
@@ -443,8 +470,7 @@ export const STORE_PLAYER_IMAGE_COLOR: string = 'playerImageColor';
  * 由 service/FormFactorHolder（App 生命周期常驻，EntryAbility.onCreate 初始化）
  * **唯一写入**：冷启动同步读一次 getFoldDisplayMode，之后 foldDisplayModeChange
  * 持续跟进开合。消费端（Index 壳选择、播放页分栏、歌词/标题字号）一律
- * @StorageProp 只读订阅 —— 2026-10-22 折叠态适配层重写：旧键 STORE_PLAYER_FOLD_FULL
- * 由播放页组件私有注册（播放页不挂载则状态缺失），已废弃删除。
+ * @StorageProp 只读订阅。
  */
 export const STORE_FOLD_EXPANDED: string = 'foldExpanded';
 
@@ -465,10 +491,10 @@ export const STORE_DOWNLOAD_TASKS: string = 'downloadTasks';
 export const STORE_DOWNLOAD_PAUSED: string = 'downloadPaused';
 
 /**
- * 下载页顶栏状态镜像键（HdsNavigation 迁移批 4，顶栏迁根容器后的状态通道）。
- * 下载页顶栏内容（选择按钮 + 工具条）依赖页内状态，迁到根 HdsNavigation
- * titleBar 后无法直接读页面 @State —— 由 DownloadsPage 把派生状态推到
- * AppStorage，根栏侧组件（components/DownloadsTabBar.ets）@StorageProp 订阅。
+ * 下载页顶栏状态镜像键（顶栏在根 HdsNavigation titleBar，无法直接读页面
+ * @State 的状态通道）。下载页顶栏内容（选择按钮 + 工具条）依赖页内状态，
+ * 由 DownloadsPage 把派生状态推到 AppStorage，根栏侧组件
+ * （components/DownloadsTabBar.ets）@StorageProp 订阅。
  * 页面侧唯一写入口：DownloadsPage.syncBarState / refreshQueueFlags。
  */
 export const STORE_DL_BAR_SELECTING: string = 'dlBarSelecting';
@@ -480,12 +506,10 @@ export const STORE_DL_BAR_QUEUE_ACTIVE: string = 'dlBarQueueHasActive';
 export const STORE_DL_BAR_QUEUE_PAUSED: string = 'dlBarQueueHasPaused';
 
 /**
- * 歌单页顶栏状态镜像键（批 4，机制同 STORE_DL_BAR_*：顶栏迁根容器后的状态通道）。
- * 页面侧唯一写入口：PlaylistsPage.syncBarState；
+ * 歌单页顶栏状态镜像键（机制同 STORE_DL_BAR_*：顶栏在根 HdsNavigation
+ * titleBar 的状态通道）。页面侧唯一写入口：PlaylistsPage.syncBarState；
  * 栏内组件 components/PlaylistsTabBar.ets（PlTitleActions / PlSelectToolbar）
  * @StorageProp 订阅。
- * 2026-10-10 歌单页 HDS 适配：bottomBuilder 第二行退役（多选工具条迁页面层、
- * 最近播放入口迁设置页），RECENT_COUNT / BOTTOM_HEIGHT 两键随之删除。
  */
 export const STORE_PL_BAR_SELECTING: string = 'plBarSelecting';
 export const STORE_PL_BAR_CAN_SELECT: string = 'plBarCanSelect';
@@ -493,22 +517,38 @@ export const STORE_PL_BAR_SELECTED_COUNT: string = 'plBarSelectedCount';
 export const STORE_PL_BAR_ALL_SELECTED: string = 'plBarAllSelected';
 
 /**
- * 搜索页顶栏状态键（批 4，机制同 STORE_DL_BAR_* / STORE_PL_BAR_*）。
- * 与前两页不同：搜索框 / 类型滑块 / 内容页签行**本身就在根栏里**，所以
- * keyword / searchKind / tab 是页面与根栏组件共享的**双向**状态
- * （两侧都 @StorageLink，任一侧写入另一侧即见）；页签行高度键由根栏组件
- * onAreaChange 实测回写，页面读它组让位量（safeTop + 56 + 实测值）
- * 与历史面板定位。
+ * 搜索状态键（搜索独立成 'Search' 二级页，首页三 chip 化）。
+ * keyword / searchKind 是搜索二级页（SearchPage）与其标题栏行（SearchInputBar，
+ * components/SearchTabBar.ets）共享的**双向**状态（两侧都 @StorageLink，
+ * 任一侧写入另一侧即见）；tab 是首页分类 chip（HomeCategoryChips）与
+ * HomePage 内容分支的共享通道。
  */
 export const STORE_SEARCH_KEYWORD: string = 'searchKeyword';
 export const STORE_SEARCH_KIND: string = 'searchKind';
 export const STORE_SEARCH_TAB: string = 'searchTab';
-export const STORE_SEARCH_TABS_HEIGHT: string = 'searchTabsHeight';
+
+/**
+ * 首页头部在场状态（boolean，HomePage 写、Index 标题栏读）：
+ * 列表偏移 < HomePage 的 HOME_ENTRY_FLIP_VP（入口搜索框还在视口内）时 true，
+ * 滚出后 false —— Index 标题栏据此淡入/淡出右上角搜索按钮（200ms）。
+ * HomePage 只在状态翻转时写（onDidScroll 每帧回调，不翻转零开销）。
+ */
+export const STORE_HOME_SEARCH_ENTRY_ACTIVE: string = 'homeSearchEntryActive';
+
+/**
+ * 首页 chip 条在场状态（boolean，HomePage 写、Index 标题栏读）：
+ * 列表偏移 < HomePage 的 HOME_TABS_FLIP_VP（分类 chip 条顶缘尚未触及导航栏底）
+ * 时 true —— Index 标题栏显示「BiliMusic」标题；滚到/越过阈值（chip 条上移到
+ * 导航栏）后 false —— 标题 200ms 淡出、三个分类 tab 图标淡入固定在导航栏
+ * （与 STORE_HOME_SEARCH_ENTRY_ACTIVE 同一套滚动翻转镜像机制）。
+ * HomePage 只在状态翻转时写（onDidScroll 每帧回调，不翻转零开销）。
+ */
+export const STORE_HOME_CHIPS_ACTIVE: string = 'homeChipsActive';
 
 /**
  * 当前活动页签下标（number，写入方 Index 的受控 HdsTabs）。
- * 2026-10-08 卡顿优化：Tabs 的 TabContent 是常驻的，下载页在非活动页签时
- * 依然接收下载快照、全量重分组 —— 切到别的 Tab 下载中照样拖慢整个 UI。
+ * Tabs 的 TabContent 是常驻的，下载页在非活动页签时依然接收下载快照、
+ * 全量重分组 —— 切到别的 Tab 下载中照样拖慢整个 UI。
  * Index 把 activeTab 挂到 AppStorage（@StorageLink 写穿），下载页据此门控：
  * 非本 Tab 跳过重算只置脏标记，切回时补算一次（见 DownloadsPage.onTabChanged）。
  */
@@ -527,20 +567,10 @@ export const STORE_TAB_SWITCH_REQUEST: string = 'tabSwitchRequest';
 export const STORE_TAB_SWITCH_TARGET: string = 'tabSwitchTarget';
 
 /**
- * Fling（惯性/回弹）进行中：仅边界写入（Fling 首帧 true / onScrollStop false），
- * 严禁逐帧写（design/Fling状态触发-两工程对照与AI实施规格.md §F2）。
- * 发布方：SearchPage 首页签 List 的 onWillScroll / onScrollStop（过 FlingSampler.note()
- * 翻转门控）。消费方：PlayBar @StorageLink + @Watch —— Fling 期暂停圆盘旋转
- * （保持当前角度，绝不复位），退出 Fling 恢复；aboutToDisappear 写回 false 兜底。
- */
-export const STORE_FLING_ACTIVE: string = 'flingActive';
-
-/**
  * 「去歌单页选」点选加入请求（seq 递增）：播放页 ControlArea 的菜单项在收起
  * 播放页 + 切到歌单页签的同时递增本键；PlaylistsPage @Watch 消费 —— 快照
  * STORE_CURRENT_TRACK 后进入「点选加入」模式（整行点击 = 加入该歌单，单次
- * 点选即退出，顶部占位条目内嵌提示条）。与 STORE_TAB_SWITCH_REQUEST 同款
- * seq 写法；2026-10-22 补齐「去歌单页选」的承接（旧实现只切页签就停了）。
+ * 点选即退出，顶部占位条目内嵌提示条）。与 STORE_TAB_SWITCH_REQUEST 同款 seq 写法。
  */
 export const STORE_PICK_PLAYLIST_ADD: string = 'pickPlaylistAdd';
 
@@ -549,11 +579,10 @@ export const STORE_PICK_PLAYLIST_ADD: string = 'pickPlaylistAdd';
  * 经 px2vp 换算。三键导航模式下非 0（整条可点击系统控件），手势导航模式下为 0 ——
  * **以它是否 > 0 区分导航模式**（判据 = 避让区来源，不按高度猜）。
  *
- * 背景（2026-10-22 修「阔折叠 / 阔直板大屏展开底部导航不居中」根因 1）：
- * 旧实现用固定 36vp 高度阈值猜「超过即三键」，但大屏展开态的手势指示条 /
- * 避让区高度与手机不同（不同形态、不同密度、分屏都会变），按阈值猜会误判
- * 分支 → barBottomMargin 折算错 → 胶囊垂直偏移。现删除阈值，模式与高度全部
- * 动态实测。写入：EntryAbility.writeSafeArea 首帧前同步首发一次 +
+ * 不能用固定高度阈值猜「超过即三键」：大屏展开态的手势指示条 / 避让区高度
+ * 与手机不同（不同形态、不同密度、分屏都会变），按阈值猜会误判分支 →
+ * barBottomMargin 折算错 → 胶囊垂直偏移。写入：EntryAbility.writeSafeArea
+ * 首帧前同步首发一次 +
  * pages/Index.ets 注册 avoidAreaChange 动态更新（转屏 / 折叠开合 / 切导航模式
  * 自动重算）。消费：Index.barFloatingStyle 的 barBottomMargin（三键 → 完整
  * 避让）、tabletPlayBar 底部 padding。
@@ -574,7 +603,7 @@ export const STORE_NAV_INDICATOR_BOTTOM: string = 'navIndicatorBottomVp';
  * 经 vp 换算。竖屏通常为 0；横屏下状态栏若以侧边条带上报，避让值落在这里。
  * 写入：EntryAbility.writeSafeArea 首发一次 + Index.applyAvoidArea（avoidAreaChange
  * 动态更新），与 STORE_SAFE_TOP / STORE_SAFE_BOTTOM 同批同源。
- * 消费（2026-10-24 播放页横屏方案）：播放页紧凑横屏分支的左侧避让。
+ * 消费：播放页紧凑横屏分支的左侧避让。
  */
 export const STORE_SAFE_LEFT: string = 'safeLeftVp';
 export const STORE_SAFE_RIGHT: string = 'safeRightVp';
@@ -584,8 +613,7 @@ export const STORE_SAFE_RIGHT: string = 'safeRightVp';
  * densityPixels 首发一次，pages/Index.ets 再挂 HdsTabs.onAreaChange 持续回写
  * （折叠开合 / 分屏 / 转屏后组件重排即触发）。
  *
- * 用途（2026-10-22 修「阔折叠 / 阔直板大屏展开底部导航不居中」根因 2）：
- * HDS 悬浮页签栏是**底左锚定**（barSideMargin = 胶囊左缘缩进，实测见
+ * 用途：HDS 悬浮页签栏是**底左锚定**（barSideMargin = 胶囊左缘缩进，实测见
  * Index.ets BAR_FLOATING_BAR_WIDTH 注释），队列空时大屏上单胶囊贴左不居中；
  * 队列空且宽度 ≥600vp 时用 (宽度 − 胶囊宽) ÷ 2 反算 barSideMargin 才能居中。
  * 不用 currentBreakpoint 判宽度：断点只给区间，居中公式要的是精确值。
@@ -595,8 +623,7 @@ export const STORE_WINDOW_WIDTH_VP: string = 'windowWidthVp';
 /**
  * 窗口内容区高度（vp）：与 STORE_WINDOW_WIDTH_VP 同一批写入（EntryAbility
  * 首帧前首发 windowRect.height ÷ densityPixels；Index 的 HdsTabs.onAreaChange
- * 回写宽度时一并回写高度）。用途（2026-10-24 下滑收起动画）：整页下滑的
- * 终点距离与手势跟手压暗的进度分母。
+ * 回写宽度时一并回写高度）。用途：整页下滑的终点距离与手势跟手压暗的进度分母。
  */
 export const STORE_WINDOW_HEIGHT_VP: string = 'windowHeightVp';
 
@@ -609,6 +636,16 @@ export const STORE_WINDOW_HEIGHT_VP: string = 'windowHeightVp';
 export const STORE_TOAST_MSG: string = 'toastMsg';
 export const STORE_TOAST_HOLD_MS: string = 'toastHoldMs';
 export const STORE_TOAST_SEQ: string = 'toastSeq';
+
+/**
+ * 一次性启动提示通道：AppContainer 迁移链路写、
+ * Index（aboutToAppear 补播 + @Watch SEQ 双覆盖）消费后清空 MSG。
+ * 走独立双键而不复用 Toast 通道的原因：initRest 与 loadContent 并行启动，
+ * Index 挂载可能早于提示写入 —— MSG 常驻 + SEQ 递增让晚到的 Index 也能补播；
+ * Toast 通道的 MSG 是即写即消，错过就丢。消费即清 MSG，防止下次启动重播。
+ */
+export const STORE_STARTUP_HINT_MSG: string = 'startupHintMsg';
+export const STORE_STARTUP_HINT_SEQ: string = 'startupHintSeq';
 
 /**
  * 媒体库（歌单 / 收藏 / 最近）版本号，每次写操作递增。
@@ -653,9 +690,34 @@ export const PREF_FAV_SYNC_STATE: string = 'bilimusic_fav_sync_state';
 export const PREF_FAV_SELECTION: string = 'bilimusic_fav_selection';
 
 /**
- * 收藏夹「待推送队列」分片前缀 —— **已下线**（2026-10-23 单向同步：本地→B 站回推
- * 链路整体移除，FavPushStore 删除）。常量保留仅供 AppContainer 启动时清理老版本
- * 残留的分片数据（key 形如 `bilimusic_fav_push_queue_0 / _1 / …`，上限 0..32）。
+ * 收藏夹同步**方向模式**（`number[]`，见 service/FavTwowayStore.ts）。
+ * 正向存储：在集合内 = 双向同步（本地增删实时写回 B 站），不在 = 单向（默认，
+ * 仅 B 站 → 本地，老版本升级零迁移）。只按 mediaId 判断，B 站侧改名不受影响。
+ * 写入 / 读取：service/FavTwowayStore.ts（同步页每行「单向/双向」滑块）。
+ */
+export const PREF_FAV_TWOWAY_IDS: string = 'bilimusic_fav_twoway_ids';
+
+/**
+ * 收藏夹双向同步**待推送意图队列**（`FavPushIntent[]`，见 service/FavPushStore.ts）。
+ * 双向夹本地增删实时写回失败后进入此队列，下次同步先补推再拉取；
+ * 上限 150 条（Preferences 单值 8192 字节预算），超限 FIFO 丢最旧。
+ * 注意：与已下线的老分片前缀 `bilimusic_fav_push_queue_` 无关，勿混淆。
+ */
+export const PREF_FAV_TWOWAY_PUSH_QUEUE: string = 'bilimusic_fav_twoway_push_queue';
+
+/**
+ * 首页快捷卡行「歌单卡」的持久化 id 列表（`string[]`，见 service/HomeCardStore.ts）。
+ * 存加入首页的歌单 id（加入顺序即卡行显示顺序），上限 9 个
+ * （快捷卡行共 10 卡 = 最近播放 1 + 歌单 9）。
+ * 写入 / 读取：service/HomeCardStore.ts（歌单列表 ⋯ 菜单「加入首页 / 移出首页」）；
+ * 消费：HomePage 快捷卡行（HomeQuickCards）。
+ */
+export const PREF_HOME_PLAYLIST_CARDS: string = 'bilimusic_home_playlist_cards';
+
+/**
+ * 收藏夹「待推送队列」分片前缀 —— **已下线**。常量保留仅供 AppContainer
+ * 启动时清理老版本残留的分片数据（key 形如 `bilimusic_fav_push_queue_0 / _1 / …`，
+ * 上限 0..32）。
  */
 export const PREF_FAV_PUSH_QUEUE: string = 'bilimusic_fav_push_queue_';
 
@@ -691,9 +753,8 @@ export const STORE_SAFE_BOTTOM: string = 'safeAreaBottom';
 
 /**
  * 各 Tab 列表末尾的固定让位高度（vp）：避开**悬浮**页签栏与全局底部播放栏。
- * 底栏换成 HdsTabs 沉浸光感悬浮胶囊后，胶囊自己还带 20vp 的离底间距，
- * 所以让位从原来的 140 抬到 160：
- *   离底 20 + 胶囊高 56 + 与底栏间距 8 + 底栏高 56 = 140，再留 20 余量。
+ * 悬浮胶囊自带 20vp 离底间距：
+ *   离底 20 + 胶囊高 56 + 与底栏间距 8 + 底栏高 56 = 140，再留 20 余量 = 160。
  *
  * 实际使用时还要加上 STORE_SAFE_BOTTOM：Tabs 内容区铺满整屏（不避让）之后，
  * 页签栏 / 底栏各自抬高了「底部安全区高度」，列表末尾不多让这么多，
@@ -702,14 +763,14 @@ export const STORE_SAFE_BOTTOM: string = 'safeAreaBottom';
 export const CONTENT_END_OFFSET: number = 160;
 
 //
-// 音频档位由服务端决定，客户端只能「在已有档位里挑」。线上实测（2026-09-28，匿名 + PC UA）：
+// 音频档位由服务端决定，客户端只能「在已有档位里挑」。线上实测（匿名 + PC UA）：
 //   热门投稿 8/8 都真实给出三档，30280 的 bandwidth 实测 176k~216k，是真的 192K；
 //   但**部分投稿（如音乐中心的承载视频）三个档位的 bandwidth 全在 66k 上下**
 //   —— 那是 B 站侧只有一份低码率音源，三个 id 指向同一份数据，选哪档文件都一样大。
-//   匿名状态下对照 fnval=16 与 fnval=4048：返回的档位完全一致，**提高 fnval 拿不到更多档**
-//   —— 该结论**仅限匿名**（2026-10-08 修正）：登录（大会员）后 fnval=4048 才会额外下发
-//   杜比全景声（dash.dolby.audio）与 Hi-Res 无损（dash.flac），这两个字段不在 dash.audio 里，
-//   需由 BilibiliApi.collectAudioStreams 合并进候选（修「登录后音质选项不生效」的根因之一）。
+//   匿名状态下 fnval=16 与 fnval=4048 返回的档位完全一致，**提高 fnval 拿不到更多档**
+//   —— 该结论**仅限匿名**：登录（大会员）后 fnval=4048 才会额外下发杜比全景声
+//   （dash.dolby.audio）与 Hi-Res 无损（dash.flac），这两个字段不在 dash.audio 里，
+//   需由 BilibiliApi.collectAudioStreams 合并进候选。
 // 所以「下载音质」能控制的是「选哪一档」，控制不了「服务端有没有那一档」；
 // 界面上必须回显**实际拿到的码率**，否则用户会把内容侧的低码率误判成 App 的 bug。
 export const AUDIO_Q_64K: number = 30216;
@@ -742,7 +803,7 @@ export function formatAudioBitrate(bandwidth: number): string {
 }
 
 /**
- * 「档位 + 实测码率」合成一行展示文案（2026-10-08）。
+ * 「档位 + 实测码率」合成一行展示文案。
  *
  * 抽成公共函数的原因：下载页（`DownloadsPage.qualityText`）与播放页
  * （`MusicInfoComponent.qualityText`）要显示同一首歌时**必须给出一致的文案**，

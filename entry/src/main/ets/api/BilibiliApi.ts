@@ -1,9 +1,8 @@
 /**
- * B 站 API 服务层（原生 ArkTS 版）。
- * 移植自原 React 版 src/services/bilibiliApi.ts，使用 HttpUtil + WBI 签名。
+ * B 站 API 服务层（原生 ArkTS 版），使用 HttpUtil + WBI 签名。
  * 所有请求自动携带 Referer / buvid Cookie（HttpUtil 统一处理），登录后追加 SESSDATA。
  *
- * 扫码登录（passport web 接口）已恢复（2026-10）：生成 / 轮询 / nav / 登出见文件末尾
+ * 扫码登录（passport web 接口）：生成 / 轮询 / nav / 登出见文件末尾
  * 「扫码登录」一节。密码 / 短信登录依赖极验验证码，第三方客户端无法内置，不做。
  * buvid 能力（设备指纹）与登录无关，在 `service/BiliDevice.ts`。
  */
@@ -68,11 +67,11 @@ async function biliFetch<T>(
   params?: Record<string, string | number>,
   anonymous: boolean = false
 ): Promise<T> {
-  // ⚠️ 2026-10-20 真机/平板实测：走 `params`（ohos 的 queryParams）时，
-  // `/x/web-interface/view` 拿到的仍是「没有 bvid」的空请求 → `-400 请求错误`
-  //（同一 bvid 用 curl 直连是 code=0）。工程里本来能用的 GET（搜索 / 推荐）
+  // ⚠️ 真机/平板实测：走 `params`（ohos 的 queryParams）时，
+  // `/x/web-interface/view` 拿到的是「没有 bvid」的空请求 → `-400 请求错误`
+  //（同一 bvid 用 curl 直连是 code=0）。工程里能用的 GET（搜索 / 推荐）
   // 全是把 query 直接拼进 URL 的，这里统一成同一口径：
-  // **参数内联到 URL**，不再依赖 queryParams。
+  // **参数内联到 URL**，不依赖 queryParams。
   let url: string = `${BILI_API}${path}`;
   if (params) {
     const parts: string[] = [];
@@ -85,7 +84,7 @@ async function biliFetch<T>(
     }
   }
   // anonymous = 不带登录 Cookie（buvid 保留）：账号级风控的匿名降级重试用，
-  // 见 extractAudioFromVideo 的「登录后不能播放」修复说明。
+  // 见 extractAudioFromVideo 的通道选择说明。
   const data: BiliEnvelope<T> = await HttpUtil.requestJson<BiliEnvelope<T>>(
     url, anonymous ? { skipLoginCookie: true } : undefined);
   if (data.code !== 0) {
@@ -206,13 +205,13 @@ export interface SearchResponse {
 /**
  * 搜索结果标题清洗。
  *
- * **API 通道返回的是未解码的原始标题**（2026-10-22 真机实测）：带引号的稿件，
+ * **API 通道返回的是未解码的原始标题**（真机实测）：带引号的稿件，
  * `/x/web-interface/wbi/search/type` 给的是 `&quot;虚妄堆起了虚妄山…&quot; DOUDOU《…》`。
  * 不解码会造成两个后果，而且第二个很隐蔽：
  *   ① 歌单里存成 `&quot;…&quot;`，用户可见的脏字符；
  *   ② 拿它当关键词去搜歌词时，query 里真的带着 `&quot`（hilog 里可见
  *      `s=%E5%AE%9D%E8%88%B9%20%26quot%20…`），命中率直接归零。
- * HTML 兜底通道早就解过（`parseSearchCardHtml`），只有 API 通道漏了，这里补齐。
+ * HTML 兜底通道（`parseSearchCardHtml`）已解码，本函数把 API 通道对齐。
  *
  * 顺序与 HTML 通道保持一致：先解实体、再剥标签（`&lt;em&gt;` 解出来才剥得掉）。
  */
@@ -249,7 +248,7 @@ export async function searchVideo(
 }
 
 //
-// ────────── HTML 搜索页兜底通道（2026-10-22）──────────
+// ────────── HTML 搜索页兜底通道 ──────────
 //
 /**
  * API 搜索是**按 IP 计量**的硬配额，长歌单必然撞墙，撞墙后整批「未找到」。
@@ -378,6 +377,56 @@ export async function searchUser(
   return data.data;
 }
 
+//
+// ────────── B 站热搜词 ──────────
+//
+
+/** 热搜词条（`/x/web-interface/wbi/search/square`，只声明 UI 用到的字段） */
+interface HotSearchSquareItem {
+  keyword: string;
+  show_name: string;
+}
+
+/** 热搜榜单容器：实测（真机 + 直连抓包）列表挂在 `data.trending.list`，
+ *  并非 `data.list`——按后者解析恒为空，表现为「没有获取到热搜」。 */
+interface HotSearchSquareTrending {
+  list: HotSearchSquareItem[];
+}
+
+interface HotSearchSquareData {
+  trending?: HotSearchSquareTrending;
+}
+
+/**
+ * B 站当前热搜词（搜索页「热搜」页签数据源）。
+ *
+ * 接口：`/x/web-interface/wbi/search/square?limit=N`（WBI 签名，与搜索同门，
+ * 匿名实测可用）。limit 服务端上限 10，超出直接 -400，这里内部封顶防误传。
+ *
+ * 返回去重后的热搜词数组（顺序即榜单顺序，首位最热）；code !== 0 抛
+ * `BiliApiError` 由上层提示，不影响搜索主流程。
+ */
+export async function getHotSearchKeywords(limit: number = 10): Promise<string[]> {
+  const capped: number = Math.min(Math.max(limit, 1), 10);
+  const query: string = await encodeWbi({ limit: capped });
+  const data: BiliEnvelope<HotSearchSquareData> =
+    await HttpUtil.requestJson<BiliEnvelope<HotSearchSquareData>>(
+      `${BILI_API}/x/web-interface/wbi/search/square?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/wbi/search/square');
+  }
+  const out: string[] = [];
+  const list: HotSearchSquareItem[] = data.data?.trending?.list ?? [];
+  for (let i = 0; i < list.length; i++) {
+    const word: string = (list[i].keyword ?? '').trim();
+    if (word.length > 0 && out.indexOf(word) < 0) {
+      out.push(word);
+    }
+  }
+  return out;
+}
+
 export interface SpaceVideo {
   bvid: string;
   aid: number;
@@ -398,10 +447,8 @@ export interface SpaceArcSearchData {
 /**
  * 空间投稿接口 `ps`（每页条数）上限。
  *
- * 2026-10-08 实测（`x/space/arc/search` 匿名直打）：ps=50 只受常规风控（412 抖动），
+ * 实测（`x/space/arc/search` 匿名直打）：ps=50 只受常规风控（412 抖动），
  * **ps=60 恒返回 `code:-400 请求错误`**（ps=100 则 -799）—— 超上限是**确定性**失败。
- * 这曾实打实坑过「登录态歌单拉新」：PlaylistDetail 传 maxItems=60 当 ps 用，
- * 空间接口每次必 -400，登录态优先路径形同虚设（反而比匿名态更差）。
  * 所以在这里统一钳制：调用方要再多也只给 50，要更多自己翻页（pn）。
  */
 const SPACE_PS_MAX: number = 50;
@@ -409,9 +456,8 @@ const SPACE_PS_MAX: number = 50;
 /**
  * UP 主投稿列表（老接口）。
  *
- * 2026-10-03 实测更正：**带不带 `jsonp=jsonp` 与成败无关**（同一 URL 一带一不带各测过，
- * 成功和失败都出现过）→ 之前「必须带 jsonp 才能过」的结论是**把限流抖动误当成了参数规律**。
- * 现在保留这个参数只是无害冗余，真正起作用的是调用时机（别密集请求）。
+ * 实测：**带不带 `jsonp=jsonp` 与成败无关**（同一 URL 一带一不带各测过，
+ * 成功和失败都出现过）。该参数只是无害冗余，真正起作用的是调用时机（别密集请求）。
  *
  * 它不需要 wbi 签名 → 在 wbi 版被限的轮次里作为替补。
  */
@@ -452,7 +498,7 @@ export interface UpVideosSearchResult {
 /**
  * UP 主投稿列表（**首选路径**：用搜索接口反查）。
  *
- * 为什么不用空间接口当首选（2026-10-03 实测）：
+ * 为什么不用空间接口当首选（实测）：
  *   · `x/space/wbi/arc/search` 与 `x/space/arc/search` 对匿名访问风控极强，
  *     同一 URL 连打 8 次 **0/8 成功**（失败形态在 HTTP 412 与 -799 之间随机跳），
  *     冷却 45s / 间隔 8s / 间隔 20s 各试一次，**没有可用规律**；
@@ -570,14 +616,14 @@ async function collectKeywordMatches(
 }
 
 /**
- * 按**任意关键词**搜索某个 UP 的投稿（UP 主页站内搜索，2026-10-23）。
+ * 按**任意关键词**搜索某个 UP 的投稿（UP 主页站内搜索）。
  *
- * 两轮策略（2026-10-23 真机修「点搜索反而 0 命中」）：
+ * 两轮策略：
  *  · 第一轮拿「UP名 + 关键词」做**相关性**搜索 —— 昵称反查（getUserVideosViaSearch）
  *    能用搜索+mid 过滤走通，正是因为搜索词就是 UP 名；拼上关键词后结果仍集中在
  *    该 UP 的稿件上，mid 过滤即得「TA 的投稿里匹配关键词的」。
- *    旧实现用 pubdate 排序搜裸关键词：全站按时间排，该 UP 的视频被埋进全局
- *    最新匹配里，3 页 60 条捞不到 → 必然 0 命中（真机复现）。
+ *    用 pubdate 排序搜裸关键词会把该 UP 的视频埋进全站最新匹配里，
+ *    3 页 60 条捞不到 → 必然 0 命中。
  *  · 第一轮 0 命中时用裸关键词再兜底一轮：捞回「标题/简介只含关键词、
  *    作者恰好是 TA」的投稿（搜索把昵称当硬条件时第一轮会漏掉这类）。
  *
@@ -619,10 +665,9 @@ const SPACE_SEARCH_MAX_ITEMS: number = 200;
  * 「搜索 TA 的投稿」同款）—— 结果就是「TA 的投稿里匹配关键词的全部」，按
  * `page.count` 精确翻页拉齐（骨架镜像 `collectUpVideosAll`）。
  *
- * 2026-10-23 修「搜索结果缺失」：`searchUpVideosByKeyword`（全站搜索 + mid
- * 过滤）按相关性排名，该 UP 的匹配视频挤不进全站前几页就搜不到；本函数在
- * 空间内过滤，天然完整。风控失败（searchOk=false）时由调用方
- * （UpSpacePage.runRemoteSearch 阶梯）落回全站兜底。
+ * `searchUpVideosByKeyword`（全站搜索 + mid 过滤）按相关性排名，该 UP 的匹配
+ * 视频挤不进全站前几页就搜不到；本函数在空间内过滤，天然完整。风控失败
+ * （searchOk=false）时由调用方（UpSpacePage.runRemoteSearch 阶梯）落回全站兜底。
  *
  * 边界预期：
  *  · 首页失败重试耗尽 → { list: [], searchOk: false }（接口被限 ≠ 0 命中）；
@@ -640,7 +685,7 @@ export async function searchSpaceVideosByKeyword(
     return { list: [], searchOk: false };
   }
   const ps: number = Math.min(hardCap, SPACE_PS_MAX);
-  // 匿名态首页重试降到 2 次：风控下多试一次只是多白等 2.5s，失败反正有全站兜底
+  // 匿名态首页重试只用 2 次：风控下多试一次只是多白等 2.5s，失败反正有全站兜底
   const firstAttempts: number = HttpUtil.getLoginCookie().length > 0 ? 3 : 2;
   let first: SpaceArcSearchData;
   try {
@@ -731,7 +776,7 @@ export async function searchVideoByDate(
  *     翻页终止由调用方按 `page.count` / 短页判断，这里把空当失败重试只会让
  *     「拉到最后一页」白等 2×2.5s 再抛错。
  * `keyword` 非空时透传给空间接口做服务端搜索（见 searchSpaceVideosByKeyword）；
- * 存量调用不传 = 参数不带 keyword，行为与旧版完全一致。
+ * 不传 = 参数不带 keyword。
  */
 export async function fetchSpacePageWithRetry(
   mid: number,
@@ -778,14 +823,13 @@ export async function fetchSpacePageWithRetry(
  *
  * ⚠️ 间隔必须给够：实测「连打 8 次间隔 1.5s」是 0/8，密集请求会自己撞满限流阈值。
  * ⚠️ `getUserVideos` 内部会在 wbi ↔ 老接口之间自动交替，所以重试天然在换接口试。
- * ⚠️ **确定性业务错误不重试**（2026-10-08）：-400（参数错误，如 ps 超限）、
+ * ⚠️ **确定性业务错误不重试**：-400（参数错误，如 ps 超限）、
  *   -101（登录失效）重试多少次结果都一样 —— 立即抛出让上层走兜底，
  *   否则用户对着「正在拉取…」白等 3×2.5s 才见到失败（复用 isRetryableFetchError 的判定）。
  *
- * ⚠️ **页码必须透传**（2026-10-11 修）：本包装层旧签名没有 page 参数、内部恒取第 1 页，
- *   UpSpacePage 上拉翻页传了 pn 也没用 —— 同一批条目被反复追加，缓存里全是重复。
- *   现在签名与 `getUserVideos` 参数序对齐（mid, page, pageSize, order, attempts），
- *   翻页调用方务必把 pn 传进来；只取首页的调用点显式传 1。
+ * ⚠️ **页码必须透传**：签名与 `getUserVideos` 参数序对齐
+ *   （mid, page, pageSize, order, attempts），翻页调用方务必把 pn 传进来；
+ *   只取首页的调用点显式传 1。
  */
 export async function getUserVideosWithRetry(
   mid: number,
@@ -814,13 +858,13 @@ function delay(ms: number): Promise<void> {
 /**
  * 上一次「投稿列表」请求走的是哪个接口。
  *
- * 2026-10-03 重复实验（同一 URL 连打 8 次、间隔 1.5s）：**0/8 成功**，
+ * 重复实验（同一 URL 连打 8 次、间隔 1.5s）：**0/8 成功**，
  * 失败形态在 `HTTP 412` 与 `code=-799 请求过于频繁` 之间随机切换；
  * 而隔开一段时间再打，同一个 URL 又能拿到 30 条。
  * 结论：**该接口是按 IP 限流的，密集请求必被拒，且失败形态随机**。
  *
  * 所以这里不做「同一次调用里 wbi 失败立刻降级」——那会在一次进入里连发两个请求，
- * 正好把限流阈值撞满。改成**跨轮次交替**：这次走 wbi，下次（用户点重试）走老接口。
+ * 正好把限流阈值撞满。采用**跨轮次交替**：这次走 wbi，下次（用户点重试）走老接口。
  */
 let lastArcSearchUsedLegacy: boolean = false;
 
@@ -867,11 +911,11 @@ export async function getUserVideos(
 
 // ===== 投稿获取：多源兜底 =====
 //
-// 「拉取新投稿」曾经只能靠空间接口（`x/space/wbi/arc/search`），而它对匿名访问风控极强
-// （间隔 20s 打 4 次也只成功 2 次，1.5s 连打 8 次是 0/8）。2026-10-06 补了一次对照实验：
+// 空间接口（`x/space/wbi/arc/search`）对匿名访问风控极强（间隔 20s 打 4 次也只
+// 成功 2 次，1.5s 连打 8 次是 0/8）。对照实验结论：
 //   · 搜索接口 `wbi/search/type` 连打 8 次 **8/8 成功** —— 它根本没被限流；
 //   · `x/web-interface/archive/related`（相关推荐）连打 3 次 **3/3 code=0**，
-//     40 条里同 UP 的占 11~20 条（随种子变化）—— 这是一条**全新的独立数据源**，
+//     40 条里同 UP 的占 11~20 条（随种子变化）—— 这是一条**独立的第三数据源**，
 //     且它不依赖「UP 昵称出现在视频标题里」（搜索反查的致命弱点）；
 //   · App 端 `app.bilibili.com/x/v2/space/archive/cursor` 恒 -400（要 appkey 签名），走不通；
 //   · 动态流 `x/polymer/web-dynamic/v1/feed/space` 恒 -352，走不通。
@@ -881,11 +925,11 @@ export async function getUserVideos(
 //   ② related 扩散（用歌单里已有的该 UP 视频当种子，捞出同 UP 的其它投稿）
 //   ③ 空间接口（老路，成功率不稳定，仅兜底）
 //
-// ⚠️ 登录态（2026-10 登录功能修复后新增）：SESSDATA 会由 HttpUtil 自动附到所有请求上，
-// 空间接口的匿名风控（412/-799/-352）大幅缓解 → collectUpVideos 在登录时把空间接口
-// **提到最前**（⓪）：它是唯一全量、按 pubdate 排序、支持真分页的准确数据源，
+// ⚠️ 登录态：SESSDATA 会由 HttpUtil 自动附到所有请求上，空间接口的匿名风控
+// （412/-799/-352）大幅缓解 → collectUpVideos 在登录时把空间接口**提到最前**
+// （⓪）：它是唯一全量、按 pubdate 排序、支持真分页的准确数据源，
 // 搜索反查的「UP 昵称必须在视频内容里」与 related 的「相关≠最新」局限它都没有。
-// 失败仍落回匿名态同款 ①→②→③ 顺序，行为无回归。
+// 失败仍落回匿名态同款 ①→②→③ 顺序。
 
 /** 相关推荐条目（`x/web-interface/archive/related`） */
 export interface RelatedVideo {
@@ -915,7 +959,7 @@ interface RelatedRawItem {
 /**
  * 相关推荐。
  *
- * 实测（2026-10-06）：匿名 `code=0` 稳定返回 **40 条**，连打 3 次全成功；
+ * 实测：匿名 `code=0` 稳定返回 **40 条**，连打 3 次全成功；
  * 条目带 `owner.mid` → 能过滤出同一 UP 的投稿。
  * 局限：它是「相关」不是「最新」，所以只作兜底，不拿来替代搜索反查。
  */
@@ -1047,8 +1091,7 @@ export interface UpVideosCollectResult {
  * 取某 UP 的投稿（**多源兜底统一入口**）。
  *
  * ⚠️ 两个页面（PlaylistDetail 的「拉取新投稿」、UpSpacePage 的订阅 / 拉取）**都必须调这里**，
- * 不要各自拼链路 —— 历史上就是因为各写一份，`getUserVideosViaSearch` 改签名时漏改了
- * PlaylistDetail，报错却指向别处。策略只在这里维护一份。
+ * 不要各自拼链路 —— 分开的副本容易在改签名时漏改调用点。策略只在这里维护一份。
  *
  * 三级兜底见本小节顶部注释。返回 `via` 是为了让 UI 能区分：
  *   · 拿到了数据但全被去重 → 「已经是最新」（不是故障，别让用户以为 App 坏了）；
@@ -1062,7 +1105,7 @@ export async function collectUpVideos(
   spaceAttempts: number = 3
 ): Promise<UpVideosCollectResult> {
   // ⓪ 登录态优先空间接口：全量、pubdate 排序、真分页（UpSpacePage hasMore 的前提）。
-  //    失败（SESSDATA 失效 / 瞬态风控）→ 落回下面的匿名态同款顺序，行为无回归。
+  //    失败（SESSDATA 失效 / 瞬态风控）→ 落回下面的匿名态同款顺序。
   //    ps 由 getUserVideos* 内部钳到 50（超上限恒 -400，见 SPACE_PS_MAX）。
   if (HttpUtil.getLoginCookie().length > 0) {
     try {
@@ -1146,7 +1189,7 @@ export async function collectUpVideosAll(
   const ps: number = Math.min(hardCap, SPACE_PS_MAX);
   let first: SpaceArcSearchData;
   try {
-    // 匿名态首页重试降到 2 次：风控下多试一次只是多白等 2.5s，失败反正有兜底链
+    // 匿名态首页重试只用 2 次：风控下多试一次只是多白等 2.5s，失败反正有兜底链
     const firstAttempts: number = HttpUtil.getLoginCookie().length > 0 ? 3 : 2;
     first = await fetchSpacePageWithRetry(Number(mid), 1, ps, 'pubdate', firstAttempts, false);
   } catch (e) {
@@ -1258,6 +1301,8 @@ export async function getVideoDetail(
   if (!refresh) {
     const hit: VideoDetail | null = cacheGet<VideoDetail>(viewCache, bvid, VIEW_CACHE_TTL_MS);
     if (hit !== null) {
+      // 合集诊断：缓存命中也带 pages/videos 数，与网络路径口径一致
+      console.info(`[Collection] view bvid=${bvid} cache=hit pages=${hit.pages ? hit.pages.length : 0} videos=${hit.videos}`);
       return hit;
     }
   }
@@ -1265,8 +1310,40 @@ export async function getVideoDetail(
   // 它抖动一次整首就废，所以必须给它退避重试（理由见 biliFetchRetry 上方注释）。
   const detail: VideoDetail = await biliFetchRetry<VideoDetail>(
     '/x/web-interface/view', { bvid: bvid }, 'view', anonymous);
+  console.info(`[Collection] view bvid=${bvid} cache=net pages=${detail.pages ? detail.pages.length : 0} videos=${detail.videos}`);
   cachePut<VideoDetail>(viewCache, bvid, detail, VIEW_CACHE_MAX);
   return detail;
+}
+
+/**
+ * 取视频**完整**分P列表（`/x/player/pagelist`，公开接口）。
+ *
+ * 背景：个别合集用 view 接口拿到的 `pages` 比服务端声称的总分P数（`videos`）少，
+ * 展开后的歌单/队列缺歌。pagelist 返回完整 `[{cid, page, part, duration}]`，
+ * 形状与 `VideoPageInfo` 一致，用它补全。失败向上抛（BiliApiError / 网络错误），
+ * 由调用方决定是否降级——**绝不静默吞错**，补全失败必须留 hilog 现场（见 expandVideoParts）。
+ */
+export async function getVideoPageList(bvid: string): Promise<VideoPageInfo[]> {
+  const raw: VideoPageInfo[] = await biliFetch<VideoPageInfo[]>('/x/player/pagelist', { bvid: bvid });
+  const list: VideoPageInfo[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    // cid 无效的条目没法取流，直接滤掉
+    if (raw[i].cid > 0) {
+      list.push(raw[i]);
+    }
+  }
+  // page 字段齐全时按 page 升序，保证与 view 的 pages 顺序口径一致；缺失则保持返回序
+  let allNumbered: boolean = list.length > 0;
+  for (let i = 0; i < list.length; i++) {
+    if (!list[i].page || list[i].page <= 0) {
+      allNumbered = false;
+      break;
+    }
+  }
+  if (allNumbered) {
+    list.sort((a: VideoPageInfo, b: VideoPageInfo): number => (a.page ?? 0) - (b.page ?? 0));
+  }
+  return list;
 }
 
 export interface PartTitle {
@@ -1308,7 +1385,26 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
     return [];
   }
   const detail: VideoDetail = await getVideoDetail(bvid);
-  const pages: VideoPageInfo[] = detail.pages ? detail.pages : [];
+  let pages: VideoPageInfo[] = detail.pages ? detail.pages : [];
+  console.info(`[Collection] expand bvid=${bvid} pages=${pages.length} videos=${detail.videos} season=${detail.ugc_season ? 'yes' : 'no'}`);
+  // ⚠️ view 返回的 pages 比服务端声称的总分P数（videos）少时（个别合集加载
+  // 不完整的根因），用 pagelist 补全。补全失败/无改善 → 保留原 pages 继续，
+  // 但必须留 warn 现场。
+  if (detail.videos > 1 && pages.length < detail.videos) {
+    console.warn(`[Collection] 分P列表不完整：服务端共 ${detail.videos} P，实际收到 ${pages.length}，尝试 pagelist 补全`);
+    try {
+      const full: VideoPageInfo[] = await getVideoPageList(bvid);
+      if (full.length > pages.length) {
+        console.warn(`[Collection] pagelist 补全成功：${pages.length} → ${full.length} 条（服务端 ${detail.videos} P）`);
+        pages = full;
+      } else {
+        console.warn(`[Collection] pagelist 无改善：返回 ${full.length} 条，保留原 pages`);
+      }
+    } catch (e) {
+      const reason: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      console.warn(`[Collection] pagelist 补全失败：${reason}`);
+    }
+  }
   if (pages.length <= 1) {
     // 多 P 不存在；用户显式要求时再看合集（ugc_season）
     return expandSeason ? expandSeasonEpisodes(bvid, detail, base) : [];
@@ -1317,8 +1413,12 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
   const cover: string = base && base.coverUrl ? base.coverUrl : toHttpsUrl(detail.pic);
   const aid: string = base && base.aid ? base.aid : String(detail.aid);
   const out: Track[] = [];
+  const badPages: number[] = [];
   for (let i = 0; i < pages.length; i++) {
     const p: VideoPageInfo = pages[i];
+    if (p.cid <= 0 || p.duration <= 0) {
+      badPages.push(i + 1);
+    }
     const parsed: PartTitle = splitPartTitle(p.part);
     let title: string = parsed.title;
     if (title.length === 0) {
@@ -1342,6 +1442,12 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
       duration: p.duration
     }));
   }
+  if (badPages.length > 0) {
+    const shown: string = badPages.slice(0, 5).join('、');
+    console.warn(`[Collection] 异常分P ${badPages.length} 个（cid/时长缺失）：P${shown}${badPages.length > 5 ? '…' : ''}`);
+  }
+  console.info(`[Collection] 展开 bvid=${bvid} 构建 ${out.length} 首（服务端 ${detail.videos} P），` +
+    `首「${out[0].title.slice(0, 30)}」末「${out[out.length - 1].title.slice(0, 30)}」`);
   return out;
 }
 
@@ -1356,6 +1462,7 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
 function expandSeasonEpisodes(bvid: string, detail: VideoDetail, base?: Track): Track[] {
   const season: UgcSeason | undefined = detail.ugc_season;
   if (!season || !season.sections) {
+    console.info(`[Collection] season 缺失 bvid=${bvid}`);
     return [];
   }
   // 跨 section 汇总（多数合集只有一个 section）
@@ -1366,7 +1473,10 @@ function expandSeasonEpisodes(bvid: string, detail: VideoDetail, base?: Track): 
       eps.push(list[j]);
     }
   }
+  console.info(`[Collection] season「${season.title.slice(0, 30)}」sections=${season.sections.length} episodes=${eps.length}`);
   if (eps.length <= 1) {
+    // 用户会看到「该视频只有一个分 P」toast，日志里留好当时的服务端数据以便对照
+    console.info(`[Collection] season 条目不足（${eps.length}），跳过展开`);
     return [];
   }
   const fallbackArtist: string = base && base.artist ? base.artist : (detail.owner ? detail.owner.name : '');
@@ -1374,13 +1484,18 @@ function expandSeasonEpisodes(bvid: string, detail: VideoDetail, base?: Track): 
     : (base && base.coverUrl ? base.coverUrl : toHttpsUrl(detail.pic));
   const baseBvid: string = base && base.bvid ? base.bvid : bvid;
   const out: Track[] = [];
+  let skippedBad: number = 0;
+  let reusedBase: number = 0;
   for (let i = 0; i < eps.length; i++) {
     const ep: SeasonEpisode = eps[i];
     if (!ep.bvid || ep.bvid.indexOf('BV') !== 0) {
+      // 条目 bvid 异常（下架 / 付费，返回空串）直接跳过
+      skippedBad++;
       continue;
     }
     // 用户点开的视频：复用原条目（含 id），位置仍在合集的原顺序处
     if (base && ep.bvid === baseBvid) {
+      reusedBase++;
       out.push(base);
       continue;
     }
@@ -1399,16 +1514,23 @@ function expandSeasonEpisodes(bvid: string, detail: VideoDetail, base?: Track): 
       pubdate: 0
     }));
   }
+  if (skippedBad > 0) {
+    console.warn(`[Collection] season ${skippedBad} 个条目 bvid 无效（下架/付费），已跳过`);
+  }
+  if (reusedBase > 0) {
+    console.info(`[Collection] season 复用当前条目 ${reusedBase} 个`);
+  }
+  console.info(`[Collection] season 展开：${eps.length} 条构建 ${out.length} 首`);
   return out;
 }
 
 /**
  * playurl 公共参数。
  *
- * ⚠️ fnval=4048（2026-10-08 从 16 改）：16 只拿基础 DASH 三档（64K/132K/192K），
+ * ⚠️ fnval=4048：16 只拿基础 DASH 三档（64K/132K/192K），
  * 杜比全景声需要 fnval 含 256 位（4048 已覆盖）**且请求带登录 Cookie（大会员）** 服务端
  * 才会下发（杜比在 dash.dolby.audio、Hi-Res 在 dash.flac.audio，见 collectAudioStreams）。
- * 匿名状态下 4048 与 16 返回完全一致（2026-09-28 实测），无回归。
+ * 匿名状态下 4048 与 16 返回完全一致（实测）。
  *
  * ⚠️ 风控指纹参数**不在这里**：它们每次请求都要重新随机，见 buildPlayUrlParams。
  */
@@ -1420,7 +1542,7 @@ const PLAYURL_BASE_PARAMS: Record<string, string | number> = {
 };
 
 /**
- * 组装 playurl 全量参数 = 业务参数 + 浏览器同款风控指纹（2026-10-24 移植 PiliPlus）。
+ * 组装 playurl 全量参数 = 业务参数 + 浏览器同款风控指纹（指纹字段对齐 PiliPlus）。
  *
  * 指纹部分（gaia_source / isGaiaAvoided / web_location / dm_img_*）取自
  * utils/RiskShield.ts，每次调用重新随机 —— **不能做成常量**：一串固定不变的
@@ -1461,7 +1583,7 @@ async function fetchPlayUrlViaWbi(params: Record<string, string | number>): Prom
  * TV 端取流（APP 签名域，`/x/tv/playurl`）—— 取流链路的**最后一级兜底**。
  *
  * 为什么它能救场：Web 域与 APP 域是两套独立风控策略，同一 aivd 在 Web playurl
- * 被 -352 拦死时，这条通常还能返回数据（2026-10-24 实测：匿名 + appSign 即 code=0）。
+ * 被 -352 拦死时，这条通常还能返回数据（实测：匿名 + appSign 即 code=0）。
  *
  * 代价明确：它只给 **durl（整段 mp4，音视频合一）**，没有 dash 音轨，
  * 且 qn 最低档也有 ~400kbps（3.5 分钟约 10MB）。所以只在「dash 完全拿不到」时用，
@@ -1496,11 +1618,11 @@ async function fetchTvPlayUrl(aid: number, cid: number, anonymous: boolean): Pro
 }
 
 /**
- * 取流统一入口：**双 Web 通道交叉 + TV 域末级兜底**（2026-10-24 改造）。
+ * 取流统一入口：**双 Web 通道交叉 + TV 域末级兜底**。
  *
  * 通道顺序（`wantHiRes` = 无损偏好 + 已登录 + 非匿名）：
  *   1. wantHiRes → wbi 优先（旧端点不下发 flac/dolby），失败落旧端点；
- *   2. 其余 → 旧端点优先（长期线上验证的稳定通道，保持零回归），失败落 wbi；
+ *   2. 其余 → 旧端点优先（长期线上验证的稳定通道），失败落 wbi；
  *   3. 两条 Web 通道都失败 → 且拿到了 aid → TV 端 playurl（durl 兜底）。
  *
  * 三条通道跑的是**不同风控策略**，所以这里的重试不是「同一策略多试几次」，
@@ -1648,7 +1770,7 @@ export function pickAudioStream(streams: AudioStream[], preferredQuality: number
 /**
  * 归一化单条音轨：把档位补进 `quality` 字段。
  *
- * ⚠️ 2026-10-08 关键修正：B 站 playurl 响应的 dash 音轨对象**只有 `id` 没有 `quality`**
+ * ⚠️ B 站 playurl 响应的 dash 音轨对象**只有 `id` 没有 `quality`**
  * （bilibili-API-collect 两个响应示例一致：id=30280/30232/30216…）。而档位选择
  * （pickAudioStream）按 `quality` 匹配 —— 不归一化的话所有偏好选择都因
  * `undefined === 30216` 永远匹配不上，全部落到「带宽最大」兜底，
@@ -1673,9 +1795,9 @@ function normalizeAudioStream(raw: AudioStream): AudioStream {
  * 把响应里**所有**音轨归一化进一个候选列表：dash.audio（基础三档）+
  * dash.flac.audio（Hi-Res，**单对象**）+ dash.dolby.audio（杜比，数组）。
  *
- * 为什么必须合并（2026-10-08 修「登录后音质选项不生效」）：B 站协议里高档位
- * 音轨**不放在 dash.audio**——杜比在 dash.dolby.audio、Hi-Res 在 dash.flac.audio。
- * 此前只读 dash.audio，导致 audioQualityCandidates 里 30250/30251 永远匹配不上，
+ * 为什么必须合并：B 站协议里高档位音轨**不放在 dash.audio**——
+ * 杜比在 dash.dolby.audio、Hi-Res 在 dash.flac.audio。
+ * 只读 dash.audio 会让 audioQualityCandidates 里 30250/30251 永远匹配不上，
  * 「无损」选项最终按带宽最大兜底拿 192K，登录了也看不出区别。
  * 无对应音轨时 flac 整体为 null、dolby.audio 为 null —— 一律真值判断。
  */
@@ -1686,7 +1808,7 @@ function collectAudioStreams(playData: PlayUrlData): AudioStream[] {
     return out;
   }
   // ⚠️ 这里**不能**在 dash.audio 为空时直接 return：服务端存在「只有 flac / dolby」的
-  // 极端响应，早退会让下面的合并逻辑整段失效（旧实现的空洞）。
+  // 极端响应，早退会让下面的合并逻辑整段失效。
   const base: AudioStream[] = dash.audio ? dash.audio : [];
   for (let i = 0; i < base.length; i++) {
     pushIfPlayable(out, base[i]);
@@ -1734,7 +1856,7 @@ function pushIfPlayable(out: AudioStream[], raw: AudioStream): void {
 /**
  * 按偏好挑一条 dash 音轨。
  *
- * ⚠️ **不要用它来组装可播地址**（2026-10-22）：它只认 dash，遇到 durl 老视频必抛
+ * ⚠️ **不要用它来组装可播地址**：它只认 dash，遇到 durl 老视频必抛
  * `No audio stream available`。组装音源请走 `resolveAudioSelection`
  * （内部会先 dash、再 durl 兜底）。本函数保留给「只想知道 dash 里挑了哪一档」的场景。
  */
@@ -1750,7 +1872,7 @@ export function getBestAudioStream(playData: PlayUrlData, preferredQuality: numb
 }
 
 /**
- * 「降档阶梯」：解析/播放失败时逐级向下换档位用的候选序列（2026-10-22）。
+ * 「降档阶梯」：解析/播放失败时逐级向下换档位用的候选序列。
  *
  * 为什么要它：`audioQualityCandidates` 回答的是「用户想要的那一档不存在时退到哪」，
  * 而且它的序列里**混着更大的档**（高品质 → 无损 → 杜比），语义是「不亏」。
@@ -1795,7 +1917,7 @@ interface AudioSelection {
 
 /**
  * durl 兜底：老视频 / 服务端把 fnval 降级成 durl 时，响应里**一条 dash 音轨都没有**，
- * 只有整段 mp4 的分段地址。旧实现到这一步直接抛 `No audio stream available`，
+ * 只有整段 mp4 的分段地址。只认 dash 会在这里抛 `No audio stream available`，
  * 表现就是「这个视频怎么点都播不出来」—— 而它其实是能出声的。
  *
  * 取舍：
@@ -1911,7 +2033,12 @@ function buildTrackSource(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth
+    audioBandwidth: best.bandwidth,
+    // 服务端响度预测：dash 响应携带；durl 降级 / 老视频缺失时兜 0，
+    // 应用侧遇 0 跳过（响度均衡对该曲目不生效）。sourceCache 旧缓存条目
+    // 缺这两个字段 → undefined，在 `> 0` 判定下同样安全跳过，无需清缓存。
+    loudnessMeasuredI: playData.volume?.measured_i ?? 0,
+    loudnessTargetI: playData.volume?.target_i ?? 0
   };
 }
 
@@ -1923,7 +2050,7 @@ export interface PopularVideo {
   owner: { mid: number; name: string; face: string };
   stat: { view: number; danmaku: number; like: number; coin: number; favorite: number; share: number };
   duration: number;
-  /** 视频发布时间（unix 秒）。原始响应带、旧声明漏了；可缺 —— 缺则 UI 不显示发布时间 */
+  /** 视频发布时间（unix 秒）。原始响应带；可缺 —— 缺则 UI 不显示发布时间 */
   pubdate?: number;
 }
 
@@ -2023,20 +2150,20 @@ export async function getRecommendedFeed(freshIdx: number, ps: number = 20): Pro
 }
 
 //
-// 数据源变迁（本机实测对照结论）：
+// 数据源对比（本机实测结论）：
 //   · `ranking/region?rid=3&day=3`（音乐区旧榜）只返回 **11 条**，且 pn/ps 完全无效，
 //     字段是 author(str) / duration("0:15") / 无 cid / 无 owner —— 既不能分页，信息也不全；
 //   · `ranking/v2?rid=3&type=all`（音乐区 v2 榜）一次返回 96 条，但 B 站已下线 web 分区
-//     排行榜，该接口**停更于 2025-03-31**（榜内 pubdate 全部冻结在那周）—— 成了死数据源
-//     （2026-10 用户反馈「排行榜日期都是很久」即此因）；
-//   · `ranking/v2?rid=0&type=all`（**全站排行榜**）仍在**每日更新**（2026-10 复测：100 条，
-//     最新一条发布于复测前一日）—— 现行数据源。匿名 web API 中已无仍在更新的音乐专属排行榜。
+//     排行榜，该接口**停更于 2025-03-31**（榜内 pubdate 全部冻结在那周）—— 死数据源
+//     （「排行榜日期都是很久」即此因）；
+//   · `ranking/v2?rid=0&type=all`（**全站排行榜**）仍在**每日更新**（实测：100 条，
+//     最新一条发布于测试前一日）—— 现行数据源。匿名 web API 中已无仍在更新的音乐专属排行榜。
 //
 // v2 **不支持 pn/ps**（传 pn=2 仍返回同一批），「上拉加载更多」只能前端分页：
 // 一次把整榜拿回内存，界面每次多放一屏（见 SearchPage 的 RANKING_PAGE_SIZE）。
 //
 // 另外注意：这里的 duration 是**秒**，跟旧 region 接口的 "0:15" 字符串不是一回事，
-// 两套映射函数不能混用（历史上就是照抄 detail 字段导致整榜被 catch 成空）。
+// 两套映射函数不能混用（照抄 detail 字段会让整榜被 catch 成空）。
 
 export interface RankingVideoItem {
   aid: number;
@@ -2048,7 +2175,7 @@ export interface RankingVideoItem {
   stat: VideoStat;
   /** 秒 */
   duration: number;
-  /** 视频发布时间（unix 秒）。原始响应带、旧声明漏了；可缺 */
+  /** 视频发布时间（unix 秒）。原始响应带；可缺 */
   pubdate?: number;
 }
 
@@ -2075,9 +2202,9 @@ export interface MusicCenterRelatedArchive {
 /**
  * 音乐中心（/x/centralization/interface/...）返回的是**下划线风格**字段名：
  *   music_id / music_title / author / cover / bvid / aid / cid / album / related_archive
- * 早期按驼峰写（musicId / musicTitle / relatedArchive）→ 标题全是 undefined，
+ * 若按驼峰读（musicId / musicTitle / relatedArchive）→ 标题全是 undefined，
  * 只有 author（该字段名两边一致）能显示 —— 就是"只能显示歌手名字，歌名没有"。
- * 这里两个名字都声明为可选，取的时候下划线优先、驼峰兜底，防止 B 站改回去。
+ * 这里两个名字都声明为可选，取的时候下划线优先、驼峰兜底，防止 B 站改回驼峰。
  */
 export interface MusicCenterItem {
   music_id?: string;
@@ -2133,12 +2260,12 @@ export interface FavoriteFolder {
  * `folder/created/list-all` 的原始条目。
  *
  * ⚠️⚠️ **字段名是 snake_case**（`media_count`），而 `FavoriteFolder` 用 camelCase。
- * 曾直接把原始响应当 `FavoriteFolder` 返回（零归一化）→ `mediaCount` **恒为 undefined**，
+ * 直接把原始响应当 `FavoriteFolder` 返回（零归一化）会让 `mediaCount` **恒为 undefined**，
  * 下游 `folder.mediaCount <= PLAYLIST_MAX_ITEMS` 恒为 `false`，于是：
- *   · 双向同步的删除分支**从未生效**（永远只增不减，与文档宣称的行为不一致）；
+ *   · 双向同步的删除分支**从不生效**（永远只增不减，与文档宣称的行为不一致）；
  *   · 「单夹超上限只镜像最新 PLAYLIST_MAX_ITEMS 首」的判定同样失效；
  *   · 「服务端自报非空却拿到 0 条」的风控识别也失效（undefined > 0 = false）。
- * 2026-10-22 真机日志实证：`mediaCount=undefined sizeOk=false`。两个名字都声明为可选，
+ * 真机日志实证：`mediaCount=undefined sizeOk=false`。两个名字都声明为可选，
  * 归一化时下划线优先、驼峰兜底，防止 B 站哪天改回驼峰。
  */
 interface FavoriteFolderRaw {
@@ -2177,19 +2304,17 @@ export async function getFavoriteFolders(mid: number): Promise<FavoriteFoldersRe
   return { count: (raw && typeof raw.count === 'number') ? raw.count : list.length, list: list };
 }
 
-// ===== 收藏夹内容（把收藏夹镜像成本地歌单，2026-10-13）=====
+// ===== 收藏夹内容（把收藏夹镜像成本地歌单）=====
 //
-// ⚠️ 本节全部为**未实测**实现：`x/v3/fav/resource/list` 在本工程此前零实现、
-// 零调用（grep `fav/resource` = 0）。首次真机运行必须打印 raw 响应核对：
-// 字段名（medias / info.media_count / has_more）、`ps` 上限、`attr` 位语义、
-// `duration` 单位（秒 or 毫秒）、是否需要 wbi 签名。详见方案文档第 10 节。
+// ⚠️ 首次真机运行必须打印 raw 响应核对：字段名（medias / info.media_count / has_more）、
+// `ps` 上限、`attr` 位语义、`duration` 单位（秒 or 毫秒）、是否需要 wbi 签名。
 
 /** 收藏夹接口风控兜底码表：与 FOLLOWINGS_RISK_CODES 同一套口径 */
 const FAV_RISK_CODES: number[] = [-352, -412, -509, -799];
 
 /**
  * 收藏夹分页大小。
- * 2026-10-22 实测（匿名直连 `fav/resource/list`）：`ps=40` 正常返回 40 条，
+ * 实测（匿名直连 `fav/resource/list`）：`ps=40` 正常返回 40 条，
  * `has_more` / `info.media_count` 均正常 → 同样条数下请求数减半（对齐 BBPlayer 的口径）。
  */
 const FAV_RESOURCE_PS: number = 40;
@@ -2363,7 +2488,7 @@ export async function getFavResources(mediaId: number, pn: number = 1): Promise<
     }
     raw = env.data;
   }
-  // ⚠️⚠️ **空壳响应必须当风控，绝不能当「这个收藏夹空了」**（2026-10-22 实测确认）：
+  // ⚠️⚠️ **空壳响应必须当风控，绝不能当「这个收藏夹空了」**（实测确认）：
   // 被风控时接口仍然回 `code=0`，但 `data` 里只有 `v_voucher`（既无 `info` 也无 `medias`）。
   // 若按「0 条 + has_more 缺省 false」处理，就会被判定成「已完整拉取、夹子确实空了」，
   // 上层 `allowDelete` 随即把本地镜像**整单清空** —— 用户看到的现象就是「收藏夹突然变空」。
@@ -2402,11 +2527,11 @@ export interface FavIdEntry {
 /**
  * 拉取收藏夹**全部**视频的 bvid / aid（`/x/v3/fav/resource/ids`）。
  *
- * 移植自 BBPlayer `lib/facades/syncBilibiliPlaylist/favorite.ts` 的两段式同步：
+ * 两段式同步（对齐 BBPlayer `lib/facades/syncBilibiliPlaylist/favorite.ts`）：
  * 先用 ids **一个请求拿到全集与收藏顺序**，再只为「本地还没有的」补详情 ——
  * 几百首的收藏夹从「25 页 × 350ms」降到「1 次 ids + 通常 1 页详情」，这才是风控的根本解法。
  *
- * 2026-10-22 实测（匿名）：307 首的夹一次返回 307 条（303 视频 + 4 音频），
+ * 实测（匿名）：307 首的夹一次返回 307 条（303 视频 + 4 音频），
  * 字段 `{id(aid), bvid, type}`，顺序 = 收藏顺序（最新在前）。
  *
  * ⚠️ 风控时 `data` 会变成对象（`{v_voucher}`）而不是数组 → 必须判 `Array.isArray`，
@@ -2442,7 +2567,7 @@ async function tryGetFavResourceIds(mediaId: number): Promise<FavIdEntry[] | nul
 }
 
 /**
- * 收藏夹全量拉取（**两段式**，移植自 BBPlayer `syncBilibiliPlaylist/favorite.ts`）。
+ * 收藏夹全量拉取（**两段式**，对齐 BBPlayer `syncBilibiliPlaylist/favorite.ts`）。
  *
  * ① `fav/resource/ids` 一次拿全集 + 收藏顺序（1 个请求，不翻页）；
  * ② 只为「本地还没有的 bvid」补详情（从 pn=1 顺序翻页，命中够即停，`ps=40`）。
@@ -2647,7 +2772,7 @@ async function collectFavByFullPages(
   const items: FavResourceItem[] = collected.length > expectedMax
     ? collected.slice(0, expectedMax)
     : collected;
-  // ⚠️ 第二道防线（2026-10-22）：首页自报 N 条却一条没拿到 → 一定是被拦/解析失效，
+  // ⚠️ 第二道防线：首页自报 N 条却一条没拿到 → 一定是被拦/解析失效，
   // 绝不能算「完整拉取成功」，否则上层会按「用户清空了收藏夹」把本地镜像删光。
   if (complete && collected.length === 0 && reportedTotal > 0) {
     complete = false;
@@ -2686,10 +2811,85 @@ export function mapFavItem(item: FavResourceItem, favName: string): Track {
   });
 }
 
-// ===== 收藏夹写接口已下线（2026-10-23 单向同步）=====
-// 本地 → B 站的回推链路（favoriteResource / unfavoriteResource / batchDelFavResources /
-// isFavWriteRetryable）整体移除：收藏夹同步只保留 B 站 → 本地单向拉取，
-// 本地对镜像歌单的改动不写回 B 站。
+// ===== 收藏夹写接口（双向同步）=====
+// 本地 → B 站的回推走 `POST /x/v3/fav/resource/deal`（批量加 / 取消收藏，一次调用
+// 可同时带 add / del 列表）。收藏夹双向同步仅此一个写接口。
+
+/** bv2av 解码表（B 站 2020 新版 bvid 编码，社区公认对照表） */
+const BV2AV_TABLE: string = 'fZodR9XQDSUm21yCkr6lBcJpq4e3YOaW7vNzLs5GxhTtMniKwA';
+/** bvid 中参与编码的 6 个字符下标（高位在前） */
+const BV2AV_POS: number[] = [11, 10, 3, 8, 4, 6];
+const BV2AV_XOR: number = 177451812;
+const BV2AV_ADD: number = 8728348608;
+
+/**
+ * bvid → avid（纯本地解码，无需请求）。
+ * 例：`BV17x411W7KC` → `170001`（可用 `selfTestBv2av` 自检）。
+ * 仅支持 2020 后的新版 BV 号（本工程镜像 / 搜索曲目的 id 全部是新版）。
+ */
+export function bv2av(bvid: string): number {
+  if (!bvid || bvid.length < 12 || bvid.indexOf('BV') !== 0) {
+    return -1;
+  }
+  let r: number = 0;
+  for (let i = 0; i < 6; i++) {
+    const idx: number = BV2AV_TABLE.indexOf(bvid.charAt(BV2AV_POS[i]));
+    if (idx < 0) {
+      return -1;
+    }
+    r += idx * Math.pow(58, i);
+  }
+  return (r - BV2AV_ADD) ^ BV2AV_XOR;
+}
+
+/** bv2av 自检（已知对照 `BV17x411W7KC` → av170001），首冲刷时打一次日志 */
+export function selfTestBv2av(): boolean {
+  const ok: boolean = bv2av('BV17x411W7KC') === 170001;
+  if (!ok) {
+    console.error('[BilibiliApi] bv2av self-test FAILED, expect 170001 got ' + bv2av('BV17x411W7KC'));
+  }
+  return ok;
+}
+
+/**
+ * 收藏夹批量写（加 / 取消收藏，`POST /x/v3/fav/resource/deal`）。
+ *
+ * · `rid` = 目标收藏夹所属视频的 avid（deal 的语义：把 rid 视频加入 / 移出
+ *   `add_media_ids` / `del_media_ids` 列出的收藏夹）；
+ * · add / del 列表均为收藏夹 media_id 数组，可同时携带；
+ * · `csrf`（bili_jct）由调用方传入（避免 BilibiliApi ↔ LoginStore 循环导入），
+ *   空串直接按未登录（-101）拒绝；
+ * · `code !== 0` 抛 `BiliApiError`，调用方（FavPushRunner）按 code 分级处理：
+ *   -352/-412/-509/-799 保留重试，-101/-111 中止需重登，其余丢弃计数。
+ */
+export async function dealFavResource(
+  rid: number,
+  addMediaIds: number[],
+  delMediaIds: number[],
+  csrf: string
+): Promise<void> {
+  if (!(rid > 0)) {
+    throw new BiliApiError(-400, `invalid rid: ${rid}`, '/x/v3/fav/resource/deal');
+  }
+  if ((addMediaIds.length === 0) && (delMediaIds.length === 0)) {
+    return;
+  }
+  if (!csrf) {
+    throw new BiliApiError(-101, 'not logged in (no bili_jct)', '/x/v3/fav/resource/deal');
+  }
+  const form: Record<string, string | number> = {
+    rid: rid,
+    type: 2,
+    csrf: csrf
+  };
+  if (addMediaIds.length > 0) {
+    form['add_media_ids'] = addMediaIds.join(',');
+  }
+  if (delMediaIds.length > 0) {
+    form['del_media_ids'] = delMediaIds.join(',');
+  }
+  await biliPost<object | null>('/x/v3/fav/resource/deal', form);
+}
 
 /** UP 主资料卡（头像 / 昵称 / 粉丝数 / 签名 / 投稿总数） */
 export interface UserCard {
@@ -2698,14 +2898,14 @@ export interface UserCard {
   face: string;
   fans: number;
   sign: string;
-  /** UP 的投稿总数（响应顶层 data.archive_count，2026-10-23 实测确认存在）；0 = 接口未返回 */
+  /** UP 的投稿总数（响应顶层 data.archive_count，实测确认存在）；0 = 接口未返回 */
   archiveCount: number;
 }
 
 /**
  * UP 主资料。
  *
- * ⚠️ **必须用这个接口，不要用 `x/space/wbi/acc/info`**（2026-10-03 匿名态实测）：
+ * ⚠️ **必须用这个接口，不要用 `x/space/wbi/acc/info`**（匿名态实测）：
  * 后者返回 `code = 0` 看着正常，实际 data 里**只有 `v_voucher` 一个字段**，
  * name / face / fans 全 undefined —— 只看 code 会误判成「可用」。
  * 老接口 `x/web-interface/card` 匿名正常返回 name / fans / face。
@@ -2770,7 +2970,7 @@ const FOLLOWINGS_RISK_CODES: number[] = [-352, -412, -509, -799];
  * 端点 `/x/relation/followings`：查**自己的**关注必须带 SESSDATA（HttpUtil 登录后
  * 自动附加，这里不用额外传）；`order=desc` = 最新关注在前，符合订阅流的直觉。
  *
- * 风控兜底（2026-10）：该接口与空间接口同属风控重灾区，明文参数可能吃到
+ * 风控兜底：该接口与空间接口同属风控重灾区，明文参数可能吃到
  * -352/-799。处理方式与 playurl 双通道同思路——先走明文 biliFetch，吃到风控码
  * 再用 encodeWbi 签名重试**一次**；仍是风控码就原样抛，由页面展示 code 让用户
  * 自己判断该等还是该换网。
@@ -2815,7 +3015,7 @@ export async function getFollowings(vmid: number, pn: number = 1): Promise<Follo
   };
 }
 
-// ===== 观看历史与稍后再看（「设置 → 登录后能力」数据源，2026-10）=====
+// ===== 观看历史与稍后再看（「设置 → 登录后能力」数据源）=====
 
 /**
  * 历史接口风控兜底码表：与 FOLLOWINGS_RISK_CODES 同一套口径 ——
@@ -3070,7 +3270,7 @@ export async function extractAudioFromVideo(
     }
   }
 
-  // ── ① 通道选择：默认走匿名（2026-10-24 移植 PiliPlus 的「取流独立槽位默认匿名」）──
+  // ── ① 通道选择：默认走匿名（对齐 PiliPlus 的「取流独立槽位默认匿名」）──
   // B 站对部分账号做**绑定登录 Cookie** 的风控：view/playurl 只要带 SESSDATA
   // 就被拒（-352/-412/-799 或 HTTP 412），不带反而正常 —— 这正是
   // 「登录后不能播放、退出登录又能播放」的成因。PiliPlus 的做法是让取流走一个
@@ -3092,8 +3292,7 @@ export async function extractAudioFromVideo(
     return source;
   } catch (e) {
     // ── ② 换通道重试：登录存在 + 风控类错误 → 翻转登录/匿名再解析一轮 ──
-    // 与旧实现的差别：以前只有「带 Cookie → 被拒 → 匿名」单向降级；现在
-    // 默认就是匿名，所以是**双向**的 —— 匿名被拒（例如该 IP 的匿名配额用尽）
+    // 通道翻转是**双向**的：匿名被拒（例如该 IP 的匿名配额用尽）
     // 也要能带着登录态试一次。两个方向都只试一次，不来回震荡。
     if (loggedIn && isChannelSwitchWorthy(e)) {
       const flipAnonymous: boolean = !preferAnonymous;
@@ -3136,8 +3335,7 @@ export async function extractAudioFromVideo(
  * 网络瞬态错误（超时 / DNS）**不在此列**：它们有自己的退避重试，与登录态无关，
  * 换通道重发只会白多一轮请求。
  *
- * ⚠️ 2026-10-24 改名（原 isAnonFallbackWorthy）：取流改为**默认匿名**后，
- * 换通道是双向的（匿名 ↔ 登录），不再是「单向降级」。
+ * ⚠️ 取流默认匿名，换通道是双向的（匿名 ↔ 登录），不是单向降级。
  */
 function isChannelSwitchWorthy(e: Object): boolean {
   if (e instanceof BiliApiError) {
@@ -3166,7 +3364,7 @@ async function resolveTrackSource(
   // 下面的 pages.some 会抛 TypeError，整首歌就白解析了
   const pages: VideoPageInfo[] = Array.isArray(detail.pages) ? detail.pages : [];
   // 曲目带 cid 时（多 P 合集的非首个分 P）必须用该 cid 取流；
-  // 早期这里一直用 detail.cid（默认第一个分 P），导致合集永远只能播第一首。
+  // 直接用 detail.cid（默认第一个分 P）会让合集永远只能播第一首。
   //
   // ⚠️ 但**必须先校验这个 cid 真的属于该 bvid 的分 P**：
   // 音乐中心（/x/centralization/interface/**）的 `related_archive.cid` 是**音频 cid**，
@@ -3210,7 +3408,11 @@ async function extractAudioByAvidCid(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth
+    audioBandwidth: best.bandwidth,
+    // 服务端响度预测（dash 响应携带；durl 降级 / 老视频缺失时兜 0），
+    // 与 buildTrackSource 同一兜底口径
+    loudnessMeasuredI: playData.volume?.measured_i ?? 0,
+    loudnessTargetI: playData.volume?.target_i ?? 0
   };
 }
 
@@ -3221,7 +3423,7 @@ async function extractAudioByAvidCid(
 //   1. generateQrLogin()  拿二维码内容 url + qrcode_key（二维码有效期约 180s）；
 //   2. pollQrLogin()      每 2s 轮询扫码状态。
 //
-// 登录 Cookie 的下发取决于 UA（2026-10-07 日志确证，B 站按 UA 分流）：
+// 登录 Cookie 的下发取决于 UA（日志确证，B 站按 UA 分流）：
 //   · web UA（PC Chrome）：成功时 data.url 是 crossDomain?ticket=... 跳转地址，
 //     登录 Cookie 在 302 重定向中间跳的 Set-Cookie 里（ohos 自动跟随重定向会吞掉）；
 //   · BiliApp UA（本实现，BBPlayer 同款 PASSPORT_UA）：登录 Cookie 直接在
@@ -3230,9 +3432,8 @@ async function extractAudioByAvidCid(
 // skipReferer）。crossDomain 跟进保留为条件兜底：仅当 poll 响应 Cookie 里没有
 // SESSDATA 时才走。
 //
-// ⚠️ 2026-10-22 复盘：「平板二维码 3 秒即 86038」的真根因**不是**服务端风控提前
-// 作废（此前的 buvid/指纹假设），而是 poll 的 GET + queryParams 在本机引擎上
-// 发空参请求——服务端查无 key 一律答 86038（详见 pollQrLogin 注释的对照实验）。
+// ⚠️ 「二维码很快 86038」的根因之一是 poll 的 GET + queryParams 在本机引擎上
+// 发空参请求——服务端查无 key 一律答 86038（详见 pollQrLogin 注释）。
 // generate 裸化与 buvid 升级链路保留：它们对「新装机假 buvid 引发 -352 风控」
 // 的防御仍然成立。
 //
@@ -3290,10 +3491,8 @@ interface QrPollData {
 /**
  * 生成扫码登录二维码（BiliApp UA，对齐 BBPlayer：其 client 默认头即 BiliApp UA）。
  *
- * 2026-10-22 平板登录修复：改为**裸请求**（skipCookie + skipReferer，与 pollQrLogin
- * 完全对齐）。旧实现经 HttpUtil.buildHeader 默认附带 buvid / 旧登录态 Cookie 与
- * Referer —— generate 带 Cookie、poll 裸请求，同一 key 的两次请求客户端指纹不一致；
- * 且新装机（典型：平板）的 buvid 是本地 MD5 兜底假值（BiliDevice.getBuvid），
+ * **裸请求**（skipCookie + skipReferer，与 pollQrLogin 完全对齐）：
+ * 新装机（典型：平板）的 buvid 是本地 MD5 兜底假值（BiliDevice.getBuvid），
  * 带着假指纹请求 generate 易触发 passport 风控**提前作废二维码**（真机表现：
  * 生成后约 3s 即 86038、aliveMs<30s 且从未出现 86090，「二维码 3 秒就刷新、
  * 来不及扫码」）。裸化后登录链路全程仅 BiliApp UA，与 BBPlayer 的
@@ -3323,13 +3522,12 @@ export async function generateQrLogin(): Promise<QrLoginTicket> {
  * crossDomain 跟进仅为兜底：poll 响应 Cookie 缺 SESSDATA 时才 GET data.url。
  * **成功帧（data.code===0）绝不向上抛**：登录 Cookie 一次性下发，后处理任何异常只降级。
  *
- * ⚠️ qrcode_key 必须内联进 URL，**绝不能走 queryParams**（2026-10-22 根因定位）：
+ * ⚠️ qrcode_key 必须内联进 URL，**绝不能走 queryParams**：
  * 本机引擎 GET + queryParams 发出的是空参请求（同 biliFetch 头注释里 view 接口
  * -400 事故，工程内能用的 GET 全是 query 内联）——服务端查无此 key，一律回
  * 86038「二维码已失效」。真机日志表现：每张码的**第一次** poll（+2s）即 86038
- * （aliveMs≈2.1s），曾被误判为「风控提前作废二维码」；开发机 curl 对照实验确证
- * 「无 key」与「错 key」的 poll 返回与 App 收到的逐字节同形，而同 key 内联 URL
- * 可正常存活 180s。此前的指纹/风控假设不成立，真根因即参数丢失。
+ * （aliveMs≈2.1s）；开发机 curl 对照实验确证「无 key」与「错 key」的 poll 返回与
+ * App 收到的逐字节同形，而同 key 内联 URL 可正常存活 180s。
  */
 export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
   const path: string = '/x/passport-login/web/qrcode/poll';
@@ -3346,9 +3544,8 @@ export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
   let responseCookies: string = raw.responseCookies;
   if (resp.data.code === 0) {
     // 成功帧是「一次性」的：B 站只在成功那一帧下发登录 Cookie，处理中任何异常都会让它
-    // 永久丢失（2026-10-07 实测教训：ArkTS 运行时缺 Array.includes，守卫代码在成功帧抛
-    // "undefined is not callable"，下一帧即 86038、Cookie 无法找回）。因此成功分支整体
-    // try/catch 降级，**绝不向上抛**；诊断日志走 console（JSAPP 缓冲区实测比 hilog 可靠）。
+    // 永久丢失。因此成功分支整体 try/catch 降级，**绝不向上抛**；
+    // 诊断日志走 console（JSAPP 缓冲区实测比 hilog 可靠）。
     try {
       console.info(`poll success frame: cookiesLen=${raw.responseCookies.length}` +
         `, cookieKeys=[${HttpUtil.cookieKeys(raw.responseCookies).join(', ')}]` +
@@ -3390,7 +3587,7 @@ export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// 短信验证码登录（2026-10 新增，对齐 BBPlayer api.ts L1426 / L1477 / L1569）
+// 短信验证码登录（对齐 BBPlayer api.ts L1426 / L1477 / L1569）
 //
 // 三步链路（每步都是独立接口，第二步前必须先过极验滑块）：
 //   1. fetchSmsCaptchaToken()  拿图形验证 token + 极验 gt/challenge；
@@ -3398,9 +3595,8 @@ export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
 //      返回 captcha_key（86211 / -105 = 图形验证已过期，需回到第 1 步重来）；
 //   3. loginWithSmsCode()      用短信验证码换登录 Cookie（响应 Set-Cookie）。
 // 三接口全部 BiliApp UA + 裸 Cookie（skipCookie，对齐 BBPlayer 的
-// credentials:'omit'）；2/3 为 POST 且**参数内联 query**（2026-10-22 修复：
-// 本引擎 queryParams 发空参 → 平板短信登录滑块通过后必 -400 退回手机号输入；
-// 表单体也会被吞，query 内联是唯一可靠通道），Referer / Origin 同 BBPlayer。
+// credentials:'omit'）；2/3 为 POST 且**参数内联 query**（本引擎 queryParams
+// 发空参、表单体也会被吞，query 内联是唯一可靠通道），Referer / Origin 同 BBPlayer。
 // ════════════════════════════════════════════════════════════════════════
 
 /** 第 1 步产物：图形验证 token + 极验参数（WebView 里 initGeetest 用） */
@@ -3481,14 +3677,14 @@ export async function sendSmsLoginCode(tel: string, cid: string, token: string,
   const path: string = '/x/passport-login/web/sms/send';
   if (tel.length === 0 || cid.length === 0) {
     // 服务端对空 tel / 空 cid 只回一句「-400 请求错误」，看不出是哪个字段，
-    // 这里先本地拦下给一句能看懂的（2026-10-20 实测：-400 等价于「表单为空/缺字段」）
+    // 这里先本地拦下给一句能看懂的（实测：-400 等价于「表单为空/缺字段」）
     throw new BiliApiError(-400, '手机号缺失，请返回上一步重新输入', path);
   }
-  // ⚠️ 2026-10-22 根因修复：参数必须**内联进 URL**，绝不能走 `params`（ohos 的
-  // queryParams）。本引擎 queryParams 会静默发出空参请求（2026-10-20 view 接口
-  // -400、2026-10-22 QR poll 86038 两次实锤），短信登录在平板上同款翻车：
+  // ⚠️ 参数必须**内联进 URL**，绝不能走 `params`（ohos 的
+  // queryParams）。本引擎 queryParams 会静默发出空参请求（view 接口
+  // -400、QR poll 86038 均同因），短信登录同款翻车：
   // 滑块通过后 send 发空参 → 服务端 -400 → 页面退回手机号输入、短信没发出去。
-  // POST + query B 站接受（2026-10-20 实测：同字段走 query → code=0 + captcha_key）。
+  // POST + query B 站接受（实测：同字段走 query → code=0 + captcha_key）。
   const url: string = `${BILI_PASSPORT}${path}` +
     `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
     `&source=main_mini_login&token=${encodeURIComponent(token)}` +
@@ -3519,9 +3715,9 @@ export async function sendSmsLoginCode(tel: string, cid: string, token: string,
 export async function loginWithSmsCode(tel: string, cid: string, code: string,
   captchaKey: string): Promise<SmsLoginResult> {
   const path: string = '/x/passport-login/web/login/sms';
-  // 同 sendSmsLoginCode（2026-10-22 根因修复）：参数内联进 URL。
+  // 同 sendSmsLoginCode：参数内联进 URL。
   // 本引擎 queryParams 发空参（QR poll 86038 同款缺陷）、字符串表单体也会被吞
-  // （2026-10-20 实测 -400），query 内联是唯一在所有引擎上都可靠的通道。
+  // （实测 -400），query 内联是唯一在所有引擎上都可靠的通道。
   const url: string = `${BILI_PASSPORT}${path}` +
     `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
     `&code=${encodeURIComponent(code)}&source=main_mini_login` +
@@ -3564,7 +3760,7 @@ export interface NavUserInfo {
   uname: string;
   face: string;
   vipStatus: number;
-  /** 会籍种类：0 无 / 1 月度大会员 / 2 年度大会员（nav 的 vipType，2026-10-11 新增） */
+  /** 会籍种类：0 无 / 1 月度大会员 / 2 年度大会员（nav 的 vipType） */
   vipType: number;
 }
 

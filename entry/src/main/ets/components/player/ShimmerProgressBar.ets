@@ -2,22 +2,26 @@
  * 播放页进度条样式 B ——「流光渐变条」（ControlAreaComponent 四分支之一）。
  *
  * 视觉：4vp 胶囊轨道（未播段半透明白 / 已播段主题色→白渐变）+ 12vp 主题色圆点
- * 滑块；流光带在已播段内循环扫动（clip 裁切，只照亮已播区）。
+ * 滑块 + 呼吸光晕；流光带在已播段内循环扫动（clip 裁切，只照亮已播区）。
  *
- * 动效（全部 createAnimator 无限循环，与 CoverDiscComponent 同一套底座）：
- *   · 流光扫动 —— 1.6s/周期线性扫过全轨，onFrame 回写 shimmerX；
- *   · 呼吸光晕 —— 2s/周期正弦回写滑块 shadow 透明度；
+ * 动效（全部为无限属性动画，插值由渲染管线按 DECORATIVE_ANIM_FRAME_RATE
+ * （LTPO 30fps）驱动，JS 侧零逐帧回调、零逐帧重渲染）：
+ *   · 流光扫动 —— animateTo(iterations:-1) 驱动流光带 translate
+ *     （-带宽 → 轨宽+带宽，无限循环），只动合成器属性；
+ *   · 呼吸光晕 —— 滑块后方光晕节点 opacity 0.35↔0.95 无限往返
+ *     （Alternate，半周期 1s 正弦近似），滑块本体投影固定 0.4 透明度主题色；
  *   · 拖拽增厚 —— 按下轨道 4→8vp + 滑块放大 1.3，松手回弹（animateTo）。
- * 播放态 play/pause（@Watch STORE_IS_PLAYING），暂停即冻结不销毁；
- * aboutToDisappear 统一 finish。
+ * 播放态 play/pause（@Watch STORE_IS_PLAYING）：暂停取消无限动画回静态；
+ * 属性动画随节点销毁，aboutToDisappear 无需清理。
  *
- * 性能：流光只动 position（合成器属性）；厚度/缩放只在拖拽起止各动一次。
+ * 性能：流光只动 translate、光晕只动 opacity（合成器属性）；厚度/缩放只在
+ * 拖拽起止各动一次。
  * 交互契约与其余三档一致：拖动本地跟随、松手才 seek、点按定位 —— 触摸
  * 事件只换算上报，交互状态（dragging/dragValue/插值）全部由父组件持有。
  */
 
-import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { StyleConstants } from '../../common/constants/StyleConstants';
+import { DECORATIVE_ANIM_FRAME_RATE } from '../../common/constants/InteractionConstants';
 import { STORE_IS_PLAYING, STORE_THEME_PRIMARY } from '../../common/Constants';
 
 /** 命中区高度（vp）：视觉轨道居中，上下留手指余量 */
@@ -34,6 +38,12 @@ const SHIMMER_BAND_VP: number = 60;
 const SHIMMER_SWEEP_MS: number = 1600;
 /** 呼吸光晕周期（ms） */
 const SHIMMER_BREATHE_MS: number = 2000;
+/** 呼吸光晕直径（vp）：滑块后方主题色径向渐变光斑 */
+const SHIMMER_HALO_VP: number = 28;
+/** 呼吸光晕透明度下限（Alternate 无限往返的起点/回静值） */
+const SHIMMER_GLOW_MIN: number = 0.35;
+/** 呼吸光晕透明度上限 */
+const SHIMMER_GLOW_MAX: number = 0.95;
 /** 增厚/回弹动画时长（ms） */
 const SHIMMER_THICKEN_MS: number = 160;
 
@@ -55,7 +65,7 @@ export struct ShimmerProgressBar {
   @StorageLink(STORE_IS_PLAYING) @Watch('onPlayingChanged') isPlay: boolean = false;
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
 
-  /** 实测轨道宽度（vp）：手势换算与流光扫动范围的数据源 */
+  /** 实测轨道宽度（vp）：手势换算和流光扫动范围的数据源 */
   @State trackWidth: number = 0;
   /** 组件内拖拽态：只驱动视觉反馈（增厚/藏流光），交互真值在父组件 */
   @State dragging: boolean = false;
@@ -63,15 +73,10 @@ export struct ShimmerProgressBar {
   @State trackThickness: number = SHIMMER_TRACK_THICK;
   /** 滑块拖拽放大系数 */
   @State thumbScale: number = 1;
-  /** 流光带当前位置（vp）：sweepAnim 每帧回写 */
-  @State shimmerX: number = 0;
-  /** 滑块光晕透明度（0~1）：breatheAnim 每帧回写，暂停时冻结回静态值 */
-  @State glowOpacity: number = 0.4;
-
-  /** 流光扫动 animator（aboutToAppear 创建，销毁时 finish） */
-  private sweepAnim: AnimatorResult | null = null;
-  /** 呼吸光晕 animator（aboutToAppear 创建，销毁时 finish） */
-  private breatheAnim: AnimatorResult | null = null;
+  /** 流光带当前位移（vp）：播放中由无限属性动画驱动（-带宽 ↔ 轨宽+带宽） */
+  @State bandX: number = -SHIMMER_BAND_VP;
+  /** 光晕呼吸透明度：播放中 0.35↔0.95 无限往返（Alternate 属性动画） */
+  @State glowBreath: number = SHIMMER_GLOW_MIN;
 
   /** Area 尺寸（Length）→ vp 数值；资源型（理论上不会出现）按 0 兜底 */
   private toVp(v: Length): number {
@@ -84,88 +89,67 @@ export struct ShimmerProgressBar {
     return 0;
   }
 
-  /** 流光扫动动画参数：end = 全轨 + 带宽（扫出右边界再回卷，循环无缝） */
-  private sweepOptions(): AnimatorOptions {
-    return {
+  /** 起播：流光带从左界外线性扫到右界外，无限循环（LTPO 30fps，合成器插值） */
+  private startSweep(): void {
+    this.getUIContext().animateTo({ duration: 0 }, (): void => {
+      this.bandX = -SHIMMER_BAND_VP;
+    });
+    this.getUIContext().animateTo({
       duration: SHIMMER_SWEEP_MS,
-      easing: 'linear',
-      delay: 0,
-      fill: 'forwards',
-      direction: 'normal',
+      curve: Curve.Linear,
       iterations: -1,
-      begin: 0,
-      end: this.trackWidth + SHIMMER_BAND_VP
-    };
+      expectedFrameRateRange: DECORATIVE_ANIM_FRAME_RATE
+    }, (): void => {
+      this.bandX = this.trackWidth + SHIMMER_BAND_VP;
+    });
   }
 
-  /** 呼吸光晕动画参数 */
-  private breatheOptions(): AnimatorOptions {
-    return {
-      duration: SHIMMER_BREATHE_MS,
-      easing: 'linear',
-      delay: 0,
-      fill: 'forwards',
-      direction: 'normal',
+  /** 停扫：取消无限动画，流光带回卷左界外（暂停态带子已被门控隐藏） */
+  private stopSweep(): void {
+    this.getUIContext().animateTo({ duration: 0 }, (): void => {
+      this.bandX = -SHIMMER_BAND_VP;
+    });
+  }
+
+  /** 起呼吸：光晕透明度下限→上限无限往返（半周期 1s，正弦近似） */
+  private startBreathe(): void {
+    this.getUIContext().animateTo({ duration: 0 }, (): void => {
+      this.glowBreath = SHIMMER_GLOW_MIN;
+    });
+    this.getUIContext().animateTo({
+      duration: SHIMMER_BREATHE_MS / 2,
+      curve: Curve.EaseInOut,
       iterations: -1,
-      begin: 0,
-      end: SHIMMER_BREATHE_MS
-    };
+      playMode: PlayMode.Alternate,
+      expectedFrameRateRange: DECORATIVE_ANIM_FRAME_RATE
+    }, (): void => {
+      this.glowBreath = SHIMMER_GLOW_MAX;
+    });
+  }
+
+  /** 停呼吸：取消无限动画，透明度回静态下限（暂停态光晕被 isPlay 门控隐藏） */
+  private stopBreathe(): void {
+    this.getUIContext().animateTo({ duration: 0 }, (): void => {
+      this.glowBreath = SHIMMER_GLOW_MIN;
+    });
   }
 
   aboutToAppear(): void {
-    // UIContext 在属性初始化时未就绪，animator 延迟到这里创建（同 CoverDisc）
-    try {
-      this.sweepAnim = this.getUIContext().createAnimator(this.sweepOptions());
-      this.sweepAnim.onFrame = (v: number): void => {
-        this.shimmerX = v;
-      };
-      this.breatheAnim = this.getUIContext().createAnimator(this.breatheOptions());
-      this.breatheAnim.onFrame = (v: number): void => {
-        // 0.4 ± 0.2 正弦呼吸：onFrame 的 v 即相位毫秒
-        this.glowOpacity = 0.4 + 0.2 * Math.sin(v / SHIMMER_BREATHE_MS * Math.PI * 2);
-      };
-      // 挂载时可能已在播放中（@Watch 不会触发，需手动起转）
-      if (this.isPlay) {
-        this.sweepAnim.play();
-        this.breatheAnim.play();
-      }
-    } catch (e) {
-      // animator 创建失败只影响流光/呼吸，进度展示与拖拽不受影响
-      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
-      console.error(`[ShimmerBar] createAnimator failed: ${msg}`);
-    }
-  }
-
-  aboutToDisappear(): void {
-    if (this.sweepAnim !== null) {
-      this.sweepAnim.finish();
-      this.sweepAnim = null;
-    }
-    if (this.breatheAnim !== null) {
-      this.breatheAnim.finish();
-      this.breatheAnim = null;
-    }
-  }
-
-  /** 播放态变化：流光续扫/冻结、呼吸续动/回静态值 */
-  onPlayingChanged(_propName: string): void {
-    const sweep: AnimatorResult | null = this.sweepAnim;
-    const breathe: AnimatorResult | null = this.breatheAnim;
+    // 挂载时可能已在播放中（@Watch 不会触发，需手动起播）
     if (this.isPlay) {
-      if (sweep !== null) {
-        sweep.play();
-      }
-      if (breathe !== null) {
-        breathe.play();
-      }
+      this.startSweep();
+      this.startBreathe();
+    }
+  }
+
+  /** 播放态变化：流光续扫/回卷、光晕续呼吸/回静态 */
+  onPlayingChanged(_propName: string): void {
+    if (this.isPlay) {
+      this.startSweep();
+      this.startBreathe();
     } else {
-      if (sweep !== null) {
-        sweep.pause();
-      }
-      if (breathe !== null) {
-        breathe.pause();
-      }
-      this.glowOpacity = 0.4;
+      this.stopSweep();
+      this.stopBreathe();
     }
   }
 
@@ -197,13 +181,11 @@ export struct ShimmerProgressBar {
     return ratio * this.max;
   }
 
-  /** 光晕颜色：主题色 + 当前透明度（0~1 → 两位 hex） */
-  private glowColor(): string {
-    const aNum: number = Math.round(Math.min(1, Math.max(0, this.glowOpacity)) * 255);
-    const a: string = aNum < 16 ? `0${aNum.toString(16)}` : aNum.toString(16);
+  /** 主题色加透明度前缀（#RRGGBB → #AARRGGBB）；非 7 位原样返回 */
+  private alphaTheme(alphaHex: string): string {
     const base: string = this.themePrimary;
     if (base.length === 7) {
-      return `#${a}${base.substring(1)}`.toUpperCase();
+      return `#${alphaHex}${base.substring(1)}`.toUpperCase();
     }
     return base;
   }
@@ -233,21 +215,26 @@ export struct ShimmerProgressBar {
                 ['#FFFFFFFF', 1.0]
               ]
             })
-          // 流光带：透明→白→透明，position 只走合成器
-          Row() {}
-            .width(SHIMMER_BAND_VP)
-            .height(this.trackThickness)
-            .linearGradient({
-              angle: 90,
-              colors: [
-                ['#00FFFFFF', 0.0],
-                ['#8CFFFFFF', 0.5],
-                ['#00FFFFFF', 1.0]
-              ]
-            })
-            .position({ x: this.shimmerX, y: 0 })
-            .opacity(this.isPlay && !this.dragging ? 1 : 0)
-            .animation({ duration: 200, curve: Curve.EaseOut })
+          // 流光带：透明→白→透明。门控（播放且非拖拽可见，200ms 淡入淡出）在
+          // 外层包装节点，translate 无限动画在内层 —— 两类属性分属不同节点，
+          // 门控翻转不打断扫动动画
+          Column() {
+            Row() {}
+              .width(SHIMMER_BAND_VP)
+              .height(this.trackThickness)
+              .linearGradient({
+                angle: 90,
+                colors: [
+                  ['#00FFFFFF', 0.0],
+                  ['#8CFFFFFF', 0.5],
+                  ['#00FFFFFF', 1.0]
+                ]
+              })
+              .translate({ x: this.bandX })
+          }
+          .position({ x: 0, y: 0 })
+          .opacity(this.isPlay && !this.dragging ? 1 : 0)
+          .animation({ duration: 200, curve: Curve.EaseOut })
         }
         .width(this.filledWidthStr())
         .height(this.trackThickness)
@@ -257,14 +244,34 @@ export struct ShimmerProgressBar {
       .width(StyleConstants.FULL_WIDTH)
       .height(this.trackThickness)
 
-      // 滑块：主题色圆点 + 呼吸光晕（Column+borderRadius 画圆，不用 Circle.fill ——
-      // fill 是 SDK 26 API，兼容 SDK 23 上无效）
+      // 呼吸光晕：滑块后方主题色径向渐变光斑，播放中透明度 0.35↔0.95
+      // 无限往返呼吸；暂停态隐藏（滑块保留固定 0.4 透明度投影）
+      Column() {}
+        .width(SHIMMER_HALO_VP)
+        .height(SHIMMER_HALO_VP)
+        .borderRadius(SHIMMER_HALO_VP / 2)
+        .radialGradient({
+          center: [SHIMMER_HALO_VP / 2, SHIMMER_HALO_VP / 2],
+          radius: SHIMMER_HALO_VP / 2,
+          colors: [
+            [this.alphaTheme('73'), 0.0],
+            [this.alphaTheme('00'), 1.0]
+          ]
+        })
+        .position({
+          x: this.headX() - SHIMMER_HALO_VP / 2,
+          y: (SHIMMER_HIT_VP - SHIMMER_HALO_VP) / 2
+        })
+        .opacity(this.isPlay ? this.glowBreath : 0)
+
+      // 滑块：主题色圆点 + 固定光晕投影（Column+borderRadius 画圆，不用
+      // Circle.fill —— fill 是 SDK 26 API，兼容 SDK 23 上无效）
       Column() {}
         .width(SHIMMER_THUMB_VP)
         .height(SHIMMER_THUMB_VP)
         .borderRadius(SHIMMER_THUMB_VP / 2)
         .backgroundColor(this.themePrimary)
-        .shadow({ radius: 10, color: this.glowColor() })
+        .shadow({ radius: 10, color: this.alphaTheme('66') })
         .position({
           x: this.headX() - SHIMMER_THUMB_VP / 2,
           y: (SHIMMER_HIT_VP - SHIMMER_THUMB_VP) / 2
@@ -279,19 +286,9 @@ export struct ShimmerProgressBar {
         return;
       }
       this.trackWidth = w;
-      // 扫动范围随轨宽重建（断点/旋转轨宽变化）；CoverDisc 同款 reset 范式
-      const sweep: AnimatorResult | null = this.sweepAnim;
-      if (sweep !== null) {
-        try {
-          sweep.reset(this.sweepOptions());
-        } catch (e) {
-          const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
-          console.error(`[ShimmerBar] animator reset failed: ${msg}`);
-          return;
-        }
-        if (this.isPlay) {
-          sweep.play();
-        }
+      // 扫动范围随轨宽重建（断点/旋转轨宽变化）：重启无限扫动动画
+      if (this.isPlay) {
+        this.startSweep();
       }
     })
     .onTouch((event: TouchEvent): void => {
@@ -322,7 +319,7 @@ export struct ShimmerProgressBar {
         this.onSeekEnd(sec);
       }
     })
-    // 消费型横向手势（2026-10-22 修「拖进度条整页横移」）：onTouch 只观察不消费、
+    // 消费型横向手势：onTouch 只观察不消费、
     // 不进手势仲裁 —— SM 形态下本组件在 PlayerInfoComponent 的 Swiper（封面页|
     // 歌词页）子树内，横向拖动会穿透到 Swiper 的**内置翻页 PanGesture**（swiper.d.ts
     // 明载 Swiper 翻页即内置 pan），整页跟着手指横移。此条 PanGesture 作为子节点

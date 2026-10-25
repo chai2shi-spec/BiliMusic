@@ -46,6 +46,7 @@ import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import {
   CapsuleSegmentButtonV2,
+  CustomContentDialog,
   LengthMetrics,
   SegmentButtonV2Items
 } from '@kit.ArkUI';
@@ -143,7 +144,7 @@ export struct WatchHistoryPage {
   @State historyItems: BiliHistoryItem[] = [];
   private historySource: ArrayDataSource<BiliHistoryItem> = new ArrayDataSource<BiliHistoryItem>([]);
   /**
-   * 两列视图数据源（无状态视图，2026-10-23 两列改造）：读 historySource 现场
+   * 两列视图数据源（无状态视图）：读 historySource 现场
    * 构造 PairOf，不缓存不注册 listener —— 数据变化处显式调 historyPairs.sync()
    * （见 TwoColumnList.PairDataSource 注释）。
    */
@@ -161,10 +162,16 @@ export struct WatchHistoryPage {
   /** 稍后再看是否已成功加载过（首次切换才请求） */
   private toviewLoaded: boolean = false;
 
-  // ── 加入歌单选择弹层（与 SearchPage 同款） ──
-  @State showPlaylistPicker: boolean = false;
+  // ── 加入歌单弹窗（官方 CustomContentDialog，与 SearchPage 同款） ──
   @State playlistOptions: Playlist[] = [];
   @State pickerTrack: Track | null = null;
+  /**
+   * 「加入歌单」弹窗 controller：官方 CustomContentDialog 标准对话框
+   * （默认遮罩 + 官方按钮槽，替代原根 Stack 内自绘弹层）。标题/按钮为
+   * 常量 → 建一次永不重建（faqs-arkui-555 只定格构造参数，动态内容经
+   * contentBuilder 闭包在 open() 时读当次状态）。
+   */
+  private playlistPickerController: CustomDialogController | undefined = undefined;
 
   /**
    * 登录态版本号：从本页「去登录」登录成功 / 退出登录时 LoginStore 会递增它，
@@ -194,18 +201,17 @@ export struct WatchHistoryPage {
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 段切换行 44。
    * 标题行与 bottomBuilder 段切换行高度均为定值且段切换行恒在（含未登录空态），
-   * 无需实测——顶部占位条目（下载页同款）与空态 padding 直接绑定该值
-   * （旧 onAreaChange 实测机制已废弃）。
+   * 无需实测——顶部占位条目（下载页同款）与空态 padding 直接绑定该值。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT + HISTORY_TABS_ROW_HEIGHT;
   }
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（四页签同款）：onDidScroll /
+   * onScrollStop 命令式驱动 opacity（不标 @State，滚动高频回调零重建）；
+   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
+   * 边缘回弹负偏移归零 = 死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -232,9 +238,31 @@ export struct WatchHistoryPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
+    // 「加入歌单」弹窗：官方标准对话框，标题/按钮常量（见成员声明处注释）。
+    // 关闭路径刻意不清暂存曲目：关闭有退场动画，清了会让副标题在淡出途中
+    // 先变空；pickerTrack 每次打开前都会重写，残留值无消费方。
+    this.playlistPickerController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '加入歌单',
+        contentBuilder: (): void => {
+          this.PlaylistPickerBody();
+        },
+        buttons: [
+          {
+            value: '取消',
+            buttonStyle: ButtonStyleMode.TEXTUAL,
+            action: (): void => {
+              this.playlistPickerController?.close();
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
     this.checkLoginAndLoad();
   }
 
@@ -340,9 +368,8 @@ export struct WatchHistoryPage {
       // 三重终止闸门：返回空页 / 游标归零 / 游标原地踏步（防死循环）
       this.hasMore = data.list.length > 0 && data.cursorMax > 0 && data.cursorMax !== reqCursor;
       if (data.list.length > 0) {
-        // 增量追加（2026-10-19 修「加载第二页列表整体跳一下」）：
-        // 镜像数组 push + historySource.append 只发 onDataAdd，
-        // 不再整表 reload（onDataReloaded 让可视区节点失效重建、锚点重算）。
+        // 增量追加：镜像数组 push + historySource.append 只发 onDataAdd，
+        // 避免整表 reload（onDataReloaded 让可视区节点失效重建、锚点重算）。
         for (let i = 0; i < data.list.length; i++) {
           this.historyItems.push(data.list[i]);
         }
@@ -515,7 +542,7 @@ export struct WatchHistoryPage {
 
   // ===== 「⋯」菜单（与搜索页同款四项） =====
 
-  /** 「⋮」标准菜单项（阶段 2 迁移：自绘菜单弹窗 → bindMenu + MenuElement 数组） */
+  /** 「⋮」菜单项：bindMenu + MenuElement 数组 */
   private trackMenuItems(track: Track, faceUrl: string): MenuElement[] {
     return [
       {
@@ -620,20 +647,20 @@ export struct WatchHistoryPage {
   }
 
   private openPlaylistPicker(track: Track): void {
-    const options: Playlist[] = LibraryStore.getPlaylists();
+    const options: Playlist[] = LibraryStore.getAddablePlaylists();
     if (options.length === 0) {
       this.createPlaylistAndAdd(track, options);
       return;
     }
     this.playlistOptions = options;
     this.pickerTrack = track;
-    this.showPlaylistPicker = true;
+    this.playlistPickerController?.open();
   }
 
   /** 弹层里的「新建歌单并加入」：省掉一次跳转 */
   private createPlaylistFromPicker(): void {
     const track: Track | null = this.pickerTrack;
-    this.dismissPicker();
+    this.playlistPickerController?.close();
     if (!track) {
       return;
     }
@@ -643,17 +670,19 @@ export struct WatchHistoryPage {
 
   private addToPlaylist(p: Playlist): void {
     const track: Track | null = this.pickerTrack;
-    this.dismissPicker();
+    this.playlistPickerController?.close();
     if (!track) {
       return;
     }
     const updated: Playlist | null = LibraryStore.addTrackToPlaylist(p.id, track);
+    // 双向收藏夹拦截提示：非 B 站曲目被 store 过滤时明确告知而非「已加入」
+    //（被滤时 addTrackToPlaylist 仍返回歌单对象）
+    const skipped: number = LibraryStore.consumeFavMirrorSkippedCount();
+    if (updated !== null && skipped > 0) {
+      this.toast(`「${p.name}」是双向同步收藏夹，仅支持添加 B 站曲目`, 2200);
+      return;
+    }
     this.toast(updated ? `已加入「${p.name}」` : '加入歌单失败', 1600);
-  }
-
-  private dismissPicker(): void {
-    this.showPlaylistPicker = false;
-    this.pickerTrack = null;
   }
 
   // ===== 标题栏内容 =====
@@ -670,16 +699,15 @@ export struct WatchHistoryPage {
 
   /**
    * 标题行下方自定义区（titleBar 的 bottomBuilder 承载，恒配置——含未登录空态）：
-   * 段切换行（观看历史 / 稍后再看，2026-10-11 按用户要求移除「播放全部」按钮）。
+   * 段切换行（观看历史 / 稍后再看）。
    * ⚠️ bottomBuilder 高度不自适应，由 titleBar 参数显式给定
    * （HISTORY_TABS_ROW_HEIGHT），行定高排布。
    */
   @Builder
   historyTabsRow() {
     Row() {
-      // 段切换（观看历史 / 稍后再看）：2026-10-11 组件标准化迁移 —— 自绘
-      // Stack+粉片 translate 滑块换成 CapsuleSegmentButtonV2 标准分段按钮
-      // （与 SearchTabBar 同款），B 站粉经 itemSelectedBackgroundColor 覆写；
+      // 段切换（观看历史 / 稍后再看）：CapsuleSegmentButtonV2 标准分段按钮
+      //（与 SearchTabBar 同款），B 站粉经 itemSelectedBackgroundColor 覆写；
       // selectedIndex 由 this.tab 重算，点击 → onItemClicked → switchTab
       // （内含切换守卫与按需懒加载）。
       CapsuleSegmentButtonV2({
@@ -708,7 +736,7 @@ export struct WatchHistoryPage {
         .height(32)
         // ⚠️ V2 分段按钮测量特性：给多大渲染多大（均摊到各段），不会内容自适应
         // —— 宽度显式收紧到 150vp（背板 padding 4×2 + 两段 4 字文案 52 +
-        // itemPadding 8×2），靠左贴近旧自绘滑块 134vp 密度。
+        // itemPadding 8×2）。
         .width(150)
     }
     .width('100%')
@@ -718,7 +746,7 @@ export struct WatchHistoryPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
    * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
    * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
@@ -742,7 +770,7 @@ export struct WatchHistoryPage {
   }
 
   /**
-   * 段切换行收窄容器（2026-10-23 平板模式宽度适配）：同 historyBarNarrow 口径 ——
+   * 段切换行收窄容器：同 historyBarNarrow 口径 ——
    * bottomBuilder 也横跨整列全宽，收窄后段切换行与本页条目列同宽对齐；
    * bottomBuilder 显式高度（HISTORY_TABS_ROW_HEIGHT）不动。sm 天然无操作。
    */
@@ -892,25 +920,13 @@ export struct WatchHistoryPage {
     })
   }
 
-  /** 「加入歌单」选择弹层（遮罩 + 面板，与 SearchPage 同款） */
+  /**
+   * 「加入歌单」弹窗正文（官方 CustomContentDialog，与 SearchPage 同款）。
+   * 标题在 primaryTitle；取消在 buttons 槽（自动关闭）。
+   */
   @Builder
-  pickerOverlay() {
-    // 全屏点击捕获层：只负责「点弹窗外关闭」，不带遮罩底色
-    //（2026-10-23 用户要求：加入歌单弹窗周围不要暗色/主题色遮罩，与 SearchPage 同步）
+  PlaylistPickerBody(): void {
     Column() {
-    }
-    .width('100%')
-    .height('100%')
-    .onClick((): void => {
-      this.dismissPicker();
-    })
-    .justifyContent(FlexAlign.Center)
-
-    Column() {
-      Text('加入歌单')
-        .fontSize(18)
-        .fontColor($r('app.color.text_primary'))
-        .margin({ bottom: 8 })
       Text(this.pickerTrack ? this.pickerTrack.title : '')
         .fontSize(13)
         .fontColor($r('app.color.text_secondary'))
@@ -970,21 +986,8 @@ export struct WatchHistoryPage {
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
       .constraintSize({ maxHeight: 260 })
-      Button('取消', { type: ButtonType.Normal })
-        .width('100%')
-        .height(44)
-        .borderRadius(BUTTON_RADIUS_VP)
-        .backgroundColor($r('app.color.bg_divider'))
-        .fontColor($r('app.color.text_primary'))
-        .margin({ top: 12 })
-        .onClick((): void => {
-          this.dismissPicker();
-        })
     }
-    .padding(20)
-    .width('80%')
-    .backgroundColor($r('app.color.bg_card'))
-    .borderRadius(12)
+    .width('100%')
   }
 
   build() {
@@ -1086,8 +1089,8 @@ export struct WatchHistoryPage {
             List({ scroller: this.listScroller }) {
               // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
               // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
-              // safeTop + 56 + 段切换行 44），首个真实条目恰从栏底起排（静置位与旧
-              // contentStartOffset 等值），滚动时占位与条目一起从沉浸材质下方穿过。
+              // safeTop + 56 + 段切换行 44），首个真实条目恰从栏底起排，
+              // 滚动时占位与条目一起从沉浸材质下方穿过。
               ListItem() {
                 // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
                 Row()
@@ -1095,8 +1098,8 @@ export struct WatchHistoryPage {
                   .height(this.barTotalHeight())
               }
               if (this.tab === TAB_HISTORY) {
-                // 横屏宽屏（2026-10-23 两列改造）：historyRow 配对两列（左右槽各渲染
-                // 一次，行内按压/菜单/点击状态按行独立）；占位与尾部状态条保持整行宽。
+                // 横屏宽屏：historyRow 配对两列（左右槽各渲染一次，
+                // 行内按压/菜单/点击状态按行独立）；占位与尾部状态条保持整行宽。
                 if (this.isTwoCol()) {
                   LazyForEach(
                     this.historyPairs,
@@ -1139,7 +1142,7 @@ export struct WatchHistoryPage {
                   )
                 }
               } else {
-                // 稍后再看页签两列改造（同观看历史页签）
+                // 稍后再看页签：同观看历史页签的两列配对
                 if (this.isTwoCol()) {
                   LazyForEach(
                     this.toviewPairs,
@@ -1178,7 +1181,7 @@ export struct WatchHistoryPage {
                   )
                 }
               }
-              // 尾部状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
+              // 尾部状态条（常驻 + 固定高度）：只换内容不插拔条目，
               // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
               // 仅历史页签挂（稍后再看是一次性列表，无分页）。
               if (this.tab === TAB_HISTORY) {
@@ -1214,17 +1217,17 @@ export struct WatchHistoryPage {
             .edgeEffect(EdgeEffect.Spring)
             .cachedCount(8)
             // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-            //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
+            //（见上方占位注释，下载页同款）。
             .onReachEnd((): void => {
               this.loadHistoryMore();
             })
-            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
             // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
             .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
               this.syncTopBlurProgress();
             })
             .onScrollStop((): void => {
-              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
               this.syncTopBlurProgress();
             })
           }
@@ -1233,28 +1236,23 @@ export struct WatchHistoryPage {
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
         // ⚠️ 不整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
-        // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）
+        // 扩展进底部安全区（不做底部避让，沉浸到底）
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）；
         // 横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL），竖屏维持原值
         .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于「加入歌单」
+        // 顶栏渐变模糊层：盖内容列之上（z 序低于「加入歌单」
         // 弹层、低于 HDS titleBar，段切换行属标题栏 bottomBuilder、随整栏一起盖），
         // 进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
         TopGradientBlurOverlay({
           barHeightVp: this.barTotalHeight(),
           updater: this.topBlurUpdater
         })
-
-        // 「加入歌单」选择弹层：盖在标题栏之上
-        if (this.showPlaylistPicker) {
-          this.pickerOverlay()
-        }
       }
     }
-    // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
+    // HDS 沉浸光感标题栏（真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    // 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
     //（historyBarNarrow / historyTabsRowNarrow），标题行与段切换行和条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
@@ -1264,7 +1262,7 @@ export struct WatchHistoryPage {
         stackBuilder: (): void => {
           this.historyBarNarrow();
         },
-        // 标题行下方自定义区：段切换行（观看历史 / 稍后再看 + 播放全部），恒配置——
+        // 标题行下方自定义区：段切换行（观看历史 / 稍后再看），恒配置——
         // 含未登录空态（「去登录」按钮也在段切换行下方的空态里，段切换本身恒可见）。
         // ⚠️ 段切换行不能塞进 stackBuilder（会溢出 56vp 标题行、与列表内容重叠，
         // 真机复现），必须走 bottomBuilder 显式高度。
@@ -1277,8 +1275,7 @@ export struct WatchHistoryPage {
         }
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1286,10 +1283,10 @@ export struct WatchHistoryPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
-    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    // 系统返回拦截：播放页 overlay 打开时吞掉返回并发收起请求（留在本页），
+    // 否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -1297,8 +1294,8 @@ export struct WatchHistoryPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function WatchHistoryPageBuilder(): void {
@@ -1306,7 +1303,7 @@ export function WatchHistoryPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const WatchHistoryPageWrapped: WrappedBuilder<[]> = wrapBuilder(WatchHistoryPageBuilder);
 

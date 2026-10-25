@@ -4,7 +4,7 @@
  * 为什么是站内页而不是跳 B 站：订阅要在 App 内落成可维护的歌单，
  * 跳出去就没法持续更新订阅，也就没有 C 方案的意义。
  *
- * 数据来源（2026-10-03 匿名态实测，均可用）：
+ * 数据来源（匿名态实测，均可用）：
  *  · 资料 `getUserCard`（x/web-interface/card）—— **不要用 space/wbi/acc/info**，
  *    那个匿名只回 v_voucher，字段全空；
  *  · 投稿 `getUserVideos`（x/space/wbi/arc/search，30 条/页，真分页）。
@@ -13,34 +13,34 @@
  * upName 兜底、upFace 首帧占位），与 PlaylistDetail 同套约定。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 标题行 + UP 资料头部区，批 1 样板同款；返回键为 HDS 默认键）；侧滑返回是 Navigation 级能力，不受影响。
+ * 标题行 + UP 资料头部区；返回键为 HDS 默认键）；侧滑返回是 Navigation 级能力，不受影响。
  *
- * 布局与 **PlaylistDetail 完全同款**（2026-10-06 对齐）：
+ * 布局与 **PlaylistDetail 完全同款**：
  *  · 头部区「96vp 头像 + 28fp 大标题 + 元信息 + 播放全部/订阅按钮」整体在栏内，
  *    UP 昵称只在头部区显示一次，标题行为空占位（返回键为 HDS 默认键）；
  *  · 列表走「首个空白占位 ListItem」**穿透模式**（下载页同款）——视口铺满全屏，
  *    首项从标题栏底部起排，滚动时条目从沉浸材质下穿过，滚动模糊由 HDS scrollEffectOpts 接管；
  *  · 非列表分支（骨架 / 失败 / 空态）没有占位条目，各自补 padding top。
  *
- * 缓存策略（2026-10-09）：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
+ * 缓存策略：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
  * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有显式动作才联网：
  *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料；
  *  · 头部「订阅投稿」（仅未订阅时）：取投稿建歌单，成功后本页列表与缓存一并换新。
- * 本页已取消「拉取新投稿」（2026-10-23）：订阅歌单的更新入口在歌单详情页
+ * 本页不提供「拉取新投稿」：订阅歌单的更新入口在歌单详情页
  * （PlaylistDetail 的「拉取新投稿」按钮）。
  * 无缓存（首次进入）仍走 loadCard + loadPage(1) 联网加载，成功后落盘。
  *
- * 投稿搜索（2026-10-23，A+B 混合；同日阶梯化）：头部搜索框输入即**本地过滤**
+ * 投稿搜索（A+B 混合阶梯）：头部搜索框输入即**本地过滤**
  * 已加载列表（标题/歌手匹配，离线可用）；Enter /「搜索」按钮走远程搜索阶梯：
  * 空间接口 keyword 服务端搜索为主（`searchSpaceVideosByKeyword`，结果 = TA 的
  * 投稿里匹配关键词的全部），被风控 / 0 命中时落回 `searchUpVideosByKeyword`
- * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿，修复前行为）。
+ * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿）。
  * 渲染源三态切换见 displayTracks()；搜索态不落缓存、不参与翻页。
  */
 
 import * as BilibiliApi from '../api/BilibiliApi';
 import { SpaceVideo } from '../api/BilibiliApi';
-import { Track, buildTrack } from '../model/MusicModels';
+import { Playlist, Track, buildTrack, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { LibraryStore, UpSubscribeResult, PLAYLIST_MAX_ITEMS } from '../service/LibraryStore';
 import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
@@ -50,6 +50,7 @@ import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { UpSpaceRouteParam, NavRouteParamReader } from '../service/NavRouteParams';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
+import { TrackCard } from '../components/TrackCard';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { CoverImage } from '../components/CoverImage';
 import { toHttpsUrl, toThumbUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
@@ -65,12 +66,15 @@ import {
 } from '../utils/HeaderBarMaterial';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { common } from '@kit.AbilityKit';
-import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON } from '../common/Constants';
+import { CustomContentDialog } from '@kit.ArkUI';
+import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP, STORE_ITEM_DISPLAY_STYLE, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
   PairDataSource,
+  makePairs,
   TWO_COL_GAP_VP,
+  GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
 import {
@@ -95,10 +99,30 @@ const RETRY_COOLDOWN_MS: number = 4000;
  * UP 资料头部区（bottomBuilder 承载）实测前的估计高度：头像行 + 元信息行 + padding。
  * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定；实测值
  * （headerAreaHeight）回来后覆盖，此值只防首次布局 0 高闪跳。
- * 2026-10-22 头部区间距 top 12→4、bottom 16→8 后同步 -16。
- * 2026-10-23 搜索框行加入（40 高 + 12 上边距）：154 → 206。
  */
 const UP_HEADER_ESTIMATE_HEIGHT: number = 206;
+
+/**
+ * 头部操作行搜索区 ↔ 多选动作区的交叉淡化时长（ms）：两层同槽位叠放，
+ * 一层淡出另一层淡入，布局稳定不跳。
+ */
+const SELECT_FADE_MS: number = 250;
+
+/**
+ * 多选批量下载的串行入队间隔（ms）：requestDownload 内部每首都会调
+ * expandVideoParts（一次 view 请求），密集连发会被 B 站匿名限流
+ * （PlaylistsPage 整单下载同一条经验），串行 + 留间隔。
+ */
+const SELECT_ENQUEUE_GAP_MS: number = 350;
+
+/** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise（批量下载串行节流用） */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout((): void => {
+      resolve();
+    }, ms);
+  });
+}
 
 /** `mm:ss` / `hh:mm:ss` → 秒（SpaceVideo.length 是字符串；榜单是秒数，两种都认） */
 function spaceDuration(raw: string): number {
@@ -152,7 +176,6 @@ export struct UpSpacePage {
   /**
    * 失败原因（人话）。
    *
-   * 之前这里只有一句「检查网络后再试一次」，但真机失败的原因完全不是网络：
    * B 站的空间接口对匿名访问风控很严（-352 风控校验失败 / -799 请求过于频繁 / HTTP 412），
    * 把 code 显示出来才知道该等风控过去还是该换网络。
    */
@@ -166,7 +189,7 @@ export struct UpSpacePage {
   @State retryCooling: boolean = false;
   /** 下拉刷新进行中（Refresh 双向绑定 $$refreshing，forceRefresh 复位） */
   @State refreshing: boolean = false;
-  // ===== 投稿搜索（2026-10-23：本地过滤 + B 站按 mid 过滤搜索，A+B 混合）=====
+  // ===== 投稿搜索（本地过滤 + B 站按 mid 过滤搜索，A+B 混合）=====
   /** 搜索框文本：输入即本地过滤已加载列表（onChange 重算）；Enter/「搜索」触发 B 站搜索 */
   @State @Watch('onListSourceChanged') searchKeyword: string = '';
   /** 本地过滤结果（keyword 变化即时重算；keyword 为空 = 不过滤，此数组为空占位） */
@@ -202,6 +225,29 @@ export struct UpSpacePage {
    */
   private lastCollectPartial: boolean = false;
 
+  // ===== 投稿多选（头部「选择」按钮进入，批量加入歌单 / 下载） =====
+  /** 多选模式：true = 头部「选择」已进入，点投稿切换选中、搜索区淡出为动作区、「⋯」隐藏 */
+  @State selecting: boolean = false;
+  /**
+   * 选中投稿 id 集（track.id = bvid）。切换一律**整表重赋值**（不用 push/splice
+   * 原地改）：@State 对数组重赋值的观测路径最稳，配合 TrackItem/TrackCard 的
+   * selected @Prop 逐条驱动勾选回显。
+   */
+  @State selectedIds: string[] = [];
+  /** 多选批量下载串行入队进行中（防重复点击：再点「下载」提示稍候） */
+  @State downloadingSelected: boolean = false;
+  /** 「加入歌单」弹窗曲目（「⋯」单曲 / 多选批量共用一个弹窗） */
+  private pickerTracks: Track[] = [];
+  /** 弹窗打开时的可加歌单快照（「新建歌单并加入」的重名检查基于它即可） */
+  private playlistOptions: Playlist[] = [];
+  /**
+   * 「加入歌单」弹窗 controller：官方 CustomContentDialog 标准对话框
+   * （默认遮罩 + 官方按钮槽，替代原根 Stack 内自绘弹层）。标题/按钮为
+   * 常量 → 建一次永不重建（faqs-arkui-555 只定格构造参数，动态内容经
+   * contentBuilder 闭包在 open() 时读当次状态）。
+   */
+  private playlistPickerController: CustomDialogController | undefined = undefined;
+
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
 
@@ -218,9 +264,17 @@ export struct UpSpacePage {
   private isTwoCol(): boolean {
     return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
   }
+
+  /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
+  @StorageProp(STORE_ITEM_DISPLAY_STYLE) itemDisplay: string = ITEM_DISPLAY_LIST;
+
+  /** 大封面模式：投稿以双列网格卡（TrackCard）渲染，竖屏 / 横屏均双列 */
+  private isGrid(): boolean {
+    return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
   /**
    * UP 资料头部区实测高（vp，bottomBuilder 内层根节点 onAreaChange 回写，随元信息行数浮动）。
-   * ⚠️ 初值必须为 0（2026-10-08 同款教训）：列表带着初值一起挂载会让占位条目先按
+   * ⚠️ 初值必须为 0：列表带着初值一起挂载会让占位条目先按
    * 不含头部区的让位量排布、实测回来再整体下移（内容跳变）——列表挂载门控直接判
    * headerAreaHeight > 0（barTotalHeight() 恒 > 0 不能当门控），即头部区首次实测
    * 完成后才挂载列表，保证让位量含头部实测高。
@@ -229,7 +283,7 @@ export struct UpSpacePage {
   /** 投稿列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
   private listScroller: Scroller = new Scroller();
   /**
-   * 列表数据源（2026-10-23 性能审查）：LazyForEach 驱动源，与 displayTracks()
+   * 列表数据源：LazyForEach 驱动源，与 displayTracks()
    * 三态保持同步 —— 三态 @State（tracks / filteredTracks / remoteResults /
    * searchKeyword）都挂 @Watch，任一变化走 reloadListSource 整表重载
    * （reload 语义与三态切换天然匹配：切态必是整表换源）。
@@ -260,10 +314,9 @@ export struct UpSpacePage {
   }
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（四页签同款）：onDidScroll / onScrollStop
+   * 命令式驱动 opacity（不标 @State，滚动高频回调零重建）；yOffset 0 →
+   * TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，边缘回弹负偏移归零）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -277,10 +330,33 @@ export struct UpSpacePage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
-    // 路由入参（2026-10-22 传参改造）：显式参数类随 pushPathByName 入栈，
+    // 「加入歌单」弹窗：官方标准对话框，标题/按钮常量（见成员声明处注释）。
+    // 关闭路径刻意不清暂存数据：关闭有退场动画，清了会让正文在淡出途中
+    // 先变空；pickerTracks / playlistOptions 每次打开前都会重写，残留值
+    // 无消费方。
+    this.playlistPickerController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '加入歌单',
+        contentBuilder: (): void => {
+          this.PlaylistPickerBody();
+        },
+        buttons: [
+          {
+            value: '取消',
+            buttonStyle: ButtonStyleMode.TEXTUAL,
+            action: (): void => {
+              this.playlistPickerController?.close();
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
+    // 路由入参：显式参数类随 pushPathByName 入栈，
     // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
     const routeParam: UpSpaceRouteParam | null =
       NavRouteParamReader.readUpSpaceParam(NavStackHolder.stack);
@@ -295,8 +371,8 @@ export struct UpSpacePage {
       return;
     }
     this.refreshSubscriptionState();
-    // （2026-10-16 AppFreeze 加固）缓存读取改异步（getUpSpaceCache 返回 Promise）：
-    // 恢复逻辑挪进 async 方法，aboutToAppear 不再同步读文件，页面挂载零阻塞。
+    // 缓存读取为异步（getUpSpaceCache 返回 Promise）：恢复逻辑在 async 方法里，
+    // aboutToAppear 不同步读文件，页面挂载零阻塞。
     this.restoreFromCache().catch((): void => {
       // 读缓存异常按无缓存兜底：直接联网拉取
       this.loadCard();
@@ -305,10 +381,10 @@ export struct UpSpacePage {
   }
 
   /**
-   * 缓存命中（2026-10-09）：直接恢复，不打任何接口 —— loadCard / loadPage 都跳过，
+   * 缓存命中：直接恢复，不打任何接口 —— loadCard / loadPage 都跳过，
    * 刷新只留显式出口：列表下拉刷新（forceRefresh）与「订阅投稿」成功后的换新。
    * 头像用缓存真图（歌单入口传的是空串占位）；上拉翻页从缓存 page+1 续拉。
-   * （2026-10-16 AppFreeze 加固）readText 移到异步任务里执行，读完再决定恢复 / 联网。
+   * readText 在异步任务里执行，读完再决定恢复 / 联网。
    */
   private async restoreFromCache(): Promise<void> {
     const cached: UpSpaceCacheEntry | null = await getUpSpaceCache(this.upMid);
@@ -356,8 +432,7 @@ export struct UpSpacePage {
    * 写缓存：当前列表 + 资料 + 分页游标整表落盘。
    * tracks / upMid 为空时 no-op（loadCard 先于列表返回时不够一格完整缓存，
    * 等列表成功后由 loadFirstMultiSource 写全量）。
-   * （2026-10-16 AppFreeze 加固）落盘已改异步，失败在 saveUpSpaceCache 内部记日志，
-   * 调用方不等待、不受影响。
+   * 落盘为异步，失败在 saveUpSpaceCache 内部记日志，调用方不等待、不受影响。
    */
   private saveToCache(): void {
     if (this.upMid.length === 0 || this.tracks.length === 0) {
@@ -401,7 +476,7 @@ export struct UpSpacePage {
         this.upName = card.name.length > 0 ? card.name : this.upName;
         this.upFace = card.face;
         this.fans = card.fans;
-        // 投稿总数（2026-10-23 用户需求：订阅态元信息行显示 UP 的投稿数而非订阅歌单曲目数）
+        // 投稿总数（订阅态元信息行显示 UP 的投稿数而非订阅歌单曲目数）
         if (card.archiveCount > 0) {
           this.archiveCount = card.archiveCount;
         }
@@ -424,7 +499,7 @@ export struct UpSpacePage {
    *   · 第一页走 `collectUpVideos`（登录态：空间接口优先，失败落回 搜索反查 → related；
    *     匿名态：搜索反查 → related → 空间接口），策略只在 `BilibiliApi` 里维护一份；
    *   · 只有**空间接口**支持真分页，所以数据来自搜索 / related 时不支持上拉翻页
-   *     （`hasMore` 直接置 false），底部提示改成「仅显示最近投稿 · 订阅可持续获取新投稿」。
+   *     （`hasMore` 直接置 false），底部提示为「仅显示最近投稿 · 订阅可持续获取新投稿」。
    */
   private async loadPage(pn: number): Promise<void> {
     if (this.loading || this.loadingMore) {
@@ -460,8 +535,8 @@ export struct UpSpacePage {
   /**
    * 第一页：三级兜底取投稿。
    *
-   * 为什么不再用旧的「搜索空 → 空间接口」两级：搜索是按**视频内容**匹配的，
-   * UP 昵称不出现在标题里时命中就是 0，旧代码这时会直接掉进风控最强的空间接口
+   * 不用「搜索空 → 空间接口」两级：搜索是按**视频内容**匹配的，
+   * UP 昵称不出现在标题里时命中就是 0，会直接掉进风控最强的空间接口
    * （实测间隔 20s 打 4 次也只成功 2 次）。related 扩散不需要任何关键词，
    * 且匿名稳定（连打 3 次 3/3 code=0，40 条里同 UP 的占 11~20 条），正好补上这一格。
    */
@@ -493,8 +568,8 @@ export struct UpSpacePage {
    *
    * 只有空间接口支持真分页，所以 pn>1 只能走这里（`loadFirstMultiSource` 里
    * 数据来自搜索 / related 时会把 `hasMore` 置 false，根本不会走到这）。
-   * pn 必须一路透传到 `getUserVideosWithRetry` → `getUserVideos`（2026-10-11 修：
-   * 旧代码包装层丢页码、恒取第 1 页，上拉翻页把同一批条目反复追加，缓存里全是重复）。
+   * pn 必须一路透传到 `getUserVideosWithRetry` → `getUserVideos`：
+   * 包装层丢页码会恒取第 1 页，上拉翻页反复追加同一批条目，缓存里全是重复。
    */
   private async loadPageViaSpace(pn: number): Promise<void> {
     try {
@@ -543,7 +618,7 @@ export struct UpSpacePage {
   }
 
   private onReachEnd(): void {
-    // 远程搜索结果是一次性的（不分页），搜索态上拉到底不再触发翻页
+    // 远程搜索结果是一次性的（不分页），搜索态上拉到底不触发翻页
     if (this.remoteResults !== null || this.remoteSearching) {
       return;
     }
@@ -614,7 +689,7 @@ export struct UpSpacePage {
   }
 
   /**
-   * 下拉刷新：强制联网重拉第一页 + 资料（2026-10-09 缓存策略下进页不联网，
+   * 下拉刷新：强制联网重拉第一页 + 资料（缓存策略下进页不联网，
    * 这是本页仅存的显式刷新出口）。
    *
    * 有请求在途（loading / loadingMore）时直接收起刷新头，不叠加请求。
@@ -640,7 +715,7 @@ export struct UpSpacePage {
       });
   }
 
-  // ===== 投稿搜索（2026-10-23）=====
+  // ===== 投稿搜索 =====
 
   /**
    * 列表渲染源（三态切换）：远程搜索态 → B 站搜索结果；本地过滤态 → 过滤结果；
@@ -658,6 +733,11 @@ export struct UpSpacePage {
 
   /** 三态渲染源任一变化（@Watch）：同步列表数据源（整表重载 + 两列视图 sync） */
   private onListSourceChanged(): void {
+    // 渲染源整表换源时退出多选：选区引用的是旧源条目（过滤词变了 / 远程结果
+    // 到了 / 刷新换列表），跨态保留选区会把用户看不见的条目悄悄加进歌单。
+    if (this.selecting) {
+      this.exitSelecting();
+    }
     this.trackSource.reload(this.displayTracks());
     this.trackPairs.sync();
   }
@@ -699,9 +779,9 @@ export struct UpSpacePage {
    *
    * ① 空间接口 keyword 搜索（`searchSpaceVideosByKeyword`，B 站空间页「搜索
    *   TA 的投稿」同款）—— 结果 = TA 的投稿里匹配关键词的**全部**（按
-   *   page.count 精确翻页），根治旧路径「挤不进全站搜索前 60 条就缺失」；
+   *   page.count 精确翻页），不受全站搜索前 60 条截断的限制；
    * ② ①被风控（searchOk=false）或 0 命中时，落回全站搜索 + mid 过滤
-   *   （`fallbackToSitewideSearch`，修复前行为原样保留）—— 0 命中也再捞
+   *   （`fallbackToSitewideSearch`）—— 0 命中也再捞
    *   一轮，防空间索引口径与全站不同导致误报「没搜到」。
    *
    * 竞态纪律（照 SearchPage）：token 只认最新；`clearSearch` / 再次输入都会令旧响应作废。
@@ -739,8 +819,7 @@ export struct UpSpacePage {
   }
 
   /**
-   * 阶梯第②步：全站搜索兜底（`searchUpVideosByKeyword`，修复前 runRemoteSearch
-   * 的主体原样搬入）。失败提示与旧版一致。
+   * 阶梯第②步：全站搜索兜底（`searchUpVideosByKeyword`）。
    */
   private fallbackToSitewideSearch(kw: string, token: number): void {
     BilibiliApi.searchUpVideosByKeyword(this.upMid, this.upName, kw)
@@ -827,7 +906,7 @@ export struct UpSpacePage {
         this.subscribed = true;
         this.subscribedCount = r.playlist.tracks.length;
         this.showSubscribeResult(r);
-        // 订阅取回的就是该 UP 的最新投稿页（2026-10-23）：与「拉取新投稿」同样把
+        // 订阅取回的就是该 UP 的最新投稿页：与「拉取新投稿」同样把
         // 页面列表和缓存一并换新 —— 否则缓存命中进入 + 订阅的场景下，缓存里还是
         // 进页时的旧列表，重进页面看不到刚拉到的条目，又得手动再拉一次。
         this.tracks = mapped;
@@ -854,7 +933,7 @@ export struct UpSpacePage {
    * 取该 UP 的**全部**投稿（订阅用，封顶 `PLAYLIST_MAX_ITEMS`），返回已映射成 Track 的列表。
    *
    * 走 `collectUpVideosAll`：空间接口按响应里的 `page.count` 精确翻页；第 1 页失败
-   * 落回单页多源兜底（搜索反查 → related 扩散 → 空间老路，与旧订阅行为一致）；
+   * 落回单页多源兜底（搜索反查 → related 扩散 → 空间老路）；
    * 中途翻页失败**保留已拉到的部分**（`lastCollectPartial` 置 true，提示文案据此
    * 告诉用户「稍后再订阅可补齐」——歌单按 id 去重幂等，重复订阅不会灌重复条目）。
    *
@@ -911,9 +990,245 @@ export struct UpSpacePage {
     showAppToast(`${prefix}，${parts.join('，')}`, this.lastCollectPartial ? 3000 : 2000);
   }
 
-  // ===== 曲目菜单（本页只给两项：播放队列 / 下载） =====
+  // ===== 投稿多选（头部「选择」按钮进入，批量加入歌单 / 下载） =====
 
-  /** 「⋯」标准菜单项（阶段 2 迁移：双按钮 AlertDialog → bindMenu + MenuElement 数组） */
+  /** 进入多选（头部「选择」按钮）：选区从空起步，条目点击切换选中 */
+  private enterSelecting(): void {
+    this.selecting = true;
+    this.selectedIds = [];
+  }
+
+  /** 切换选中（多选态点投稿 / 点勾选槽位） */
+  private toggleSelected(track: Track): void {
+    if (this.selectedIds.indexOf(track.id) >= 0) {
+      this.selectedIds = this.selectedIds.filter((id: string): boolean => id !== track.id);
+      return;
+    }
+    const next: string[] = this.selectedIds.slice(0);
+    next.push(track.id);
+    this.selectedIds = next;
+  }
+
+  /** 全选判定：与当前渲染源（三态）比对，全选的是「正在看的那份列表」 */
+  private isAllSelected(): boolean {
+    const shown: Track[] = this.displayTracks();
+    if (shown.length === 0) {
+      return false;
+    }
+    for (let i = 0; i < shown.length; i++) {
+      if (this.selectedIds.indexOf(shown[i].id) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** 全选 / 取消全选（工具条按钮） */
+  private toggleSelectAll(): void {
+    if (this.isAllSelected()) {
+      this.selectedIds = [];
+      return;
+    }
+    const shown: Track[] = this.displayTracks();
+    const ids: string[] = [];
+    for (let i = 0; i < shown.length; i++) {
+      ids.push(shown[i].id);
+    }
+    this.selectedIds = ids;
+  }
+
+  /** 退出多选（「完成」/ 返回键 / 渲染源切换） */
+  private exitSelecting(): void {
+    this.selecting = false;
+    this.selectedIds = [];
+  }
+
+  /** 选中的投稿（按渲染源收口：渲染源里已不存在的 id 自动略过，不盲信选区） */
+  private selectedTracks(): Track[] {
+    const shown: Track[] = this.displayTracks();
+    return shown.filter((t: Track): boolean => this.selectedIds.indexOf(t.id) >= 0);
+  }
+
+  // ===== 加入歌单（DownloadsPage 同款：无歌单自动建单兜底 + 选择弹层；多曲批量走 addTracksToPlaylist） =====
+
+  /** 没有任何可加歌单时的兜底：新建歌单并直接加入（名字取自第一首） */
+  private createPlaylistAndAdd(tracks: Track[], existing: Playlist[]): void {
+    const name: string = LibraryStore.nextPlaylistNameForTrack(tracks[0], existing);
+    const created: Playlist = LibraryStore.createPlaylist({ name: name });
+    const updated: Playlist | null = LibraryStore.addTracksToPlaylist(created.id, tracks);
+    showAppToast(updated ? `已新建歌单「${name}」并加入` : '加入歌单失败', 1800);
+  }
+
+  /**
+   * 打开「加入歌单」选择弹层；可加歌单为空时跳过弹层直接自动建单。
+   * 歌单列表走 getAddablePlaylists（过滤 UP 订阅歌单：订阅歌单由订阅机制
+   * 维护曲目，手动加歌会被「拉取新投稿」合并逻辑搅乱）。
+   */
+  private openPickerFor(tracks: Track[]): void {
+    if (tracks.length === 0) {
+      return;
+    }
+    const options: Playlist[] = LibraryStore.getAddablePlaylists();
+    if (options.length === 0) {
+      this.createPlaylistAndAdd(tracks, options);
+      return;
+    }
+    this.playlistOptions = options;
+    this.pickerTracks = tracks;
+    this.playlistPickerController?.open();
+  }
+
+  /** 弹层里的「新建歌单并加入」（省一次跳转；快照沿用弹层打开时的列表，重名检查基于它即可） */
+  private createPlaylistFromPicker(): void {
+    const tracks: Track[] = this.pickerTracks;
+    const options: Playlist[] = this.playlistOptions;
+    this.playlistPickerController?.close();
+    if (tracks.length > 0) {
+      this.createPlaylistAndAdd(tracks, options);
+    }
+  }
+
+  private addToPlaylistFromPicker(p: Playlist): void {
+    const tracks: Track[] = this.pickerTracks;
+    this.playlistPickerController?.close();
+    if (tracks.length === 0) {
+      return;
+    }
+    const updated: Playlist | null = LibraryStore.addTracksToPlaylist(p.id, tracks);
+    showAppToast(updated ? `已加入「${p.name}」` : '加入歌单失败', 1600);
+  }
+
+  /**
+   * 多选动作区「加入歌单」：选区投稿开弹层。
+   * 加入成功后**保持多选态与选区**（DownloadsPage 口径）：用户可再选一个歌单
+   * 连着加，不必从头重选。选区清空出口只有「完成」/ 返回键 / 渲染源切换。
+   */
+  private addSelectedToPlaylist(): void {
+    const tracks: Track[] = this.selectedTracks();
+    if (tracks.length === 0) {
+      showAppToast('还没有选中投稿', 1500);
+      return;
+    }
+    this.openPickerFor(tracks);
+  }
+
+  /**
+   * 多选动作区「下载」：先确认，再串行入队（间隔见 SELECT_ENQUEUE_GAP_MS）。
+   * 入队后保持多选态与选区（与「加入歌单」同口径，用户可继续操作选区）。
+   */
+  private confirmDownloadSelected(): void {
+    const tracks: Track[] = this.selectedTracks();
+    if (tracks.length === 0) {
+      showAppToast('还没有选中投稿', 1500);
+      return;
+    }
+    showAppAlertDialog(this.getUIContext(), {
+      title: '下载选中投稿',
+      message: `将把选中的 ${tracks.length} 首投稿加入下载队列。\n已下载的会自动跳过。`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '开始下载',
+        action: (): void => {
+          this.enqueueSelectedSerial(tracks);
+        }
+      }
+    });
+  }
+
+  /**
+   * 串行入队 + 每首间隔节流（B 站匿名密集请求直接限流，见
+   * SELECT_ENQUEUE_GAP_MS 注释）。「仅 WiFi 下载」闸门在 requestDownload 入口，
+   * 只会在**首条**返回 blockedReason —— 用它探测一次，被拦则询问，
+   * 用户确认后整批以 ignoreWifiLimit 重跑（已入队的自动跳过计数，
+   * PlaylistsPage 整单下载同一套逻辑）。
+   */
+  private async enqueueSelectedSerial(tracks: Track[]): Promise<void> {
+    if (this.downloadingSelected) {
+      showAppToast('正在加入下载队列，请稍候', 1500);
+      return;
+    }
+    this.downloadingSelected = true;
+    let queued: number = 0;
+    let skipped: number = 0;
+    for (let i = 0; i < tracks.length; i++) {
+      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(tracks[i], false);
+      if (r.blockedReason.length > 0) {
+        // 首条就被「仅 WiFi 下载」拦下：收尾状态交给确认弹窗的两条分支
+        this.downloadingSelected = false;
+        this.confirmCellularSelected(tracks);
+        return;
+      }
+      queued += r.queued;
+      skipped += r.skipped;
+      if ((i + 1) % 5 === 0) {
+        showAppToast(`正在加入下载队列（${i + 1}/${tracks.length}）`, 800);
+      }
+      if (i < tracks.length - 1) {
+        await delay(SELECT_ENQUEUE_GAP_MS);
+      }
+    }
+    this.downloadingSelected = false;
+    showAppToast(this.selectedDownloadResultText(queued, skipped), 2500);
+  }
+
+  /** 「仅 WiFi 下载」拦下批量下载：问一次（措辞与单曲 confirmDownloadOnCellular 一致） */
+  private confirmCellularSelected(tracks: Track[]): void {
+    showAppAlertDialog(this.getUIContext(), {
+      title: '仅 WiFi 下载',
+      message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '继续下载',
+        action: (): void => {
+          this.enqueueSelectedWithWifiOverride(tracks);
+        }
+      }
+    });
+  }
+
+  /** 用户确认用流量后：整批 ignoreWifiLimit=true 重跑（已入队/已下载的自动跳过） */
+  private async enqueueSelectedWithWifiOverride(tracks: Track[]): Promise<void> {
+    if (this.downloadingSelected) {
+      return;
+    }
+    this.downloadingSelected = true;
+    let queued: number = 0;
+    let skipped: number = 0;
+    for (let i = 0; i < tracks.length; i++) {
+      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(tracks[i], true);
+      queued += r.queued;
+      skipped += r.skipped;
+      if (i < tracks.length - 1) {
+        await delay(SELECT_ENQUEUE_GAP_MS);
+      }
+    }
+    this.downloadingSelected = false;
+    showAppToast(this.selectedDownloadResultText(queued, skipped), 2500);
+  }
+
+  /** 批量入队结果文案：排上 / 跳过 分开说，用户才知道有多少真进了队列 */
+  private selectedDownloadResultText(queued: number, skipped: number): string {
+    if (queued === 0 && skipped === 0) {
+      return '没有可下载的投稿';
+    }
+    if (queued === 0) {
+      return `全部已在下载队列中（${skipped} 首）`;
+    }
+    const tail: string = skipped > 0 ? `，跳过 ${skipped} 首已在队列/已下载` : '';
+    return `已加入下载队列 ${queued} 首${tail}`;
+  }
+
+  // ===== 曲目菜单（加入队列 / 加入歌单 / 下载） =====
+
+  /** 「⋯」标准菜单项（bindMenu + MenuElement 数组） */
   private trackMenuItems(track: Track): MenuElement[] {
     return [
       {
@@ -921,6 +1236,13 @@ export struct UpSpacePage {
         action: (): void => {
           this.player.addToQueue(track);
           showAppToast('已加入播放队列', 1500);
+        }
+      },
+      // 加入歌单（对齐 SearchPage 菜单顺序惯例：加入队列 → 加入歌单 → 下载）
+      {
+        value: '加入歌单',
+        action: (): void => {
+          this.openPickerFor([track]);
         }
       },
       {
@@ -982,6 +1304,195 @@ export struct UpSpacePage {
   }
 
   /**
+   * 「加入歌单」弹窗正文（官方 CustomContentDialog，DownloadsPage 同款；
+   * 多曲时曲名行带「等 N 首」）。标题在 primaryTitle；取消在 buttons 槽
+   * （自动关闭）。
+   */
+  @Builder
+  PlaylistPickerBody(): void {
+    Column() {
+      // 曲名行：单曲（「⋯」菜单入口）显示曲名；多选批量显示「曲名 等 N 首」
+      Text(this.pickerTracks.length > 1
+        ? `${this.pickerTracks[0].title} 等 ${this.pickerTracks.length} 首`
+        : (this.pickerTracks.length > 0 ? this.pickerTracks[0].title : ''))
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .margin({ bottom: 12 })
+      // 第一项就是「新建歌单并加入」：想单独存一首歌时不必再跑到歌单页
+      Row() {
+        Text('＋ 新建歌单并加入')
+          .fontSize(16)
+          .fontColor(this.themeDeep)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .padding({ top: 12, bottom: 12 })
+      .stateStyles({
+        pressed: { .backgroundColor($r('app.color.press_overlay')) },
+        normal: { .backgroundColor(Color.Transparent) }
+      })
+      .onClick((): void => {
+        this.createPlaylistFromPicker();
+      })
+      Divider()
+        .color($r('app.color.bg_divider'))
+      List() {
+        ForEach(
+          this.playlistOptions,
+          (p: Playlist): void => {
+            ListItem() {
+              Row() {
+                Text(p.name)
+                  .fontSize(16)
+                  .fontColor($r('app.color.text_primary'))
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                Text(`${p.tracks.length} 首`)
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+              }
+              .width('100%')
+              .padding({ top: 12, bottom: 12 })
+              .stateStyles({
+                pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                normal: { .backgroundColor(Color.Transparent) }
+              })
+              .onClick((): void => {
+                this.addToPlaylistFromPicker(p);
+              })
+            }
+          },
+          // key 含渲染字段（与 PlaylistsPage 同因）：改名/数量变化后行才会重渲染
+          (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
+        )
+      }
+      .width('100%')
+      .edgeEffect(EdgeEffect.Spring)
+      .constraintSize({ maxHeight: 260 })
+    }
+    .width('100%')
+  }
+
+  /**
+   * 大封面网格配对行（ListItem 内容）：LazyForEach / ForEach 双渲染路径共用。
+   * 选择态在这读取（DownloadsPage.GroupContent 同款）：ForEach 路径随页面
+   * @State 重跑 builder 就地更新勾选；LazyForEach 路径仅在非多选态挂载，
+   * 选择态恒为关。
+   */
+  @Builder
+  GridPairRow(pair: PairOf<Track>): void {
+    Row() {
+      TrackCard({
+        track: pair.first,
+        onPlay: (tr: Track): void => {
+          this.player.playOrToggle(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+        selecting: this.selecting,
+        selected: this.selectedIds.indexOf(pair.first.id) >= 0,
+        onToggleSelect: (tr: Track): void => {
+          this.toggleSelected(tr);
+        }
+      }).layoutWeight(1)
+      // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+      // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+      // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+      // 间隔条，末卡与满行卡等宽。
+      Blank().width(TWO_COL_GAP_VP)
+      if (pair.second !== null) {
+        TrackCard({
+          track: pair.second,
+          onPlay: (tr: Track): void => {
+            this.player.playOrToggle(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+          selecting: this.selecting,
+          selected: this.selectedIds.indexOf(pair.second.id) >= 0,
+          onToggleSelect: (tr: Track): void => {
+            this.toggleSelected(tr);
+          }
+        }).layoutWeight(1)
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+    // 网格行页边距：两边留白 + 封面整体
+    // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+    .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+    // Top 对齐：卡高随标题行数浮动，
+    // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
+    // Top 让左右封面严格同高起步。
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /**
+   * 横屏宽屏配对行（ListItem 内容）：双渲染路径共用，选择态读取见 GridPairRow。
+   */
+  @Builder
+  TwoColPairRow(pair: PairOf<Track>, pIndex: number): void {
+    Row() {
+      TrackItem({
+        track: pair.first,
+        entranceIndex: pIndex * 2,
+        onPlay: (tr: Track): void => {
+          this.player.playOrToggle(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+        selecting: this.selecting,
+        selected: this.selectedIds.indexOf(pair.first.id) >= 0,
+        onToggleSelect: (tr: Track): void => {
+          this.toggleSelected(tr);
+        }
+      }).layoutWeight(1)
+      if (pair.second !== null) {
+        TrackItem({
+          track: pair.second,
+          entranceIndex: pIndex * 2 + 1,
+          onPlay: (tr: Track): void => {
+            this.player.playOrToggle(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+          selecting: this.selecting,
+          selected: this.selectedIds.indexOf(pair.second.id) >= 0,
+          onToggleSelect: (tr: Track): void => {
+            this.toggleSelected(tr);
+          }
+        }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+  }
+
+  /**
+   * 单列行（ListItem 内容）：双渲染路径共用，选择态读取见 GridPairRow。
+   */
+  @Builder
+  SingleTrackRow(t: Track, index: number): void {
+    TrackItem({
+      track: t,
+      entranceIndex: index,
+      onPlay: (tr: Track): void => {
+        this.player.playOrToggle(tr);
+      },
+      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+      selecting: this.selecting,
+      selected: this.selectedIds.indexOf(t.id) >= 0,
+      onToggleSelect: (tr: Track): void => {
+        this.toggleSelected(tr);
+      }
+    })
+  }
+
+  /**
    * 子页转场：从右滑入 slow(400ms) EaseOut，pop 反向（照 RecentPage / PlaylistDetail 同款）。
    */
   private navTransitionDelegate(op: NavigationOperation,
@@ -1025,10 +1536,10 @@ export struct UpSpacePage {
       parts.push(`粉丝 ${formatFans(this.fans)}`);
     }
     if (this.subscribed) {
-      // 2026-10-23 用户需求：订阅态显示 UP 的投稿总数（card 的 archive_count），
-      // 不再显示订阅歌单的曲目数 —— 两者经常不相等（订阅时只装了当时加载到的投稿），
-      // 后者会让用户误以为 UP 的投稿就这么多。未知时（旧缓存 / 卡片被风控）
-      // 退回已加载条数做近似，口径仍与未订阅分支一致。
+      // 订阅态显示 UP 的投稿总数（card 的 archive_count），不显示订阅歌单的
+      // 曲目数 —— 两者经常不相等（订阅时只装了当时加载到的投稿），后者会让
+      // 用户误以为 UP 的投稿就这么多。未知时（旧缓存 / 卡片被风控）退回已加载
+      // 条数做近似，口径仍与未订阅分支一致。
       const submissionCount: number =
         this.archiveCount > 0 ? this.archiveCount : this.tracks.length;
       if (submissionCount > 0) {
@@ -1043,7 +1554,7 @@ export struct UpSpacePage {
   /**
    * 头部区（整体钉在悬浮固定栏内，不随列表滚动）—— 与 PlaylistDetail.PlaylistHeader 同款：
    * 左侧 96vp 圆角头像 + 右侧 28fp 大标题 + 元信息行；头像行下方是操作行
-   * （2026-10-23 合并为单行：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
+   * （单行：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
    *
    * 头像尺寸与圆角对齐歌单封面（96 / 12）：两个详情页的头部视觉语言一致，
    * 进哪个页都是同一套「大图 + 大标题」。
@@ -1082,13 +1593,16 @@ export struct UpSpacePage {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 操作行（2026-10-23 合并）：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（含框内 ×
-      // 清除）+ 搜索按钮，单行排布。原独立搜索行已并入本行。
+      // 操作行：播放全部 + 选择 + 订阅投稿（仅未订阅）+ 搜索框（含框内 ×
+      // 清除）+ 搜索按钮，单行排布（新增按钮后搜索框靠 layoutWeight 收窄适应）。
       // · 播放全部：有投稿才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
+      // · 选择：多选入口（播放全部右边）；多选态变身「完成」退出，同一颗按钮
+      //   承担进出，位置恒定不跳。播放全部 / 订阅投稿在多选态用 visibility
+      //   摘出布局让位（opacity 不摘布局会留空洞，不能用；属性摘出无过渡，
+      //   DownloadsPage 同款可接受）。
       // · 订阅投稿：本页核心动作，仅未订阅时显示 —— 订阅成功后 subscribed=true
-      //   自动消失（2026-10-23 用户需求：本页取消「拉取新投稿」，订阅歌单的更新
-      //   入口收敛到歌单详情页的「拉取新投稿」按钮）。
-      // · 清除不再用独立按钮：搜索框内右侧 × 承接（点击调 clearSearch，
+      //   自动消失（本页没有「拉取新投稿」，订阅歌单的更新入口在歌单详情页）。
+      // · 清除不用独立按钮：搜索框内右侧 × 承接（点击调 clearSearch，
       //   有关键词或处于远程结果态时才出现）。
       Row({ space: 8 }) {
         if (this.tracks.length > 0) {
@@ -1100,8 +1614,25 @@ export struct UpSpacePage {
             .backgroundColor(this.themeSurface)
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
+            .visibility(this.selecting ? Visibility.None : Visibility.Visible)
             .onClick((): void => {
               this.player.playAll(this.tracks);
+            })
+        }
+        if (this.tracks.length > 0) {
+          Button(this.selecting ? '完成' : '选择', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              if (this.selecting) {
+                this.exitSelecting();
+              } else {
+                this.enterSelecting();
+              }
             })
         }
         if (this.upMid.length > 0 && !this.subscribed) {
@@ -1110,70 +1641,127 @@ export struct UpSpacePage {
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
             .backgroundColor(this.themeSurface)
-            .fontColor(this.themeDeep)
+            .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
             .enabled(!this.subBusy)
+            .visibility(this.selecting ? Visibility.None : Visibility.Visible)
             .onClick((): void => {
               this.subscribe();
             })
         }
-        // 搜索框（2026-10-23）：输入即过滤**已加载**的投稿（本地，离线可用）；
-        // Enter / 「搜索」按钮发起远程搜索（空间接口 keyword 服务端搜索为主，
-        // 被风控 / 0 命中时全站搜索 + mid 过滤兜底，见 runRemoteSearch 阶梯）。
-        // 框内右侧 × = 清除（替代原独立「清除」按钮）。
-        Stack({ alignContent: Alignment.End }) {
-          TextInput({ placeholder: '搜索 TA 的投稿', text: this.searchKeyword })
-            .height(32)
-            .fontSize(14)
-            .fontColor($r('app.color.text_primary'))
-            .placeholderColor($r('app.color.text_tertiary'))
-            .placeholderFont({ size: 14 })
-            // 底色走 searchBoxBg()：26+ 材质可用时透明（不透明底会盖住材质层玻璃，
-            // 官方 FAQ 同款结论），低版本回落 bg_card 实色兜底。
-            .backgroundColor(this.searchBoxBg())
-            .borderRadius(BUTTON_RADIUS_VP)
-            // 沉浸光感材质（2026-10-23 用户需求）：26+ 渲染 systemMaterial 玻璃底
-            //（与同行按钮同档），低版本 no-op 走上方链式 bg_card 实色兜底。
-            .attributeModifier(this.searchInputMaterial)
-            // 右侧让位给框内 ×：文字滚动到最右时不被图标盖住
-            .padding({ left: 14, right: 34 })
-            .onChange((v: string): void => {
-              this.searchKeyword = v;
-              this.onKeywordChanged();
-            })
-            .onSubmit((): void => {
-              this.runRemoteSearch();
-            })
-          if (this.searchKeyword.trim().length > 0 || this.remoteResults !== null) {
-            Stack() {
-              SymbolGlyph($r('sys.symbol.xmark'))
+        // 尾部槽位（layoutWeight 1）if/else 换层：常态 = 搜索框 + 搜索按钮，
+        // 多选态 = 全选 / 加入歌单 / 下载。
+        // ⚠️ 隐藏层必须用条件渲染（不挂载），不能双层叠放 + 透明层：
+        // HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
+        // 常态点搜索框位置误触透明的「加入歌单」/「下载」，搜索框要点多次）。
+        // 条件渲染让隐藏层根本不存在，从源头杜绝；淡入淡出走 transition
+        //（插入/移除动画，换层时旧层淡出新层淡入）。
+        // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）。
+        Stack() {
+          if (!this.selecting) {
+          // 常态层：搜索框 + 搜索按钮
+          Row({ space: 8 }) {
+            // 搜索框：输入即过滤**已加载**的投稿（本地，离线可用）；
+            // Enter / 「搜索」按钮发起远程搜索（空间接口 keyword 服务端搜索为主，
+            // 被风控 / 0 命中时全站搜索 + mid 过滤兜底，见 runRemoteSearch 阶梯）。
+            // 框内右侧 × = 清除。
+            Stack({ alignContent: Alignment.End }) {
+              TextInput({ placeholder: '搜索 TA 的投稿', text: this.searchKeyword })
+                .height(32)
                 .fontSize(14)
-                // SymbolGlyph.fontColor 按图层接收颜色数组，单色也传单元素数组
-                .fontColor([$r('app.color.text_tertiary')])
+                .fontColor($r('app.color.text_primary'))
+                .placeholderColor($r('app.color.text_tertiary'))
+                .placeholderFont({ size: 14 })
+                // 底色走 searchBoxBg()：26+ 材质可用时透明（不透明底会盖住材质层玻璃，
+                // 官方 FAQ 同款结论），低版本回落 bg_card 实色兜底。
+                .backgroundColor(this.searchBoxBg())
+                .borderRadius(BUTTON_RADIUS_VP)
+                // 沉浸光感材质：26+ 渲染 systemMaterial 玻璃底
+                //（与同行按钮同档），低版本 no-op 走上方链式 bg_card 实色兜底。
+                .attributeModifier(this.searchInputMaterial)
+                // 右侧让位给框内 ×：文字滚动到最右时不被图标盖住
+                .padding({ left: 14, right: 34 })
+                .onChange((v: string): void => {
+                  this.searchKeyword = v;
+                  this.onKeywordChanged();
+                })
+                .onSubmit((): void => {
+                  this.runRemoteSearch();
+                })
+              if (this.searchKeyword.trim().length > 0 || this.remoteResults !== null) {
+                Stack() {
+                  SymbolGlyph($r('sys.symbol.xmark'))
+                    .fontSize(14)
+                    // SymbolGlyph.fontColor 按图层接收颜色数组，单色也传单元素数组
+                    .fontColor([$r('app.color.text_tertiary')])
+                }
+                .width(24)
+                .height(24)
+                .margin({ right: 8 })
+                .onClick((): void => {
+                  this.clearSearch();
+                })
+              }
             }
-            .width(24)
-            .height(24)
-            .margin({ right: 8 })
-            .onClick((): void => {
-              this.clearSearch();
-            })
+            .layoutWeight(1)
+            Button(this.remoteSearching ? '搜索中' : '搜索', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .padding({ left: 16, right: 16 })
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              // 不用 .enabled(false) 表达「空词 / 搜索中不可点」：禁用态会用系统灰字
+              // 覆盖 themePrimary 字色（用户要求按钮字色恒为主题色）；点击兜底在
+              // runRemoteSearch 里（空词 / 在途一律 no-op）。
+              .onClick((): void => {
+                this.runRemoteSearch();
+              })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
+          } else {
+          // 多选态层：全选 / 加入歌单 / 下载（淡入替换搜索区）
+          Row({ space: 8 }) {
+            Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.toggleSelectAll();
+              })
+            Button('加入歌单', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.addSelectedToPlaylist();
+              })
+            Button('下载', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.confirmDownloadSelected();
+              })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
           }
         }
         .layoutWeight(1)
-        Button(this.remoteSearching ? '搜索中' : '搜索', { type: ButtonType.Normal })
-          .fontSize(13)
-          .height(32)
-          .borderRadius(BUTTON_RADIUS_VP)
-          .padding({ left: 16, right: 16 })
-          .backgroundColor(this.themeSurface)
-          .fontColor(this.themePrimary)
-          .attributeModifier(this.buttonMaterial)
-          // 不用 .enabled(false) 表达「空词 / 搜索中不可点」：禁用态会用系统灰字
-          // 覆盖 themePrimary 字色（用户要求按钮字色恒为主题色）；点击兜底在
-          // runRemoteSearch 里（空词 / 在途一律 no-op）。
-          .onClick((): void => {
-            this.runRemoteSearch();
-          })
       }
       .width('100%')
       .margin({ top: 12 })
@@ -1181,8 +1769,8 @@ export struct UpSpacePage {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    // 头部区间距（2026-10-22 用户要求上移）：top 12→4 紧贴标题行下沿，
-    // bottom 16→8 让首个投稿条目同步上移（列表占位随 headerAreaHeight 实测自动跟随）。
+    // 头部区间距：top 4 紧贴标题行下沿，bottom 8 让首个投稿条目同步上移
+    //（列表占位随 headerAreaHeight 实测自动跟随）。
     .padding({ left: 20, right: 20, top: 4, bottom: 8 })
   }
 
@@ -1221,7 +1809,7 @@ export struct UpSpacePage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
    * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
    * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
@@ -1245,7 +1833,7 @@ export struct UpSpacePage {
   }
 
   /**
-   * UP 资料头部区收窄容器（2026-10-23 平板模式宽度适配）：同 upSpaceBarNarrow
+   * UP 资料头部区收窄容器：同 upSpaceBarNarrow
    * 口径 —— bottomBuilder 也横跨整列全宽，收窄后头部区与本页条目列同宽对齐；
    * bottomBuilder 显式高度（实测 headerAreaHeight / 估计值垫底）不动，
    * 内层 onAreaChange 实测载体原样保留（高度不受收窄影响）。
@@ -1270,7 +1858,7 @@ export struct UpSpacePage {
     HdsNavDestination() {
       Stack() {
         Column() {
-          // UP 资料头已移进钉顶固定栏（UpHeader），这里直接是列表内容 ——
+          // UP 资料头在钉顶固定栏（UpHeader）里，这里直接是列表内容 ——
           // 与 PlaylistDetail 同结构：列表视口铺满全屏，首项从整栏底部起排，
           // 滚动时条目从毛玻璃下穿过（顶部占位条目负责让位）。
           if (this.loading && this.tracks.length === 0) {
@@ -1321,7 +1909,7 @@ export struct UpSpacePage {
                     .borderRadius(BUTTON_RADIUS_VP)
                     .padding({ left: 18, right: 18 })
                     .backgroundColor(this.themeSurface)
-                    .fontColor(this.themeDeep)
+                    .fontColor(this.themePrimary)
                     .onClick((): void => {
                       this.openInBilibili();
                     })
@@ -1354,7 +1942,7 @@ export struct UpSpacePage {
           // 列表会在 headerAreaHeight 实测前挂载并固化 safeTop + 56 的错误让位量
           // （首项被封面压住，真机复现）；必须直接判 headerAreaHeight > 0。
           } else if (this.headerAreaHeight > 0) {
-             // 下拉刷新（2026-10-09）：缓存策略下进页不联网，这里是本页仅存的
+             // 下拉刷新：缓存策略下进页不联网，这里是本页仅存的
              // 显式刷新出口。Refresh 只包列表（SearchPage 同款），
              // 系统默认刷新头即可；layoutWeight 移交 Refresh，内层 List 补 height('100%')。
             Refresh({ refreshing: $$this.refreshing }) {
@@ -1362,7 +1950,7 @@ export struct UpSpacePage {
                 // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
                 // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
                 // safeTop + 56 + 头部区实测高，随元信息行数浮动），首个真实条目恰
-                // 从栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与
+                // 从栏底起排，滚动时占位与
                 // 条目一起从沉浸材质下方穿过。
                 ListItem() {
                   // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
@@ -1370,68 +1958,96 @@ export struct UpSpacePage {
                     .width('100%')
                     .height(this.barTotalHeight())
                 }
-                // 条目渲染（2026-10-23 性能审查）：ForEach → LazyForEach，
+                // 条目渲染：非多选走 LazyForEach，多选走 ForEach
+                //（GridPairRow / TwoColPairRow / SingleTrackRow 双路径共用）：
+                // LazyForEach 只认数据源通知，@Prop 选择态不随页面 @State 同步
+                //（勾选不亮、「⋯」不隐、点击仍走 onPlay），多选必须 ForEach ——
+                // 随页面 @State 重跑 itemGenerator 就地更新（DownloadsPage 多选同因）；
+                // 进出多选切换渲染控件的一次性整表重建视为模式转场。
                 // 渲染源走 displayTracks() 三态切换（远程搜索结果 / 本地过滤结果 /
                 // 全量已加载），@Watch（onListSourceChanged）把三态 @State 的变化
-                // 同步进 trackSource / trackPairs，按需建行、翻页不再全量重建。
-                // 横屏宽屏（2026-10-23 两列改造）：条目配对，每个 ListItem 左右两列。
-                if (this.isTwoCol()) {
-                  LazyForEach(
-                    this.trackPairs,
-                    (pair: PairOf<Track>, pIndex: number): void => {
-                      ListItem() {
-                        Row() {
-                          TrackItem({
-                            track: pair.first,
-                            entranceIndex: pIndex * 2,
-                            onPlay: (tr: Track): void => {
-                              this.player.playOrToggle(tr);
-                            },
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1)
-                          if (pair.second !== null) {
-                            TrackItem({
-                              track: pair.second,
-                              entranceIndex: pIndex * 2 + 1,
-                              onPlay: (tr: Track): void => {
-                                this.player.playOrToggle(tr);
-                              },
-                              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                            }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                          } else {
-                            // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
-                            Blank().layoutWeight(1)
-                          }
+                // 同步进 trackSource / trackPairs，按需建行、翻页不全量重建。
+                // 横屏宽屏：条目配对，每个 ListItem 左右两列。
+                // 大封面模式（外观设置「条目展示」）：投稿配对成双列
+                // 网格卡（TrackCard），竖屏 / 横屏均双列，交互契约与行内版一致
+                // （整卡点击播/暂停、「⋯」菜单）；配对数据源复用 trackPairs
+                // （onListSourceChanged 无条件 sync，网格竖屏也是热的）。
+                if (this.isGrid()) {
+                  if (this.selecting) {
+                    ForEach(
+                      makePairs<Track>(this.displayTracks()),
+                      (pair: PairOf<Track>): void => {
+                        ListItem() {
+                          this.GridPairRow(pair)
                         }
-                        .width('100%')
-                      }
-                    },
-                    (pair: PairOf<Track>): string =>
-                      `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                  )
+                      },
+                      (pair: PairOf<Track>): string =>
+                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                    )
+                  } else {
+                    LazyForEach(
+                      this.trackPairs,
+                      (pair: PairOf<Track>): void => {
+                        ListItem() {
+                          this.GridPairRow(pair)
+                        }
+                      },
+                      (pair: PairOf<Track>): string =>
+                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                    )
+                  }
+                } else if (this.isTwoCol()) {
+                  if (this.selecting) {
+                    ForEach(
+                      makePairs<Track>(this.displayTracks()),
+                      (pair: PairOf<Track>, pIndex: number): void => {
+                        ListItem() {
+                          this.TwoColPairRow(pair, pIndex)
+                        }
+                      },
+                      (pair: PairOf<Track>): string =>
+                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                    )
+                  } else {
+                    LazyForEach(
+                      this.trackPairs,
+                      (pair: PairOf<Track>, pIndex: number): void => {
+                        ListItem() {
+                          this.TwoColPairRow(pair, pIndex)
+                        }
+                      },
+                      (pair: PairOf<Track>): string =>
+                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                    )
+                  }
                 } else {
-                  LazyForEach(
-                    this.trackSource,
-                    (t: Track, index: number): void => {
-                      ListItem() {
-                        TrackItem({
-                          track: t,
-                          entranceIndex: index,
-                          onPlay: (tr: Track): void => {
-                            this.player.playOrToggle(tr);
-                          },
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        })
-                      }
-                    },
-                    (t: Track): string => t.id
-                  )
+                  if (this.selecting) {
+                    ForEach(
+                      this.displayTracks(),
+                      (t: Track, index: number): void => {
+                        ListItem() {
+                          this.SingleTrackRow(t, index)
+                        }
+                      },
+                      (t: Track): string => t.id
+                    )
+                  } else {
+                    LazyForEach(
+                      this.trackSource,
+                      (t: Track, index: number): void => {
+                        ListItem() {
+                          this.SingleTrackRow(t, index)
+                        }
+                      },
+                      (t: Track): string => t.id
+                    )
+                  }
                 }
-                // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
+                // 加载更多状态条（常驻 + 固定高度）：只换内容不插拔条目，
                 // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
-                // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏骨架不动。
-                // 2026-10-23 搜索分支排在最前：搜索态的计数 / 失败 / 在途提示
-                // 优先于常规加载文案（搜索态下不翻页，旧三分支不会再被走到）。
+                // 加载态为单行转圈：为固定高度做的取舍，首屏骨架不动。
+                // 搜索分支排在最前：搜索态的计数 / 失败 / 在途提示
+                // 优先于常规加载文案（搜索态下不翻页）。
                 ListItem() {
                   Row() {
                     if (this.remoteSearching) {
@@ -1488,25 +2104,25 @@ export struct UpSpacePage {
               // 裁剪放开（官方博客：「clip 是 true，内容到标题栏底部就截断，看不到模糊效果」；
               // 列表内容要能画进标题栏区域，HDS 的材质/模糊才有可采样的源）
               .clip(false)
-              // 边界回弹（2026-10-08）：到顶/到底的反馈动效；顶部下拉由 Refresh 刷新动画接管
+              // 边界回弹：到顶/到底的反馈动效；顶部下拉由 Refresh 刷新动画接管
               .edgeEffect(EdgeEffect.Spring)
               .cachedCount(8)
-              // 顶部 HDS 标题栏让位（Sumy 式穿透，与 PlaylistDetail 同款）：由 List
-              // 首个空白占位 ListItem 负责（见上方占位注释，下载页同款），不再使用
-              // contentStartOffset。
-              // 列表末端常规留白（2026-10-09：不再叠加 safeBottom —— 底部不做避让，
-              // 视口直接扩展进安全区，末行可滚到手势条下）
-              .contentEndOffset(CONTENT_END_OFFSET)
+                // 顶部 HDS 标题栏让位（Sumy 式穿透，与 PlaylistDetail 同款）：由 List
+                 // 首个空白占位 ListItem 负责（见上方占位注释，下载页同款），不使用
+                 // contentStartOffset。
+                 // 列表末端常规留白（不叠加 safeBottom —— 底部不做避让，
+                 // 视口直接扩展进安全区，末行可滚到手势条下）。
+                .contentEndOffset(CONTENT_END_OFFSET)
               .onReachEnd((): void => {
                 this.onReachEnd();
               })
-              // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已
+              // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已
               // 应用后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
               .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
                 this.syncTopBlurProgress();
               })
               .onScrollStop((): void => {
-                // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+                // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
                 this.syncTopBlurProgress();
               })
             }
@@ -1520,12 +2136,12 @@ export struct UpSpacePage {
         .width('100%')
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
-        // ⚠️ 不再整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
-        // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）；
+        // ⚠️ 不整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
+        // 扩展进底部安全区（不做底部避让，沉浸到底）；
         // 非列表分支（骨架 / 失败 / 空态）各自补 padding top。
         .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
         // titleBar，UP 头部区属标题栏 bottomBuilder、随整栏一起盖），进度由
         // 列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
         TopGradientBlurOverlay({
@@ -1534,11 +2150,11 @@ export struct UpSpacePage {
         })
       }
     }
-    // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
+    // HDS 沉浸光感标题栏（真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    // 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
     //（upSpaceBarNarrow / upSpaceHeaderAreaNarrow），标题行与 UP 头部区和
-    // 条目列同宽对齐（原「标题栏宽度跟随内容列」为不实声称，本轮根治）。
+    // 条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
       style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
@@ -1547,7 +2163,7 @@ export struct UpSpacePage {
         stackBuilder: (): void => {
           this.upSpaceBarNarrow();
         },
-        // 标题行下方自定义区：UP 资料头部区（封面 / 昵称 / 订阅 / 拉新等，
+        // 标题行下方自定义区：UP 资料头部区（封面 / 昵称 / 订阅 / 搜索等，
         // 收窄容器内与条目列对齐）。
         // ⚠️ 头部区不能塞进 stackBuilder（会溢出 56vp 标题行、与列表内容重叠，
         // 真机复现），必须走 bottomBuilder；高度用实测值（未实测时估计值垫底）。
@@ -1560,18 +2176,25 @@ export struct UpSpacePage {
         }
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     .translate({ x: this.navTransX })
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
-    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
-    .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 系统返回拦截（优先级从高到低）：
+    //   · 多选态：先退选择模式（选区丢弃），留在本页；
+    //   · 播放页 overlay 打开时吞掉返回并发收起请求（留在本页），
+    //     否则走默认 pop —— 详见 utils/SubPageBackPress。
+    .onBackPressed((): boolean => {
+      if (this.selecting) {
+        this.exitSelecting();
+        return true;
+      }
+      return handleSubPageBackPress();
+    })
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -1579,8 +2202,8 @@ export struct UpSpacePage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function UpSpacePageBuilder(): void {
@@ -1588,7 +2211,7 @@ export function UpSpacePageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const UpSpacePageWrapped: WrappedBuilder<[]> = wrapBuilder(UpSpacePageBuilder);
 

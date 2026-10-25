@@ -7,15 +7,14 @@
  * `{filesDir}/up_space_cache/{upMid}.json`，最多保留 MAX_CACHED_UPS 个，超出按
  * 文件 mtime 淘汰最旧（按 mtime 而非 cachedAtMs：不用逐个解析文件内容）。
  *
- * 读写均为异步（2026-10-16 AppFreeze 加固：原先 readTextSync/writeSync/listFileSync
- * 全在主线程同步执行，是进页路径上的卡顿点）：单文件 15~50KB，毫秒级，
+ * 读写均为异步（避免主线程同步 I/O 卡顿）：单文件 15~50KB，毫秒级，
  * 分别发生在进页（aboutToAppear）与请求成功回调里，用户无感。
  *
  * 损坏即弃：读文件 / JSON.parse / 字段校验任何一步异常都返回 null —— 缓存坏了
  * 就当作没有缓存，页面照常联网拉取，绝不把脏数据甩进 UI（SearchHistoryStore 的
  * sanitize 纪律同款）。
  *
- * 缓存语义（2026-10-09 需求）：再次进入 UP 主页**不自动联网刷新**，直接显示缓存；
+ * 缓存语义：再次进入 UP 主页**不自动联网刷新**，直接显示缓存；
  * 只有「拉取新投稿」按钮与列表下拉刷新才联网更新并重写缓存。无 TTL ——
  * 用户显式刷新即视为最新。
  */
@@ -70,7 +69,6 @@ export async function getUpSpaceCache(upMid: string): Promise<UpSpaceCacheEntry 
   const path: string = `${cacheDir}/${upMid}.json`;
   let raw: string = '';
   try {
-    // （2026-10-16 AppFreeze 加固）readTextSync → 异步 readText
     raw = await fs.readText(path);
   } catch (e) {
     // 文件不存在（首次进入）属常态；读失败一律当作无缓存
@@ -85,9 +83,7 @@ export async function getUpSpaceCache(upMid: string): Promise<UpSpaceCacheEntry 
     if (parsed.upMid !== upMid || !Array.isArray(parsed.tracks) || parsed.tracks.length === 0) {
       return null;
     }
-    // 按 id 去重（保留首次出现位置，2026-10-11 修）：修复前「翻页恒取第 1 页」的
-    // 版本会往缓存里写进重复条目 —— 恢复时在这里自愈，重进页面重复即消失；
-    // 之后任意一次成功刷新整表覆写，落盘的就是干净数据。全被滤掉视为缓存无效。
+    // 按 id 去重（保留首次出现位置，脏缓存自愈）；全被滤掉视为缓存无效。
     const rawTracks: Track[] = parsed.tracks;
     const seenIds: Set<string> = new Set<string>();
     const tracks: Track[] = [];
@@ -132,7 +128,6 @@ export async function saveUpSpaceCache(entry: UpSpaceCacheEntry): Promise<void> 
   const path: string = `${cacheDir}/${entry.upMid}.json`;
   try {
     const json: string = JSON.stringify(entry);
-    // （2026-10-16 AppFreeze 加固）openSync/writeSync/closeSync → 异步版
     const file: fs.File = await fs.open(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     try {
       await fs.write(file.fd, json);
@@ -155,7 +150,6 @@ interface CacheFileStamp {
 /** 淘汰：缓存文件数超出上限时按 mtime 删最旧（本次刚写的文件 mtime 最新，不会被删）。 */
 async function evictOverCapacity(): Promise<void> {
   try {
-    // （2026-10-16 AppFreeze 加固）listFileSync/statSync/unlinkSync → 异步版
     const names: string[] = await fs.listFile(cacheDir);
     const jsonNames: string[] = names.filter((n: string): boolean => n.endsWith('.json'));
     if (jsonNames.length <= MAX_CACHED_UPS) {

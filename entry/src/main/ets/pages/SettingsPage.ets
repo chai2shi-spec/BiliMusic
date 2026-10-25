@@ -1,22 +1,26 @@
 /**
- * 设置页（主页面，2026-10-24 二级菜单化改造）：
- * 原本 6 个分组、最多 28 行的长列表按语义拆分，本页只保留两块内容：
- *   1. 「账户」卡：扫码登录行（未登录点击进登录页 'Login' 路由；已登录显示
- *      头像 / 昵称 / 大会员徽标，点击弹菜单退出登录），登录后下方连着三行
- *      登录后能力入口（收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
- *   2. 设置入口卡（iOS 设置风格彩色圆角图标行）：播放设置 / 下载与存储 /
- *      外观设置 / 歌单备份 / 关于本项目，点击分别推入对应二级页。
+ * 设置页（主页面）：本页只保留两块内容：
+ *   1. 账户卡（无分组标题）：扫码登录行（未登录点击进登录页 'Login' 路由；
+ *      已登录显示头像 / 昵称 / 会籍徽标（B 站风格渐变胶囊），行最右「退出
+ *      登录」显式按钮（弹确认后退出），登录后下方连着三行登录后能力入口
+ *      （收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
+ *   2. 设置入口卡（iOS 设置风格彩色圆角图标行，两张分组卡片）：
+ *      卡 1：播放设置 / 下载与存储 / 外观设置 / 应用图标 / 歌单导入；
+ *      卡 2：日志记录 / 打赏作者 / 关于本项目 / 反馈Q群（点按复制群号），
+ *      点击分别推入对应二级页或执行复制。
  *
  * 二级页（各自独立文件，懒加载注册见 service/LazyPageRegistry.ets）：
- *   · PlaybackSettingsPage（'PlaybackSettings'）—— 原「播放」卡 10 行；
- *   · DownloadSettingsPage（'DownloadSettings'）—— 原「下载」卡 3 行；
- *   · AppearanceSettingsPage（'AppearanceSettings'）—— 原「外观」卡 8 行；
- *   · PlaylistBackupPage（'PlaylistBackup'）—— 原「歌单备份」卡 3 行；
- *   · AboutPage（'About'，原有）—— 关于页。
- * 拆分后本页不再持有 AppSettings 状态：所有开关 / 值展示都在二级页里，
+ *   · PlaybackSettingsPage（'PlaybackSettings'）—— 播放设置；
+ *   · DownloadSettingsPage（'DownloadSettings'）—— 下载与存储；
+ *   · AppearanceSettingsPage（'AppearanceSettings'）—— 外观设置；
+ *   · PlaylistBackupPage（'PlaylistBackup'）—— 歌单备份；
+ *   · PlaybackLogPage（'PlaybackLog'）—— 播放失败日志页；
+ *   · RewardPage（'Reward'）—— 打赏作者页；
+ *   · AboutPage（'About'）—— 关于页。
+ * 本页不持有 AppSettings 状态：所有开关 / 值展示都在二级页里，
  * 主题色运行时值经 AppStorage（STORE_THEME_*）订阅刷新，跨页无同步负担。
  *
- * 「账户」分组：本页是 Tabs 常驻页，登录态变化靠 STORE_LOGIN_REV 版本号 +
+ * 账户卡区：本页是 Tabs 常驻页，登录态变化靠 STORE_LOGIN_REV 版本号 +
  * @Watch 驱动刷新（aboutToAppear 只触发一次）。
  *
  * 简约 iOS 风格：组件见 components/InsetCardGroup.ets；固定栏（THIN 毛玻璃，
@@ -24,7 +28,6 @@
  */
 
 import { bundleManager } from '@kit.AbilityKit';
-import { Chip, ChipSize } from '@kit.ArkUI';
 import { BusinessError } from '@ohos.base';
 import {
   CONTENT_END_OFFSET,
@@ -40,12 +43,13 @@ import { LoginRouteParam } from '../service/NavRouteParams';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { showAppToast } from '../components/AppToast';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { copyText } from '../utils/ClipboardUtil';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
-// 2026-10-23 平板模式宽度适配：设置页签内容列上限与根顶栏（immersiveTitleBarNarrow）
+// 设置页签内容列上限与根顶栏（immersiveTitleBarNarrow）
 // 及其他页签统一走 840 口径（TwoColumnLayout.contentMaxWidth）。
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { InsetCard, CardDivider, SectionHeader } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider } from '../components/InsetCardGroup';
 
 /**
  * 设置入口行的图标底色（iOS 设置风格：每行固定异色，深浅色模式通用；
@@ -60,10 +64,25 @@ const ICON_BG_GRAY: string = '#8E8E93';
 const ICON_BG_ORANGE: string = '#FF9500';
 const ICON_BG_TEAL: string = '#30B0C7';
 const ICON_BG_INDIGO: string = '#5E5CE6';
+/** 「打赏作者」入口图标底色（iOS 系统红）：打赏/爱心的辨识色，与其它异色行并列 */
+const ICON_BG_RED: string = '#FF3B30';
 
 /** 入口行图标容器边长与圆角（vp）：约 iOS 设置图标的视觉比例 */
 const ENTRY_ICON_SIZE: number = 28;
 const ENTRY_ICON_RADIUS: number = 7;
+
+/**
+ * 会籍徽标渐变色对（B 站风格硬编码、不随主题）：
+ * 月度大会员粉渐变 / 年度大会员金渐变，白色小字胶囊。
+ * 会籍是身份标识而非 UI 主题色，用 B 站官方会员色系最易辨识。
+ */
+const VIP_BADGE_PINK_FROM: string = '#FB7299';
+const VIP_BADGE_PINK_TO: string = '#FF9EB8';
+const VIP_BADGE_GOLD_FROM: string = '#F7C862';
+const VIP_BADGE_GOLD_TO: string = '#E29B2D';
+
+/** 反馈 Q 群号：入口行点按即复制到剪贴板 */
+const FEEDBACK_QQ_GROUP: string = '1129926978';
 
 @Component
 export struct SettingsPage {
@@ -76,7 +95,7 @@ export struct SettingsPage {
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  /** 当前横竖屏（Index 常驻注册写入）：内容列 840 口径取值用（2026-10-23） */
+  /** 当前横竖屏（Index 常驻注册写入）：内容列 840 口径取值用 */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   /**
    * 主题色运行时值（EntryAbility 启动发布、外观设置页选色 / 切深浅模式重发布）。
@@ -92,7 +111,7 @@ export struct SettingsPage {
   /** 当前登录用户（null = 未登录）；由 LoginStore 的缓存提供 */
   @State loginUser: LoginUser | null = null;
   /**
-   * 登录已失效（2026-10-08）：本地有 Cookie 但被服务端拒绝过一次（nav -101）。
+   * 登录已失效：本地有 Cookie 但被服务端拒绝过一次（nav -101）。
    *
    * 与 `loginUser === null`（从未登录）**必须分开**：前者凭据还在、点一下重新登录即可，
    * 后者是根本没登录过。见 LoginStore.refreshLoginUser / isLoginStale。
@@ -103,9 +122,9 @@ export struct SettingsPage {
   @State appVersion: string = '';
 
   /**
-   * 列表滚动控制器：批 3 起交给**根 HdsNavigation 的统一标题栏**联动。
-   * 2026-10-11 起 List 直接挂 TabScrollerHolder.settings（唯一真源，身份恒定），
-   * 不再 new 私有实例后注册替换——替换会让根栏绑定在注册前求值拿到未挂载的占位实例。
+   * 列表滚动控制器：交给**根 HdsNavigation 的统一标题栏**联动。
+   * List 直接挂 TabScrollerHolder.settings（唯一真源，身份恒定）——
+   * 替换实例会让根栏绑定在注册前求值拿到未挂载的占位实例。
    */
 
   aboutToAppear(): void {
@@ -168,7 +187,7 @@ export struct SettingsPage {
   }
 
   /**
-   * 推登录页并挂 onPop 返回回调（2026-10-22 Navigation 差距收敛）：
+   * 推登录页并挂 onPop 返回回调：
    * 登录页无论登录成功与否返回，都幂等重读一次登录态刷新「账户」分组
    * （refreshLoginUi 只重读缓存，无副作用，重复调用安全）。正常路径
    * STORE_LOGIN_REV 的 @Watch 已刷新，这里是双保险；用户没登录直接
@@ -218,8 +237,10 @@ export struct SettingsPage {
         .margin({ left: 12 })
         .layoutWeight(1)
 
+      // 箭头 fontSize 16：chevron 字形宽约为字号一半，14 时实际渲染 7×14vp
+      // 触发「图标宽或高小于 8vp」合规检查；16 渲染 8×16vp 达标。
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(14)
+        .fontSize(16)
         .fontColor([$r('app.color.text_tertiary')])
     }
     .width('100%')
@@ -270,8 +291,9 @@ export struct SettingsPage {
           .margin({ right: 4 })
       }
 
+      // 箭头 fontSize 16：合规检查要求图标实际渲染宽高 ≥8vp，14 渲染 7×14vp 不达标。
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(14)
+        .fontSize(16)
         .fontColor([$r('app.color.text_tertiary')])
     }
     .width('100%')
@@ -285,6 +307,57 @@ export struct SettingsPage {
     .accessibilityLevel('yes')
     .onClick((): void => {
       NavStackHolder.stack.pushPath({ name: 'About' });
+    })
+  }
+
+  /**
+   * 「反馈Q群」入口行：非跳转行 —— 右侧直接显示群号，整行点按复制群号
+   * + toast 回执（非跳转行不带 chevron）。
+   */
+  @Builder
+  FeedbackEntryRow() {
+    Row() {
+      Row() {
+        SymbolGlyph($r('sys.symbol.person_2_fill'))
+          .fontSize(17)
+          .fontColor([Color.White])
+      }
+      .width(ENTRY_ICON_SIZE)
+      .height(ENTRY_ICON_SIZE)
+      .borderRadius(ENTRY_ICON_RADIUS)
+      .backgroundColor(ICON_BG_TEAL)
+      .justifyContent(FlexAlign.Center)
+
+      Text('反馈Q群')
+        .fontSize(16)
+        .fontColor($r('app.color.text_primary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ left: 12 })
+        .layoutWeight(1)
+
+      Text(FEEDBACK_QQ_GROUP)
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .margin({ right: 8 })
+
+      SymbolGlyph($r('sys.symbol.doc_filled_on_doc'))
+        .fontSize(16)
+        .fontColor([$r('app.color.text_tertiary')])
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 11, bottom: 11 })
+    .alignItems(VerticalAlign.Center)
+    .stateStyles({
+      pressed: { .backgroundColor($r('app.color.press_overlay')) },
+      normal: { .backgroundColor(Color.Transparent) }
+    })
+    .accessibilityText(`复制反馈Q群 ${FEEDBACK_QQ_GROUP}`)
+    .accessibilityLevel('yes')
+    .onClick((): void => {
+      copyText(FEEDBACK_QQ_GROUP).then((ok: boolean): void => {
+        showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
+      });
     })
   }
 
@@ -330,15 +403,33 @@ export struct SettingsPage {
   }
 
   /**
-   * 账户行第二行＝动作提示：
-   *   未登录 → 登录引导；已登录 → 「退出登录」；
-   *   待重验 → 「重新登录」（凭据失效时用户要的是重新登录，不是清凭据）。
+   * 是否年度大会员（金渐变徽标）：nav 的 vipType >= 2；月度/未知走粉渐变。
+   */
+  private isAnnualVip(): boolean {
+    const u: LoginUser | null = this.loginUser;
+    return u !== null && u.vipType >= 2;
+  }
+
+  /**
+   * 会籍徽标的 linearGradient 渐变色对：年度金渐变 / 其余粉渐变。
+   * 元组数组类型显式标注（ArkTS 禁匿名数组字面量类型）。
+   */
+  private vipBadgeColors(): Array<[ResourceColor, number]> {
+    const from: string = this.isAnnualVip() ? VIP_BADGE_GOLD_FROM : VIP_BADGE_PINK_FROM;
+    const to: string = this.isAnnualVip() ? VIP_BADGE_GOLD_TO : VIP_BADGE_PINK_TO;
+    const stops: Array<[ResourceColor, number]> = [[from, 0], [to, 1]];
+    return stops;
+  }
+
+  /**
+   * 账户行第二行引导文案：仅未登录态有第二行；已登录态的动作入口
+   * （退出登录 / 重新登录）由行最右侧的显式按钮承担。
    */
   private accountHint(): string {
     if (this.loginUser === null) {
       return '扫码登录，可解锁更高音质档位';
     }
-    return this.loginStale ? '登录已失效 · 重新登录' : '退出登录';
+    return '';
   }
 
   build() {
@@ -348,27 +439,31 @@ export struct SettingsPage {
         List({ scroller: TabScrollerHolder.settings }) {
           // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在屏幕
           // 顶端（y=0）。占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底
-          // 起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目一起从
-          // 模糊板下方穿过。
+          // 起排，滚动时占位与条目一起从模糊板下方穿过。
           ListItem() {
             // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
             Row()
               .width('100%')
               .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
           }
-          // ── 账户（扫码登录）──
+          // 卡片间距占位：账户卡不加标题（根固定栏已常显「设置」，账户行自身
+          // 文案已表意），只保留卡片与标题栏的间距。
           ListItem() {
-            SectionHeader({ headerText: '账户' })
+            Row()
+              .width('100%')
+              .height(20)
           }
           ListItem() {
             InsetCard() {
-              // 账户行（2026-10-11 手写行）：
-              //   为什么不用 HdsListItemCard —— 该组件 B 区只支持「文本 + Symbol」，
-              //   放不下「昵称 + 会籍徽标」；用 TextItemOptions.customBuilder 时 HDS 会把
-              //   自定义内容渲染到标准文本区之外（昵称/徽标落到头像下面一行，且 C 区的
-              //   SuffixButton 也不渲染）。所以这一行回到手写，只沿用 HDS 行的观感参数
-              //  （16/13 内边距 + press_overlay 按压反馈），与上下其它行视觉一致。
-              // 版式：头像 | 第一行「昵称 + 会籍徽标」、第二行「退出登录」（未登录＝登录引导）。
+              // 账户行（手写行）：不用 HdsListItemCard —— 该组件 B 区只支持
+              // 「文本 + Symbol」，放不下「昵称 + 会籍徽标」；用
+              // TextItemOptions.customBuilder 时 HDS 会把自定义内容渲染到标准
+              // 文本区之外（昵称/徽标落到头像下面一行，且 C 区的 SuffixButton
+              // 也不渲染）。手写沿用 HDS 行的观感参数（16/13 内边距 +
+              // press_overlay 按压反馈），与上下其它行视觉一致。
+              // 版式：头像 | 第一行「昵称 + 会籍徽标」、第二行仅未登录时渲染
+              // （登录引导）；已登录时行最右是「退出登录」显式按钮（避免同一行
+              // 出现两处「退出登录」语义重复；待重验时按钮变「重新登录」）。
               Row() {
                 this.accountAvatar()
 
@@ -380,35 +475,66 @@ export struct SettingsPage {
                       .fontColor($r('app.color.text_primary'))
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    // 会籍徽标（Chip 复用）：月度「大会员」/ 年度「年度大会员」
+                    // 会籍徽标（B 站风格渐变胶囊）：月度「大会员」粉渐变 /
+                    // 年度「年度大会员」金渐变，白字小胶囊。不用主题色 Chip：
+                    // 与头像/占位图标同一色系时辨识度差；渐变 + 固定会员色
+                    // 一眼可辨。不随主题色 —— 会籍是身份标识不是 UI 主题。
                     if (this.memberLabel().length > 0) {
-                      Row() {
-                        Chip({
-                          label: {
-                            text: this.memberLabel(),
-                            fontSize: 11,
-                            fontColor: this.themeOn
-                          },
-                          size: ChipSize.SMALL,
-                          allowClose: false,
-                          backgroundColor: this.themePrimary
+                      Text(this.memberLabel())
+                        .fontSize(10)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(Color.White)
+                        .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+                        .borderRadius(9)
+                        .linearGradient({
+                          angle: 90,
+                          colors: this.vipBadgeColors()
                         })
-                      }
-                      .margin({ left: 6 })
-                      .hitTestBehavior(HitTestMode.None)
+                        .margin({ left: 6 })
+                        .maxLines(1)
+                        .hitTestBehavior(HitTestMode.None)
                     }
                   }
                   .alignItems(VerticalAlign.Center)
 
-                  // 第二行＝动作提示：未登录「扫码登录…」/ 已登录「退出登录」/ 待重验「重新登录」
-                  Text(this.accountHint())
-                    .fontSize(11)
-                    .fontColor($r('app.color.text_tertiary'))
-                    .margin({ top: 3 })
+                  // 第二行仅未登录态渲染（已登录的动作改行右按钮）
+                  if (this.accountHint().length > 0) {
+                    Text(this.accountHint())
+                      .fontSize(11)
+                      .fontColor($r('app.color.text_tertiary'))
+                      .margin({ top: 3 })
+                  }
                 }
                 .alignItems(HorizontalAlign.Start)
                 .layoutWeight(1)
                 .margin({ left: 12 })
+
+                // 行最右：已登录「退出登录」/ 待重验「重新登录」显式按钮。
+                // ArkUI 点击不冒泡：按钮 onClick 优先命中自身，整行 onClick
+                // 兜底不受影响；bg_page 底与 bg_card 卡面形成轻对比胶囊。
+                if (this.loginUser !== null) {
+                  Text(this.loginStale ? '重新登录' : '退出登录')
+                    .fontSize(13)
+                    .fontColor($r('app.color.text_secondary'))
+                    .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                    .borderRadius(14)
+                    .backgroundColor($r('app.color.bg_page'))
+                    .stateStyles({
+                      pressed: { .opacity(0.5) },
+                      normal: { .opacity(1) }
+                    })
+                    .accessibilityText(this.loginStale ? '重新登录' : '退出登录')
+                    .accessibilityLevel('yes')
+                    .onClick((): void => {
+                      // 待重验态优先去重新登录（与整行点击同策略）：此时退出
+                      // 只会把凭据清掉，用户目标是「让登录重新能用」。
+                      if (this.loginStale) {
+                        this.pushLoginWithRefresh();
+                        return;
+                      }
+                      this.confirmLogout();
+                    })
+                }
               }
               .width('100%')
               .padding({ left: 16, right: 16, top: 13, bottom: 13 })
@@ -420,7 +546,7 @@ export struct SettingsPage {
                 ? '登录 B 站账号'
                 : (this.loginStale
                   ? `登录已失效，点击重新登录 ${this.loginUser.uname}`
-                  : `已登录 ${this.loginUser.uname}，点击退出登录`))
+                  : `已登录 ${this.loginUser.uname}`))
               .accessibilityLevel('yes')
               .onClick((): void => {
                 if (this.loginUser === null) {
@@ -436,9 +562,8 @@ export struct SettingsPage {
                 this.confirmLogout();
               })
 
-              // 登录后能力三行：未登录不渲染，登录后在账户行下连着出现。
-              // 2026-10-24 样式统一：改用与下方设置入口同款 IconEntryRow
-              //（彩色圆角图标 + 标题 + 箭头），替换原 HdsListItemCard 纯文字行。
+              // 登录后能力三行：未登录不渲染，登录后在账户行下连着出现，
+              // 与下方设置入口同款 IconEntryRow（样式统一）。
               if (this.loginUser !== null) {
                 CardDivider()
                 this.IconEntryRow('收藏夹同步', $r('sys.symbol.arrow_clockwise'), ICON_BG_ORANGE, (): void => {
@@ -456,15 +581,15 @@ export struct SettingsPage {
             }
           }
 
-          // 卡片间距占位（原 SectionHeader 的节奏位）：入口卡不加分组标题
-          //（根固定栏已常显「设置」，再标一次冗余），只保留卡片间距。
+          // 卡片间距占位：入口卡不加分组标题（根固定栏已常显「设置」，
+          // 再标一次冗余），只保留卡片间距。
           ListItem() {
             Row()
               .width('100%')
               .height(20)
           }
 
-          // ── 设置入口（iOS 风格彩色图标行，点击进二级页）──
+          // ── 设置入口卡 1（iOS 风格彩色图标行，点击进二级页）──
           ListItem() {
             InsetCard() {
               this.IconEntryRow('播放设置', $r('sys.symbol.play_fill'), ICON_BG_PINK, (): void => {
@@ -485,23 +610,60 @@ export struct SettingsPage {
 
               CardDivider()
 
+              // 「应用图标」（2026-10-25）：API 26 alternateIcons 备用图标 ——
+              // 默认 + 4 套预设设计运行时切换桌面图标，低版本设备页内自动降级。
+              this.IconEntryRow('应用图标', $r('sys.symbol.waveform'), ICON_BG_PINK, (): void => {
+                NavStackHolder.stack.pushPath({ name: 'AppIconSettings' });
+              })
+
+              CardDivider()
+
               this.IconEntryRow('歌单导入', $r('sys.symbol.doc_filled_on_doc'), ICON_BG_GREEN, (): void => {
                 NavStackHolder.stack.pushPath({ name: 'PlaylistBackup' });
+              })
+            }
+          }
+
+          // 卡片间距占位：卡 1 与卡 2 之间（与上方账户卡—入口卡间距同款 20vp）。
+          ListItem() {
+            Row()
+              .width('100%')
+              .height(20)
+          }
+
+          // ── 设置入口卡 2：日志记录 / 打赏作者 / 关于本项目 / 反馈Q群 ──
+          ListItem() {
+            InsetCard() {
+              // 「日志记录」：进 PlaybackLogPage 查看播放失败日志（app 内
+              // 环形缓冲留档，三方读不到 hilog 的替代方案，详见 PlaybackLogStore）。
+              this.IconEntryRow('日志记录', $r('sys.symbol.doc_text_fill'), ICON_BG_ORANGE, (): void => {
+                NavStackHolder.stack.pushPath({ name: 'PlaybackLog' });
+              })
+
+              CardDivider()
+
+              // 「打赏作者」：进 RewardPage 查看打赏二维码（页面居中展示 zsm.jpg）。
+              this.IconEntryRow('打赏作者', $r('sys.symbol.heart_fill'), ICON_BG_RED, (): void => {
+                NavStackHolder.stack.pushPath({ name: 'Reward' });
               })
 
               CardDivider()
 
               this.AboutEntryRow()
+
+              CardDivider()
+
+              this.FeedbackEntryRow()
             }
           }
         }
         .width('100%')
         .layoutWeight(1)
-        // 边界回弹（2026-10-08）：到顶/到底的反馈动效
+        // 边界回弹：到顶/到底的反馈动效
         .edgeEffect(EdgeEffect.Spring)
         .cachedCount(10)
         // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-        //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
+        //（见上方占位注释，下载页同款）。
         // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
         // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
         .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
@@ -511,8 +673,8 @@ export struct SettingsPage {
       // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
       // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）；
-      // 2026-10-23 平板模式宽度适配：上限统一走 TwoColumnLayout.contentMaxWidth
-      //（两列激活 840 / 否则 600/720），平板横屏下与根顶栏及其他页签条目列同宽对齐。
+      // 上限统一走 TwoColumnLayout.contentMaxWidth（两列激活 840 / 否则
+      // 600/720），平板横屏下与根顶栏及其他页签条目列同宽对齐。
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
       // 顶栏由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），
       // 本页只负责把 listScroller 注册给根容器驱动滚动模糊。

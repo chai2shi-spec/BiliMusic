@@ -17,6 +17,10 @@
       "value": "用于在后台持续播放音乐与下载歌曲"
     },
     {
+      "name": "permission_bluetooth_reason",
+      "value": "用于识别蓝牙耳机、音箱等音频设备，连接手表时避免误暂停播放"
+    },
+    {
       "name": "tab_search",
       "value": "搜索"
     },
@@ -47,6 +51,38 @@
     {
       "name": "settings_title",
       "value": "设置"
+    },
+    {
+      "name": "widget_display_name_control",
+      "value": "音乐播控卡片"
+    },
+    {
+      "name": "widget_desc_control",
+      "value": "桌面快捷控制音乐播放"
+    },
+    {
+      "name": "widget_display_name_lyrics",
+      "value": "心动歌词卡片"
+    },
+    {
+      "name": "widget_desc_lyrics",
+      "value": "在桌面欣赏当前歌曲的歌词"
+    },
+    {
+      "name": "widget_dynamic_lyrics",
+      "value": "动态歌词卡片"
+    },
+    {
+      "name": "widget_desc_dynamic_lyrics",
+      "value": "歌词跟随播放进度滚动"
+    },
+    {
+      "name": "MusicCardFormAbility_label",
+      "value": "音乐卡片服务"
+    },
+    {
+      "name": "MusicCardFormAbility_desc",
+      "value": "BiliMusic 桌面卡片表单服务"
     }
   ]
 }

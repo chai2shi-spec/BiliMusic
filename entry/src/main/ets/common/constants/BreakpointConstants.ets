@@ -1,5 +1,5 @@
 /**
- * 断点常量（移植自 audio-interaction-master，配合 BreakpointSystem 使用）。
+ * 断点常量（配合 BreakpointSystem 使用）。
  * SM=手机 / MD=折叠屏展开·小平板 / LG=平板·大屏。
  */
 
@@ -55,7 +55,7 @@ export class BreakpointConstants {
   }
 
   /**
-   * 横屏媒体查询（2026-10-23 两列列表改造）：窗口宽 > 高。
+   * 横屏媒体查询：窗口宽 > 高。
    * BreakpointSystem 注册监听，命中状态写入 AppStorage（IS_LANDSCAPE 键）。
    */
   static readonly RANGE_LANDSCAPE: string = '(orientation: landscape)';
@@ -64,7 +64,7 @@ export class BreakpointConstants {
 
   /**
    * 两列模式内容列上限（vp）：两列激活（横屏宽屏：折叠屏展开横屏 / 平板横屏 /
-   * 手机横屏；2026-10-23 扩展：平板竖屏亦两列）时列表条目两列显示，内容列
+   * 手机横屏 / 平板竖屏）时列表条目两列显示，内容列
    * 放宽到 840vp，保证每列约 400vp 以上的行宽；其余（折叠屏展开竖屏等）仍走
    * contentMaxWidth（600/720）。判定见 TwoColumnLayout.isActive。
    */

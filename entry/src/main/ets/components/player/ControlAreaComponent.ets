@@ -1,21 +1,19 @@
 /**
- * 播放控制区（参考 audio-interaction-master 的 ControlAreaComponent 版式重做）。
+ * 播放控制区。
  *
  * 版式自上而下：功能行（播放模式 / 播放列表）→ 进度条 + 双侧时间 → 三键控制行。
- * 紧凑模式（compactMode，2026-10-23 阔折叠外屏）：功能行与进度区整体不挂载
- *（条件渲染而非 visibility 隐藏——三种自绘进度条各有 createAnimator 无限循环，
- * 隐藏挂载会留空转节点），只渲染三键行（聚拢左对齐）；进度插值一并跳过。
+ * 紧凑模式（compactMode，阔折叠外屏）：功能行与进度区整体不挂载
+ * （条件渲染而非 visibility 隐藏），只渲染三键行（聚拢左对齐）。
  * 控制调用全部走 MusicPlayer 单例；队列弹层复用共享组件 QueueSheet；
  * 按用户决策不引入收藏 / 静音按钮。
  *
  * 动效拆分（每条动画独立变量、互不共用，无全局统一 animation）：
  *   · 播放/暂停主按钮 → 独立子组件 PlayButtonComponent（呼吸形变 + 点击回弹自理）；
  *   · 模式 / 列表 / 上一曲 / 下一曲 → BounceIconButton（仅点击单次回弹，无持续动画）；
- *   · 进度条 → 播放时对 500ms 一次的进度写入做 520ms 线性插值（平滑推进，
- *     大跳即 seek/切歌直接落位不扫动）；拖拽时轻微放大，松手关键帧回弹。
- *
- * 进度条交互仍为「拖动本地跟随、松手才 seek」：拖动期间 STORE_PROGRESS 照常
- * 更新，由 dragging + dragValue 隔离，插值动画在拖动中暂停。
+ *   · 进度条 → 独立子组件 PlayerProgressArea（订阅必须圈死在进度区小子树内：
+ *     STORE_PROGRESS 每 500ms 推送一次，订阅挂在本组件上会导致整个控制区
+ *     播放期间每 500ms 重渲染一次；拆出后本组件播放期间零重渲染，
+ *     进度插值 / 拖拽交互由子组件自理）。
  */
 
 import {
@@ -23,9 +21,6 @@ import {
   RepeatMode,
   PLAYBACK_SPEED_OPTIONS,
   speedLabelOf,
-  PROGRESS_STYLE_SHIMMER,
-  PROGRESS_STYLE_PULSE,
-  PROGRESS_STYLE_WAVE,
   VideoDetail,
   VideoPageInfo
 } from '../../model/MusicModels';
@@ -37,13 +32,10 @@ import { StyleConstants } from '../../common/constants/StyleConstants';
 import { showAppToast } from '../AppToast';
 import { showAppAlertDialog } from '../AppAlertDialog';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
-import { PlayerConstants } from '../../common/constants/PlayerConstants';
 import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { PlayButtonComponent } from './PlayButtonComponent';
 import { BounceIconButton } from './BounceIconButton';
-import { ShimmerProgressBar } from './ShimmerProgressBar';
-import { PulseDotProgressBar } from './PulseDotProgressBar';
-import { WaveBarsProgressBar } from './WaveBarsProgressBar';
+import { PlayerProgressArea } from './PlayerProgressArea';
 import { LibraryStore } from '../../service/LibraryStore';
 import { Playlist } from '../../model/MusicModels';
 import {
@@ -53,13 +45,10 @@ import {
 } from '../../service/DownloadManager';
 import {
   STORE_CURRENT_TRACK,
-  STORE_PROGRESS,
-  STORE_DURATION,
   STORE_REPEAT_MODE,
   STORE_PLAYBACK_SPEED_ENABLED,
   STORE_PLAYBACK_SPEED,
   STORE_OPEN_IN_BILI_ENABLED,
-  STORE_PROGRESS_STYLE,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_PICK_PLAYLIST_ADD,
@@ -76,13 +65,6 @@ import {
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
-
-function formatTime(totalSeconds: number): string {
-  const s: number = Math.max(0, Math.floor(totalSeconds));
-  const m: number = Math.floor(s / 60);
-  const r: number = s % 60;
-  return `${m}:${r < 10 ? '0' : ''}${r}`;
-}
 
 /** 切歌键（上一曲 / 下一曲）图标与圆底尺寸 */
 const PREVNEXT_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 26, md: 26, lg: 30 });
@@ -108,43 +90,30 @@ const SPEED_CHIP_WIDTH: BreakpointType<number> = new BreakpointType<number>({ sm
 const PLAYLIST_PICKER_MAX: number = 5;
 /** 歌单页签下标（与 Index 的 TAB_PLAYLISTS 同值；模块私有常量跨文件不可引用） */
 const TAB_INDEX_PLAYLISTS: number = 1;
-/** 进度插值时长（ms）：STORE_PROGRESS 按 500ms 分桶推送，插值略长避免步进感 */
-const PROGRESS_TWEEN_MS: number = 520;
-/** 判定「大跳」的阈值（秒）：超过视为 seek / 切歌，直接落位不做扫动 */
-const PROGRESS_JUMP_SEC: number = 2;
 
 @Component
 export struct ControlAreaComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /**
-   * 紧凑模式（2026-10-23 阔折叠外屏，Pura X 折起 632×924vp → md 断点）：
+   * 紧凑模式（阔折叠外屏，Pura X 折起 632×924vp → md 断点）：
    * 功能行 / 进度区 / 时间行整体不挂载，仅渲染三键行（聚拢左对齐）。
    * 默认 false：SM / MD / LG / 折叠展开四分支行为零变化。
    */
   @Prop compactMode: boolean = false;
   /**
-   * 三键行居中（2026-10-24 紧凑横屏左列版式）：compactMode 且 centerMode 时
+   * 三键行居中（紧凑横屏左列版式）：compactMode 且 centerMode 时
    * 三键行由左对齐改居中（左列歌名/歌手/封面均居中，控制区同轴）。
    * 默认 false：Pura X 外屏等既有 compactMode 调用点保持左对齐零变化。
    */
   @Prop centerMode: boolean = false;
-  @StorageLink(STORE_PROGRESS) @Watch('onProgressTick') progress: number = 0;
-  @StorageLink(STORE_DURATION) duration: number = 0;
   @StorageLink(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
   @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
   /** 队列弹层开关（本组件自持，bindSheet 挂在播放列表按钮上） */
   @State showQueueSheet: boolean = false;
-  /** 拖动隔离：拖动中滑块显示 dragValue，松手恢复跟随插值进度 */
-  @State dragging: boolean = false;
-  @State dragValue: number = 0;
-  /** 进度条平滑显示值（本动画独占）：播放中由 onProgressTick 插值驱动 */
-  @State sliderValue: number = 0;
-  /** 进度条拖拽反馈缩放（本动画独占） */
-  @State trackScale: number = 1;
   /** 「下载」请求在途：连点会重复提交同一首（提交后立刻变「已在队列」，体验是「点了没反应」） */
   @State downloading: boolean = false;
   /**
-   * 歌单菜单新鲜度版本号（2026-10-11）：bindMenu 的 MenuElement 数组在渲染时求值，
+   * 歌单菜单新鲜度版本号：bindMenu 的 MenuElement 数组在渲染时求值，
    * 新建歌单后自增它触发重渲染，下次打开菜单就能看到新歌单。
    */
   @State playlistMenuVersion: number = 0;
@@ -158,18 +127,12 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
   /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
   @State speedButtonScale: number = 1;
-  /**
-   * 播放页进度条样式（设置页镜像）：SHIMMER（流光）/ PULSE（波点）/ WAVE（频谱）
-   * 走自绘分支，其余取值（含未知值）回落经典 Slider —— 交互契约四档一致。
-   */
-  @StorageProp(STORE_PROGRESS_STYLE) progressStyle: string = '';
 
   private player: MusicPlayer = MusicPlayer.getInstance();
 
   aboutToAppear(): void {
-    this.sliderValue = this.progress;
     this.exitRequested = false;
-    // 分层入场（方案 B）：控制区最后落位（LAYER_DELAY_CONTROL）。
+    // 分层入场：控制区最后落位（LAYER_DELAY_CONTROL）。
     // 延迟交给 animateTo 的 delay —— 不用 setTimeout，少一个要清理的定时器。
     this.getUIContext().animateTo(
       { duration: ENTRANCE_DURATION_MS, curve: Curve.EaseOut, delay: LAYER_DELAY_CONTROL },
@@ -201,8 +164,7 @@ export struct ControlAreaComponent {
 
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：控制区 200ms EaseIn 柔退淡出 + 回沉（2026-10-24 三风格
-   * 收起改版，替代 2026-10-22 的单帧瞬隐；末批退场 LAYER_EXIT_DELAY_CONTROL）。
+   * 仅柔退路径递增）：控制区 200ms EaseIn 柔退淡出 + 回沉（末批退场 LAYER_EXIT_DELAY_CONTROL）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把控制区点亮 */
@@ -231,94 +193,6 @@ export struct ControlAreaComponent {
         this.enterOffsetY = ENTRANCE_OFFSET_VP;
       }
     );
-  }
-
-  /**
-   * 进度写入（500ms 一次）→ 520ms 线性插值：animateTo 反复重定目标，
-   * 滑块匀速连续推进而非半秒一跳；拖动中不插值（滑块跟手指）；
-   * 大跳（seek / 切歌）duration 0 直接落位。
-   */
-  private onProgressTick(): void {
-    // 紧凑模式不渲染进度区：插值动画没有渲染对象，跳过（少一个 520ms animateTo）
-    if (this.compactMode || this.dragging) {
-      return;
-    }
-    const target: number = this.progress;
-    const jump: number = Math.abs(target - this.sliderValue);
-    const duration: number = jump > PROGRESS_JUMP_SEC ? 0 : PROGRESS_TWEEN_MS;
-    this.getUIContext().animateTo({ duration: duration, curve: Curve.Linear }, (): void => {
-      this.sliderValue = target;
-    });
-  }
-
-  /** 拖拽开始：进度条轻微放大（独立 animateTo，不与插值共用通道） */
-  private scaleUpTrack(): void {
-    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseOut }, (): void => {
-      this.trackScale = 1.04;
-    });
-  }
-
-  /** 松手：先落位显示值，再关键帧回弹（轻微下探 → 回 1） */
-  private bounceBackTrack(value: number): void {
-    this.getUIContext().animateTo({ duration: 0 }, (): void => {
-      this.sliderValue = value;
-    });
-    this.getUIContext().keyframeAnimateTo({ iterations: 1 }, [
-      {
-        duration: 0,
-        event: (): void => {
-          this.trackScale = 1.04;
-        }
-      },
-      {
-        duration: 150,
-        curve: Curve.EaseOut,
-        event: (): void => {
-          this.trackScale = 0.99;
-        }
-      },
-      {
-        duration: 130,
-        curve: Curve.EaseOut,
-        event: (): void => {
-          this.trackScale = 1;
-        }
-      }
-    ]);
-  }
-
-  /**
-   * 生效总时长：AVPlayer 的 durationUpdate 在部分流上拿不到值，
-   * 回退曲目自带时长，否则 max=0 时拖动手势按 0 换算、seek 永远是 0 秒。
-   */
-  private effectiveDuration(): number {
-    if (this.duration > 0) {
-      return this.duration;
-    }
-    return this.currentTrack !== null ? this.currentTrack.duration : 0;
-  }
-
-  // ===== 自绘进度条（流光 / 波点 / 频谱）的拖拽回调 =====
-  // 交互契约与经典 Slider 完全一致：按下/拖动只写本地隔离值，松手才 seek；
-  // 插值推进、时间标签、拖动隔离共用同一套 dragging / dragValue / sliderValue。
-
-  /** 自绘条按下：进入拖拽隔离（视觉反馈由子组件自理，父只置位） */
-  private onBarDragStart(): void {
-    this.dragging = true;
-  }
-
-  /** 自绘条拖动：本地跟随，不写播放进度 */
-  private onBarDragMove(sec: number): void {
-    this.dragValue = sec;
-  }
-
-  /** 自绘条松手 / 点按定位：交给播放内核；显示值直接落位（trackScale 无视觉、等效空跑） */
-  private onBarDragEnd(sec: number): void {
-    this.dragging = false;
-    if (this.effectiveDuration() > 0) {
-      this.player.seek(sec);
-    }
-    this.bounceBackTrack(sec);
   }
 
   /** 短提示：模式这种「图标变化不明显」的切换给一次文字反馈 */
@@ -456,13 +330,13 @@ export struct ControlAreaComponent {
   }
 
   /**
-   * 「加入歌单」按钮的标准菜单项（阶段 2 迁移：自绘菜单弹窗 → bindMenu + MenuElement 数组）。
+   * 「加入歌单」按钮的标准菜单项（bindMenu + MenuElement 数组）。
    *
    * 新鲜度：数组在**渲染时**求值，新建歌单后由 createPlaylistAndAdd 里的
    * playlistMenuVersion 自增触发重渲染（@StorageLink currentTrack 等状态变化也会顺带刷新）。
    *
-   * 行为微调（bindMenu 无法条件性不弹出）：没有任何歌单时原先是「直接新建 + toast」，
-   * 现在弹出只有一条「新建歌单并加入」的菜单，多一次点击但行为可预期。
+   * 行为约定（bindMenu 无法条件性不弹出）：没有任何歌单时弹出
+   * 只有一条「新建歌单并加入」的菜单，多一次点击但行为可预期。
    * 歌单很多时只列前 5 个 + 一条「去歌单页选」入口 + 「新建歌单并加入」。
    */
   private playlistMenuItems(): MenuElement[] {
@@ -470,7 +344,7 @@ export struct ControlAreaComponent {
     if (track === null) {
       return [{ value: '还没有正在播放的曲目', enabled: false, action: (): void => {} }];
     }
-    const options: Playlist[] = LibraryStore.getPlaylists();
+    const options: Playlist[] = LibraryStore.getAddablePlaylists();
     const items: MenuElement[] = [];
     const shown: Playlist[] = options.length > PLAYLIST_PICKER_MAX
       ? options.slice(0, PLAYLIST_PICKER_MAX)
@@ -481,6 +355,12 @@ export struct ControlAreaComponent {
         value: target.name,
         action: (): void => {
           const updated: Playlist | null = LibraryStore.addTrackToPlaylist(target.id, track);
+          // 双向收藏夹拦截提示：非 B 站曲目被 store 过滤时明确告知
+          const skipped: number = LibraryStore.consumeFavMirrorSkippedCount();
+          if (updated !== null && skipped > 0) {
+            this.toast(`「${target.name}」是双向同步收藏夹，仅支持添加 B 站曲目`);
+            return;
+          }
           this.toast(updated ? `已加入「${target.name}」` : '加入歌单失败');
         }
       });
@@ -505,7 +385,7 @@ export struct ControlAreaComponent {
 
   /**
    * 「去歌单页选」：收起播放页 overlay + 切到歌单页签 + 让歌单页进入「点选加入」
-   * 模式（2026-10-22 补齐承接：旧实现只切页签就停了，用户落在歌单页无从下手）。
+   * 模式（只切页签不够，用户会落在歌单页无从下手）。
    *
    * 三路信号：
    * · 收起：TopArea 收起按钮同款 seq（STORE_PLAYER_CLOSE_REQUEST）→
@@ -676,154 +556,12 @@ export struct ControlAreaComponent {
         .justifyContent(FlexAlign.SpaceBetween)
       }
 
-      // 紧凑模式（阔折叠外屏）：进度区（四分支进度条 + 双侧时间行）不挂载 ——
-      // 三种自绘进度条各有 createAnimator 无限循环，visibility 隐藏会留空转节点。
+      // 进度区（四分支进度条 + 双侧时间行，独立子组件）：
+      // STORE_PROGRESS 每 500ms 推送一次，订阅与 520ms 插值全部圈在
+      // PlayerProgressArea 内 —— 本组件播放期间零重渲染。
+      // 紧凑模式（阔折叠外屏）整体不挂载：订阅与插值随组件卸载注销。
       if (!this.compactMode) {
-        Column() {
-          // 进度条四分支（设置 → 外观「播放页进度条样式」）：三种自绘样式共用
-          // value/max/拖拽回调契约，经典 Slider 保持原样（含未知值兜底）。
-          if (this.progressStyle === PROGRESS_STYLE_SHIMMER) {
-            ShimmerProgressBar({
-              value: this.dragging ? this.dragValue : this.sliderValue,
-              max: this.effectiveDuration(),
-              onSeekStart: (): void => {
-                this.onBarDragStart();
-              },
-              onSeekMove: (sec: number): void => {
-                this.onBarDragMove(sec);
-              },
-              onSeekEnd: (sec: number): void => {
-                this.onBarDragEnd(sec);
-              }
-            })
-              .margin({
-                left: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint),
-                right: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint)
-              })
-          } else if (this.progressStyle === PROGRESS_STYLE_PULSE) {
-            PulseDotProgressBar({
-              value: this.dragging ? this.dragValue : this.sliderValue,
-              max: this.effectiveDuration(),
-              onSeekStart: (): void => {
-                this.onBarDragStart();
-              },
-              onSeekMove: (sec: number): void => {
-                this.onBarDragMove(sec);
-              },
-              onSeekEnd: (sec: number): void => {
-                this.onBarDragEnd(sec);
-              }
-            })
-              .margin({
-                left: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint),
-                right: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint)
-              })
-          } else if (this.progressStyle === PROGRESS_STYLE_WAVE) {
-            WaveBarsProgressBar({
-              value: this.dragging ? this.dragValue : this.sliderValue,
-              max: this.effectiveDuration(),
-              onSeekStart: (): void => {
-                this.onBarDragStart();
-              },
-              onSeekMove: (sec: number): void => {
-                this.onBarDragMove(sec);
-              },
-              onSeekEnd: (sec: number): void => {
-                this.onBarDragEnd(sec);
-              }
-            })
-              .margin({
-                left: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint),
-                right: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint)
-              })
-          } else {
-            Slider({
-              min: 0,
-              max: Math.max(1, this.effectiveDuration()),
-              step: 1,
-              style: SliderStyle.OutSet,
-              value: this.dragging ? this.dragValue : this.sliderValue
-            })
-              .selectedColor($r('app.color.slider_select'))
-              .trackColor($r('app.color.slider_track'))
-              .scale({ x: this.trackScale, y: this.trackScale })
-              .onChange((value: number, mode: SliderChangeMode): void => {
-                if (mode === SliderChangeMode.Begin) {
-                  // 按下：只动本地滑块并轻微放大，不写播放进度
-                  this.dragging = true;
-                  this.dragValue = value;
-                  this.scaleUpTrack();
-                  return;
-                }
-                if (mode === SliderChangeMode.Moving) {
-                  this.dragValue = value;
-                  return;
-                }
-                // 松手 / 点击定位：交给播放内核，进度条回弹
-                this.dragging = false;
-                if (this.effectiveDuration() > 0) {
-                  this.player.seek(value);
-                }
-                this.bounceBackTrack(value);
-              })
-              .height($r('app.float.slider_height'))
-              .margin({
-                left: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint),
-                right: new BreakpointType<Resource>({
-                  sm: $r('app.float.slider_margin_sm'),
-                  md: $r('app.float.slider_margin_md'),
-                  lg: $r('app.float.slider_margin_lg')
-                }).getValue(this.currentBreakpoint)
-              })
-          }
-          Row() {
-            Text(formatTime(this.dragging ? this.dragValue : this.sliderValue))
-              .fontColor($r('app.color.play_text_color'))
-              .fontSize($r('app.float.singer_title_sm'))
-              .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
-              .lineHeight('14vp')
-            Text(formatTime(this.effectiveDuration()))
-              .fontColor($r('app.color.play_text_color'))
-              .fontSize($r('app.float.singer_title_sm'))
-              .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
-              .lineHeight('14vp')
-          }
-          .width(StyleConstants.FULL_WIDTH)
-          .justifyContent(FlexAlign.SpaceBetween)
-        }
-        .margin({
-          top: $r('app.float.slider_margin_top'),
-          bottom: this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG ?
-          $r('app.float.slider_margin_bottom_lg') : $r('app.float.slider_margin_bottom')
-        })
+        PlayerProgressArea()
       }
 
       // 三键行（紧凑模式可变布局）：常规 = 全宽两端分布 + control_padding；

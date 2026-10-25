@@ -1,16 +1,15 @@
 /**
  * 全局轻提示：AppStorage 驱动的**单实例**系统 toast（Index 根部挂载一次）。
  *
- * 阶段 4 迁移（2026-10-11）：
- *   自绘气泡 → HdsSnackBar → **系统标准 toast**（`promptAction.openToast`）。
- *   为什么最后落在这：HdsSnackBar 是「左图标 / 中文本 / 右操作」三区横幅形态，
- *   纯短文案（本 App 全部提示都是一行短句）时三区各自留白，横竖都空 —— 版式不匹配。
+ * 为什么用系统标准 toast（`promptAction.openToast`）而不是 HdsSnackBar：
+ *   HdsSnackBar 是「左图标 / 中文本 / 右操作」三区横幅形态，纯短文案（本 App
+ *   全部提示都是一行短句）时三区各自留白，横竖都空 —— 版式不匹配。
  *   系统 toast 的气泡**自身贴合文案**，无留白，且是平台标准形式。
  *
- * 为什么不用老的 `promptAction.showToast`（当初自绘的动机）：
+ * 为什么不用 `promptAction.showToast`：
  *   · `showToast` 没有句柄，连续调用只会**排队连播**（批量删 5 首连弹 5 次）；
- *   · 现在走的 `openToast` 返回 toastId，配 `closeToast(id)` 先关旧再开新，
- *     天然满足「替换不排队」——自绘的唯一理由（可与动效一并）随之消失。
+ *   · `openToast` 返回 toastId，配 `closeToast(id)` 先关旧再开新，
+ *     天然满足「替换不排队」。
  *
  * 通道（任何 .ts/.ets 都能写，播放内核也走这里，见 MusicPlayer.notifyHint）：
  *   STORE_TOAST_MSG      文案

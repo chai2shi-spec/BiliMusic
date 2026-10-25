@@ -1,11 +1,11 @@
 /**
- * Canvas 歌词渲染组件（移植自 audio-interaction-master 的 LrcView）。
+ * Canvas 歌词渲染组件。
  *
  * 逐行绘制 + 400ms ease-in-out 补间滚动 + 上下渐隐遮罩，视觉效果远好于 List 方案。
  * 逐字特效（LetterGradient / LetterScaleGradient / LetterStar）需要 KRC 逐字
  * 时间轴；本项目 LyricsApi 只有行级时间轴，固定使用 LyricScrollEffect.Line。
  *
- * ── 时间轴同步（2026-10-21 改造，见 design/歌词同步问题诊断与方案.md）──
+ * ── 时间轴同步（见 design/歌词同步问题诊断与方案.md）──
  * 入参 `lyricMilliSecondsTime` 来自 STORE_PROGRESS，而那条链路为了不拖垮进度条
  * 是按 **500ms 分桶**推送的（MusicPlayer.PROGRESS_PUSH_INTERVAL_MS）。
  * 直接把桶值当播放位置判行，换行平均滞后 171~235ms、最坏 500ms，
@@ -16,25 +16,19 @@
  *      用 `锚点值 + (now - 锚点时刻) × 播放倍率` 算出「现在放到哪儿了」，
  *      精度从 500ms 提到 ~20ms（只受定时器精度限制），**不增加任何声明式重渲染**；
  *   2. 判行后算出「距下一行起点还有多久」，用一次 setTimeout 睡到那一刻再判，
- *      不做常驻 60fps 轮询（每行只唤醒 1~2 次，比原先每个 tick 全量重绘更省）；
+ *      不做常驻 60fps 轮询（每行只唤醒 1~2 次，比每个 tick 全量重绘更省）；
  *   3. 外推上限 1.2s：tick 丢了（卡顿 / 后台冻结）就不再往前推，等下一个 tick 校正，
  *      避免「卡住时歌词越走越远，恢复后猛回头」。
  *
  * 行级判据用二分查「最后一个 lineStartTime <= 当前时刻」的行（左闭右开）。
- * 旧实现是线性扫描 + 右边界 `>=`，因为行时长 = 下一行起点 − 本行起点，
- * `>=` 会让上一行在下一行起点那一刻仍然命中 → 换行永远再晚一个 tick。
+ * 右边界不能取 `>=`：行时长 = 下一行起点 − 本行起点，`>=` 会让上一行
+ * 在下一行起点那一刻仍然命中 → 换行永远再晚一个 tick。
  *
- * ── 浏览模式（2026-10-23 手动滑词）──
+ * ── 浏览模式 ──
  * 纵向拖动跟手浏览歌词（钳位不出界），期间暂停自动跟随但**高亮照常走**
  * （judgeAndDraw 浏览分支只原地刷新、不滚动）；松手 3.5s 无操作或浏览中
  * 轻点，平滑滚回当前演唱行。纯滚动位置浏览，不触碰任何播放 API（不 seek）。
  * 与外部 LongPressGesture 共存：按住不动 = 开设置弹窗，拖动 = 浏览。
- *
- * 移植适配（按本项目 ArkTS 规范）：
- *   - 默认导出改具名导出；去掉 hypium / MediaService Logger 依赖（console 即可）；
- *   - AnimatorResult 延迟到 aboutToAppear 创建（属性初始化时 UIContext 未就绪）；
- *   - onAreaChange 的 Area.width 是 Length 联合类型，补 parseAreaLength 归一化；
- *   - 修正参考工程 onAreaChange 宽/高分支里画布偏移取正负号不一致的问题（统一 -offset）。
  */
 
 import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
@@ -42,6 +36,7 @@ import { LrcEntry } from './LrcEntry';
 import { angleToRadian } from './LrcUtils';
 import { Rectangle, LyricTopPosition, LyricScrollEffect } from './LyricConst';
 import { STORE_PLAYBACK_SPEED, STORE_PLAYBACK_SPEED_ENABLED } from '../common/Constants';
+import { DECORATIVE_ANIM_FRAME_RATE } from '../common/constants/InteractionConstants';
 
 const NONE_LINE: number = -1;
 const STAR_ANGLE_NUMBER: number = 5;
@@ -94,11 +89,11 @@ const SUB_TEXT_GAP: number = 3;
 const CULL_MARGIN: number = 48;
 
 /**
- * 单行布局缓存（2026-10-23 滑动流畅性优化）。
+ * 单行布局缓存。
  *
- * 旧实现每帧对**全部**歌词行做 measureText（换行补间与浏览拖动都全量重绘，
- * 百行歌词 = 每帧上百次文本测量），浏览钳位更是在每个拖动事件里跑 O(n)
- * 测量循环 —— 这是滑动掉帧的根因。现把只依赖「歌词内容 + 宽度」的量
+ * 每帧对**全部**歌词行做 measureText（换行补间与浏览拖动都全量重绘，
+ * 百行歌词 = 每帧上百次文本测量），浏览钳位再在每个拖动事件里跑 O(n)
+ * 测量循环 —— 这是滑动掉帧的根因。把只依赖「歌词内容 + 宽度」的量
  * 一次性算好缓存，歌词 / 尺寸变化时整体失效（invalidateLayout），
  * 绘制时按视口裁剪（drawContent）。
  */
@@ -197,6 +192,9 @@ export struct LrcView {
       end: 1
     };
     this.animator = this.getUIContext().createAnimator(options);
+    // LTPO 期望帧率 30fps（见 DECORATIVE_ANIM_FRAME_RATE 说明）：
+    // 歌词是小区域文本动效，400ms 换行补间 @30fps 平滑度足够
+    this.animator.setExpectedFrameRateRange(DECORATIVE_ANIM_FRAME_RATE);
   }
 
   aboutToDisappear(): void {
@@ -211,8 +209,8 @@ export struct LrcView {
   /**
    * 滚动到目标偏移：从当前偏移补间到 -desOffsetY（ease-in-out 起收都缓，换行不突兀）。
    *
-   * 暂停态改为**瞬时对齐**：补间动画是自走的 400ms，暂停时若仍播放，
-   * 拖动进度条会出现「歌词自己滚一段」的错觉（历史 bug，顺手修掉）。
+   * 暂停态**瞬时对齐**：补间动画是自走的 400ms，暂停时若仍播放，
+   * 拖动进度条会出现「歌词自己滚一段」的错觉。
    */
   startAnimator(desOffsetY: number): void {
     if (this.animator !== null) {
@@ -236,14 +234,16 @@ export struct LrcView {
       end: -desOffsetY
     };
     // 复用 aboutToAppear 创建的单一动画器：reset 改参（官方建议在动画
-    // 未开始或已结束后调用，上面已 finish）再重新 play。旧实现每次滚动
-    // createAnimator 一个新实例且从不释放，快速换行 / 频繁进出浏览态时
+    // 未开始或已结束后调用，上面已 finish）再重新 play。每次滚动都
+    // createAnimator 一个新实例且不释放，快速换行 / 频繁进出浏览态时
     // 累积大量待回收对象，加剧 GC 卡顿。reset 可能抛错（参数 / 状态异常），
     // 失败时退回新建实例，滚动不受影响。
     try {
       this.animator.reset(options);
     } catch (error) {
       this.animator = this.getUIContext().createAnimator(options);
+      // 新建实例需重新声明 LTPO 期望帧率（reset 复用主实例时声明天然保留）
+      this.animator.setExpectedFrameRateRange(DECORATIVE_ANIM_FRAME_RATE);
     }
     this.animator.onFrame = (value: number): void => {
       this.drawContent(value);
@@ -361,8 +361,8 @@ export struct LrcView {
    * 下限 = 最后一行底部至少距可视区下沿 BROWSE_BOTTOM_MARGIN（歌词比视口短时下限收敛到 0）。
    */
   private clampBrowseOffset(offset: number): number {
-    // 拖动事件的触控采样可达 120Hz：这里必须 O(1) 查布局缓存。
-    // 旧实现每个事件都跑 O(n) 的 getOffset/getLineHeight 测量循环，是拖动掉帧主因。
+    // 拖动事件的触控采样可达 120Hz：这里必须 O(1) 查布局缓存，
+    // 每个事件都跑 O(n) 的 getOffset/getLineHeight 测量循环是拖动掉帧主因。
     const layouts: LrcLineLayout[] = this.ensureLayout();
     if (layouts.length === 0) {
       return 0;
@@ -414,7 +414,7 @@ export struct LrcView {
     if (delay < WAKE_MIN_MS) {
       // 算出来已经过了换行点却没换行 → 外推与真实进度有偏差（倍率读错 / 系统时间跳变）。
       // 此时**不再 10ms 空转**，把校正交给下一个 tick（≤500ms 必到），
-      // 最坏退回旧行为，但不会出现忙等把 CPU 打满。
+      // 最坏换行晚一个 tick，但不会出现忙等把 CPU 打满。
       return;
     }
     this.wakeTimer = setTimeout((): void => {
@@ -427,8 +427,8 @@ export struct LrcView {
   /**
    * 判行 + 重绘：只有换行才滚动/重绘。
    *
-   * 行级歌词（本项目固定 Line 效果）在同一行内不需要重绘 —— 旧实现每个 tick
-   * 都全量重绘一遍（60 行 × measureText），纯属浪费；逐字特效才需要按时间重绘。
+   * 行级歌词（本项目固定 Line 效果）在同一行内不需要重绘 ——
+   * 每个 tick 都全量重绘一遍（60 行 × measureText）纯属浪费；逐字特效才需要按时间重绘。
    */
   private judgeAndDraw(nowMs: number): void {
     if (!this.hasLrc()) {
@@ -449,7 +449,7 @@ export struct LrcView {
         this.startAnimator(0);
       } else {
         // 留下的 lag 是「换行比这一行真实起点晚多少」——
-        // 真机 hilog 过滤 [LrcView] 应稳定在几十 ms 量级（改造前 170~500ms）
+        // 真机 hilog 过滤 [LrcView] 应稳定在几十 ms 量级
         console.info(`[LrcView] line ${line} lag ${Math.round(nowMs - this.mLrcEntryList[line].lineStartTime)}ms`);
         this.smoothScrollTo(line);
       }
@@ -511,7 +511,7 @@ export struct LrcView {
   private calculate(): void {
     this.lrcWidth = this.viewWidth - this.paddingLeft - this.paddingRight;
     this.lrcHeight = this.viewHeight - this.paddingTop - this.paddingBottom;
-    // 每次尺寸变化都重算：原先只在 initFirstLineY === 0 时算一次，
+    // 每次尺寸变化都重算：不能只在 initFirstLineY === 0 时算一次，
     // 横竖屏 / 分屏 / 折叠屏展开导致的高度变化后，首行基准会停在旧值上
     switch (this.lyricTopPosition) {
       case LyricTopPosition.Middle:
@@ -714,7 +714,6 @@ export struct LrcView {
           if (lyric.words && lyric.words.length > 0) {
             // ⚠️ `this.lrcX` 是**左边界**（非当前行分支用 textAlign='start' 以它为起点），
             // 这里切成 center 后必须自己换算中心点，否则整行会右移半个行宽
-            // （2026-10-22 启用逐字歌词时暴露：以前 words 恒为空，这段从没真正跑过）
             this.context.textAlign = 'center';
             let startX_g = this.lrcX;
             let endX_g = this.lrcX + textMetrics.width;
@@ -913,8 +912,8 @@ export struct LrcView {
   }
 
   private drawContent(desOffsetY: number): void {
-    // 旧写法第三个参数是「上一次绘制残留的 lrcY + viewHeight」（lrcY 可达数千
-    // px），每帧过度清除；画布本身就是 viewWidth × viewHeight，按它清即可
+    // 按画布尺寸清屏即可：清除区域若用「上一次绘制残留的 lrcY + viewHeight」
+    // （lrcY 可达数千 px），会每帧过度清除
     this.context.clearRect(0, 0, this.viewWidth, this.viewHeight);
     this.reset();
 
@@ -934,7 +933,7 @@ export struct LrcView {
         const isCurrentLine: boolean = this.mCurrentLine === index;
         const layout: LrcLineLayout | undefined = index < layouts.length ? layouts[index] : undefined;
         if (layout === undefined) {
-          // 缓存未就绪（宽度为 0 等边角态）：退回旧行为全量绘制
+          // 缓存未就绪（宽度为 0 等边角态）：退回全量绘制
           this.drawLyricLine(lyric, isCurrentLine, index);
           continue;
         }
@@ -978,7 +977,7 @@ export struct LrcView {
   }
 
   getOffset(line: number): number {
-    // O(1) 查表（公式与旧 O(n) 循环逐字等价，只是把 Σ 换成了前缀和 topOffset）：
+    // O(1) 查表（把 Σ 换成前缀和 topOffset）：
     //   Top:    Σ_{i<line}(normH+sub+divider) + (curH-normH)/2
     //   Middle: Σ_{i<line}(normH+sub+divider) + curH/2 + sub/2 + divider
     const layouts: LrcLineLayout[] = this.ensureLayout();
@@ -1020,7 +1019,7 @@ export struct LrcView {
    * 收到新的进度 tick（500ms 一次）。
    *
    * 只把 tick 当锚点用：记下「值 + 到达时刻」，然后用外推值判行。
-   * 换行是否发生由外推决定，所以歌词不必等这 500ms —— 这是本次改造的核心。
+   * 换行是否发生由外推决定，所以歌词不必等这 500ms。
    */
   onTimeUpdated(): void {
     const tickMs: number = this.lyricMilliSecondsTime;
@@ -1036,9 +1035,9 @@ export struct LrcView {
    * 当前时间所在行。
    *
    * 二分查「最后一个 lineStartTime <= milliSeconds」的行 —— 天然左闭右开：
-   * 在下一行起点那一刻就已经切到下一行，不会像旧实现的 `>=` 那样把上一行
-   * 多留一个 tick。顺带不再依赖 lineDuration，重复时间标签（duration=0）的行
-   * 也能被正确命中；复杂度从 O(n) 降到 O(log n)（每次判行都调）。
+   * 在下一行起点那一刻就已经切到下一行（右边界取 `>=` 会把上一行
+   * 多留一个 tick）。不依赖 lineDuration，重复时间标签（duration=0）的行
+   * 也能被正确命中；复杂度 O(log n)（每次判行都调）。
    *
    * 返回 NONE_LINE 表示「时间在第一行之前」（前奏），调用方据此不高亮任何行。
    */
@@ -1064,7 +1063,7 @@ export struct LrcView {
 
   build() {
     Canvas(this.context)
-      // 浏览模式（2026-10-23 手动滑词）：纵向拖动跟手浏览，钳位不出界；
+      // 浏览模式：纵向拖动跟手浏览，钳位不出界；
       // 松手 3.5s 自动滚回当前演唱行。与外部 LongPressGesture（开设置弹窗）
       // 天然互斥：按住不动走长按，位移超阈值走 Pan。
       .gesture(PanGesture({ fingers: 1, direction: PanDirection.Vertical, distance: 5 })

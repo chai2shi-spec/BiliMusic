@@ -5,9 +5,6 @@
  * 点击瞬间的官方 BounceSymbolEffect 弹跳（trigger 形态：bounceTrigger 数值
  * 变化一次播放一次），**无持续动画、无定时器**，与播放态完全解耦。
  * buttonSize 只作为透明命中区（保证点按手感），不渲染任何可见底板。
- *
- * （2026-10-23 官方化：原 keyframeAnimateTo 自绘缩放回弹 1→0.86→1.04→1
- * 改为官方弹跳动效；官方曲线固定，不再有自定义回弹轮廓。）
  */
 
 @Component

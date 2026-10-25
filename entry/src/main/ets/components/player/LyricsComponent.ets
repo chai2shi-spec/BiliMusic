@@ -1,14 +1,15 @@
 /**
- * 播放页歌词页（移植自 audio-interaction-master 的 LyricsComponent，数据源接 LyricsApi）。
+ * 播放页歌词页（数据源接 LyricsApi）。
  *
  * 结构（SM）：小封面 + 歌名/歌手头行 → Canvas LrcView（平滑滚动 + 渐隐遮罩）
  * → 底部控制区。LG / 折叠屏展开时走栅格分栏，控制区不随歌词渲染
  * （isShowControl 由宿主按布局传参）。
  *
  * 歌词数据流：LyricsApi.getLyricForTrack → LyricLine[]（行级时间轴，秒）
- * → LrcEntry[]（毫秒）。沿用原播放页的令牌 + 信息键机制：
+ * → LrcEntry[]（毫秒）。令牌 + 信息键机制：
  *   - 切歌 / 信息补全后，在途旧请求的结果必须丢弃（令牌）；
- *   - 「缺时长搜出的没有歌词」结论不可信，时长补回后清缓存重搜（信息键）。
+ *   - 「缺时长搜出的没有歌词」结论不可信，时长补回后信息键失配自动重搜
+ *     （LyricsApi 内部 cacheKey 比对；不清缓存，manual 手选结果跨重启固定）。
  */
 
 import { Track, LyricLine, LyricResult, LyricWord, LyricCandidate } from '../../model/MusicModels';
@@ -47,7 +48,7 @@ export struct LyricsComponent {
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   /** 播放进度（秒）：LrcView 要毫秒，传入时 ×1000 */
   @StorageLink(STORE_PROGRESS) time: number = 0;
-  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读（2026-10-22 迁移） */
+  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读 */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageLink(STORE_IS_PLAYING) isPlay: boolean = false;
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
@@ -88,8 +89,6 @@ export struct LyricsComponent {
   private lastTrackKey: string = '';
   /** 上一次真正发起歌词请求时的「信息键」（id + 标题 + 歌手 + 时长是否已知） */
   private lastLyricKey: string = '';
-  /** 上一次发起歌词请求时是否已有时长（缺时长搜出来的「没有歌词」结论不可信） */
-  private lastLyricHadDuration: boolean = false;
   /** 歌词请求令牌：切歌 / 信息补全后，在途的旧请求结果必须丢弃 */
   private lyricToken: number = 0;
 
@@ -101,12 +100,11 @@ export struct LyricsComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：歌词层 200ms EaseIn 柔退淡出（2026-10-24 三风格收起
-   * 改版，替代 2026-10-22 的单帧瞬隐；与控制区同批 LAYER_EXIT_DELAY_CONTROL）。
+   * 仅柔退路径递增）：歌词层 200ms EaseIn 柔退淡出（与控制区同批 LAYER_EXIT_DELAY_CONTROL）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /**
-   * 分层入场（2026-10-21 动效规格第 3 点）：歌词列表主动画期间不可见，
+   * 分层入场：歌词列表主动画期间不可见，
    * 封面落位后与控制区同批（LAYER_DELAY_CONTROL）淡入，只淡入不位移。
    */
   @State enterOpacity: number = 0;
@@ -333,7 +331,6 @@ export struct LyricsComponent {
     if (track === null) {
       this.lastTrackKey = '';
       this.lastLyricKey = '';
-      this.lastLyricHadDuration = false;
       this.lyricToken++;
       this.mLrcEntryList = [];
       this.lyricOffsetMs = 0;
@@ -346,18 +343,16 @@ export struct LyricsComponent {
       // 同一首、关键信息没变（例如只是封面被异步补全）→ 不重复请求
       return;
     }
-    const hadDuration: boolean = this.lastLyricHadDuration;
     if (track.id !== this.lastTrackKey) {
       this.lastTrackKey = track.id;
       // 换歌立刻清空上一首的歌词，避免新歌词到达前显示错位内容
       this.mLrcEntryList = [];
     }
     this.lastLyricKey = key;
-    this.lastLyricHadDuration = track.duration > 0;
-    if (track.duration > 0 && !hadDuration) {
-      // 上一次是拿「缺时长」的信息搜的，那次「查不到」的结论（miss 缓存）不可信
-      LyricsApi.clearLyricCache(track.id);
-    }
+    // 不主动清缓存：「缺时长的 miss 结论不可信」由 LyricsApi 内部 cacheKey
+    // 比对处理（信息键失配 → miss 失效自动重搜；manual 缓存永远优先返回，
+    // 且物理隔离在 manual 目录，只有显式操作能清除）。曾在冷启动时误判
+    // 「上次缺时长」删掉缓存文件，导致用户手选的歌词每次重启都被重新自动匹配。
     this.loadLyrics();
   }
 
@@ -474,13 +469,12 @@ export struct LyricsComponent {
    * 参数来自状态变量时内部不随状态刷新；且函数类型参数不能做状态变量。
    * 所以每个按钮都内联写，只有文案与颜色是常量。
    *
-   * 配色（2026-10-23 修「浅色模式不可见」）：旧的硬编码白色系（Color.White /
-   * #99FFFFFF / #1AFFFFFF / #33FFFFFF / #CCFFFFFF）在系统浅色模式下被 sheet
-   * 的浅色背景吞掉。现全部改用 app.color.* 语义 token（base/dark 双份定义，
+   * 配色：全部使用 app.color.* 语义 token（base/dark 双份定义，
    * 随系统深浅色自动切换），与 SettingsPage 弹窗、QueueSheet 的自适应口径一致；
-   * 唯一保留的 Color.White 是品牌色底上的白字（深浅色下均可见）。
+   * 唯一保留的 Color.White 是品牌色底上的白字（深浅色下均可见）——
+   * 硬编码白色系在系统浅色模式下会被 sheet 的浅色背景吞掉。
    *
-   * 手动搜索（2026-10-23 新增）：「搜索歌词」展开输入区 → 三源并行搜候选 →
+   * 手动搜索：「搜索歌词」展开输入区 → 三源并行搜候选 →
    * 点选落地并写 manual 缓存（用户的选择 > 算法，自动搜索不再覆盖）。
    */
   @Builder
@@ -779,7 +773,7 @@ export struct LyricsComponent {
       }
 
       // 平板大屏歌词（7 列居中窄栅格）只服务真 LG；折叠屏展开即使宽度落 lg
-      //（阔折叠大屏，2026-10-22 折叠态适配层重写）也走普通歌词列表 —— 分栏
+      //（阔折叠大屏）也走普通歌词列表 —— 分栏
       // 由外层折叠分支的 8 列 4+4 栅格负责，再套窄栅格会双重收窄。
       if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG && !this.isFoldFull) {
         Row() {
@@ -835,8 +829,8 @@ export struct LyricsComponent {
     // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；收起为柔退淡出（onContentExit 的 200ms EaseIn 退场）
     .opacity(this.enterOpacity)
     .bindSheet($$this.showLyricSheet, this.LyricSheetHost(), {
-      // FIT_CONTENT（2026-10-23 修「底部大片空白」）：内容只有 ~230vp，旧的 MEDIUM
-      // 半屏固定高在大屏真机上留下大片空白；贴合内容后与 SettingsPage 弹窗口径一致。
+      // FIT_CONTENT：内容只有 ~230vp，固定半屏高在大屏真机上会留大片空白；
+      // 贴合内容后与 SettingsPage 弹窗口径一致。
       height: SheetSize.FIT_CONTENT,
       dragBar: true,
       showClose: false,

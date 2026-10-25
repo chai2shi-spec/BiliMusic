@@ -1,15 +1,15 @@
 /**
- * 歌词源适配层 —— 移植自 BBPlayer `apps/mobile/src/lib/api/{netease,qqmusic}/api.ts`。
+ * 歌词源适配层。
  *
  * 三个源，全部走「搜索候选 → 取歌词」两步：
  *   1. **网易云**（`netease`）：**免加密**老通道
  *      - 搜索 `GET https://music.163.com/api/search/get?s=&type=1&limit=&offset=`
  *      - 歌词 `GET https://music.163.com/api/song/lyric/v1?id=&lv=-1&tv=-1&rv=-1&yv=-1`
  *        同时给出 **主歌词 + 中文翻译(tlyric) + 罗马音(romalrc)**，
- *        `lrc.lyric` 还可能是逐字（YRC）文本 —— 这是本次移植的核心收益。
+ *        `lrc.lyric` 还可能是逐字（YRC）文本 —— 这是该源的核心价值。
  *   2. **QQ 音乐**（`qq`）：官方 `musicu.fcg` 搜索 + `fcg_query_lyric_new.fcg` 歌词，
  *      带 `trans` 翻译轨；只要 Referer，不需要签名。
- *   3. **OIAPI**（`oiapi`）：本工程原有的第三方 QQ 歌词代理，保留作兜底
+ *   3. **OIAPI**（`oiapi`）：第三方 QQ 歌词代理，兜底
  *      （前两个源都拿不到时才会用；它没有翻译轨）。
  *
  * 三者对上层暴露同一套 `LyricSongCandidate` / `RawLyricData`，

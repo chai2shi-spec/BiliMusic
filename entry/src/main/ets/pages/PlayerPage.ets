@@ -1,22 +1,20 @@
 /**
- * 播放详情页（2026-10-21 组件状态切换动画改版：不再是 NavDestination，无路由）。
- *
- * 本页现在是 Index 根 Stack 上的 overlay 薄壳：PlayBar.openPlayer 写
- * STORE_PLAYER_OVERLAY_MOUNTED=true → Index 条件挂载 LazyDest('Player')（复用
- * 懒加载注册 + 1.5s 预热，冷启动优化不回退）→ 本组件 → PlayerInfoComponent。
+ * 播放详情页：Index 根 Stack 上的 overlay 薄壳（不是 NavDestination，无路由）。
+ * PlayBar.openPlayer 写 STORE_PLAYER_OVERLAY_MOUNTED=true → Index 条件挂载
+ * LazyDest('Player')（复用懒加载注册 + 1.5s 预热）→ 本组件 → PlayerInfoComponent。
  *
  * 打开/收起的主动画全部由组件状态驱动（无 pushPath / pop / customTransition）：
  *   · 打开：PlayerInfoComponent.playEnterTransition —— 单个 animateTo(700ms,
  *     PLAYER_MAIN_CURVE) 写 STORE_PLAYER_OPEN=true，同帧驱动两套 geometryTransition
  *     配对（背景面从迷你栏真实视觉包围盒长到全屏 + 唱片页内配对飞行）与
  *     Index 页签图标 opacity 淡出。三种收起风格下打开侧均不变（morph 一镜到底）。
- *   · 收起（2026-10-24 三风格改版，Index.closePlayer 按 STORE_PLAYER_CLOSE_ANIM
- *     分流）：柔退（morph / morph_swipe 按键收起）仍是 700ms 逆向镜像；
- *     下滑（slide 全入口 / 手势松手过阈值）由 Index.slideOutClose 写
- *     STORE_PLAYER_SLIDE_OFFSET / _ALPHA 终值，本壳根节点绑定做整页下滑渐隐。
+ *   · 收起（Index.closePlayer 按 STORE_PLAYER_CLOSE_ANIM 分流）：柔退
+ *     （morph / morph_swipe 按键收起）仍是 700ms 逆向镜像；下滑（slide 全
+ *     入口 / 手势松手过阈值）由 Index.slideOutClose 写 STORE_PLAYER_SLIDE_OFFSET
+ *     / _ALPHA 终值，本壳根节点绑定做整页下滑渐隐。
  *
  * 下拉手势（morph_swipe 风格 + 直板机版式形态挂载 —— sm 断点 / 阔折叠展开竖屏
- * （isWideFoldFull，2026-10-24 阔折叠展开改版扩展），其余条件见 dragDismissEnabled）：
+ * （isWideFoldFull），其余条件见 dragDismissEnabled）：
  *   · 跟手：PanGesture onActionUpdate 逐帧直写 AppStorage（SLIDE_OFFSET/_ALPHA
  *     与下滑收起共用同一对键 —— 松手过阈值时 Index.slideOutClose 的终态动画从
  *     当前位移自然续滑，无「先归零本地量再滑」的视觉跳变；手势期间逐帧写
@@ -30,7 +28,7 @@
  *   · 歌词页手势天然被 Scroller 消费不触发；封面页竖拉与 SM Swiper 的横滑
  *     靠方向判定互不抢占。
  *
- * 保留的原有机制：
+ * 布局约束：
  *   - 全屏布局避让（safeTop / safeBottom 在 PlayerInfoComponent 内部消费）；
  *   - 离开时把状态栏内容色复原为黑（首页是浅色背景）。
  */
@@ -68,9 +66,9 @@ export struct PlayerPage {
   /** 当前断点：手势挂载判定用（sm 直板机 / 阔折叠展开竖屏 lg） */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = 'sm';
   /**
-   * 折叠屏展开态 + 横竖屏（2026-10-24 阔折叠展开改版）：下拉手势从「仅 sm」
-   * 扩展到阔折叠展开竖屏（isWideFoldFull 同口径双份实现 —— 播放页该形态走
-   * 直板机 Swiper 版式，交互随之对齐；见 PlayerInfoComponent.isWideFoldFull）。
+   * 折叠屏展开态 + 横竖屏：下拉手势覆盖阔折叠展开竖屏（isWideFoldFull 同口径
+   * 双份实现 —— 播放页该形态走直板机 Swiper 版式，交互随之对齐；见
+   * PlayerInfoComponent.isWideFoldFull）。
    */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
@@ -191,7 +189,7 @@ export struct PlayerPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
  * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染
  *（路由 pageMap 与播放页 overlay 共用同一份注册与预热）。
  */
@@ -201,6 +199,6 @@ export function PlayerPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const PlayerPageWrapped: WrappedBuilder<[]> = wrapBuilder(PlayerPageBuilder);

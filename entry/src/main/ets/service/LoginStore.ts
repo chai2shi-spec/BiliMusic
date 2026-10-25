@@ -1,5 +1,5 @@
 /**
- * 登录态管理（扫码登录，2026-10 恢复重建）。
+ * 登录态管理（扫码登录）。
  *
  * 职责（与 BiliDevice 管理匿名身份的分工）：
  *   1. initLoginState()：启动时把持久化的登录 Cookie 装填进 HttpUtil（登录通道）；
@@ -147,7 +147,7 @@ export function initLoginState(): void {
   const cookie: string = AppPreferences.getLoginCookie();
   if (cookie.length > 0) {
     HttpUtil.setLoginCookie(cookie);
-    // ⚠️ 兼容升级路径（2026-10-08）：`verifiedAt` 是新加的键，老版本用户磁盘上没有它
+    // ⚠️ 兼容升级路径：`verifiedAt` 是后加的键，老版本用户磁盘上没有它
     // → getLoginVerifiedAt() 返回 0 → isLoginStale() 会把**所有老用户**都显示成
     // 「登录已失效 · 点击重新登录」。这里给存量 Cookie 补一个初始标记：
     // 它的有效性由随后那次 refreshLoginUser() 的 nav 校验来确认，
@@ -192,7 +192,7 @@ async function persistLoginCookie(cookie: string, refreshToken: string): Promise
   await AppPreferences.setLoginVerifiedAt(Date.now());
   HttpUtil.setLoginCookie(cookie);
   bumpLoginRev();
-  // 2026-10-24（移植 PiliPlus Accounts.set 的行为）：登录 = 换了一个身份，
+  //（移植 PiliPlus Accounts.set 的行为）：登录 = 换了一个身份，
   // 服务端对「同一 buvid 突然变成登录态」的评分会重新计算，强制重报一次
   // 设备激活让新身份从「已激活设备」起算。fire-and-forget（内部全兜住异常），
   // 绝不阻塞登录成功跳转。
@@ -204,7 +204,7 @@ async function persistLoginCookie(cookie: string, refreshToken: string): Promise
  *
  * Cookie 双通道提取（B 站两种下发形态都接）：
  *   a) 回调 url 的 query 参数（老格式）；
- *   b) poll 响应的 Set-Cookie 头（现行格式，此前只走 a 导致「扫码确认后仍登录失败」）。
+ *   b) poll 响应的 Set-Cookie 头（现行格式）。
  * a 优先、b 兜底，成功时日志记录实际命中的来源。
  *
  * @throws 两条通道都拿不到 SESSDATA 时抛带诊断元数据（长度/字段命中，不含凭据值）的错，
@@ -257,14 +257,10 @@ export async function applySmsLoginCookies(responseCookies: string, refreshToken
 /**
  * 拉取 nav 接口刷新用户信息（昵称/ 头像 / VIP 状态）。
  *
- * ⚠️ **被拒绝时不再清凭据**（2026-10-08 改）。原实现在 nav 返回 -101 时直接
- * `clearLoginState()`，后果是：Cookie / refresh_token / 用户信息全被清掉，用户
- * 完全不知情（界面上只是「莫名其妙变回未登录」），且**必须重新扫码**。
- * 但 -101 有多种成因（B 站风控临时拒绝、Cookie 确实过期、网络抖动被误判），
- * 一律按「已过期」处理过于武断。
- *
- * 现在改成：保留 Cookie，只把 `verifiedAt` 归零并广播 ——设置页会显示
- * 「登录已失效 · 点击重新登录」，用户点一下重新登录即可，凭据也还在。
+ * ⚠️ **被拒绝时不清凭据**：nav 返回 -101 有多种成因（B 站风控临时拒绝、
+ * Cookie 确实过期、网络抖动被误判），直接清凭据会让用户不知情地变回未登录
+ * 且**必须重新扫码**。因此保留 Cookie，只把 `verifiedAt` 归零并广播 ——
+ * 设置页会显示「登录已失效 · 点击重新登录」，用户点一下重新登录即可，凭据也还在。
  *
  * 三态：
  *   - `isLogin === false` → 标stale（保留凭据，等用户重新登录）；
@@ -351,8 +347,7 @@ export async function logout(): Promise<void> {
  * 那属于「凭据待重验」，不是「用户要退出」。
  */
 export async function clearLoginState(): Promise<void> {
-  // 2026-10-23 性能审查：四个 key 攒一次 removeMany（单次 flush），
-  // 旧写法逐 key remove，登出要全量落盘 4 次。
+  // 四个 key 攒一次 removeMany（单次 flush），避免逐 key remove 全量落盘 4 次。
   await AppPreferences.removeMany([PREF_LOGIN_COOKIE, PREF_LOGIN_USER, PREF_LOGIN_REFRESH_TOKEN, PREF_LOGIN_VERIFIED_AT]);
   cachedUser = null;
   HttpUtil.clearLoginCookie();

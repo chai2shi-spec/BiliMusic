@@ -1,10 +1,8 @@
 /**
- * 外观设置页（2026-10-24 设置页二级菜单化改造）：
- * 原设置页「外观」卡整体迁入本二级页，行序与逻辑原样保留。
- *
+ * 外观设置页：
  * 内容：主题（深浅循环）/ 主题色（bindSheet 半屏 8 色面板）/ 播放页进度条样式（四档循环）/
- * 播放页收起动画（三档循环）/ 播放页封面风格（三档循环）/ 底部导航布局（SM 断点才渲染）/
- * 迷你栏进度条 / 自动展开收起（SM 断点才渲染）。
+ * 播放页收起动画（三档循环）/ 播放页封面风格（三档循环）/ 条目展示（两档循环：长条 / 大封面）/
+ * 底部导航布局（SM 断点才渲染）/ 迷你栏进度条 / 自动展开收起（SM 断点才渲染）。
  *
  * 主题深浅 / 主题色经 publishThemeColors 写 AppStorage，全局组件 @StorageProp 订阅
  * 即时刷新，无需重启；样式类设置（进度条 / 收起动画 / 封面风格 / 底部导航布局 /
@@ -27,6 +25,7 @@ import {
   STORE_PROGRESS_STYLE,
   STORE_PLAYER_CLOSE_ANIM,
   STORE_PLAYER_COVER_STYLE,
+  STORE_ITEM_DISPLAY_STYLE,
   STORE_MINI_BAR_PROGRESS,
   STORE_MINI_BAR_AUTO_EXPAND
 } from '../common/Constants';
@@ -47,8 +46,10 @@ import {
   closeStyleLabelOf,
   PLAYER_COVER_STYLE_DISC,
   PLAYER_COVER_STYLE_SQUARE,
-  PLAYER_COVER_STYLE_IMMERSIVE,
-  coverStyleLabelOf
+  coverStyleLabelOf,
+  ITEM_DISPLAY_LIST,
+  ITEM_DISPLAY_GRID,
+  itemDisplayLabelOf
 } from '../model/MusicModels';
 import { AppPreferences } from '../preferences/AppPreferences';
 import {
@@ -103,7 +104,7 @@ export struct AppearanceSettingsPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // 偏好读取延后一拍，首帧 build 全程零磁盘读（与原设置页同款模式）。
+    // 偏好读取延后一拍，首帧 build 全程零磁盘读。
     setTimeout((): void => {
       this.settings = AppPreferences.getSettings();
     }, 0);
@@ -211,15 +212,16 @@ export struct AppearanceSettingsPage {
   }
 
   /**
-   * 切换播放页封面风格（点击三档循环）：唱片（圆形旋转，默认）/ 方卡（方形
-   * 圆角极简）/ 全屏（封面满屏宽顶状态栏 + 主色渐变背景）。写偏好 + 写
-   * AppStorage 镜像（STORE_PLAYER_COVER_STYLE）—— CoverDiscComponent 的
-   * 封面形态与 PlayerInfoComponent 的 SurfaceLayers 背景分层据此分流，
-   * 即时生效无需重启。
+   * 切换播放页封面风格（点击两档循环）：唱片（圆形，默认）/ 方卡（方形
+   * 圆角极简）。写偏好 + 写 AppStorage 镜像（STORE_PLAYER_COVER_STYLE）——
+   * CoverDiscComponent 的封面形态与 PlayerInfoComponent 的 SurfaceLayers
+    * 背景分层据此分流，即时生效无需重启。不设全屏档（linearGradientBlur
+    * 逐帧实时模糊为播放页最贵开销），存量偏好由 normalizeCoverStyle
+    * 白名单归一化回落唱片档。
    */
   private cyclePlayerCoverStyle(): void {
     const order: string[] =
-      [PLAYER_COVER_STYLE_DISC, PLAYER_COVER_STYLE_SQUARE, PLAYER_COVER_STYLE_IMMERSIVE];
+      [PLAYER_COVER_STYLE_DISC, PLAYER_COVER_STYLE_SQUARE];
     const idx: number = order.indexOf(this.settings.playerCoverStyle);
     // 未知存量值（旧版本数据异常）从唱片档重新开始循环
     const next: string = order[((idx < 0 ? 0 : idx) + 1) % order.length];
@@ -228,6 +230,23 @@ export struct AppearanceSettingsPage {
     });
     AppStorage.setOrCreate(STORE_PLAYER_COVER_STYLE, next);
     this.toast(`封面风格：${coverStyleLabelOf(next)}`, 1500);
+  }
+
+  /**
+   * 切换条目展示（点击两档循环）：长条（小封面 + 长标题行，默认）/ 大封面
+   * （双列网格、大封面 + 小字标题）。写偏好 + 写 AppStorage 镜像
+   * （STORE_ITEM_DISPLAY_STYLE）—— 歌单页签 / 最近播放 / UP 主页 / 首页
+   * 三页签 / 歌单详情（不可排序）/ 搜索视频结果的 @StorageProp 订阅即时
+   * 重渲染，无需重启。可排序歌单详情恒为长条（保 onMove 拖动排序）。
+   */
+  private cycleItemDisplayStyle(): void {
+    const next: string = this.settings.itemDisplayStyle === ITEM_DISPLAY_LIST
+      ? ITEM_DISPLAY_GRID : ITEM_DISPLAY_LIST;
+    this.update((s: AppSettings): void => {
+      s.itemDisplayStyle = next;
+    });
+    AppStorage.setOrCreate(STORE_ITEM_DISPLAY_STYLE, next);
+    this.toast(`条目展示：${itemDisplayLabelOf(next)}`, 1500);
   }
 
   /**
@@ -446,7 +465,7 @@ export struct AppearanceSettingsPage {
 
             CardDivider()
 
-            // 播放页收起动画（三档循环，2026-10-24 三风格收起动画改版）：
+            // 播放页收起动画（三档循环）：
             // 柔退（内容反向错峰淡出 + 背景末端渐隐 + 封面回飞）/ 柔退+手势
             // （柔退 + 手机端封面页下拉跟手收起，默认）/ 下滑（所有入口整页
             // 下滑淡出）。写偏好 + AppStorage 镜像（STORE_PLAYER_CLOSE_ANIM），
@@ -469,16 +488,14 @@ export struct AppearanceSettingsPage {
 
             CardDivider()
 
-            // 播放页封面风格（三档循环，2026-10-24 封面/背景风格改版）：
-            // 唱片（圆形封面旋转，默认）/ 方卡（方形圆角极简 + 主色净底）/
-            // 全屏（封面满屏宽顶状态栏 + 主色渐变背景）。写偏好 + AppStorage
-            // 镜像（STORE_PLAYER_COVER_STYLE），CoverDiscComponent 封面形态与
-            // SurfaceLayers 背景分层据此分流，即时生效。播放页全形态存在 →
-            // 本行不做断点隐藏。
+            // 播放页封面风格（两档循环）：唱片（圆形封面，默认）/ 方卡（方形圆角极简 + 主色
+            // 净底）。写偏好 + AppStorage 镜像（STORE_PLAYER_COVER_STYLE），
+            // CoverDiscComponent 封面形态与 SurfaceLayers 背景分层据此分流，
+            // 即时生效。播放页全形态存在 → 本行不做断点隐藏。
             HdsListItemCard({
               textItem: {
                 primaryText: { text: '播放页封面风格' },
-                secondaryText: { text: '唱片 / 方卡 / 全屏' }
+                secondaryText: { text: '唱片 / 方卡' }
               },
               suffixItem: new SuffixText({ text: coverStyleLabelOf(this.settings.playerCoverStyle) }),
               cardBackgroundColor: Color.Transparent,
@@ -491,10 +508,31 @@ export struct AppearanceSettingsPage {
 
             CardDivider()
 
+            // 条目展示（两档循环）：长条（小封面 +
+            // 长标题行，默认）/ 大封面（双列网格、大封面 + 小字标题）。写偏好 +
+            // AppStorage 镜像（STORE_ITEM_DISPLAY_STYLE），各封面类列表页的
+            // @StorageProp 订阅即时重渲染。各形态（手机 / 平板）均有列表页 →
+            // 本行不做断点隐藏。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '条目展示' },
+                secondaryText: { text: '长条 / 大封面' }
+              },
+              suffixItem: new SuffixText({ text: itemDisplayLabelOf(this.settings.itemDisplayStyle) }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.cycleItemDisplayStyle();
+              }
+            })
+
+            CardDivider()
+
             // 底部导航布局：水平融合（播放栏与页签同一行）/ 垂直两层（播放栏上、页签下）。
             // 点击循环切换，写偏好 + AppStorage 镜像即时生效（Index 受控样式重建）。
-            // A12（2026-10-20 平板功能对齐）：HDS 底部页签栏只在手机形态（SM）渲染，
-            // md/lg 是 NavRail + 浮岛，本项在平板上点了没有任何可见效果 → 非 SM 整卡隐藏。
+            // HDS 底部页签栏只在手机形态（SM）渲染，md/lg 是 NavRail + 浮岛，
+            // 本项在平板上点了没有任何可见效果 → 非 SM 整卡隐藏。
             if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
               HdsListItemCard({
                 textItem: { primaryText: { text: '底部导航布局' } },
@@ -537,8 +575,7 @@ export struct AppearanceSettingsPage {
             // 关闭后浏览列表的竖向滑动不再触发迷你栏收放，仅保留点按圆盘等
             // 显式交互；写偏好 + AppStorage 镜像（STORE_MINI_BAR_AUTO_EXPAND），
             // Index 的 @StorageProp 订阅即时生效，无需重启。
-            // A12（2026-10-20 平板功能对齐）：屏幕滑动收放只在手机形态（SM）接线，
-            // md/lg 浮岛不参与手势展开 → 非 SM 整卡隐藏。
+            // 屏幕滑动收放只在手机形态（SM）接线，md/lg 浮岛不参与手势展开 → 非 SM 整卡隐藏。
             if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
               CardDivider()
 
@@ -551,7 +588,7 @@ export struct AppearanceSettingsPage {
                   isCheck: this.settings.miniBarAutoExpand,
                   selectColor: this.themePrimary,
                   onChange: (v: boolean): void => {
-                    // 进页不再弹提示（2026-10-24）：settings 延后一拍读真值时
+                    // 进页不弹提示：settings 延后一拍读真值时
                     // isCheck 翻转会让 SuffixSwitch 误触发 onChange —— 用翻转
                     // 前值守卫，只有值真的从关翻到开才提醒；误触发时 v 与持久值
                     // 一致被拦下。
@@ -581,7 +618,7 @@ export struct AppearanceSettingsPage {
       .cachedCount(10)
       // 底部让位：列表末尾可滚动至手势区上方，不被遮挡
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-      // 大屏适配：内容列收窄居中（与原设置页同口径走 TwoColumnLayout.contentMaxWidth）
+      // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策

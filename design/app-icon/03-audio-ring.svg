@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Audio Ring</title>
+  <desc id="desc">延续现有圆环资产的音频环方案。深粉底上一条正下方留切口的白色圆环，切口暗示音轨开口；环心是白色播放三角。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#C2185B"/>
+  </g>
+
+  <g id="foreground-layer">
+    <circle
+      id="ring"
+      cx="512" cy="512" r="278"
+      fill="none" stroke="#FFFFFF" stroke-width="92"
+      stroke-dasharray="1602 145"
+      transform="rotate(105 512 512)"/>
+    <path
+      id="play-triangle"
+      d="M 634 512 L 452 402 L 452 622 Z"
+      fill="#FFFFFF" stroke="#FFFFFF" stroke-width="34" stroke-linejoin="round"/>
+  </g>
+</svg>

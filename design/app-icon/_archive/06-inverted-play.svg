@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Inverted Play</title>
+  <desc id="desc">反白播放块方案。深粉底上一枚白色圆角方块，方块中心以负形镂空播放三角（露出底色）。用「挖掉」代替「画上」，对比最硬、最不易误读，是十案里最通用的一枚。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#C2185B"/>
+  </g>
+
+  <g id="foreground-layer">
+    <rect id="plate" x="232" y="232" width="560" height="560" rx="152" fill="#FFFFFF"/>
+    <path
+      id="play-cut"
+      d="M 650 512 L 460 387 L 460 637 Z"
+      fill="#C2185B" stroke="#C2185B" stroke-width="40" stroke-linejoin="round"/>
+  </g>
+</svg>

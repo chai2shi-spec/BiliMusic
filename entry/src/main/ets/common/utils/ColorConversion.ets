@@ -1,5 +1,5 @@
 /**
- * 颜色处理（移植自 audio-interaction-master）。
+ * 颜色处理。
  *
  * dealColor：把封面主色（RGB）转成适合做沉浸背景的暗调颜色 ——
  * 压低亮度（bHSB）并保持色相，保证其上的白色文字可读。
@@ -12,7 +12,7 @@ import { common } from '@kit.AbilityKit';
 export class ColorConversion {
   /**
    * 生成沉浸式背景色：HSB 空间压亮度后转回 RGB。
-   * 参考工程原实现，另补了 max===min（灰/黑白）时色相计算除零的防护。
+   * max===min（灰/黑白）时色相无意义，需防色相计算除零。
    */
   public static dealColor(rRGB: number, gRGB: number, bRGB: number): number[] {
     let max = Math.max(Math.max(rRGB, gRGB), bRGB);

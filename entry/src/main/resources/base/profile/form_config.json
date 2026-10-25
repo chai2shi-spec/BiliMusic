@@ -1,0 +1,83 @@
+{
+  "forms": [
+    {
+      "name": "PlayControlCard2x2",
+      "displayName": "$string:widget_display_name_control",
+      "description": "$string:widget_desc_control",
+      "src": "./ets/widget/pages/PlayControlCard2x2.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": true,
+      "isDefault": false,
+      "updateEnabled": false,
+      "scheduledUpdateTime": "10:30",
+      "updateDuration": 1,
+      "defaultDimension": "2*2",
+      "supportDimensions": ["2*2"],
+      "sceneAnimationParams": {
+        "abilityName": "CardLiveFormAbility"
+      }
+    },
+    {
+      "name": "PlayControlCard2x4",
+      "displayName": "$string:widget_display_name_control",
+      "description": "$string:widget_desc_control",
+      "src": "./ets/widget/pages/PlayControlCard2x4.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": true,
+      "isDefault": true,
+      "updateEnabled": false,
+      "scheduledUpdateTime": "10:30",
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*4"]
+    },
+    {
+      "name": "LyricsCard",
+      "displayName": "$string:widget_display_name_lyrics",
+      "description": "$string:widget_desc_lyrics",
+      "src": "./ets/widget/pages/LyricsCard.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": false,
+      "isDefault": false,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "10:20",
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*4", "4*4"]
+    },
+    {
+      "name": "DynamicLyrics",
+      "displayName": "$string:widget_dynamic_lyrics",
+      "description": "$string:widget_desc_dynamic_lyrics",
+      "src": "./ets/widget/pages/DynamicLyrics.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": true,
+      "isDefault": false,
+      "updateEnabled": true,
+      "scheduledUpdateTime": "10:20",
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*4"]
+    }
+  ]
+}

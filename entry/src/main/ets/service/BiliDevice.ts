@@ -11,8 +11,8 @@
  * 因此这里做三件事：
  *   1. initBuvidCookie()：同步保证 HttpUtil 带上 buvid（离线也能用本地生成的保底）；
  *   2. upgradeBuvidCookie()：后台向 /x/frontend/finger/spi 换取官方 buvid 并持久化；
- *   3. activateBuvid()：向风控指纹接口 ExClimbWuzhi 上报一次「设备已激活」
- *      （2026-10-24 移植 PiliPlus）。**新 buvid 在服务端是「未激活」状态**，
+ *   3. activateBuvid()：向风控指纹接口 ExClimbWuzhi 上报一次「设备已激活」。
+ *      **新 buvid 在服务端是「未激活」状态**，
  *      取流容易被判异常 —— 换了 buvid 却不激活，等于换了个更可疑的指纹。
  */
 
@@ -31,9 +31,6 @@ import {
 
 /**
  * buvid：首次生成后持久化，之后复用。
- *
- * 原先定义在 `api/BilibiliApi.ts` 的登录模块里，登录功能整体移除后迁到本模块 ——
- * buvid 与登录无关，是**首页能否出内容**的前置条件，不能跟着登录代码一起删掉。
  */
 let cachedBuvid: string = '';
 
@@ -65,9 +62,9 @@ interface SpiResponse {
 /**
  * 把访客身份 Cookie 补齐成「最小完整集」。
  *
- * 2026-10-03 实测（同一 IP、同一时刻的对照实验，只改变量是 Cookie）：
+ * 实测（同一 IP、同一时刻的对照实验，只改变量是 Cookie）：
  *   · 无 Cookie                                                  → HTTP 412
- *   · `buvid3` + `buvid4`（**本工程原来的样子**）                  → HTTP 412
+ *   · `buvid3` + `buvid4`                                        → HTTP 412
  *   · 再加 `b_nut` + `_uuid` + `b_lsid`                          → **HTTP 200**
  * 也就是说 412 并不是「buvid 无效」，而是**访客身份不完整**被直接挡在门外。
  * 补齐后同一接口能拿到 body（`code` 可能是 -352 那一档风控，属于下一道门，另说）。
@@ -122,7 +119,7 @@ export function initBuvidCookie(): void {
       AppPreferences.setString(PREF_BUVID_COOKIE, full);
     }
     HttpUtil.setBaseCookie(full);
-    // 诊断（2026-10-22 平板登录修复）：启动即留痕 buvid 来源（official / fallback）
+    // 诊断：启动即留痕 buvid 来源（official / fallback）
     // 与 Cookie 串长度指纹 —— 风控类问题（二维码早失效 / playurl 偶发拦截）的
     // 定位起点。旧安装首次运行时标记位缺省会显示 fallback，下一次
     // upgradeBuvidCookie 成功后即纠正。
@@ -138,7 +135,7 @@ export function initBuvidCookie(): void {
 }
 
 /**
- * buvid 是否仍为本地兜底假值（2026-10-22 平板登录修复）。
+ * buvid 是否仍为本地兜底假值。
  *
  * 背景：新装机（典型：平板）持久化里没有官方 buvid，initBuvidCookie 用本地
  * MD5 兜底值顶上（能过 412，但非 finger/spi 官方下发）。带着假指纹请求
@@ -210,7 +207,7 @@ function buvidFingerprint(): string {
 }
 
 /**
- * 向风控指纹接口上报「本设备已激活」（2026-10-24 移植 PiliPlus `Request.buvidActive`）。
+ * 向风控指纹接口上报「本设备已激活」。
  *
  * 为什么必须做：`finger/spi` 只**下发** buvid，不激活它。服务端把新 buvid 当作
  * 「一台还没跑过 JS 指纹采集的设备」，这类指纹在 playurl / 登录接口上更容易被

@@ -1,6 +1,5 @@
 /**
- * 歌单备份页（2026-10-24 设置页二级菜单化改造）：
- * 原设置页「歌单备份」卡整体迁入本二级页，行序与逻辑原样保留。
+ * 歌单备份页：设置页「歌单备份」二级页，行序与逻辑原样保留。
  *
  * 内容：导出歌单到剪贴板 / 从剪贴板导入歌单（经 PasteButton 安全控件授权）/
  * 从网易云 · QQ 音乐导入（跳 'PlaylistImport' 路由）+ 脚注说明。
@@ -8,10 +7,9 @@
  * 解决的真实痛点：歌单只存在 Preferences 里，**清数据 / 换机即丢**。
  * 导出剥掉 localFilePath、导入逐首 slimTrack（见 LibraryStore 的注释）。
  *
- * 剪贴板授权弹窗（PasteImportDialog）保留原实现：HarmonyOS 要求读取剪贴板
- * 必须经系统安全控件 PasteButton 显式授权，普通 onClick 静默读会被拦截
- * （getData 只拿到空串，真机两次复现）。行点击弹本窗，窗内放系统粘贴按钮，
- * 点它完成授权 + 读取。
+ * 剪贴板授权弹窗：官方 CustomContentDialog（标题/取消按钮常量定格，
+ * 动态正文经 contentBuilder 读当次状态，与全站 6 页「加入歌单」弹窗同款口径）。
+ * 行点击弹本窗，窗内放系统粘贴按钮（PasteButton 安全控件），点它完成授权 + 读取。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）。
  */
@@ -19,9 +17,7 @@
 import {
   CONTENT_END_OFFSET,
   STORE_SAFE_BOTTOM,
-  STORE_SAFE_TOP,
-  STORE_THEME_PRIMARY,
-  STORE_THEME_ON
+  STORE_SAFE_TOP
 } from '../common/Constants';
 import { Playlist } from '../model/MusicModels';
 import { NavStackHolder } from '../service/NavStackHolder';
@@ -35,97 +31,24 @@ import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
 import { InsetCard, CardDivider, SectionFooter } from '../components/InsetCardGroup';
 import { HdsListItemCard, SuffixArrowIconText } from '@kit.UIDesignKit';
+import { CustomContentDialog } from '@kit.ArkUI';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 
 /**
- * 剪贴板导入授权弹窗（2026-10-16，用户选择的折中方案）。
+ * 剪贴板导入授权弹窗：官方 CustomContentDialog 承载（正文 + 系统粘贴按钮）。
  *
  * 为什么不塞进 AppAlertDialog：那是「纯文本 + 双按钮」的固定版式（20+ 调用点
  * 共用），安全控件需要专属回调与样式约束，混入会把公共组件改得面目全非。
- * controller 声明与注入遵循 AppAlertDialog.ets 注释里的官方口径
- * （@CustomDialog 结构体必须声明 controller? 属性；真正开关由宿主页的
- * CustomDialogController 成员持有 —— 在 @Component 内部定义时赋值才有效）。
  *
- * 视觉沿用旧版确认弹窗的自绘语言：bg_card 底 + 24 圆角 + 主题色文字。
+ * 官方口径（CustomDialogController 构造参数定格）：controller 必须是
+ * @Component 成员、aboutToAppear 建一次；primaryTitle / buttons 全常量，
+ * 动态正文经 contentBuilder 闭包在 open() 时读当次状态。
+ * 视觉：官方标准观感（系统标题/按钮槽），PasteButton 回归系统默认样式
+ * （默认样式天然满足安全控件「文字完整显示 + 对比度」红线）。
  */
-@CustomDialog
-struct PasteImportDialog {
-  /** 编译器硬性要求（10905211）：@CustomDialog 结构体必须声明 controller 属性；实际开关走宿主页的 controller */
-  controller?: CustomDialogController;
-  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
-  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
-  /** 授权成功回调：宿主页注入（关弹窗 → confirmImportPlaylists 读剪贴板） */
-  onPasteGranted: () => void = (): void => {};
-
-  build() {
-    Column() {
-      Column() {
-        Text('从剪贴板导入歌单')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.themePrimary)
-          .textAlign(TextAlign.Center)
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text('系统要求先授权才能读取剪贴板，点击下方「粘贴」继续')
-          .fontSize(13)
-          .fontColor(this.themePrimary)
-          .textAlign(TextAlign.Center)
-          .margin({ top: 8 })
-          .width('100%')
-        // 系统粘贴按钮（安全控件，全局组件无需 import）：
-        // ⚠️ 不能对安全控件挂 .margin()，用包装 Row 承载间距；
-        // 授权校验红线：文字必须完整显示、前景与背景对比度不能过低
-        // （themePrimary 底 + themeOn 字 ≈ 6.4:1，满足）。
-        Row() {
-          PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
-            .fontSize(14)
-            .iconSize(16)
-            .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-            .backgroundColor(this.themePrimary)
-            .fontColor(this.themeOn)
-            .iconColor(this.themeOn)
-            .onClick((event: ClickEvent, result: PasteButtonOnClickResult): void => {
-              // 先关弹窗再走业务：confirmImportPlaylists 里的确认弹窗 / toast
-              // 不会被本弹层盖住。授权令牌不受弹窗关闭影响（授权在点击瞬间生效）。
-              this.controller?.close();
-              if (result === PasteButtonOnClickResult.SUCCESS) {
-                this.onPasteGranted();
-              } else {
-                showAppToast('剪贴板授权失败，请重试', 1800);
-              }
-            })
-        }
-        .width('100%')
-        .margin({ top: 24 })
-        .justifyContent(FlexAlign.Center)
-      }
-      .width('100%')
-      .padding({ left: 24, right: 24, top: 24, bottom: 20 })
-
-      Divider()
-        .color($r('app.color.bg_divider'))
-
-      Text('取消')
-        .fontSize(16)
-        .fontColor(this.themePrimary)
-        .textAlign(TextAlign.Center)
-        .height(48)
-        .width('100%')
-        .onClick((): void => {
-          this.controller?.close();
-        })
-    }
-    .width('86%')
-    .backgroundColor($r('app.color.bg_card'))
-    .borderRadius(24)
-    .clip(true)
-  }
-}
 
 @Component
 export struct PlaylistBackupPage {
@@ -143,8 +66,72 @@ export struct PlaylistBackupPage {
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
+  /**
+   * 「从剪贴板导入歌单」授权弹窗 controller：官方 CustomContentDialog 承载。
+   * ⚠️ 必须在 @Component 内部定义时赋值才有效，且一经创建不能重新赋值；
+   * 构造参数定格（primaryTitle / buttons 常量），动态正文走 contentBuilder。
+   * 授权成功回调链：PasteButton SUCCESS → 关弹窗 → confirmImportPlaylists。
+   */
+  private pasteImportController: CustomDialogController | undefined = undefined;
+
+  aboutToAppear(): void {
+    this.pasteImportController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '从剪贴板导入歌单',
+        contentBuilder: (): void => {
+          this.PasteImportBody();
+        },
+        buttons: [{
+          value: '取消',
+          buttonStyle: ButtonStyleMode.TEXTUAL,
+          action: (): void => {
+            this.pasteImportController?.close();
+          }
+        }]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
+  }
+
   private toast(message: string, duration: number): void {
     showAppToast(message, duration);
+  }
+
+  /**
+   * 弹窗正文：说明文案 + 系统粘贴按钮（安全控件，全局组件无需 import）。
+   * ⚠️ 不能对安全控件挂 .margin()，用包装 Row 承载间距；
+   * PasteButton 回归系统默认样式（默认样式满足授权红线，官方标准观感）。
+   */
+  @Builder
+  PasteImportBody(): void {
+    Column() {
+      Text('系统要求先授权才能读取剪贴板，点击下方「粘贴」继续')
+        .fontSize(14)
+        .fontColor($r('app.color.text_secondary'))
+        .textAlign(TextAlign.Center)
+        .width('100%')
+      Row() {
+        PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE, buttonType: ButtonType.Capsule })
+          .fontSize(14)
+          .iconSize(16)
+          .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+          .onClick((event: ClickEvent, result: PasteButtonOnClickResult): void => {
+            // 先关弹窗再走业务：confirmImportPlaylists 里的确认弹窗 / toast
+            // 不会被本弹层盖住。授权令牌不受弹窗关闭影响（授权在点击瞬间生效）。
+            this.pasteImportController?.close();
+            if (result === PasteButtonOnClickResult.SUCCESS) {
+              this.confirmImportPlaylists();
+            } else {
+              showAppToast('剪贴板授权失败，请重试', 1800);
+            }
+          })
+      }
+      .width('100%')
+      .margin({ top: 20 })
+      .justifyContent(FlexAlign.Center)
+    }
+    .width('100%')
   }
 
   /**
@@ -183,23 +170,6 @@ export struct PlaylistBackupPage {
     const tracks: number = playlists.reduce((sum: number, p: Playlist): number => sum + p.tracks.length, 0);
     this.toast(`已复制 ${playlists.length} 个歌单（${tracks} 首）到剪贴板`, 2200);
   }
-
-  /**
-   * 剪贴板授权弹窗 controller（2026-10-16）：⚠️ 必须在 @Component 内部定义时
-   * 赋值才有效（官方约束，模块级定义会「编译过、open 不显示」的静默失效），
-   * 且一经创建不能重新赋值（会导致旧弹窗关不掉）。
-   * 授权成功回调链：PasteButton SUCCESS → 关弹窗 → confirmImportPlaylists。
-   */
-  private pasteDialogCtrl: CustomDialogController = new CustomDialogController({
-    builder: PasteImportDialog({
-      onPasteGranted: (): void => {
-        this.confirmImportPlaylists();
-      }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Center,
-    customStyle: true
-  });
 
   /**
    * 导入：先读剪贴板看有没有像歌单数据，有则二次确认再落库。
@@ -339,12 +309,12 @@ export struct PlaylistBackupPage {
               this.exportPlaylists();
             })
             CardDivider()
-            // 2026-10-16（真机两次复现）：普通行点击后静默读剪贴板被系统拦截
-            // （getData 只拿到空串），HarmonyOS 强制要求经安全控件 PasteButton
-            // 授权。改为：点击本行 → 弹 PasteImportDialog（窗内系统粘贴按钮）→
+            // 普通行点击后静默读剪贴板会被系统拦截（getData 只拿到空串，
+            // 真机两次复现），HarmonyOS 强制要求经安全控件 PasteButton
+            // 授权：点击本行 → 官方授权弹窗（窗内系统粘贴按钮）→
             // 点「粘贴」授权 → confirmImportPlaylists 读剪贴板并二次确认落库。
             this.SettingsRow('从剪贴板导入歌单', (): void => {
-              this.pasteDialogCtrl.open();
+              this.pasteImportController?.open();
             })
             CardDivider()
             // 跨平台导入（网易云 / QQ 音乐）：本 App 自产自销的 JSON 备份管不了

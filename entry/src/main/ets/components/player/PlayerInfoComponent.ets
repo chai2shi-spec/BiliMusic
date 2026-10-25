@@ -1,16 +1,15 @@
 /**
- * 播放页主体（移植自 audio-interaction-master 的 PlayerInfoComponent）。
+ * 播放页主体。
  *
  * 沉浸式背景：网络封面下载为 PixelMap → effectKit 取主色调暗
  * （dealColor）做页面底色 + 模糊封面图打底；主色明度写入
  * STORE_PLAYER_BG_DARK，供顶栏投播按钮与状态栏内容色切换。
  *
- * 布局五分支（2026-10-24 增紧凑横屏分支与阔折叠展开改版，触发跟随系统旋转）：
+ * 布局五分支：
  *   · 紧凑横屏（直板机：isLandscape 且窗口高 < LANDSCAPE_COMPACT_MAX_WINDOW_H_VP，
  *     ~844×391vp；折叠屏展开横屏：isFoldFull && isLandscape，Pura X 展开横屏
- *     ~721vp / Mate X 类，2026-10-24 推广纳入）→ 左列 45%（封面 + 歌名 +
- *     歌手 + 三键，居中）+ 右列纯歌词（2026-10-24 重设计：封面预算挂弹性壳
- *     实测，旧「整行宽×0.42 ≈ 全高」口径致封面吞满左列破版）；
+ *     ~721vp / Mate X 类）→ 左列 45%（封面 + 歌名 +
+ *     歌手 + 三键，居中）+ 右列纯歌词（封面预算挂弹性壳实测）；
  *   · 折叠屏展开竖屏（isFoldFull 且非 isWideFoldFull，STORE_FOLD_EXPANDED）→
  *     封面 / 歌词左右分栏（md/lg 宽度均 8 列 4+4）—— 只留常规折叠展开竖屏
  *     （md，Mate X 类），展开横屏已上移紧凑横屏分支；
@@ -20,15 +19,15 @@
  *   · MD/LG 断点（真平板 / 大窗口 / 阔折叠外屏横屏；!isFoldFull 守卫）→
  *     栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
  *   · SM 断点 / 阔折叠展开竖屏（isWideFoldFull：isFoldFull && lg && 竖屏，
- *     Pura X 展开 ≥840vp；2026-10-24 用户拍板去分栏、全宽铺满、仅阔折叠）→
+ *     Pura X 展开 ≥840vp；用户拍板去分栏、全宽铺满、仅阔折叠）→
  *     Swiper 双页（封面页 | 歌词页）+ 顶栏叠加，版式与直板机一致。
  *
  * 安全区：STORE_SAFE_TOP / STORE_SAFE_BOTTOM（全屏布局方案，见 Constants.ts 注释）。
  *
- * 收起（2026-10-24 三风格收起动画改版）：
+ * 收起：
  *   · 背景面离场末端渐隐 —— 非对称 transition 离场侧 opacity(0) 配
- *     PLAYER_BG_EXIT_CURVE（前 ~65% 近似恒持、临落位快速衰减），替代
- *     「背景直到落位才消失」旧规格（用户 10-24 拍板）；
+ *     PLAYER_BG_EXIT_CURVE（前 ~65% 近似恒持、临落位快速衰减；
+ *     用户拍板，不走「背景直到落位才消失」）；
  *   · 下滑收起（slide 风格 / 手势过阈值）时背景面靠 STORE_PLAYER_SLIDE_OUT
  *     守卫保持挂载（随整页滑走，不参与配对），geometryTransition 由
  *     STORE_PLAYER_GT_OFF 摘除（下滑路径不做配对飞行，防迷你唱片斜飞）；
@@ -40,15 +39,16 @@ import { effectKit } from '@kit.ArkGraphics2D';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
 import { common } from '@kit.AbilityKit';
+import { taskpool } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Track } from '../../model/MusicModels';
 import {
   PLAYER_COVER_STYLE_DISC,
-  PLAYER_COVER_STYLE_SQUARE,
-  PLAYER_COVER_STYLE_IMMERSIVE
+  PLAYER_COVER_STYLE_SQUARE
 } from '../../model/MusicModels';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
 import { ColorConversion } from '../../common/utils/ColorConversion';
+import { CoverPaletteResult, buildRgba, extractCoverPaletteTask } from '../../common/utils/CoverPalette';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { LyricsComponent } from './LyricsComponent';
@@ -76,7 +76,6 @@ import {
   STORE_PLAYER_SLIDE_ALPHA,
   STORE_DEVICE_FOLDABLE,
   STORE_WINDOW_HEIGHT_VP,
-  STORE_WINDOW_WIDTH_VP,
   STORE_SAFE_LEFT,
   STORE_SAFE_RIGHT,
   STORE_PLAYER_COVER_STYLE,
@@ -92,6 +91,16 @@ import { PLAYER_MAIN_CURVE, PLAYER_BG_EXIT_CURVE, LAYER_EXIT_DURATION_MS, LAYER_
 
 /** blur 偶发失败的单次重试延迟（ms） */
 const BLUR_RETRY_DELAY_MS: number = 300;
+/** 取色主色 600ms 颜色过渡时长（切歌时 animateTo 平滑插值） */
+const PALETTE_COLOR_ANIM_MS: number = 600;
+/** 取色降采样源边长（px）：48×48 RGBA ≈ 9KB，TaskPool 直方图聚类的输入规模 */
+const PALETTE_SOURCE_PX: number = 48;
+
+/** 封面双尺寸解码结果（loadCoverPair 一次下载一次建源、双档输出） */
+interface CoverPixelPair {
+  full: image.PixelMap;
+  small: image.PixelMap;
+}
 /** 阔折叠外屏（Pura X 折起 632×924vp → md 断点）封面圆盘宽度预算比例 */
 const COMPACT_DISC_W_RATIO: number = 0.63;
 /** 阔折叠外屏圆盘高度预算比例（矮屏兜底，防宽度驱动的圆盘纵向溢出） */
@@ -102,15 +111,12 @@ const COMPACT_DISC_BLEED_RATIO: number = 0.25;
 const COMPACT_DISC_TOP_VP: number = 12;
 /** 阔折叠外屏翻页时封面淡出/淡入时长（ms） */
 const COMPACT_COVER_FADE_MS: number = 200;
-/** 全屏档沉浸渐变纯色平顶区兜底终点（0-1，窗口高占比）：窄高屏 / 数据缺失时下限 */
-const IMMERSIVE_FLAT_STOP_FALLBACK: number = 0.42;
-// ⚠️ 这里曾有 CONTENT_FADE_IN_DELAY_MS / CONTENT_FADE_IN_MS（整块内容层 60ms 延迟 + 180ms 淡入），
-// 2026-10-21 真机首验后**删除**：整块淡入会把封面（CoverDisc，geometryTransition 一镜到底）
+// ⚠️ 这里**不要**定义整块内容层的延迟淡入常量（如 CONTENT_FADE_IN_DELAY_MS /
+// CONTENT_FADE_IN_MS）：整块淡入会把封面（CoverDisc，geometryTransition 一镜到底）
 // 一起压成透明 —— 转场头 60ms 封面完全不可见，观感变成「一块背景矩形从迷你栏长开、
 // 内容随后浮现」，而不是「迷你栏那块玻璃整块变大、封面飞出来」。
-// 编辑者注意：**不要为了「避免内容浮在没长开的背景之外」把整块 opacity 加回来** ——
-// 这个职责已由各层自带的分层入场承担（2026-10-21 晚间修订：随背景面覆盖进度空间序淡入，
-// 与飞行尾部重叠，不再等主动画结束后依次弹出）：
+// 「避免内容浮在没长开的背景之外」的职责由各层自带的分层入场承担
+// （随背景面覆盖进度空间序淡入，与飞行尾部重叠）：
 //   · 控制区 ControlAreaComponent    → LAYER_DELAY_CONTROL(400) + 250ms 淡入 + 10vp 上移（底部最先被盖住）
 //   · 标题块 MusicInfoComponent      → LAYER_DELAY_INFO(470)   + 250ms 淡入 + 10vp 上移（中部）
 //   · 顶栏   TopAreaComponent        → LAYER_DELAY_TOP(530)    + 250ms 淡入（顶部最后被盖住）
@@ -125,32 +131,35 @@ export struct PlayerInfoComponent {
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   /**
    * 沉浸背景主色（取自封面，取色失败保持默认深色）。@StorageLink 发布到
-   * STORE_PLAYER_IMAGE_COLOR（2026-10-24 全屏档渐变模糊改版）：CoverDiscComponent
-   * 全屏档封面底部溶解层只读订阅，与 SurfaceLayers 沉浸渐变同源同色。
+   * STORE_PLAYER_IMAGE_COLOR：背景面 Stack 底色与各处主色消费点同源。
    */
   @StorageLink(STORE_PLAYER_IMAGE_COLOR) imageColor: string = 'rgba(0, 0, 2, 1)';
-  /** 沉浸背景主色压深变体（imageColor 各通道 ×0.5，保色相）：全屏档下方渐变终止色 */
-  @State imageColorDeep: string = 'rgba(0, 0, 1, 1)';
+  /**
+   * 深辅色 RGB：muted 深色簇，与主色同色系恒更暗，驱动 SurfaceLayers 双色渐变
+   * （disc 压深渐变着色 / square 对角渐变终点）。组件内部状态、无外部消费方，
+   * 不进 AppStorage。
+   */
+  @State deepRgb: number[] = [0, 0, 1];
   /** 背景图：取色成功前显示原图，成功后换模糊图 */
   @State bgCover: PixelMap | string = '';
   /**
-   * 折叠屏展开态（2026-10-22 折叠态适配层重写）：不再本组件私有注册
-   * display 监听（旧实现播放页不挂载则全局无折叠态），改订阅全局唯一真源
-   * service/FormFactorHolder 的 STORE_FOLD_EXPANDED（EntryAbility 常驻首发）。
+   * 折叠屏展开态：订阅全局唯一真源 service/FormFactorHolder 的
+   * STORE_FOLD_EXPANDED（EntryAbility 常驻首发）—— 播放页是懒加载 overlay，
+   * 本组件不私有注册 display 监听（不挂载就没有折叠态）。
    */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
-  /** 背景明暗（本组件取色写入 STORE_PLAYER_BG_DARK 后回读）：A7 标题块码率文案压深/提亮用 */
+  /** 背景明暗（本组件取色写入 STORE_PLAYER_BG_DARK 后回读）：标题块码率文案压深/提亮用 */
   @StorageProp(STORE_PLAYER_BG_DARK) isBgDark: boolean = true;
-  /** 封面风格（三档，设置页可切）：SurfaceLayers 背景分层据此分流，取色/模糊管线全风格共用不变 */
+  /** 封面风格（两档，设置页可切）：SurfaceLayers 背景分层据此分流，取色/模糊管线全风格共用不变 */
   @StorageProp(STORE_PLAYER_COVER_STYLE) coverStyle: string = PLAYER_COVER_STYLE_DISC;
-  /** 登录态版本号（A7 音质文案随登录/退出刷新，见 qualityText 的注释） */
+  /** 登录态版本号（音质文案随登录/退出刷新，见 qualityText 的注释） */
   @StorageLink(STORE_LOGIN_REV) loginRev: number = 0;
 
   /**
    * 播放页展开态（打开主动画里写 true / Index.closePlayer 里写 false）：
    * 驱动背景面的 geometryTransition 配对 —— true 时本组件的全屏背景面出现、
    * PlayBar 迷你栏里的透明锚点消失，系统在「迷你栏真实视觉包围盒 ↔ 全屏」之间
-   * 做几何插值（2026-10-21 起点偏左下根治，见 GEOMETRY_ID_PLAYER_SURFACE 注释）。
+   * 做几何插值（见 GEOMETRY_ID_PLAYER_SURFACE 注释）。
    */
   @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
 
@@ -158,8 +167,8 @@ export struct PlayerInfoComponent {
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
    * 仅柔退路径递增 —— 下滑收起内容随整页滑走，不触发）：本组件自持内容
    * （SM/阔折叠 Swiper 指示点、LG/MD 标题块、阔折叠信息块）与四个子内容层
-   * （顶栏 / 标题 / 控制区 / 歌词）各自订阅同一信号自理（2026-10-24 柔退改版，
-   * 替代 2026-10-22「其他元素直接消失」的单帧瞬隐旧规格）。
+   * （顶栏 / 标题 / 控制区 / 歌词）各自订阅同一信号自理（柔退淡出，
+   * 各层按 LAYER_EXIT_DELAY_* 错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /**
@@ -171,7 +180,7 @@ export struct PlayerInfoComponent {
   /** 自持内容柔退透明度（LG/MD 标题块、阔折叠信息块）：onContentExit 内 200ms EaseIn 淡出 */
   @State contentFade: number = 1;
   /**
-   * geometryTransition 全窗摘除开关（2026-10-24 下滑收起，Index.slideOutClose 置位）：
+   * geometryTransition 全窗摘除开关（Index.slideOutClose 置位）：
    * true 时背景面 / 封面 / 迷你唱片 / 透明锚点的 GT id 全部换空串 —— 下滑收起
    * 翻转 playerOpen 前必须先摘除（渲染一帧），否则被移除节点仍带旧 id 触发
    * 迷你唱片反向配对飞行（封面斜飞回栏）。
@@ -184,8 +193,7 @@ export struct PlayerInfoComponent {
    */
   @StorageProp(STORE_PLAYER_SLIDE_OUT) slideOut: boolean = false;
   /**
-   * 上滑展开进行中（2026-10-24 展开动画三风格区分，PlayBar.openPlayer 的 slide
-   * 分支在挂载前预置）：① 背景面/封面挂载守卫的第三项 —— playerOpen 在
+   * 上滑展开进行中（PlayBar.openPlayer 的 slide 分支在挂载前预置）：① 背景面/封面挂载守卫的第三项 —— playerOpen 在
    * slideInTransition 闭包内才翻 true，靠本标志背景面/封面在挂载首帧（屏下
    * 隐形位）即已渲染；② onAppear 分流依据 —— true 走上滑主动画、false 走
    * morph 打开。slideInTransition 的 onFinish 复位（连同 TRANSITIONING / GT_OFF）。
@@ -193,7 +201,7 @@ export struct PlayerInfoComponent {
   @StorageProp(STORE_PLAYER_SLIDE_IN) slideIn: boolean = false;
 
   /**
-   * SM Swiper 当前页下标（受控，2026-10-24 歌词页收起漂移修复）：收起开始
+   * SM Swiper 当前页下标（受控）：收起开始
    *（onContentExit）时以 duration 0 瞬间回跳封面页（第 0 页）—— 右滑到歌词页
    * 后封面页被平移出屏但 CoverDisc 节点仍挂载（Swiper 缓存相邻页），geometryTransition
    * 配对按真实视觉包围盒取起点，不回跳则封面从屏幕左侧外斜飞入迷你栏。回跳后
@@ -211,7 +219,7 @@ export struct PlayerInfoComponent {
     // 默认值（400ms / 第 0 页），无需复位逻辑。
     this.smAnimDuration = 0;
     this.smIndex = 0;
-    // 自持内容柔退（2026-10-24，替代单帧瞬隐）：LG/MD 标题块与阔折叠信息块
+    // 自持内容柔退：LG/MD 标题块与阔折叠信息块
     // 200ms EaseIn 淡出，延迟与 MusicInfoComponent 同档（LAYER_EXIT_DELAY_INFO）
     // —— 跨组件错峰口径一致。SM Swiper 回跳**不**包进本动画（瞬跳保持不动画）。
     this.getUIContext().animateTo(
@@ -236,7 +244,7 @@ export struct PlayerInfoComponent {
   private lgColW: number = 0;
   private lgColH: number = 0;
   private lgCtrlH: number = 0;
-  /** LG 左列标题块实测高（A7 后圆盘预算要一并减掉） */
+  /** LG 左列标题块实测高（圆盘预算要一并减掉） */
   private lgTitleH: number = 0;
 
   /** Area 尺寸（Length）→ vp 数值（资源型按 0 兜底） */
@@ -260,7 +268,7 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * 阔折叠外屏判定（2026-10-23 Pura X 外屏适配）：折叠屏设备 && 非展开态 &&
+   * 阔折叠外屏判定：折叠屏设备 && 非展开态 &&
    * md 断点 —— 精准锁定阔折叠外屏（折起 632×924vp 落 md）。普通手机（sm）、
    * 平板（非折叠设备）、折叠展开（isFoldFull 分支优先）均不命中。
    */
@@ -275,20 +283,19 @@ export struct PlayerInfoComponent {
   @State compactPageIndex: number = 0;
 
   private isCompactFold(): boolean {
-    // 横屏排除（2026-10-24 播放页横屏方案）：外屏横屏（924×632vp）误入本竖屏
+    // 横屏排除：外屏横屏（924×632vp）误入本竖屏
     // 出血版式会破版 —— 横屏高度充足，落下方 md/lg 栅格分栏。
     return this.deviceFoldable && !this.isFoldFull && !this.isLandscape
       && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD;
   }
 
   /**
-   * 阔折叠展开判定（2026-10-24 Pura X 展开态改直板机版式，用户拍板「去分栏、
-   * 全宽铺满、仅阔折叠」）：折叠屏展开（isFoldFull）且宽度落 lg（≥840vp，
+   * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开（isFoldFull）且宽度落 lg（≥840vp，
    * Index.ets isTabletShell 同口径 —— 阔折叠 Pura X 类展开落 lg，常规折叠
    * Mate X 类展开落 md 仍走分栏）且竖屏。命中时 build() 的 isFoldFull 分栏
    * 分支放行，穿透到 SM Swiper 双页分支（直板机版式）。横屏排除：直板机
    * Swiper 版式不处理横屏，展开横屏命中 isCompactLandscape（isFoldFull &&
-   * isLandscape，2026-10-24 推广紧凑横屏版式）。PlayerPage.dragDismissEnabled
+   * isLandscape）。PlayerPage.dragDismissEnabled
    * 为同口径双份实现（morph_swipe 下拉手势扩展），改判定口径时两处同步。
    */
   private isWideFoldFull(): boolean {
@@ -312,26 +319,24 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * 横竖屏（2026-10-24 播放页横屏方案）：BreakpointSystem 常驻监听
+   * 横竖屏：BreakpointSystem 常驻监听
    * （orientation: landscape 媒体查询，Index 注册）写入 IS_LANDSCAPE，
    * 本组件只读订阅。
    */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   /** 窗口内容区高度（vp）：EntryAbility 首发 + Index HdsTabs.onAreaChange 持续回写（旋转后新鲜） */
   @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
-  /** 窗口内容区宽度（vp）：与高度同批回写，全屏档沉浸渐变平顶区动态计算用 */
-  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
   /** 水平安全区（vp）：横屏下状态栏侧边条带避让；竖屏两值为 0，padding 不生效 */
   @StorageProp(STORE_SAFE_LEFT) safeLeft: number = 0;
   @StorageProp(STORE_SAFE_RIGHT) safeRight: number = 0;
 
   /**
-   * 紧凑横屏判定（2026-10-24，直板机横屏 ~844×391vp）：横屏且窗口高低于
+   * 紧凑横屏判定：横屏且窗口高低于
    * LANDSCAPE_COMPACT_MAX_WINDOW_H_VP 才命中 —— 阔折叠外屏横屏 632vp /
    * 平板横屏 ≥600vp 均不命中，维持既有分支。
-   * 2026-10-24 推广（用户拍板）：折叠屏展开横屏（Pura X 展开横屏 ~721vp 高）
-   * 复用本版式 —— isFoldFull && isLandscape 直进，不卡高度阈值（~721vp 不满足
-   * <500）；常规折叠 Mate X 类展开横屏一并纳入（折叠展开横屏统一口径）。
+   * 折叠屏展开横屏（Pura X 展开横屏 ~721vp 高，用户拍板）复用本版式 ——
+   * isFoldFull && isLandscape 直进，不卡高度阈值；常规折叠 Mate X 类展开
+   * 横屏一并纳入（折叠展开横屏统一口径）。
    * 版式全实测驱动（封面弹性壳 onAreaChange + layoutWeight），大窗仅等比
    * 放大，结构零改动；平板恒非折叠（isFoldFull=false）不受影响。
    */
@@ -351,11 +356,11 @@ export struct PlayerInfoComponent {
   @State landscapeDiscSize: number = 0;
 
   /**
-   * 紧凑横屏封面预算（2026-10-24 横屏重设计）：min(封面壳宽, 壳高 − 呼吸间隙)。
+   * 紧凑横屏封面预算：min(封面壳宽, 壳高 − 呼吸间隙)。
    * 实测点挂「封面弹性壳」（layoutWeight(1)，高度 = 左列高 − 歌名/歌手/三键
    * 实测块高），壳高即封面可用高，随 lg 档按钮 76vp / 字号缩放自适应 ——
-   * 旧口径「内容行宽 × 0.42」在 ~917×375vp 内容区算出 ≈ 全高 375vp，封面
-   * 吞满左列、下部元素全部溢出（用户实测「封面太大、无控制元素」破版根因）。
+   * 不能按「内容行宽 × 0.42」估：矮屏上会算出 ≈ 全高，封面吞满左列、
+   * 下部元素全部溢出。
    */
   private recomputeLandscapeDisc(): void {
     if (this.landscapeAreaW <= 0 || this.landscapeAreaH <= 0) {
@@ -367,7 +372,7 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * LG/MD 左列标题块取数（A7，2026-10-20 平板功能对齐）：与 MusicInfoComponent
+   * LG/MD 左列标题块取数：与 MusicInfoComponent
    * 同口径复制，不抽共享组件 —— Swiper 页那套带分层入场动画（titleOpacity/
    * titleOffsetY）和自己的圆盘预算字段，抽公共层要把动画状态一起搬过来，
    * 得不偿失。数据源仍是 STORE_CURRENT_TRACK，不引入新数据。
@@ -421,9 +426,8 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * 打开主动画 —— morph 路径（2026-10-21 组件状态切换改版；2026-10-24 展开
-   * 动画三风格区分后仅 morph / morph_swipe 风格走这里，slide 风格走
-   * slideInTransition 的上滑展开）：**唯一**的 animateTo，
+   * 打开主动画 —— morph 路径（仅 morph / morph_swipe 风格走这里，
+   * slide 风格走 slideInTransition 的上滑展开）：**唯一**的 animateTo，
    * 闭包内写 STORE_PLAYER_OPEN=true，同帧驱动两套 geometryTransition 配对 ——
    *   · 背景面：PlayBar 迷你栏透明锚点 if 消失 ↔ 本组件全屏背景面 if 出现 →
    *     系统在「迷你栏**真实视觉包围盒** ↔ 全屏」间几何插值（起点偏左下根治，
@@ -431,8 +435,7 @@ export struct PlayerInfoComponent {
    *   · 封面：PlayBar 迷你唱片 if 消失 ↔ CoverDisc 大唱片 if 出现 →
    *     页内配对飞行（圆→圆，独立于背景面）；
    *   · Index 页签图标 opacity 同步淡出（@StorageProp/@Watch 同帧翻转）。
-   * 时长与曲线（PLAYER_TRANSITION_MS / PLAYER_MAIN_CURVE，2026-10-21 晚间从
-   * FastOutSlowIn 换为 iOS 风格贝塞尔——起手果断、长尾柔和）即两套配对飞行时长。
+   * 时长与曲线（PLAYER_TRANSITION_MS / PLAYER_MAIN_CURVE，iOS 风格贝塞尔——起手果断、长尾柔和）即两套配对飞行时长。
    * onFinish 复位连点防护标志（PlayBar.openPlayer 置位）。
    *
    * ⚠️ 只在 onAppear 启动 —— 首帧已经按 playerOpen=false 画过（背景面未挂载），
@@ -457,7 +460,7 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * 上滑展开主动画（2026-10-24 展开动画三风格区分，仅 slide 风格打开路径；
+   * 上滑展开主动画（仅 slide 风格打开路径；
    * openPlayer 已预置 SLIDE_OFFSET=窗高 / SLIDE_ALPHA=0 / GT_OFF / SLIDE_IN，
    * 首帧整页渲染在屏下隐形位）：SLIDE_OPEN_MS(350ms) 减速上滑 + 渐显
    * （PLAYER_SLIDE_IN_CURVE，与下滑收起的加速下滑镜像），闭包内写 ——
@@ -492,13 +495,15 @@ export struct PlayerInfoComponent {
 
   /** 封面 PixelMap 缓存（同曲复用，不重复下载） */
   private coverCache: image.PixelMap | undefined = undefined;
+  /** 取色降采样源缓存（与 coverCache 同源同时效，换曲/销毁一并释放） */
+  private smallCache: image.PixelMap | undefined = undefined;
   private coverCacheId: string = '';  /** 取色令牌：切歌后，在途的旧取色结果必须丢弃 */
   private colorToken: number = 0;
   /** 当前背景/配色已应用（或正在应用）的曲目 id；'' = 无。
    *  同曲对象重建（merge/点赞/重试/暂停→播放重载/单曲环绕）据此跳过重铺 */
   private themedId: string = '';
 
-  /** 安全释放 PixelMap：重复释放 / 释放失败只留日志，不打断调用方（2026-10-23 审查修复 #3） */
+  /** 安全释放 PixelMap：重复释放 / 释放失败只留日志，不打断调用方 */
   private releasePixelMapSafe(p: image.PixelMap): void {
     p.release().catch((e: BusinessError): void => {
       console.error(`release pixelMap failed: ${e.code} ${e.message}`);
@@ -515,12 +520,16 @@ export struct PlayerInfoComponent {
   }
 
   aboutToDisappear(): void {
-    // 2026-10-23 审查修复（#3）：组件销毁时释放持有的两块 PixelMap
+    // 组件销毁时释放持有的两块 PixelMap
     //（bgCover 模糊图 + coverCache 原图缓存），不释放则 Native 内存泄到进程退出
     if (this.coverCache !== undefined) {
       this.releasePixelMapSafe(this.coverCache);
       this.coverCache = undefined;
       this.coverCacheId = '';
+    }
+    if (this.smallCache !== undefined) {
+      this.releasePixelMapSafe(this.smallCache);
+      this.smallCache = undefined;
     }
     if (typeof this.bgCover !== 'string') {
       const blurred: PixelMap = this.bgCover;
@@ -529,10 +538,9 @@ export struct PlayerInfoComponent {
     }
   }
 
-  // 折叠态检测已迁出（2026-10-22 折叠态适配层重写）：旧实现在这里注册
-  // display.getFoldDisplayMode / foldDisplayModeChange 并写 STORE_PLAYER_FOLD_FULL
-  // —— 播放页是懒加载 overlay，不挂载就没有折叠态，壳层冷启动读不到。
-  // 现由 service/FormFactorHolder 在 EntryAbility.onCreate 统一初始化，
+  // 折叠态检测不在这里注册 display 监听 —— 播放页是懒加载 overlay，
+  // 不挂载就没有折叠态，壳层冷启动读不到。
+  // 由 service/FormFactorHolder 在 EntryAbility.onCreate 统一初始化，
   // 本组件 @StorageProp(STORE_FOLD_EXPANDED) 只读订阅。
 
   aboutToAppear(): void {
@@ -548,7 +556,7 @@ export struct PlayerInfoComponent {
       this.themedId = '';
       this.replaceBgCover('');
       this.imageColor = 'rgba(0, 0, 2, 1)';
-      this.imageColorDeep = 'rgba(0, 0, 1, 1)';
+      this.deepRgb = [0, 0, 1];
       AppStorage.setOrCreate(STORE_PLAYER_BG_DARK, true);
       this.applyStatusBar(true);
       return;
@@ -560,13 +568,12 @@ export struct PlayerInfoComponent {
       return;
     }
     this.themedId = track.id;
-    // 修复（2026-10-20 真机反馈「切歌时底部模糊瞬间消失再变回模糊」）：
-    // 不再「先立刻铺原图」——bgCover 换成网络 URL 后，Image 在加载期间
-    // 渲染空白，旧模糊背景瞬间消失；加载完又先显清晰原图、blur 完成后再
-    // 跳一次模糊，形成「模糊 → 空白 → 清晰 → 模糊」的连环闪变。
-    // 改为**保持旧模糊背景**，待新歌 blur PixelMap 就绪后一次性换装
-    //（模糊 → 模糊，无闪变窗口）；下载 / blur 彻底失败时才把原图 URL
-    // 铺上去兜底（见 applyTheme / tryBlur 的失败分支，宁可清晰不可挂错图）。
+    // 切歌时保持旧模糊背景，待新歌 blur PixelMap 就绪后一次性换装
+    //（模糊 → 模糊，无闪变窗口）—— bgCover 换成网络 URL 后 Image 在加载期间
+    // 渲染空白，加载完又先显清晰原图、blur 完成后再跳一次模糊，会形成
+    //「模糊 → 空白 → 清晰 → 模糊」的连环闪变；
+    // 下载 / blur 彻底失败时才把原图 URL 铺上去兜底
+    //（见 applyTheme / tryBlur 的失败分支，宁可清晰不可挂错图）。
     this.applyTheme(track);
   }
 
@@ -574,10 +581,12 @@ export struct PlayerInfoComponent {
   private async applyTheme(track: Track): Promise<void> {
     const token: number = ++this.colorToken;
     let pixel: image.PixelMap | undefined = undefined;
+    let small: image.PixelMap | undefined = undefined;
     if (this.coverCacheId === track.id && this.coverCache !== undefined) {
       pixel = this.coverCache;
+      small = this.smallCache;
     } else {
-      const loaded: image.PixelMap | null = await this.loadCoverPixelMap(track.coverUrl);
+      const loaded: CoverPixelPair | null = await this.loadCoverPair(track.coverUrl);
       if (loaded === null) {
         // 下载失败兜底：此时背景上还没有任何新歌素材，铺原图 URL
         //（Image 自己的加载重试还在），避免长期挂着上一首的模糊背景
@@ -590,15 +599,112 @@ export struct PlayerInfoComponent {
       if (this.coverCache !== undefined) {
         this.releasePixelMapSafe(this.coverCache);
       }
-      this.coverCache = loaded;
+      if (this.smallCache !== undefined) {
+        this.releasePixelMapSafe(this.smallCache);
+      }
+      this.coverCache = loaded.full;
+      this.smallCache = loaded.small;
       this.coverCacheId = track.id;
-      pixel = loaded;
+      pixel = loaded.full;
+      small = loaded.small;
     }
     if (token !== this.colorToken) {
       return;
     }
 
-    // 主色 → 调暗做底色；明度写入全局（顶栏图标 / 状态栏内容色消费）
+    this.applyPalette(small, pixel, token);
+    this.tryBlur(pixel, token, false, track.coverUrl);
+  }
+
+  /**
+   * 取色：降采样源 readPixelsToBuffer → TaskPool
+   * 量化直方图聚类（vibrant 主色 + muted 深辅色）→ animateTo 600ms 平滑换色。
+   * 降采样源缺失 / 尺寸字节校验不过 / readPixels / taskpool 异常 / ok:false →
+   * 全部回落 effectKit 单色路径（applyLegacyPalette）。
+   */
+  private applyPalette(small: image.PixelMap | undefined, pixel: image.PixelMap, token: number): void {
+    if (small === undefined) {
+      this.applyLegacyPalette(pixel, token);
+      return;
+    }
+    small.getImageInfo()
+      .then((info: image.ImageInfo): void => {
+        if (token !== this.colorToken) {
+          return;
+        }
+        const w: number = info.size.width;
+        const h: number = info.size.height;
+        const byteCount: number = small.getPixelBytesNumber();
+        // 前提校验：解码档位非 RGBA_8888（字节 ≠ w×h×4）即走兜底
+        if (w <= 0 || h <= 0 || byteCount !== w * h * 4) {
+          this.applyLegacyPalette(pixel, token);
+          return;
+        }
+        const ab: ArrayBuffer = new ArrayBuffer(byteCount);
+        small.readPixelsToBuffer(ab)
+          .then((): void => {
+            if (token !== this.colorToken) {
+              return;
+            }
+            // ArrayBuffer 随任务转移（主线程引用 detach），一次性分配不复用
+            const task: Promise<CoverPaletteResult> =
+              taskpool.execute(extractCoverPaletteTask, ab, w, h) as Promise<CoverPaletteResult>;
+            task
+              .then((res: CoverPaletteResult): void => {
+                if (token !== this.colorToken) {
+                  return;
+                }
+                if (!res.ok) {
+                  this.applyLegacyPalette(pixel, token);
+                  return;
+                }
+                this.publishPalette(res);
+              })
+              .catch((e: BusinessError): void => {
+                console.error(`extractCoverPalette failed: ${e.code} ${e.message}`);
+                if (token === this.colorToken) {
+                  this.applyLegacyPalette(pixel, token);
+                }
+              });
+          })
+          .catch((e: BusinessError): void => {
+            console.error(`readPixelsToBuffer failed: ${e.code} ${e.message}`);
+            if (token === this.colorToken) {
+              this.applyLegacyPalette(pixel, token);
+            }
+          });
+      })
+      .catch((e: BusinessError): void => {
+        console.error(`getImageInfo failed: ${e.code} ${e.message}`);
+        if (token === this.colorToken) {
+          this.applyLegacyPalette(pixel, token);
+        }
+      });
+  }
+
+  /**
+   * 取色结果发布：主色在 animateTo 600ms 闭包内换（backgroundColor 支持
+   * animateTo 颜色插值，切歌瞬跳消除，曲线 Friction 起手快长尾柔）；深辅色与
+   * 明暗信号同帧落位 —— linearGradient / 状态栏不参与颜色动画，静态切换无跳变
+   *（双色同源同色系，观感连续性由底色动画承接）。
+   */
+  private publishPalette(res: CoverPaletteResult): void {
+    this.getUIContext().animateTo(
+      { duration: PALETTE_COLOR_ANIM_MS, curve: Curve.Friction },
+      (): void => {
+        this.imageColor = buildRgba(res.main, 1);
+      }
+    );
+    this.deepRgb = res.deep;
+    AppStorage.setOrCreate(STORE_PLAYER_BG_DARK, res.dark);
+    this.applyStatusBar(res.dark);
+  }
+
+  /**
+   * effectKit 单色取色兜底路径：主色 = 最大占比色
+   * dealColor 压亮；深辅色由主色 ×0.5 派生。
+   */
+  private applyLegacyPalette(pixel: image.PixelMap, token: number): void {
     effectKit.createColorPicker(pixel)
       .then((picker: effectKit.ColorPicker): void => {
         if (token !== this.colorToken) {
@@ -606,9 +712,13 @@ export struct PlayerInfoComponent {
         }
         const color: effectKit.Color = picker.getLargestProportionColor();
         const arr: number[] = ColorConversion.dealColor(color.red, color.green, color.blue);
-        this.imageColor = `rgba(${arr[0]}, ${arr[1]}, ${arr[2]}, 1)`;
-        // 压深变体：各通道 ×0.5（四舍五入取整，保色相压暗）—— 全屏档下方渐变终止色
-        this.imageColorDeep = `rgba(${Math.round(arr[0] * 0.5)}, ${Math.round(arr[1] * 0.5)}, ${Math.round(arr[2] * 0.5)}, 1)`;
+        this.getUIContext().animateTo(
+          { duration: PALETTE_COLOR_ANIM_MS, curve: Curve.Friction },
+          (): void => {
+            this.imageColor = buildRgba(arr, 1);
+          }
+        );
+        this.deepRgb = [Math.round(arr[0] * 0.5), Math.round(arr[1] * 0.5), Math.round(arr[2] * 0.5)];
         const luminance: number = (0.299 * arr[0] + 0.587 * arr[1] + 0.114 * arr[2]) / 255;
         const isDark: boolean = luminance < 0.5;
         AppStorage.setOrCreate(STORE_PLAYER_BG_DARK, isDark);
@@ -617,8 +727,6 @@ export struct PlayerInfoComponent {
       .catch((e: BusinessError): void => {
         console.error(`createColorPicker failed: ${e.code} ${e.message}`);
       });
-
-    this.tryBlur(pixel, token, false, track.coverUrl);
   }
 
   /**
@@ -665,8 +773,9 @@ export struct PlayerInfoComponent {
     }, BLUR_RETRY_DELAY_MS);
   }
 
-  /** 网络封面 → PixelMap（B 站图床要带 Referer，同 MusicPlayer 的实现） */
-  private async loadCoverPixelMap(url: string): Promise<image.PixelMap | null> {
+  /** 网络封面 → 双尺寸 PixelMap（B 站图床要带 Referer，同 MusicPlayer 的实现）：
+   *  full=512px 模糊背景源，small=48×48 取色降采样源 */
+  private async loadCoverPair(url: string): Promise<CoverPixelPair | null> {
     const httpReq: http.HttpRequest = http.createHttp();
     try {
       const resp: http.HttpResponse = await httpReq.request(url, {
@@ -683,11 +792,17 @@ export struct PlayerInfoComponent {
         return null;
       }
       const src: image.ImageSource = image.createImageSource(resp.result);
-      // 降采样解码：模糊背景源只要 512px，避免整张原图解码占内存
-      const opts: image.DecodingOptions = { desiredSize: { width: 512, height: 512 } };
-      return await src.createPixelMap(opts);
+      // 降采样解码：同一 ImageSource 双档输出（512 模糊源 + 48 取色源），
+      // 避免整张原图解码占内存，也避免二次下载/二次建源
+      const fullOpts: image.DecodingOptions = { desiredSize: { width: 512, height: 512 } };
+      const full: image.PixelMap = await src.createPixelMap(fullOpts);
+      const smallOpts: image.DecodingOptions =
+        { desiredSize: { width: PALETTE_SOURCE_PX, height: PALETTE_SOURCE_PX } };
+      const small: image.PixelMap = await src.createPixelMap(smallOpts);
+      const pair: CoverPixelPair = { full: full, small: small };
+      return pair;
     } catch (e) {
-      console.error(`loadCoverPixelMap failed: ${JSON.stringify(e)}`);
+      console.error(`loadCoverPair failed: ${JSON.stringify(e)}`);
       return null;
     } finally {
       httpReq.destroy();
@@ -705,13 +820,13 @@ export struct PlayerInfoComponent {
 
   build() {
       Stack() {
-        // ── 背景面（2026-10-21 起点偏左下根治）：全屏沉浸层，经 geometryTransition
+        // ── 背景面：全屏沉浸层，经 geometryTransition
         // 与 PlayBar 迷你栏里的**透明锚点**配对 —— playerOpen 翻转（本组件
         // playEnterTransition / Index.closePlayer 的同一条 animateTo）时，系统在
         // 「迷你栏真实视觉包围盒 ↔ 全屏」间做几何插值，跨 HDS 窗口坐标换算由
         // 系统完成（getRectangleById 等应用侧 API 拿不到合成变换后的视觉几何）。
         // 内容层**不在这里**（它不跟着缩放，靠各层分层入场）。
-        // 挂载守卫（2026-10-24 下滑收起 / 上滑展开）：playerOpen || slideOut ||
+        // 挂载守卫：playerOpen || slideOut ||
         // slideIn —— 下滑途中 playerOpen 已翻 false，靠 slideOut 背景面不析构、
         // 随整页滑走渐隐；上滑展开时 playerOpen 在 slideInTransition 闭包内才翻
         // true，靠 slideIn 背景面在挂载首帧（屏下隐形位）即渲染、随整页上滑。
@@ -723,16 +838,16 @@ export struct PlayerInfoComponent {
           .width(StyleConstants.FULL_WIDTH)
           .height(StyleConstants.FULL_HEIGHT)
           .backgroundColor(this.imageColor)
-          // 终点圆角（2026-10-21 展开过程四角圆角）：配对两端显式挂 borderRadius
+          // 终点圆角：配对两端显式挂 borderRadius
           // 即参与 geometryTransition 形变 —— 飞行途中四角呈胶囊同款圆角（起点
           // 28vp，见 PlayBar 锚点），全屏静止态收平（0），不露底层页面底色。
           // SurfaceLayers 三层均 100% 有界，clip 不裁静止态内容。
           .borderRadius(PLAYER_SURFACE_RADIUS_END_VP)
           .clip(true)
-          // GT 门控（2026-10-24 下滑收起）：gtOff=true 时 id 换空串（无转场）——
+          // GT 门控：gtOff=true 时 id 换空串（无转场）——
           // Index.slideOutClose 先摘全窗 GT 再翻 playerOpen，下滑路径不配对飞行。
           .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_SURFACE)
-          // 离场末端渐隐（2026-10-24 用户拍板，替代「背景直到落位才消失」旧规格）：
+          // 离场末端渐隐：
           // 官方《共享元素转场（一镜到底）》指南明确 —— geometryTransition 配对时
           // 「系统将调整绑定两组件的宽高及位置至相同值，并切换二者的透明度」，默认
           // 交叉淡化从头淡起、背景面中途就透出首页。这里挂非对称 transition 显式
@@ -750,14 +865,13 @@ export struct PlayerInfoComponent {
 
       Row() {
         if (this.isCompactLandscape()) {
-          // 紧凑横屏重设计（2026-10-24，用户拍板「精简元素 + 封面再大一点」）：
+          // 紧凑横屏（用户拍板「精简元素 + 封面再大一点」）：
           // 左列 45%（封面 + 歌名 + 歌手 + 三键，整列居中）+ 右列纯歌词。
-          // 旧版「左封面全高 + 右标题/歌词/三键」的封面预算按整行宽 × 0.42 计
-          //（~917×375vp 内容区 ≈ 375vp 全高），封面吞满左列整高、歌名/三键全
-          // 部溢出屏外（用户实测「封面太大、无控制元素」破版）。新预算挂封面
-          // 弹性壳实测（min(壳宽, 壳高 − 间隙)），壳高由 layoutWeight(1) 天然
-          // 扣除下部元素实测高 —— 封面尽可能大且歌名/歌手/三键完整在屏；控制
-          // 区随封面进左列，右列歌词即使异常也不影响三键可见（结构性兜底）。
+          // 封面预算挂弹性壳实测（min(壳宽, 壳高 − 间隙)），壳高由 layoutWeight(1)
+          // 天然扣除下部元素实测高 —— 封面尽可能大且歌名/歌手/三键完整在屏
+          //（不能按整行宽 × 0.42 估：矮屏上会算出 ≈ 全高，封面吞满左列、
+          // 其余元素全部溢出屏外）；控制区随封面进左列，右列歌词即使异常也不
+          // 影响三键可见（结构性兜底）。
           // 外层左右叠加水平安全区：横屏状态栏以侧边条带上报时避让（竖屏为 0）。
           Column() {
             TopAreaComponent()
@@ -820,8 +934,7 @@ export struct PlayerInfoComponent {
               .alignItems(HorizontalAlign.Center)
               .padding({ right: $r('app.float.common_padding') })
 
-              // 右列：纯歌词。双约束缺一不可（2026-10-24 横屏破版修复结论
-              // 沿袭）：layoutWeight(1) 限宽（Row 上下文作用于主轴），补
+              // 右列：纯歌词。双约束缺一不可：layoutWeight(1) 限宽（Row 上下文作用于主轴），补
               // .height(FULL_HEIGHT) 限高 —— 仅宽度权重时内部 LrcView 按歌词
               // 全长测量（无界高），列内容 ~900vp 被 Row 垂直居中上下溢出屏外。
               LyricsComponent({ isShowControl: false })
@@ -841,17 +954,17 @@ export struct PlayerInfoComponent {
             right: this.safeRight
           })
         } else if (this.isFoldFull && !this.isWideFoldFull()) {
-          // 2026-10-24 阔折叠展开改版：isWideFoldFull（展开落 lg + 竖屏，Pura X 类）
+          // isWideFoldFull（展开落 lg + 竖屏，Pura X 类）
           // 命中时放行本分支、穿透到下方 SM Swiper 双页（直板机版式，用户拍板
           // 全宽铺满）—— 本分栏只留常规折叠展开竖屏（md，Mate X 类）；折叠展开
-          // 横屏（isFoldFull && isLandscape）已于 2026-10-24 推广上移紧凑横屏分支。
+          // 横屏（isFoldFull && isLandscape）命中上方紧凑横屏分支。
           Column() {
             TopAreaComponent()
               .margin({
                 bottom: $r('app.float.music_info_margin_top'),
                 left: $r('app.float.top_margin_left')
               })
-            // 2026-10-22 折叠态适配层重写：显式补 lg 档列定义 —— 折叠展开横屏
+            // 显式补 lg 档列定义 —— 折叠展开横屏
             // 宽度落 lg（≥840vp），只写 md 会让 GridRow/GridCol 在 lg 下回落默认
             // 列数/跨度（12 列默认跨度），4+4 分栏破版。md/lg 均按 8 列 4+4。
             GridRow({
@@ -897,8 +1010,7 @@ export struct PlayerInfoComponent {
             right: $r('app.float.common_padding')
           })
         } else if (this.isCompactFold()) {
-          // 阔折叠外屏（Pura X 折起 632×924vp → md）：此前误入「平板栅格分栏」
-          // 分支给外屏渲染两列平板布局。专属版式（2026-10-23 用户拍板）：
+          // 阔折叠外屏（Pura X 折起 632×924vp → md）专属版式（用户拍板）：
           // 封面右上角出血裁切（约 1/4 出屏，可见 3/4）；无进度条无时间；
           // 歌名/歌手 + 三键收缩左下；保留左右滑歌词页（歌词占中部）。
           Column() {
@@ -995,7 +1107,7 @@ export struct PlayerInfoComponent {
               right: $r('app.float.common_padding'),
               bottom: $r('app.float.music_component_bottom')
             })
-            // 收起柔退（2026-10-24）：信息块 200ms EaseIn 淡出（contentFade，
+            // 收起柔退：信息块 200ms EaseIn 淡出（contentFade，
             // onContentExit 驱动），与四个子内容层同批错峰退场（封面/背景不在此列）
             .opacity(this.contentFade)
           }
@@ -1003,10 +1115,10 @@ export struct PlayerInfoComponent {
         } else if (!this.isFoldFull
           && (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG
           || this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD)) {
-          // 2026-10-24 阔折叠展开改版：!isFoldFull 守卫放行 isWideFoldFull（展开
+          // !isFoldFull 守卫放行 isWideFoldFull（展开
           // 落 lg + 竖屏）穿透到下方 SM Swiper 双页，不得落平板分栏；真平板 /
           // 直板横屏 / 阔折叠外屏横屏（非展开态）不受影响。
-          // A8（2026-10-20 平板功能对齐）：MD 不再落手机 Swiper —— LG 栅格分栏
+          // MD 不落手机 Swiper —— LG 栅格分栏
           // 的 GridRow 本就定义了 md 的列数/跨度（左列 span 4 | 歌词 span 4），
           // 600~840vp 窗口直接进分栏，与 LG 同一套布局逻辑。
           Column() {
@@ -1030,9 +1142,9 @@ export struct PlayerInfoComponent {
                   .width(StyleConstants.FULL_WIDTH)
                   .justifyContent(FlexAlign.Center)
 
-                  // A7：左列补标题块（歌名 / 歌手 / 音质回显）—— 此前 LG 左列
-                  // 只有封面 + 控制区，正在播什么完全不可见（歌词列的头部又被
-                  // LyricsComponent 按 SM 门控关掉），对齐手机端播放页信息密度。
+                  // 左列标题块（歌名 / 歌手 / 音质回显）：
+                  // 歌词列的头部被 LyricsComponent 按 SM 门控关掉，
+                  // 正在播什么必须在此可见，对齐手机端播放页信息密度。
                   // 文案与字号和 MusicInfoComponent.MusicInfo 同口径；左列是
                   // SpaceBetween 布局，圆盘预算（recomputeLgDisc）已减掉本块高度。
                   Column() {
@@ -1073,7 +1185,7 @@ export struct PlayerInfoComponent {
                   .width(StyleConstants.FULL_WIDTH)
                   .margin({ top: $r('app.float.music_info_margin_top') })
                   .alignItems(HorizontalAlign.Start)
-                  // 收起柔退（2026-10-24）：标题块 200ms EaseIn 淡出（contentFade，
+                  // 收起柔退：标题块 200ms EaseIn 淡出（contentFade，
                   // onContentExit 驱动，延迟与 MusicInfoComponent 同档），封面/背景不在此列
                   .opacity(this.contentFade)
                   .onAreaChange((_old: Area, n: Area): void => {
@@ -1117,32 +1229,26 @@ export struct PlayerInfoComponent {
             })
           }
         } else {
-          // 2026-10-24 阔折叠展开改版：本分支除直板机（sm）外，亦承接阔折叠展开
+          // 本分支除直板机（sm）外，亦承接阔折叠展开
           // 竖屏（isWideFoldFull 穿透至此）—— 版式与直板机一致、全宽铺满（用户
           // 拍板）：子组件守卫已就位（MusicInfo/Lyrics 的 !isFoldFull 字号与栅格
           // 门控 → 直板机口径；MusicInfo 内 ComponentSize 栅格在 ≥840vp 落
           // component-lg 回落默认 12 列满跨度 = 全宽列），尺寸随断点放大，不居中限宽。
           Stack({ alignContent: Alignment.TopStart }) {
-            // 2026-10-23 SM 固定控制区改版：控制区移出 Swiper 固定在底部 ——
-            // 右滑切歌词页时只有封面区↔歌词区滑动，控制区静止（旧实现两页各内嵌
-            // 一份，滑动中能看到两份控制区在移动）。两页均传 isShowControl:false；
-            // 底部间距沿用原页内 margin（music_component_bottom），左右沿用
-            // common_padding，控制区最终视觉位置与改版前一致。
+            // SM 固定控制区：控制区移出 Swiper 固定在底部 ——
+            // 右滑切歌词页时只有封面区↔歌词区滑动，控制区静止（不能两页
+            // 各内嵌一份，滑动中会看到两份控制区在移动）。两页均传
+            // isShowControl:false；底部间距沿用页内 margin（music_component_bottom），
+            // 左右沿用 common_padding。
             Column() {
               Swiper() {
                 MusicInfoComponent({ isShowControl: false })
-                  // 全屏档（immersive，2026-10-24 第二轮改版）：margin top = -safeTop
-                  // 精确抵消外层分支 Row 的 padding(top: safeTop) → 封面上沿顶到
-                  // y=0（延伸至状态栏）；左右 padding 置 0 → discSize 预算的 colW
-                  // 即屏宽（封面满屏宽）。其余两档维持原边距零变化。
                   .margin({
-                    top: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE
-                      ? -this.safeTop
-                      : $r('app.float.music_component_top')
+                    top: $r('app.float.music_component_top')
                   })
                   .padding({
-                    left: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? 0 : $r('app.float.common_padding'),
-                    right: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? 0 : $r('app.float.common_padding')
+                    left: $r('app.float.common_padding'),
+                    right: $r('app.float.common_padding')
                   })
                 LyricsComponent({ isShowControl: false })
                   .margin({
@@ -1154,7 +1260,7 @@ export struct PlayerInfoComponent {
                   })
               }
               .layoutWeight(1)
-              // 受控页下标 + 切换时长（2026-10-24 歌词页收起漂移修复）：收起开始
+              // 受控页下标 + 切换时长：收起开始
               // 时 onContentExit 置 duration 0 并回跳第 0 页，封面配对起点回屏幕
               // 中央；手势滑动经 onChange 回写 smIndex，翻页行为不变。
               .index(this.smIndex)
@@ -1170,7 +1276,7 @@ export struct PlayerInfoComponent {
                 .color($r('app.color.slider_track')))
               .clip(false)
               .loop(false)
-              // 边界回弹（2026-10-08）：Swiper 在当前 SDK 无 .edgeEffect 属性，
+              // 边界回弹：Swiper 在当前 SDK 无 .edgeEffect 属性，
               // 但 loop(false) 模式下默认即 Spring 回弹，无需显式声明。
 
               // 固定控制区（Swiper 外）：入场动画 / 收起瞬隐由 ControlAreaComponent
@@ -1199,7 +1305,7 @@ export struct PlayerInfoComponent {
         top: this.safeTop,
         bottom: this.safeBottom
       })
-      // ⚠️ 这里**不能再挂整块 opacity**（2026-10-21 已删）：
+      // ⚠️ 这里**不能挂整块 opacity**：
       // 它会连封面一起淡掉，把「迷你栏变大 + 封面飞出」压成「背景块长开 + 内容浮现」。
       // 内容显现交给各层的分层入场；且本层一旦挂 translate/scale，
       // 共享元素（封面）的目标框还会被搬走 —— 只允许纯布局，不许 transform。
@@ -1219,37 +1325,23 @@ export struct PlayerInfoComponent {
   }
 
   /**
-   * 全屏档沉浸渐变的纯 imageColor 平顶区终点（0-1，全屏高度占比，
-   * 2026-10-24 渐变模糊改版）：取封面下沿位置 = 窗口宽/高（封面满屏宽、
-   * 正方形，底边 y ≈ 窗口宽），下限 0.42（窄高屏兜底）上限 0.9（横屏/
-   * 数据缺失兜底，避免平顶吞满整屏）。封面底部溶解层（CoverDisc 沉浸档）
-   * 淡出到纯 imageColor，平顶区延伸到封面下沿才能保证衔接处两侧同色。
-   */
-  private immersiveFlatStop(): number {
-    if (this.windowWidthVp <= 0 || this.windowHeightVp <= 0) {
-      return IMMERSIVE_FLAT_STOP_FALLBACK;
-    }
-    const coverBottom: number = this.windowWidthVp / this.windowHeightVp;
-    return Math.min(0.9, Math.max(IMMERSIVE_FLAT_STOP_FALLBACK, coverBottom));
-  }
-
-  /**
    * 背景三层：模糊封面 / 渐变压深 / 噪点。
    *
    * 它们原来直接挂在页面根 Stack 上，现在收进「生长面」容器 —— 尺寸写 100%，
    * 随生长面一起被拉伸/裁剪。三者都是可拉伸的无文本图元，逐帧重排代价可忽略。
    *
-    * 背景按封面风格（coverStyle，2026-10-24）分流；底色恒由背景面 Stack
-    * 的 backgroundColor(imageColor) 提供，取色/模糊管线（applyTheme/tryBlur）
-    * 全风格共用零改动 —— square 不消费模糊图但保持计算，运行时切风格无重触发：
-    *   · disc：现状三层（模糊 0.5 + 纵向暗化渐变 + 噪点 0.05）；
-    *   · square：极简净底 —— 无模糊图无噪点，仅一层极轻对角明暗渐变；
-    *   · immersive：主色纵向渐变层（imageColor → 压深 50% 变体 imageColorDeep，
-    *     顶部 42% 保持纯 imageColor 与封面下沿无缝衔接），封面满屏宽顶状态栏。
+   * 背景按封面风格（coverStyle）分流；底色恒由背景面 Stack
+   * 的 backgroundColor(imageColor) 提供（600ms animateTo 颜色动画承接观感
+   * 连续性），取色/模糊管线（applyTheme/tryBlur）全风格共用零改动 ——
+   * square 不消费模糊图但保持计算，运行时切风格无重触发：
+   *   · disc：三层（模糊 0.5 + 深辅色着色的纵向压深渐变 + 噪点 0.05）；
+   *   · square：主色 → 深辅色对角双色渐变。
+   * 渐变停靠点用深辅色（deepRgb）变体，双色
+   * 同源同色系 —— linearGradient 不参与 animateTo，静态切换无跳变感。
    */
   @Builder
   SurfaceLayers(): void {
-    // ── 方卡极简：净底（底色由背景面 Stack 的 imageColor 提供）+ 极轻对角渐变
+    // ── 方卡极简：主色 → 深辅色对角双色渐变（底色 Stack 仍为 imageColor 动画层）
     if (this.coverStyle === PLAYER_COVER_STYLE_SQUARE) {
       Column()
         .width(StyleConstants.FULL_WIDTH)
@@ -1257,28 +1349,8 @@ export struct PlayerInfoComponent {
         .linearGradient({
           angle: 160,
           colors: [
-            ['rgba(255, 255, 255, 0.06)', 0.0],
-            ['rgba(0, 0, 0, 0.0)', 0.4],
-            ['rgba(0, 0, 0, 0.30)', 1.0]
-          ]
-        })
-    } else if (this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE) {
-      // ── 全屏沉浸：下方取封面主色纵向渐变（imageColor → 压深 50% 变体
-      // imageColorDeep，保色相），纯 imageColor 平顶区延伸到封面下沿
-      // （immersiveFlatStop 动态计算，2026-10-24 渐变模糊改版前为固定 42%），
-      // 向下渐变过渡压深；不做背景模糊、无噪点。封面下沿的渐变模糊过渡由
-      // CoverDiscComponent.ImmersiveCover 承担（linearGradientBlur + 主色溶解层）。
-      // 上方封面由 SM 调用点（-safeTop 负边距 + 零左右内边距）满屏宽、上沿顶到
-      // 状态栏（y=0）。
-      Column()
-        .width(StyleConstants.FULL_WIDTH)
-        .height(StyleConstants.FULL_HEIGHT)
-        .linearGradient({
-          angle: 180,
-          colors: [
             [this.imageColor, 0.0],
-            [this.imageColor, this.immersiveFlatStop()],
-            [this.imageColorDeep, 1.0]
+            [buildRgba(this.deepRgb, 1), 1.0]
           ]
         })
     } else {
@@ -1299,16 +1371,18 @@ export struct PlayerInfoComponent {
             }
           })
       }
-      // 缓慢渐变底色：主色底上自上而下压深，底部最暗 —— 静态渐变不产生每帧开销
+      // 缓慢渐变底色：深辅色着色的自上而下压深（deepRgb 变体，
+      // 压深层携带封面 muted 色相），底部最暗 ——
+      // 静态渐变不产生每帧开销
       Column()
         .width(StyleConstants.FULL_WIDTH)
         .height(StyleConstants.FULL_HEIGHT)
         .linearGradient({
           angle: 180,
           colors: [
-            ['rgba(0, 0, 0, 0.05)', 0.0],
-            ['rgba(0, 0, 0, 0.22)', 0.45],
-            ['rgba(0, 0, 0, 0.45)', 1.0]
+            [buildRgba(this.deepRgb, 0.05), 0.0],
+            [buildRgba(this.deepRgb, 0.22), 0.45],
+            [buildRgba(this.deepRgb, 0.45), 1.0]
           ]
         })
       // 微弱噪点纹理：打破纯色渐变的塑料感，低透明度平铺，无逐帧成本

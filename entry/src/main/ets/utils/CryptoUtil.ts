@@ -1,7 +1,7 @@
 /**
  * 纯 TS 实现的 MD5（ASCII/UTF-8 输入，hex 输出）。
- * 来源：原 React 版 bilibiliApi.ts 的内联 MD5，已对照 node crypto 校验。
- * 用于 B 站 WBI 签名（w_rid = md5(排序查询 + mixinKey)），查询均为 ASCII。
+ * 已对照 node crypto 校验。用于 B 站 WBI 签名（w_rid = md5(排序查询 + mixinKey)），
+ * 查询均为 ASCII。
  */
 
 function rol(x: number, c: number): number {

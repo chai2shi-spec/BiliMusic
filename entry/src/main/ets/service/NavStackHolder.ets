@@ -7,13 +7,20 @@
 import { LOGIN_GATED_ROUTES } from './NavRouteParams';
 import { isLoggedIn } from './LoginStore';
 import { STORE_SUB_PAGE_ACTIVE } from '../common/Constants';
+import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
 
 /**
  * 同名路由 push 防抖窗口（ms）：窗口内对同一路由名的第二次 push 直接
- * 取消（修复快速双击入口双推同一页）。300ms 覆盖典型连点间隔，正常
+ * 取消（防快速双击入口双推同一页）。300ms 覆盖典型连点间隔，正常
  * 两次有意跳转（不同入口）不受影响。
  */
 const PUSH_DEBOUNCE_MS: number = 300;
+/**
+ * push 后栈顶校验延迟（ms）：转场（NAV_TRANSITION_MS）+ 余量。转场动画
+ * 进行中 NavPathStack 收到 push 会被系统**静默忽略**（无报错无日志，
+ * 「点了没进」的根因），校验窗口后栈顶不是目标页则自动补推一次。
+ */
+const PUSH_VERIFY_DELAY_MS: number = NAV_TRANSITION_MS + 150;
 
 export class NavStackHolder {
   static stack: NavPathStack = new NavPathStack();
@@ -27,9 +34,29 @@ export class NavStackHolder {
 
   // ── 栈操作封装（薄封装：统一入口 + 便于全局加日志/防抖策略） ──
 
-  /** 压栈（携带路由参数；同名 300ms 防抖见 setupInterception） */
-  static push(name: string, param: Object): void {
+  /**
+   * 压栈（携带路由参数；同名 300ms 防抖见 setupInterception）。
+   *
+   * 转场期自愈：转场动画进行中 push 被系统静默忽略
+   * → 延时校验栈顶，不是目标页则自动补推一次。
+   * · 补推会再过 willShow 拦截器：原 push 被忽略时未记录时间戳，
+   *   补推不会被 300ms 同名防抖吞掉；
+   * · 误重推不可能：用户在 PUSH_VERIFY_DELAY_MS（550ms）内完整「进入 →
+   *   返回」物理上做不到（转场就 400ms）；
+   * · 校验只看栈顶：若目标页在栈内但被其它子页覆盖（<550ms 内再 push
+   *   其它页同样物理上做不到），栈顶不是目标也不补推——该窗口内
+   *   栈顶等价于「本次 push 是否生效」的权威答案。
+   */
+  static push(name: string, param: Object | undefined): void {
     NavStackHolder.stack.pushPathByName(name, param);
+    setTimeout((): void => {
+      const names: string[] = NavStackHolder.stack.getAllPathName();
+      const top: string = names.length > 0 ? names[names.length - 1] : '';
+      if (top !== name) {
+        console.warn(`[Nav] push ${name} dropped during transition, retrying`);
+        NavStackHolder.stack.pushPathByName(name, param);
+      }
+    }, PUSH_VERIFY_DELAY_MS);
   }
 
   /** 出栈并回传结果给上一页的 onPop 回调 */
@@ -59,7 +86,7 @@ export class NavStackHolder {
    *   改推登录页。当前清单为空（校验留在各调用点），仅基础设施就位；
    * · 同名 push 防抖：300ms 内对同一路由名的第二次 push 直接 pop 取消
    *   （willShow 允许栈操作且对本次转场立即生效，官方文档口径）。
-   * · 二级页在顶标志（STORE_SUB_PAGE_ACTIVE，2026-10-22 二级页悬浮播放条）：
+   * · 二级页在顶标志（STORE_SUB_PAGE_ACTIVE）：
    *   willShow 顶部随转场同步翻转 + didShow 转场落定后权威校正 —— 双写兜住
    *   「push 防抖在 willShow 内 stack.pop() 取消、不再触发 willShow」的边角
    *   （取消回首页时由 didShow to='navBar' 修正为 false）。

@@ -45,7 +45,7 @@ export class ArrayDataSource<T> implements IDataSource {
   }
 
   /**
-   * 尾部增量追加（上拉加载更多专用，2026-10-19）：
+   * 尾部增量追加（上拉加载更多专用）：
    * 只通知 LazyForEach「新增了下标 start..start+n-1 的数据」（onDataAdd），
    * 可视区已建节点不重建、缓存区不丢弃、滚动锚点不重算 —— 区别于 reload 的
    * 整表重载（onDataReloaded 会让可视区节点失效重建，列表在底部过滚动 /

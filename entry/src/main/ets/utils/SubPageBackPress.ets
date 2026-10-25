@@ -1,12 +1,12 @@
 /**
- * 二级页（NavDestination）系统返回拦截（2026-10-24 二级页播放页返回修复）。
+ * 二级页（NavDestination）系统返回拦截。
  *
- * 背景：播放页自 2026-10-21 改版后不再是 NavDestination 路由，而是 Index 根
- * Stack 上的组件 overlay —— 盖住整个界面却不参与返回事件分发。二级页在顶时
- * 系统返回被隐藏在 overlay 之下的 NavDestination 默认消费（静默 pop 二级页），
+ * 播放页不是 NavDestination 路由，而是 Index 根 Stack 上的组件 overlay ——
+ * 盖住整个界面却不参与返回事件分发。二级页在顶时若不拦截，系统返回会被
+ * 隐藏在 overlay 之下的 NavDestination 默认消费（静默 pop 二级页），
  * 收起播放页后用户看到的是一级首页而非来源二级页。
  *
- * 修复：全部 9 个推送二级页在 HdsNavDestination 上挂 .onBackPressed 调本函数：
+ * 全部 9 个推送二级页在 HdsNavDestination 上挂 .onBackPressed 调本函数：
  * 播放页 overlay 打开（playerOpen 或仍挂载）时吞掉返回并发收起请求
  * （STORE_PLAYER_CLOSE_REQUEST seq 递增，Index @Watch 消费 → closePlayer，
  * 与播放页 TopArea 收起按钮同一跨层信号，closePlayer 幂等）；否则返回 false

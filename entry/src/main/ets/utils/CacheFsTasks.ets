@@ -1,12 +1,10 @@
 /**
  * 缓存目录文件任务（TaskPool 专用）。
  *
- * 背景：AppGallery 审核反馈 AppFreeze（THREAD_BLOCK_6S / AAFWK）。原实现里
- * SettingsPage 的缓存统计（dirSize）与清理（clearDirContents）是主线程上的
- * 递归同步 IO（listFileSync / statSync / unlinkSync），遍历对象包含 Image 组件
- * 的 image_file_cache 等目录 —— 文件数随使用量无上界增长，主线程被 6s+ 阻塞。
- *
- * 本文件把这两个递归函数原样移植为 @Concurrent 任务：递归同步 fs 在 TaskPool
+ * 背景：缓存统计与清理是递归同步 IO（listFileSync / statSync /
+ * unlinkSync），遍历对象（含 Image 组件的 image_file_cache 等目录）
+ * 文件数随使用量无上界增长，放在主线程会长时间阻塞（AppFreeze）。
+ * 本文件把这两个递归函数移植为 @Concurrent 任务：递归同步 fs 在 TaskPool
  * 线程里执行是合法且廉价的，主线程只拿到最终的字节数 / 删除计数。
  *
  * ⚠️ @Concurrent 限制（必须遵守）：
@@ -20,7 +18,6 @@ import fs from '@ohos.file.fs';
 
 /**
  * 递归统计目录占用（字节）。目录不存在 / 单项读不动时按 0 计，绝不抛。
- * 逻辑与原 SettingsPage.dirSize 一致（2026-10-16 迁移）。
  * ⚠️ @Concurrent 函数禁止自引用（es2abc 报「not import variable or local
  * variable」），递归必须改写为显式栈迭代。
  */
@@ -61,7 +58,6 @@ function dirSizeTask(path: string): number {
 /**
  * 清空目录内容，**保留目录自身**（cacheDir 是系统目录，不能删）。
  * @returns 删除的文件个数
- * 逻辑与原 SettingsPage.clearDirContents 一致（2026-10-16 迁移）：
  * 文件边遍历边删；子目录内容清空后再 rmdir 子目录自身。
  * ⚠️ 同上：@Concurrent 禁止自引用，递归改显式栈迭代。
  */

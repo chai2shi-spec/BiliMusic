@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #host { width: 1024px; height: 1024px; }
+  #host svg { width: 1024px; height: 1024px; display: block; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script>
+  var q = new URLSearchParams(location.search);
+  var file = q.get('f');
+  var layer = q.get('layer') || 'fg';
+
+  fetch(file).then(function (r) { return r.text(); }).then(function (txt) {
+    var host = document.getElementById('host');
+    host.innerHTML = txt;
+    var bg = host.querySelector('#background-layer');
+    var fg = host.querySelector('#foreground-layer');
+    if (layer === 'fg') {
+      if (bg) { bg.remove(); }
+      if (fg) { fg.removeAttribute('opacity'); }
+    } else {
+      if (fg) { fg.remove(); }
+    }
+  });
+</script>
+</body>
+</html>

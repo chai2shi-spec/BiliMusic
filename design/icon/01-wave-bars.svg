@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Wave Bars</title>
+  <desc id="desc">声波柱方案，强调这是音频提取应用而非视频。主粉底上四根白色圆头竖条，高低起落构成波形，不对称以避免与信号强度图标混淆。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#FB7299"/>
+  </g>
+
+  <g id="foreground-layer" fill="#FFFFFF">
+    <rect id="bar-1" x="270" y="408" width="88" height="208" rx="44"/>
+    <rect id="bar-2" x="402" y="280" width="88" height="464" rx="44"/>
+    <rect id="bar-3" x="534" y="256" width="88" height="512" rx="44"/>
+    <rect id="bar-4" x="666" y="352" width="88" height="320" rx="44"/>
+  </g>
+</svg>

@@ -1,63 +1,65 @@
 /**
- * 搜索页：搜索 / 推荐 / 排行榜 / 音乐中心。
- * 搜索结果在本页签内展示；关键词与结果存于 SearchStateHolder，
- * 切换底部页签后返回不丢失。
+ * 搜索二级页（路由名 'Search'）。
  *
- * 顶栏（根栏移植，2026-10-10）：搜索行 + 页签行回到根 HdsNavigation
- * titleBar 的 stackBuilder（Index.immersiveTitleBarContent，行 1 / 行 2），
- * 页面不再自绘顶栏与磨砂（旧 SearchTopBar 已删除）。滚动模糊由根栏
- * bindToScrollable 统一驱动（0→20，2026-10-23 规格落地全站归一）。
- * keyword / searchKind / tab 是页面与栏共享的 AppStorage 双向状态。
- * 搜索历史面板从**整栏下沿**弹出（用户确认保持现状），
- * 定位与列表让位都读 STORE_SEARCH_TABS_HEIGHT 实测镜像。
+ * 承载全部搜索逻辑：关键词搜索（视频 / UP 主双类型）、搜索历史、结果分页、
+ * 下拉刷新。会话关键词与结果存于 SearchStateHolder（页面 / 标题栏行同源）；
+ * 每次进入本页都从全新状态开始（aboutToAppear 清 holder，不恢复上次搜索的
+ * 关键词与结果）。
  *
- * 四个页签都支持「下拉刷新 + 上拉加载更多」，但四个数据源的分页能力**完全不同**
- * （都是对线上接口做对照实验后的结论，细节见 api/BilibiliApi.ts 的注释）：
- *   · 搜索     —— /wbi/search/type 真分页：page / page_size，响应带 numPages
- *   · 推荐     —— 首屏 index/top/rcmd（30 条，重复调用返回同一批）+ popular pn=1；
- *                 翻页必须走 feed/rcmd 的 fresh_idx（每页约 17 条新内容）
- *   · 排行榜   —— ranking/v2 全站榜（rid=0，每日更新）一次返回整榜 100 条、pn/ps 无效 → 只能前端分页
- *   · 音乐中心 —— 新歌榜（最新发布，固定 18 条）置顶 + 综合榜（热歌，真分页 pn）随后
- * 把「不能分页的源」硬接成上拉加载，得到的就是「一直加载却永远同一批」，所以这里分开处理。
+ * 结构（RecentPage 二级页样板同款）：
+ *   · HdsNavDestination + HDS 沉浸光感标题栏（titleBar.stackBuilder 承载
+ *     SearchInputBar 搜索行，56 锁高；返回键为 HDS 默认键）；
+ *   · TopGradientBlurOverlay 自绘渐变模糊层 + 私有 scroller 命令式驱动
+ *     （HDS 滚动效果经 styleOptions 第三参关闭，防双重模糊）；
+ *   · 「最近搜索 / B 站热搜」页签区直接在页面内容区显示；
+ *   · 「视频/UP主」分段按钮在 SearchInputBar（components/SearchTabBar.ets），
+ *     动作经 TabScrollerHolder 静态回调转回本页私有方法。
+ *
+ * 分页说明（对照实验结论，细节见 api/BilibiliApi.ts 的注释）：
+ *   · 搜索 —— /wbi/search/type 真分页：page / page_size，响应带 numPages；
+ *     UP 主搜（search_type=bili_user）匿名完全可用，同款真分页。
+ *   · 空页 ≠ 到底：风控时接口同样返回空列表（HTTP 200 / code 0），遇到空页
+ *     只提示可重试，真到底由服务端 numPages 判定。
  */
 
 import * as BilibiliApi from '../api/BilibiliApi';
-import { UserSearchResult } from '../api/BilibiliApi';
-import {
-  SearchResultItem,
-  PopularVideo,
-  RankingVideoItem,
-  MusicCenterItem,
-  MusicCenterRelatedArchive
-} from '../api/BilibiliApi';
-import { Playlist, Track, VideoDetail, VideoOwner, VideoStat, buildTrack } from '../model/MusicModels';
+import { UserSearchResult, SearchResultItem } from '../api/BilibiliApi';
+import { Playlist, Track, VideoDetail, buildTrack, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { LibraryStore } from '../service/LibraryStore';
 import { TrackItem } from '../components/TrackItem';
+import { TrackCard } from '../components/TrackCard';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
-import { MusicPlayer } from '../player/MusicPlayer';import { toHttpsUrl, toThumbUrl, stripHtmlTags } from '../utils/TextUtil';
-import { CoverImage } from '../components/CoverImage';
+import { MusicPlayer } from '../player/MusicPlayer';
+import { toHttpsUrl, toThumbUrl, stripHtmlTags } from '../utils/TextUtil';
 import {
-  DownloadManager,
-  DownloadStartResult,
-  WIFI_ONLY_BLOCKED
-} from '../service/DownloadManager';
-import { currentNetworkLabel } from '../utils/NetworkUtil';
-import { ComponentContent, CustomContentDialog, Chip, ChipSize } from '@kit.ArkUI';
+  ComponentContent,
+  CustomContentDialog,
+  Chip,
+  ChipSize,
+  CapsuleSegmentButtonV2,
+  LengthMetrics,
+  SegmentButtonV2Items
+} from '@kit.ArkUI';
 import { SearchStateHolder } from '../service/SearchStateHolder';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { SearchHistoryStore } from '../service/SearchHistoryStore';
+import { PLAYBACK_LOG_INFO, PLAYBACK_LOG_ERROR, recordPlaybackLog } from '../service/PlaybackLogStore';
+import { AppPreferences } from '../preferences/AppPreferences';
 import {
   CONTENT_END_OFFSET,
   DEFAULT_PLAYLIST_NAME,
-  STORE_FLING_ACTIVE,
+  PREF_COMMON_WORDS,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
-  STORE_NET_RETRY_REV,
+  STORE_ITEM_DISPLAY_STYLE,
   STORE_THEME_SURFACE,
-  STORE_THEME_DEEP
+  STORE_THEME_DEEP,
+  STORE_THEME_ON,
+  STORE_THEME_PRIMARY,
+  STORE_SEARCH_KEYWORD,
+  STORE_SEARCH_KIND
 } from '../common/Constants';
-import { FlingSampler } from '../components/FlingSampler';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { showAppToast } from '../components/AppToast';
@@ -67,17 +69,24 @@ import {
   PairOf,
   PairDataSource,
   TWO_COL_GAP_VP,
+  GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
 import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
+import { CoverImage } from '../components/CoverImage';
+import { SearchInputBar } from '../components/SearchTabBar';
+import { HdsNavDestination } from '@kit.UIDesignKit';
+import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
+import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { SegmentColors, makeBiliSegmentColors } from '../utils/HeaderBarMaterial';
 import {
-  STORE_SEARCH_KEYWORD,
-  STORE_SEARCH_KIND,
-  STORE_SEARCH_TAB,
-  STORE_SEARCH_TABS_HEIGHT
-} from '../common/Constants';
+  DownloadManager,
+  DownloadStartResult,
+  WIFI_ONLY_BLOCKED
+} from '../service/DownloadManager';
+import { currentNetworkLabel } from '../utils/NetworkUtil';
 import {
   PULL_REFRESH_OFFSET_VP,
   PULL_REFRESH_RATIO,
@@ -86,7 +95,8 @@ import {
   PULL_SKELETON_EXIT_VP,
   PULL_SKELETON_FADE_MS,
   BUTTON_RADIUS_VP,
-  LIST_FOOTER_HEIGHT_VP
+  LIST_FOOTER_HEIGHT_VP,
+  NAV_TRANSITION_MS
 } from '../common/constants/InteractionConstants';
 
 function parseDur(s: string | number | undefined): number {
@@ -115,7 +125,7 @@ function mapSearch(item: SearchResultItem): Track {
     aid: String(item.aid),
     title: stripHtmlTags(item.title),
     artist: item.author,
-    // 搜索结果自带 mid（实测一直有），只是旧类型声明漏了 → 「进 UP 主主页」全靠它
+    // 搜索结果自带 mid（实测一直有）：「进 UP 主主页」全靠它
     upMid: item.mid !== undefined ? String(item.mid) : '',
     coverUrl: toHttpsUrl(item.pic),
     duration: parseDur(item.duration),
@@ -124,147 +134,10 @@ function mapSearch(item: SearchResultItem): Track {
   });
 }
 
-function mapPopular(v: PopularVideo): Track {
-  return buildTrack({
-    id: v.bvid,
-    bvid: v.bvid,
-    aid: String(v.aid),
-    title: stripHtmlTags(v.title),
-    artist: v.owner?.name ?? '',
-    // owner 在 API 层就已解析出 mid（getRecommendedFeed 里 owner 为 null 的条目已被剔除）
-    upMid: v.owner && v.owner.mid ? String(v.owner.mid) : '',
-    coverUrl: toHttpsUrl(v.pic),
-    duration: v.duration,
-    pubdate: v.pubdate ?? 0
-  });
-}
-
 /**
- * 排行榜（ranking/v2）映射。
- * 与旧的 ranking/region 不同：这条接口有 owner 对象、有 cid、duration 是**秒**。
- * owner / stat 仍按可空读取——字段缺失时映射函数抛异常会让整块列表被 catch 成空，
- * 这是本项目踩过的坑，宁可退化成空字符串也不要整块丢。
- */
-function mapRankingV2(v: RankingVideoItem): Track {
-  const owner: VideoOwner | null = v.owner;
-  const stat: VideoStat | null = v.stat;
-  return buildTrack({
-    id: v.bvid,
-    bvid: v.bvid,
-    aid: String(v.aid),
-    cid: v.cid ? String(v.cid) : '',
-    title: stripHtmlTags(v.title),
-    artist: owner ? owner.name : '',
-    upMid: owner && owner.mid ? String(owner.mid) : '',
-    coverUrl: toHttpsUrl(v.pic),
-    duration: v.duration,
-    playCount: stat ? stat.view : 0,
-    pubdate: v.pubdate ?? 0
-  });
-}
-
-/**
- * 音乐中心：线上是下划线字段（music_title / music_id / related_archive），驼峰仅作兜底。
- *
- * ⚠️ **不要把 cid 传下去**：音乐中心的 `related_archive.cid` 是**音频 cid**，
- * 不属于该 bvid 的视频分 P（实测：BV1kQhz6fEMZ 的 pages[0].cid=42091416602，
- * 但 related_archive.cid=117309800781135 → playurl 返回 -404「啥都木有」）。
- * 传这个 cid 会让音乐中心所有条目都解析不出音源 —— 用户看到的就是
- * 「点了歌，封面歌名都换了，放出来的还是上一首」。播放侧会用 view 返回的真实 cid。
- */
-function mapMusicCenter(x: MusicCenterItem): Track {
-  const related: MusicCenterRelatedArchive | undefined = x.related_archive ?? x.relatedArchive;
-  const playable: string = related?.bvid || x.bvid;
-  let title: string = (x.music_title ?? x.musicTitle ?? '').trim();
-  if (title.length === 0) {
-    title = related?.title ?? x.album ?? '';
-  }
-  const coverUrl: string = pickMusicCenterCover(x, related);
-  return buildTrack({
-    id: (x.music_id ?? x.musicId ?? '') || playable,
-    bvid: playable,
-    aid: x.aid,
-    title: title,
-    artist: x.author,
-    // 音乐中心结构里**没有 mid**（只有 author 字符串）→ 这里留空，
-    // 「进 UP 主主页」会退回用 bvid 走 getVideoDetail 换 owner.mid（带 viewCache）。
-    upMid: '',
-    coverUrl: coverUrl,
-    // 音乐中心**自带时长**（在 `related_archive.duration`，单位秒，实测 140）。
-    // 早先漏了这一步 → 列表里这一页签的条目全都没有时长（duration=0），
-    // 连带歌词匹配的「时长加分」也拿不到（见 PlayerPage 的信息键注释）。
-    duration: related?.duration ?? 0
-  });
-}
-
-/**
- * 音乐中心的封面取值链：**专辑图优先，视频截图兜底**。
- *
- * 实测同一个条目会带**两张完全不同的图**（这不是异常，是接口设计）：
- *   · `cover`            → 专辑封面 `…/bfs/station_src/music_metadata/xxx.jpg`（约 33KB）
- *   · `related_archive.cover` → 承载视频的截图 `…/bfs/archive/xxx.jpg`（约 574KB）
- * 播放侧的合并规则是「列表侧优先」，所以这里选哪张，播放页就会显示哪张。
- * 一旦这里和播放侧不一致，用户看到的就是「播放页的图和列表里不是同一张」。
- * 因此两处必须走同一条链：专辑图 → 视频图。
- */
-function pickMusicCenterCover(x: MusicCenterItem, related: MusicCenterRelatedArchive | undefined): string {
-  const album: string = x.cover ?? '';
-  if (album.length > 0) {
-    return toHttpsUrl(album);
-  }
-  const video: string = related ? (related.cover ?? '') : '';
-  return toHttpsUrl(video);
-}
-
-/**
- * 音乐中心列表映射 + 可播性过滤。
- * 没有 bvid 的条目（纯音频卡片）在播放侧必然解析失败，放进来就是一行
- * 「点了没反应 / 信息换了歌没换」的坏条目，这里直接拦掉并记账。
- */
-function mapMusicCenterList(list: MusicCenterItem[]): Track[] {
-  const out: Track[] = [];
-  for (let i = 0; i < list.length; i++) {
-    const t: Track = mapMusicCenter(list[i]);
-    if (t.bvid.length > 0 && t.bvid.indexOf('BV') === 0) {
-      out.push(t);
-    } else {
-      console.error(`music center item without playable bvid: ${t.id} / ${t.title}`);
-    }
-  }
-  return out;
-}
-
-/**
- * 追加合并并去重（首屏双源合成仍在用，如 settleCenter）。
- *
- * 必须去重：ForEach 的 keyGenerator 用的是 track.id，重复 id 会让 ArkUI 复用错节点
- * （表现为滚动时条目跳动 / 部分行空白）。推荐位尤其明显——首屏两个源
- * （popular 与 rcmd）实测重叠约 8/10。
- */
-function mergeTracks(base: Track[], add: Track[]): Track[] {
-  const seen: Set<string> = new Set<string>();
-  const out: Track[] = [];
-  for (let i = 0; i < base.length; i++) {
-    const t: Track = base[i];
-    if (!seen.has(t.id)) {
-      seen.add(t.id);
-      out.push(t);
-    }
-  }
-  for (let i = 0; i < add.length; i++) {
-    const t: Track = add[i];
-    if (!seen.has(t.id)) {
-      seen.add(t.id);
-      out.push(t);
-    }
-  }
-  return out;
-}
-
-/**
- * 下拉刷新区的静态空占位（方案三 · 骨架接管）：唯一作用是顶掉系统默认的
+ * 下拉刷新区的静态空占位（骨架接管）：唯一作用是顶掉系统默认的
  * 刷新头（转圈/竖条），0.1vp 高度 = 视觉上不存在。刷新指示完全由 List
- * 首行的骨架行承担（见 build 里 List 的第一个 ListItem）。
+ * 首行的骨架行承担（见 build 里 List 的下拉骨架条目）。
  *
  * 刻意用 refreshingContent 而非 builder：占位不需要跟手，而 builder 会被
  * 状态变化重建，下拉时状态每帧都在变，用它纯属白白重建。
@@ -279,30 +152,32 @@ function PullRefreshPlaceholder(): void {
     .height(0.1)
 }
 
-/** 自动建歌单时使用的默认名（用户一个歌单都没有时） */
-
 /** 搜索每页条数（跟着接口的 page_size） */
 const SEARCH_PAGE_SIZE: number = 30;
-const CENTER_PAGE_SIZE: number = 20;
-/** 推荐流每页条数：实测 ps=20 时约 17 条有效（其余是登录引导/广告卡片） */
-const RECOMMEND_FEED_PS: number = 20;
-/** 排行榜一次拿全（实测 100 条）后前端分页，每次多放这么多条 */
-const RANKING_PAGE_SIZE: number = 20;
-/** 搜索历史面板最大高度（vp）：20 条一屏放不下，超出部分在面板内滚动 */
-const HISTORY_PANEL_MAX_HEIGHT: number = 320;
-const HISTORY_PANEL_GAP: number = 4;
 /**
- * 列表首条独立让位定值（vp）：与页签行实测高（searchTabsHeight）解耦
- * （用户 2026-10-15）—— 条目起始位与页签栏位置分别单独调。
- * 56（标题行）+ 此值 = List 首个空白占位条目高度（不含 safeTop）。
+ * 常用搜索词出厂默认表：首次进入（无 PREF_COMMON_WORDS 存档）时的种子列表；
+ * 此后列表整体持久化（「+」新建 / 长按 ✕ 删除即时落盘），本表不再参与。
  */
-const SEARCH_LIST_START_EXTRA_VP: number = 37.6;
-
+const COMMON_SEARCH_WORDS: string[] = [
+  'playlist', '原创音乐', '翻唱音乐', '二创音乐', 'ai创造', '相声评书', '有声书', '脱口秀'
+];
+/** 热搜榜前三名的序号用主题色高亮（B 站热搜榜惯例） */
+const HOT_TOP_RANK_COUNT: number = 3;
+/**
+ * 列表首条独立让位定值（vp）：标题行 56 + 此值 = List 首个空白占位条目高度
+ * （不含 safeTop）。搜索二级页无 chip 行，只留呼吸间距。
+ */
+const SEARCH_LIST_START_EXTRA_VP: number = 12;
 /**
  * 骨架屏占位行：首屏整页用 8 行（贴合首屏可见条数），上拉加载更多用 3 行。
  * 只作 ForEach 的数据源，渲染时忽略内容。
  */
 const SKELETON_ROW_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7];
+/**
+ * push 进页后延迟聚焦的兜底等待（ms）：NavDestination 动态挂载时
+ * Search 的 defaultFocus 偶发不触发，转场落定后按 id 再补一次 requestFocus。
+ */
+const SEARCH_FOCUS_FALLBACK_MS: number = 400;
 
 /** 诊断：SearchPage 实例号（排查「平板下 searchSubmit 绑到旧实例」） */
 let searchPageInstanceSeq: number = 0;
@@ -310,61 +185,41 @@ let searchPageInstanceSeq: number = 0;
 @Component
 export struct SearchPage {
   /**
-   * 搜索关键词（批 4 迁根栏后为页面 / 根栏共享的双向状态）：
-   * 根栏 SearchInputBar 的输入框 $$ 直改它，页面点历史词条也改它，
-   * 两侧经 AppStorage 即时互见。初值取 holder 的会话词（与根栏组件同源）。
+   * 搜索关键词（页面 / 标题栏行共享的双向状态）：
+   * SearchInputBar 的输入框 onChange 直改它，页面点历史词条也改它，
+   * 两侧经 AppStorage 即时互见。初值取 holder 的会话词（与栏组件同源）。
    */
   @StorageLink(STORE_SEARCH_KEYWORD) keyword: string = SearchStateHolder.keyword;
-  /** 内容页签（'search'/'recommend'/'ranking'/'center'）：页面 switchTab 写、根栏页签行读高亮 */
-  @StorageLink(STORE_SEARCH_TAB) tab: string = 'search';
   /** 主题色运行时值：加入歌单弹层的歌单名与新建按钮跟随切色刷新 */
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  /** 新建常用搜索词弹窗「添加」自绘按钮的实底/文字色（见 AddWordBody） */
+  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   @State @Watch('onListSourceChanged') results: Track[] = SearchStateHolder.results;
-  @State @Watch('onListSourceChanged') recommend: Track[] = [];
-  @State @Watch('onListSourceChanged') ranking: Track[] = [];
-  @State @Watch('onListSourceChanged') center: Track[] = [];
-  // ===== 列表数据源（2026-10-23 性能审查：ForEach → LazyForEach）=====
-  // 四页签数组 + UP 搜索结果都挂 @Watch('onListSourceChanged')：整表替换与 push
+  // ===== 列表数据源（LazyForEach 渲染）=====
+  // 结果数组 + UP 搜索结果都挂 @Watch('onListSourceChanged')：整表替换与 push
   // 追加都会触发（V1 数组代理拦截 push），对应 ArrayDataSource 整表 reload +
-  // 两列 PairDataSource sync。reload 语义与页签数据流天然匹配：新搜索 / 切页签
-  // 必是整表换源；翻页 push 时 LazyForEach 只重建可视区，代价可控。
+  // 两列 PairDataSource sync。reload 语义与搜索数据流天然匹配：新搜索必是
+  // 整表换源；翻页 push 时 LazyForEach 只重建可视区，代价可控。
   private resultSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
   private resultPairs: PairDataSource<Track> = new PairDataSource<Track>(this.resultSource);
-  private recommendSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private recommendPairs: PairDataSource<Track> = new PairDataSource<Track>(this.recommendSource);
-  private rankingSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private rankingPairs: PairDataSource<Track> = new PairDataSource<Track>(this.rankingSource);
-  private centerSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private centerPairs: PairDataSource<Track> = new PairDataSource<Track>(this.centerSource);
   @State loading: boolean = false;
   /** 是否已执行过一次搜索：用于区分「还没搜」和「搜了但没结果」，避免空态文案误导。 */
   @State searched: boolean = false;
   /** 诊断用实例号（aboutToAppear 分配） */
   private pageId: number = 0;
-  /** 推荐位待完成的数据源数量（热门 + 推荐两个源并行，互不影响） */
-  @State recommendPending: number = 0;
-  @State loadingRanking: boolean = false;
-  /** 音乐中心待完成的数据源数量（综合榜 + 新歌榜并行，互不影响） */
-  @State centerPending: number = 0;
-  /** 底部安全区高度（vp）：根容器不再统一避让，列表末尾让位要自己叠上这一份 */
+  /** 底部安全区高度（vp）：列表末尾让位要自己叠上这一份（含二级页悬浮播放条避让） */
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   /**
-   * 状态栏高度（vp）：HdsTabs 不再整层避让（见 Index.ets），固定栏材质 Row 内部
-   * padding 用它把材质从 y=0 铺起覆盖状态栏；历史面板 / 遮罩按搜索框定位，
-   * 不含在 Row 实测高度内，position 时也要显式 +safeTop。
+   * 状态栏高度（vp）：历史面板 / 遮罩按标题栏下沿定位，定位公式含它。
    */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   /**
-   * [任务③·自绘原型] 顶栏渐变模糊层进度更新器：onDidScroll / onScrollStop
+   * 顶栏渐变模糊层进度更新器：onDidScroll / onScrollStop
    * 命令式驱动（不标 @State，滚动高频回调零重建），见 syncTopBlurProgress。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
-  /**
-   * 网络恢复重试信号（Index 的 watchNetwork 在「断过又恢复」时递增）。
-   * @StorageProp 单向只读 —— 页面不改它，只借 @Watch 收通知。
-   */
-  @StorageProp(STORE_NET_RETRY_REV) @Watch('onNetRetry') netRetryRev: number = 0;
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中，见 build 里的 constraintSize */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /** 横竖屏（Index 常驻注册写入）：横屏宽屏时结果条目两列显示 */
@@ -375,38 +230,54 @@ export struct SearchPage {
     return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
   }
 
-  /**
-   * 结果列表滚动控制器：List 直接挂 TabScrollerHolder.search（唯一真源，身份恒定），
-   * 根栏 bindToScrollable 绑它驱动滚动模糊（2026-10-11 起不再 new 私有实例后注册替换）。
-   */
+  /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
+  @StorageProp(STORE_ITEM_DISPLAY_STYLE) itemDisplay: string = ITEM_DISPLAY_LIST;
 
   /**
-   * 页签行实测高（vp，Plan B）：页面层 SearchTabsBar onAreaChange 回写（写入口在
-   * SearchTabsBar 组件），本页读它组让位量（barTotalHeight）与历史面板定位。
-   * 初值 0 = 未实测：列表挂载以它为门（contentStartOffset 只在首次布局生效，
-   * 必须等实测值就位再挂，PD 2026-10-08 同款坑）。
+   * 大封面模式：**视频结果**以双列网格卡（TrackCard）渲染，竖屏 / 横屏均双列；
+   * UP 主结果 / 历史词 / 热搜词保持原样（大封面只作用于封面类视频条目，
+   * UP 行是圆形头像非封面，网格化收益低）。
    */
-  @StorageProp(STORE_SEARCH_TABS_HEIGHT) searchTabsHeight: number = 0;
+  private isGrid(): boolean {
+    return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
 
   /** 最近搜索词（最新在前，最多 SEARCH_HISTORY_MAX 条）。持久化在 service/SearchHistoryStore.ts */
   @State history: string[] = [];
-  /** 历史下拉是否展开：点搜索框展开，点遮罩 / 点词条 / 开始输入都收起 */
-  @State showHistory: boolean = false;
+  /** 页签区当前页签：'history' 最近搜索 / 'hot' B 站热搜 */
+  @State searchSectionTab: string = 'history';
+  /** 「最近搜索 / 热搜」官方分段按钮条目：静态一次构造 */
+  private historySegItems: SegmentButtonV2Items = new SegmentButtonV2Items([
+    { text: '最近搜索' },
+    { text: '热搜' }
+  ]);
+  /** 分段按钮主题色配色组：每次渲染现取（读 AppStorage），缓存成字段切色不刷新 */
+  private segColors(): SegmentColors {
+    return makeBiliSegmentColors();
+  }
+  /** B 站热搜词（点「热搜」页签拉取，榜单顺序，页面存活期内缓存） */
+  @State hotWords: string[] = [];
+  /** 热搜拉取中（右角「刷新」按钮与加载态共用） */
+  @State hotLoading: boolean = false;
+  /** 热搜是否已拉取过（避免每次切页签都打接口；「刷新」按钮重置它强制重拉） */
+  private hotLoaded: boolean = false;
+  /** 常用搜索词（初始页快捷入口）：aboutToAppear 从偏好读完整列表，无存档回落默认表；增删即时落盘 */
+  @State commonWords: string[] = [];
+  /** 常用搜索词编辑态：长按任一词进入 —— 词旁显示 ✕（点击删除），点词体退出 */
+  @State wordsEditing: boolean = false;
+  /** 「新建常用搜索词」弹窗输入草稿 */
+  @State newWordDraft: string = '';
 
   /** Refresh 组件的转圈状态（$$ 双向绑定，干完活必须落回 false 才会收起） */
   @State refreshing: boolean = false;
-  /** 加载更多进行中（同一时刻只允许一个页签在加载） */
+  /** 加载更多进行中 */
   @State loadingMore: boolean = false;
-  /** 推荐流还有没有下一页（feed 返回 0 条或整页重复即到底） */
-  @State recommendHasMore: boolean = true;
-  /** 音乐中心还有没有下一页（综合榜某页返回 0 条即到底） */
-  @State centerHasMore: boolean = true;
 
   /**
-   * ── 下拉刷新头（方案三 · 骨架接管）──
+   * ── 下拉刷新头（骨架接管）──
    * 刷新指示器复用 SkeletonTrackItem 骨架行，不新增任何视觉元素：
    *   · 跟手 —— onOffsetChange 每帧把下拉进度映射成骨架的淡入 + 落位；
-   *   · 触发 —— 骨架停在原位保持纯静态（扫光带已全局删除，见 SkeletonTrackItem 注释）；
+   *   · 触发 —— 骨架停在原位保持纯静态（见 SkeletonTrackItem 注释）；
    *   · 收尾 —— Done 后 250ms 淡出，动画放完再摘节点（句柄兜底回收）。
    */
   /** 刷新头骨架是否渲染（双骨架闸门：整屏骨架在场时必须为 false） */
@@ -421,6 +292,8 @@ export struct SearchPage {
   private pullFadeTimer: number = -1;
   /** 下拉刷新区占位：ComponentContent 构造依赖 UIContext，属性初始化时未就绪，aboutToAppear 里建 */
   private refreshPlaceholder: ComponentContent<Object> | null = null;
+  /** push 后延迟聚焦兜底句柄（aboutToDisappear 回收） */
+  private focusFallbackTimer: number = -1;
 
   private player: MusicPlayer = MusicPlayer.getInstance();
   /** 当前结果集对应的关键词：用户可能已经改了输入框，翻页必须用产生这批结果的那个词 */
@@ -428,16 +301,7 @@ export struct SearchPage {
   /** 搜索结果已加载到第几页 / 共几页（0 表示未知，允许先试一页） */
   private searchPage: number = 1;
   private searchTotalPages: number = 0;
-  /** 推荐流游标：每加载一页 +1（feed/rcmd 靠 fresh_idx 换内容） */
-  private recommendFreshIdx: number = 1;
-  private centerPage: number = 1;
-  /** 音乐中心首屏缓冲：新歌榜与热歌榜各自落定后再按固定顺序合成（见 settleCenter） */
-  private centerNewTracks: Track[] = [];
-  private centerHotTracks: Track[] = [];
-  /** 排行榜全量（接口一次给全，展示侧按 RANKING_PAGE_SIZE 切片） */
-  private rankingAll: Track[] = [];
 
-  @State showPlaylistPicker: boolean = false;
   @State playlistOptions: Playlist[] = [];
   @State pickerTrack: Track | null = null;
 
@@ -445,11 +309,59 @@ export struct SearchPage {
   @State collectionName: string = '';
   @State pendingCollectionTracks: Track[] = [];
   /**
-   * 「保存合集为歌单」对话框（阶段 3 迁移：自绘 scrim+card 浮层 → CustomContentDialog
-   * 标准对话框，仍走 CustomDialogController，绝不走 promptAction —— 崩溃史见
-   * AppAlertDialog.ets 头注释）。aboutToAppear 创建一次，绝不重新赋值。
+   * 「保存合集为歌单」对话框：CustomContentDialog 标准对话框，走
+   * CustomDialogController，绝不走 promptAction —— 崩溃史见
+   * AppAlertDialog.ets 头注释。aboutToAppear 创建一次，绝不重新赋值。
    */
-  private collectionSaverController: CustomDialogController | undefined = undefined;
+   private collectionSaverController: CustomDialogController | undefined = undefined;
+
+  /** 「新建常用搜索词」对话框（按钮自绘版）：aboutToAppear 创建一次，绝不重新赋值 */
+  private addWordController: CustomDialogController | undefined = undefined;
+
+  /**
+   * 「加入歌单」弹窗：官方 CustomContentDialog 标准对话框（默认遮罩 +
+   * 官方按钮槽，替代原根 Stack 内自绘弹层）。标题/按钮为常量 →
+   * controller 建一次永不重建（faqs-arkui-555 只定格构造参数，动态内容
+   * 经 contentBuilder 闭包在 open() 时读当次状态）。
+   */
+  private playlistPickerController: CustomDialogController | undefined = undefined;
+
+  /**
+   * 结果列表滚动控制器：本页私有实例（二级页不进 TabScrollerHolder 的
+   * Tab 页静态槽位），bindToScrollable 绑它驱动 HDS 标题栏。
+   */
+  private listScroller: Scroller = new Scroller();
+
+  /**
+   * 子页转场的横移量（相对页面自身宽度）：常驻 '0%'，
+   * 转场代理里按 push/pop 方向临时改写（见 navTransitionDelegate）。
+   */
+  @State navTransX: string = '0%';
+
+  /**
+   * 搜索类型：`'video'` 搜视频 / `'user'` 搜 UP 主。
+   *
+   * 为什么要这个开关：B 站的 `search_type=bili_user` **匿名完全可用**（实测 code=0，
+   * 「索尼音乐」能搜到官方号并带 `mid`），而搜出来的 UP 可以直接进站内 UP 主页 →
+   * 订阅投稿，等于把「找歌 → 找 UP → 长期收歌」这条链打通了。
+   *
+   * 切换后**不自动重搜**：用户可能只是改了模式还没按搜索，自动请求会白花一次配额
+   * （B 站对匿名搜索也有频率限制）。已经在结果态的话才自动重搜，手感更自然。
+   *
+   * 页面 / 标题栏行共享的双向状态：SearchInputBar 滑片选段改它，本页读它。
+   */
+  @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
+  /** UP 主搜索结果（`searchKind === 'user'` 时渲染这个，其余时间忽略） */
+  @State @Watch('onListSourceChanged') userResults: UserSearchResult[] = [];
+  private userSource: ArrayDataSource<UserSearchResult> = new ArrayDataSource<UserSearchResult>([]);
+  private userPairs: PairDataSource<UserSearchResult> = new PairDataSource<UserSearchResult>(this.userSource);
+
+  /**
+   * 请求序号（竞态保护）：快速连搜两次时，先发的那次可能后返回，
+   * 不判序号会把新结果覆盖成旧结果。进入时自增取号，await 返回后
+   * 号对不上就整体丢弃（结果、失败提示、loading 复位都不能写）。
+   */
+  private searchSeq: number = 0;
 
   /**
    * 列表数组变化（@Watch 携带属性名）：同步对应数据源。
@@ -459,15 +371,6 @@ export struct SearchPage {
     if (propName === 'results') {
       this.resultSource.reload(this.results);
       this.resultPairs.sync();
-    } else if (propName === 'recommend') {
-      this.recommendSource.reload(this.recommend);
-      this.recommendPairs.sync();
-    } else if (propName === 'ranking') {
-      this.rankingSource.reload(this.ranking);
-      this.rankingPairs.sync();
-    } else if (propName === 'center') {
-      this.centerSource.reload(this.center);
-      this.centerPairs.sync();
     } else if (propName === 'userResults') {
       this.userSource.reload(this.userResults);
       this.userPairs.sync();
@@ -478,23 +381,47 @@ export struct SearchPage {
   private syncAllListSources(): void {
     this.resultSource.reload(this.results);
     this.resultPairs.sync();
-    this.recommendSource.reload(this.recommend);
-    this.recommendPairs.sync();
-    this.rankingSource.reload(this.ranking);
-    this.rankingPairs.sync();
-    this.centerSource.reload(this.center);
-    this.centerPairs.sync();
     this.userSource.reload(this.userResults);
     this.userPairs.sync();
   }
 
-  aboutToAppear(): void {
-    // 列表数据源初值同步（见 syncAllListSources 注释）
+  /**
+   * 重置回搜索初始页（清空输入框即回初始页）：
+   * 清空输入框（✕ / 退格删到空）或进页初始化时整体清掉结果态 ——
+   * 「常用搜索 + 最近搜索/热搜」初始页回来，键盘不收可直接输入下一个词。
+   * 历史记录 / 页签选择 / 热搜缓存不在清理范围（页面存活期内一直有效）。
+   */
+  private resetToLanding(): void {
+    // 作废所有在途请求：doSearch / refreshSearch / loadMoreSearch 共用 searchSeq
+    // 竞态守卫（seq !== searchSeq 即整体丢弃），且 loadMoreSearch 只读不自增 ——
+    // 这里的自增能同时作废三条路径，防止清空后旧响应把结果回填回来。
+    ++this.searchSeq;
+    SearchStateHolder.clear();
+    this.keyword = '';
+    this.results = [];
+    this.userResults = [];
+    this.searchKeyword = '';
+    this.searched = false;
+    // 骨架屏在场时清空必须一并复位，否则 SearchStateArea 永远走 loading 分支
+    this.loading = false;
+    this.refreshing = false;
+    this.loadingMore = false;
+    this.searchPage = 1;
+    this.searchTotalPages = 0;
+    // @Watch 触发的数据源同步与这里显式同步双保险（aboutToAppear 同款口径）
     this.syncAllListSources();
-    // [任务③·自绘原型] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
-    // 挂载时 initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
+    // 列表归位 + 顺带校准自绘顶栏模糊层进度
+    this.resetResultScroll();
+  }
+
+  aboutToAppear(): void {
+    // 每次进入都从头开始：不恢复上次的关键词与结果。
+    // 重置逻辑与「清空输入框回初始页」共用 resetToLanding（见其注释）。
+    this.resetToLanding();
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
-    // 「保存合集为歌单」对话框（阶段 3）：按钮走 buttons 槽（无校验失败需保持
+    // 「保存合集为歌单」对话框：按钮走 buttons 槽（无校验失败需保持
     // 打开的路径，可用自动关闭），点遮罩关闭时只清暂存数据，关闭由系统完成。
     this.collectionSaverController = new CustomDialogController({
       builder: CustomContentDialog({
@@ -524,70 +451,68 @@ export struct SearchPage {
         this.cancelSaveCollection();
       }
     });
-    // 同 currentListLength 的口径：搜索页签要「有任一搜索结果」才留得住。
-    // 只数 results 会把「搜 UP 主」的现场误判成空，一进来就被踢回推荐页。
-    const hasSearchResult: boolean =
-      this.searchKind === 'user' ? this.userResults.length > 0 : this.results.length > 0;
-    if (this.tab === 'search' && !hasSearchResult) {
-      this.tab = 'recommend';
-    }
-    // 结果是从 holder 恢复的：页码未知（0），先允许通过「上拉」去探一页，
-    // 探到空页自然停下——否则切回页签后永远加载不出更多。
-    this.searchPage = 1;
-    this.searchTotalPages = 0;
+    // 「新建常用搜索词」对话框：确认键自绘在 contentBuilder —— 空名/重名校验
+    // 失败要保持弹窗打开，buttons 槽点击即自动关闭（faqs-arkui-986）。
+    this.addWordController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '新建常用搜索词',
+        contentBuilder: (): void => {
+          this.AddWordBody();
+        }
+      }),
+      autoCancel: true,
+      cancel: (): void => {
+        this.cancelAddWord();
+      }
+    });
+    // 「加入歌单」：官方标准对话框，标题/按钮常量（见成员声明处注释）。
+    // 关闭路径（取消按钮 / 点遮罩 / 返回键）刻意不清暂存曲目：关闭有退场
+    // 动画，清了会让副标题在淡出途中先变空；pickerTrack 每次打开前都会
+    // 重写，残留值无消费方。
+    this.playlistPickerController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '加入歌单',
+        contentBuilder: (): void => {
+          this.PlaylistPickerBody();
+        },
+        buttons: [
+          {
+            value: '取消',
+            buttonStyle: ButtonStyleMode.TEXTUAL,
+            action: (): void => {
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
+    // 常用搜索词：完整列表整体读（用户增删后的持久真值）；null = 首次进入播种默认表
+    const storedWords: string[] | null = AppPreferences.getObject<string[]>(PREF_COMMON_WORDS);
+    this.commonWords = storedWords !== null ? storedWords : COMMON_SEARCH_WORDS.slice();
     // 搜索历史从 Preferences 读一次（SearchHistoryStore 内部有内存快照，读是同步的）
     this.history = SearchHistoryStore.getSearchHistory();
-    this.loadHomeData();
-    // 栏内动作（提交搜索 / 开关历史 / 切类型 / 切页签）经持有器转回本页私有方法；
-    // scroller 不再注册替换——List 直挂 Holder.search 唯一真源（2026-10-11）
+    // 无历史时直接落在「热搜」页签：空的「最近搜索」列表没有可看的
+    if (this.history.length === 0) {
+      this.searchSectionTab = 'hot';
+      this.loadHotWords();
+    }
+    // 栏内动作（提交搜索 / 开关历史 / 切类型）经持有器转回本页私有方法
     this.pageId = ++searchPageInstanceSeq;
     console.info(`[Search] appear id=${this.pageId} bp=${this.currentBreakpoint}`);
-    TabScrollerHolder.searchOpenHistory = (): void => {
-      this.openHistory();
-    };
-    TabScrollerHolder.searchCloseHistory = (): void => {
-      this.closeHistory();
-    };
     TabScrollerHolder.searchSetKind = (kind: string): void => {
       this.setSearchKind(kind);
-    };
-    TabScrollerHolder.searchSwitchTab = (target: string): void => {
-      this.switchTab(target);
     };
     // 下拉刷新占位：ComponentContent 构造依赖 UIContext，属性初始化时还没就绪，
     // 只能在生命周期里建（工程内先例：PlayBar / CoverDiscComponent / LrcView 的 animator）。
     this.refreshPlaceholder =
       new ComponentContent<Object>(this.getUIContext(), wrapBuilder(PullRefreshPlaceholder));
-  }
-
-  /**
-   * 根栏整栏让位量（vp）：safeTop + 标题行 56（搜索行垂直居中其中）+ 页签行实测高。
-   * 历史面板定位统一读它（贴根栏下沿弹出）；列表内容让位已解耦，读 listStartOffset()。
-   */
-  private barTotalHeight(): number {
-    return this.safeTop + NAV_TITLE_BAR_HEIGHT + this.searchTabsHeight;
-  }
-
-  /**
-   * [任务③·自绘原型] 按当前列表偏移校准自绘渐变模糊层进度：
-   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
-   * 边缘回弹负偏移归零 = 用户方案 ③ 死区）。onDidScroll 逐帧 + onScrollStop
-   * Idle 校准终态都走这里（用户方案 ②：Fling 期只命令式写 opacity 不写 @State）。
-   */
-  private syncTopBlurProgress(): void {
-    // currentOffset() 在 Scroller 尚未挂到 List（冷启动 aboutToAppear 早于 build）
-    // 时运行时返回 undefined，空防护防启动崩溃（jscrash 实锤），未挂载按偏移 0。
-    this.topBlurUpdater.setProgress(
-      (TabScrollerHolder.search.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
-  }
-
-  /**
-   * 列表内容起始让位量（vp）：safeTop + 标题行 56 + 独立定值
-   * （SEARCH_LIST_START_EXTRA_VP，不读页签行实测高）。
-   * List 首个空白占位 / 骨架 / 空态读它 —— 条目位置与页签栏解耦，各自单独调。
-   */
-  private listStartOffset(): number {
-    return this.safeTop + NAV_TITLE_BAR_HEIGHT + SEARCH_LIST_START_EXTRA_VP;
+    // 延迟聚焦兜底：NavDestination 动态挂载时 Search 的 defaultFocus 偶发不触发，
+    // 转场落定后按 id 再补一次 requestFocus（入口式搜索框的「进页即搜」承接）。
+    this.focusFallbackTimer = setTimeout((): void => {
+      this.focusFallbackTimer = -1;
+      this.getUIContext().getFocusController().requestFocus('searchSubPageInput');
+    }, SEARCH_FOCUS_FALLBACK_MS);
   }
 
   aboutToDisappear(): void {
@@ -596,6 +521,67 @@ export struct SearchPage {
       clearTimeout(this.pullFadeTimer);
       this.pullFadeTimer = -1;
     }
+    if (this.focusFallbackTimer !== -1) {
+      clearTimeout(this.focusFallbackTimer);
+      this.focusFallbackTimer = -1;
+    }
+  }
+
+  /**
+   * 子页转场（customTransition 代理）：从右滑入 slow(400ms) EaseOut。
+   * · push 入场：先把页面挪到屏幕右侧外（'100%'），event 闭包内回到 '0%'，
+   *   系统按闭包内的状态变化生成 400ms EaseOut 过渡；
+   * · pop 出场（含侧滑返回手势触发的返回）：反向滑回右侧，与手势方向一致；
+   * · 其余场景（本页被上层页覆盖 / 上层页返回后重新露出）返回 undefined，
+   *   走系统默认转场。
+   */
+  private navTransitionDelegate(op: NavigationOperation,
+    isEnter: boolean): Array<NavDestinationTransition> | undefined {
+    if (op === NavigationOperation.PUSH && isEnter) {
+      this.navTransX = '100%';
+      const enter: NavDestinationTransition = {
+        duration: NAV_TRANSITION_MS,
+        curve: Curve.EaseOut,
+        event: (): void => {
+          this.navTransX = '0%';
+        }
+      };
+      const transitions: Array<NavDestinationTransition> = [enter];
+      return transitions;
+    }
+    if (op === NavigationOperation.POP && !isEnter) {
+      const exit: NavDestinationTransition = {
+        duration: NAV_TRANSITION_MS,
+        curve: Curve.EaseOut,
+        event: (): void => {
+          this.navTransX = '100%';
+        }
+      };
+      const transitions: Array<NavDestinationTransition> = [exit];
+      return transitions;
+    }
+    return undefined;
+  }
+
+  /**
+   * 按当前列表偏移校准自绘渐变模糊层进度：
+   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
+   * 边缘回弹负偏移归零 = 死区）。onDidScroll 逐帧 + onScrollStop
+   * Idle 校准终态都走这里（Fling 期只命令式写 opacity 不写 @State）。
+   */
+  private syncTopBlurProgress(): void {
+    // currentOffset() 在 Scroller 尚未挂到 List（冷启动 aboutToAppear 早于 build）
+    // 时运行时返回 undefined，空防护防启动崩溃（jscrash 实锤），未挂载按偏移 0。
+    this.topBlurUpdater.setProgress(
+      (this.listScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
+  /**
+   * 列表内容起始让位量（vp）：safeTop + 标题行 56 + 独立定值
+   * （SEARCH_LIST_START_EXTRA_VP）。List 首个空白占位 / 骨架 / 空态读它。
+   */
+  private listStartOffset(): number {
+    return this.safeTop + NAV_TITLE_BAR_HEIGHT + SEARCH_LIST_START_EXTRA_VP;
   }
 
   private toast(message: string, duration: number): void {
@@ -603,231 +589,115 @@ export struct SearchPage {
   }
 
   /**
-   * 首屏数据。刻意拆成各自独立的任务：
-   * 早期把两个源串行 await 后合并，任一源失败（如缺 buvid 导致 rcmd 返回 412）
-   * 会把另一个源已拿到的数据一起丢掉，表现为"首页一片空白"。
+   * 搜索结果归位：新结果若沿用旧滚动偏移，首项会被 TitleBar 裁掉上半截
+   * （「第一首压在顶栏下面」）。
+   *
+   * 为什么用 scrollEdge(Edge.Top) 而不是 scrollToIndex(0)：
+   *   · Edge.Top 回到**内容起点**，即占位条目让位后的静止位（首项在栏下方）；
+   *   · scrollToIndex(0) 会把第 0 项顶到视口物理顶端 —— 正是要避免的「压顶栏」。
+   *
+   * setTimeout(0)：等新结果完成这一帧布局再滚，否则滚的是上一批内容。
    */
-  private loadHomeData(): void {
-    this.loadHomeRecommend();
-    this.loadRanking();
-    this.loadCenter();
+  private resetResultScroll(): void {
+    setTimeout((): void => {
+      this.listScroller.scrollEdge(Edge.Top);
+    }, 0);
   }
 
-  private resetRecommend(): void {
-    this.recommend = [];
-    this.recommendFreshIdx = 1;
-    this.recommendHasMore = true;
-    // 先预置为 2（热门 + 推荐），避免首帧渲染时因计数为 0 闪一下"暂无数据"
-    this.recommendPending = 2;
-  }
-
-  private loadHomeRecommend(): void {
-    this.resetRecommend();
-    this.loadPopular();
-    this.loadRecommended();
-  }
-
-  private appendRecommend(list: Track[]): void {
-    this.recommend = mergeTracks(this.recommend, list);
-  }
-
-  private async loadPopular(): Promise<void> {
-    try {
-      const pop: PopularVideo[] = await BilibiliApi.getPopularVideos(10, 1);
-      this.appendRecommend(pop.map(mapPopular));
-    } catch (e) {
-      console.error(`loadPopular failed: ${JSON.stringify(e)}`);
-    } finally {
-      this.recommendPending = this.recommendPending - 1;
-    }
-  }
-
-  private async loadRecommended(): Promise<void> {
-    try {
-      const rec: PopularVideo[] = await BilibiliApi.getRecommendedVideos(10);
-      this.appendRecommend(rec.map(mapPopular));
-    } catch (e) {
-      // 该接口在缺少 buvid Cookie 时会返回 HTTP 412；此处失败不影响同行热门数据
-      console.error(`loadRecommended failed: ${JSON.stringify(e)}`);
-    } finally {
-      this.recommendPending = this.recommendPending - 1;
-    }
-  }
-
-  private async loadRanking(): Promise<void> {
-    this.loadingRanking = true;
-    try {
-      const list: RankingVideoItem[] = await BilibiliApi.getGlobalRankingV2();
-      this.rankingAll = list.map(mapRankingV2);
-      this.ranking = this.rankingAll.slice(0, RANKING_PAGE_SIZE);
-    } catch (e) {
-      console.error(`loadRanking failed: ${JSON.stringify(e)}`);
-    } finally {
-      this.loadingRanking = false;
-    }
-  }
-
-  private resetCenter(): void {
-    this.center = [];
-    this.centerPage = 1;
-    this.centerHasMore = true;
-    this.centerPending = 2;
-    this.centerNewTracks = [];
-    this.centerHotTracks = [];
-  }
-
-  /** 两个数据源各自独立：串行 await 后合并会把已成功那份一起丢掉。 */
-  private loadCenter(): void {
-    this.resetCenter();
-    this.loadCenterRank();
-    this.loadCenterNew();
-  }
-
-  /**
-   * 双源落定（成功或失败都算）后按**固定顺序**合成首屏：新歌榜（最新发布）在前、
-   * 热歌榜随后。此前两源各自到达即追加（竞速合并），热歌榜一页 20 条几乎总先返回，
-   * 最新发布的歌被压到中后段 —— 用户看到的就是「音乐中心都是老歌，不是最新的」。
-   * 缓冲到双双落定再一次性合成，展示顺序不再受网络先后影响；上拉加载更多追加在
-   * 合成结果的尾部（见 loadMoreCenter），新歌置顶的顺序不被破坏。
-   */
-  private settleCenter(): void {
-    if (this.centerPending > 0) {
-      return;
-    }
-    this.center = mergeTracks(this.centerNewTracks, this.centerHotTracks);
-  }
-
-  private async loadCenterRank(): Promise<void> {
-    try {
-      const hot: MusicCenterItem[] = await BilibiliApi.getMusicComprehensiveRank(CENTER_PAGE_SIZE, 1);
-      this.centerHotTracks = mapMusicCenterList(hot);
-    } catch (e) {
-      console.error(`loadCenterRank failed: ${JSON.stringify(e)}`);
-    } finally {
-      this.centerPending = this.centerPending - 1;
-      this.settleCenter();
-    }
-  }
-
-  private async loadCenterNew(): Promise<void> {
-    try {
-      const fresh: MusicCenterItem[] = await BilibiliApi.getNewMusic();
-      this.centerNewTracks = mapMusicCenterList(fresh);
-    } catch (e) {
-      console.error(`loadCenterNew failed: ${JSON.stringify(e)}`);
-    } finally {
-      this.centerPending = this.centerPending - 1;
-      this.settleCenter();
-    }
-  }
-
+  /** 当前结果条数：搜 UP 主时装在 `userResults`（`results` 会被 doSearch 显式清空）。 */
   private currentListLength(): number {
-    if (this.tab === 'recommend') {
-      return this.recommend.length;
-    }
-    if (this.tab === 'ranking') {
-      return this.ranking.length;
-    }
-    if (this.tab === 'center') {
-      return this.center.length;
-    }
-    // ⚠️ 搜索页签有**两套**结果：搜 UP 主时装在 `userResults`，而 `results`
-    // 会被 `doSearch()` 显式清空（见 :1096）。漏掉这个分支就会数成 0，
-    // 于是「UP 主列表已经渲染出来了，空态文案还挂在上头」同时显示（2026-10-07 修）。
     if (this.searchKind === 'user') {
       return this.userResults.length;
     }
     return this.results.length;
   }
 
-  private homeLoading(): boolean {
-    if (this.tab === 'recommend') {
-      return this.recommendPending > 0;
-    }
-    if (this.tab === 'ranking') {
-      return this.loadingRanking;
-    }
-    if (this.tab === 'center') {
-      return this.centerPending > 0;
-    }
-    return false;
-  }
-
   /**
-   * 当前页签还有没有下一页。
-   * 四个源的分页能力不同，所以判据也不同（详见文件头的说明）。
+   * 还有没有下一页。
+   * 页数未知（0，如从 holder 恢复）时先允许试一页，返回空页会自动停；
+   * 真到底由服务端 numPages 判定（空页可能是风控，见 loadMoreSearch）。
    */
   private hasMore(): boolean {
-    if (this.tab === 'search') {
-      // 与 currentListLength 同款：搜 UP 主时判据要用 userResults，
-      // 用 results 会恒为 0 → UP 主结果永远翻不了页。
-      if (this.searchKind === 'user') {
-        if (this.userResults.length === 0) {
-          return false;
-        }
-        if (this.searchTotalPages <= 0) {
-          return true;
-        }
-        return this.searchPage < this.searchTotalPages;
-      }
-      if (this.results.length === 0) {
+    if (this.searchKind === 'user') {
+      if (this.userResults.length === 0) {
         return false;
       }
-      // 页数未知（0，如从 holder 恢复）时先允许试一页，返回空页会自动停
       if (this.searchTotalPages <= 0) {
         return true;
       }
       return this.searchPage < this.searchTotalPages;
     }
-    if (this.tab === 'recommend') {
-      return this.recommend.length > 0 && this.recommendHasMore;
+    if (this.results.length === 0) {
+      return false;
     }
-    if (this.tab === 'ranking') {
-      // 全量已经在内存里，没放完就还有
-      return this.ranking.length > 0 && this.ranking.length < this.rankingAll.length;
+    if (this.searchTotalPages <= 0) {
+      return true;
     }
-    if (this.tab === 'center') {
-      return this.center.length > 0 && this.centerHasMore;
-    }
-    return false;
+    return this.searchPage < this.searchTotalPages;
   }
 
-  /** 空态里的「点击重试」：只重载当前页签，不要把四个源都刷一遍 */
-  private reloadCurrentTab(): void {
-    if (this.tab === 'search') {
-      this.doSearch();
-    } else if (this.tab === 'recommend') {
-      this.loadHomeRecommend();
-    } else if (this.tab === 'ranking') {
-      this.loadRanking();
-    } else {
-      this.loadCenter();
-    }
-  }
-
-  /**
-   * 网络恢复自动重试（Index 发信号）：只救「首页类页签加载失败后停在空态」的场景 ——
-   * 失败态的判据与空态 UI 一致（非加载中 + 列表为空，见 HomeStateArea）。
-   * 搜索页签刻意不自动重搜：搜索是用户的显式动作，替用户重发请求会打乱输入现场。
-   */
-  private onNetRetry(): void {
-    if (this.tab === 'search') {
+  private async doSearch(): Promise<void> {
+    const kw: string = this.keyword.trim();
+    if (!kw) {
+      this.toast('请输入搜索关键词', 1500);
       return;
     }
-    if (!this.homeLoading() && this.currentListLength() === 0) {
-      this.reloadCurrentTab();
-    }
-  }
-
-  private handleRefresh(): void {
-    if (this.tab === 'search') {
-      this.refreshSearch();
-    } else if (this.tab === 'recommend') {
-      this.refreshRecommend();
-    } else if (this.tab === 'ranking') {
-      this.refreshRanking();
-    } else {
-      this.refreshCenter();
+    const seq: number = ++this.searchSeq;
+    console.info(`[Search] doSearch id=${this.pageId} kw=${kw} kind=${this.searchKind} seq=${seq}`);
+    this.loading = true;
+    // 先记历史再发请求：被风控 / 断网导致搜不出结果时，这次搜索同样算「搜过」，
+    // 否则用户会遇到「明明搜过却不在历史里」。
+    this.history = SearchHistoryStore.addSearchHistory(kw);
+    try {
+      if (this.searchKind === 'user') {
+        const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, 1, SEARCH_PAGE_SIZE);
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        this.userResults = resp.result || [];
+        this.searchKeyword = kw;
+        this.searchPage = 1;
+        this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+        this.results = [];
+        this.searched = true;
+        this.resetResultScroll();
+        console.info(`[Search] user done id=${this.pageId} n=${this.userResults.length} searched=${this.searched}`);
+        if (this.userResults.length === 0) {
+          this.toast('没有搜到相关 UP 主，换个关键词试试', 2000);
+        }
+        return;
+      }
+      const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE);
+      // 已有更新的搜索在途（或已完成）：旧响应整体丢弃，不覆盖新结果
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      this.results = (resp.result || []).map(mapSearch);
+      this.userResults = [];
+      this.searchKeyword = kw;
+      this.searchPage = 1;
+      this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+      this.searched = true;
+      this.resetResultScroll();
+      SearchStateHolder.save(kw, this.results);
+      if (this.results.length === 0) {
+        // 搜索接口被风控时也是返回 0 条（HTTP 200 / code 0），明确提示，别让人以为没搜
+        this.toast('没有搜索到结果，请换个关键词或稍后再试', 2000);
+      }
+    } catch (e) {
+      // 失败的旧请求不提示、不碰状态：新请求还在飞，别让用户看到「先成功后报错」
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      this.searched = true;
+      console.error(`doSearch failed: ${JSON.stringify(e)}`);
+      this.toast('搜索失败，请检查网络或登录态', 2000);
+    } finally {
+      // 只有「最新一次」请求有权复位 loading：旧请求的 finally 不能把
+      // 新请求的 loading=true 提前拉回 false（骨架屏会闪没）
+      if (seq === this.searchSeq) {
+        this.loading = false;
+      }
     }
   }
 
@@ -838,7 +708,7 @@ export struct SearchPage {
       this.toast('还没有搜索内容', 1200);
       return;
     }
-    // seq 竞态保护（2026-10-23 审查修复）：刷新在途时提交新搜索（doSearch）或
+    // seq 竞态保护：刷新在途时提交新搜索（doSearch）或
     // 再次刷新，旧响应必须整体丢弃；++searchSeq 同时使同关键词在途的上拉
     // 翻页作废（刷新会整体置换结果集，翻页的增量 push 已无意义）。
     const seq: number = ++this.searchSeq;
@@ -864,44 +734,14 @@ export struct SearchPage {
     }
   }
 
-  private async refreshRecommend(): Promise<void> {
-    this.resetRecommend();
-    try {
-      await this.loadPopular();
-      await this.loadRecommended();
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
-  private async refreshRanking(): Promise<void> {
-    try {
-      await this.loadRanking();
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
-  private async refreshCenter(): Promise<void> {
-    this.resetCenter();
-    try {
-      await this.loadCenterRank();
-      await this.loadCenterNew();
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
   /**
-   * 下拉刷新头状态机（方案三 · 骨架接管），RefreshStatus 五态收口：
-   *   · Drag / OverDrag —— 双骨架闸门：列表非空才挂刷新头骨架；recommend/center
-   *     首屏加载中（整屏骨架在场、列表为空）时不再叠一条。若上一次 Done 的淡出
-   *     还没跑完（快速连拉），先掐掉定时器并用 0 时长动画顶掉在途淡出 ——
+   * 下拉刷新头状态机（骨架接管），RefreshStatus 五态收口：
+   *   · Drag / OverDrag —— 双骨架闸门：列表非空才挂刷新头骨架；整屏骨架在场
+   *     （加载中、列表为空）时不再叠一条。若上一次 Done 的淡出还没跑完
+   *     （快速连拉），先掐掉定时器并用 0 时长动画顶掉在途淡出 ——
    *     否则旧动画继续接管 opacity/translate，跟手映射全部失效。
-   *   · Refresh —— recommend/center 的刷新会先清空列表（resetRecommend /
-   *     resetCenter），整屏骨架随即接管，刷新头骨架必须在这里先撤，否则
-   *     「顶部一条 + 下面一整屏」；search/ranking 不清列表，骨架是唯一指示，
-    *     停在原位保持纯静态即可（扫光带已全局删除，不另加旋转/脉冲/进度环）。
+   *   · Refresh —— 搜索刷新不清列表，骨架是唯一指示，停在原位保持纯静态
+   *     即可（骨架纯静态，不另加旋转/脉冲/进度环）。
    *   · Done —— 250ms 淡出上移；淡出**结束后**再摘节点（直接摘节点淡出
    *     根本看不到），句柄由 aboutToDisappear 兜底回收。
    *   · Inactive —— 未触发刷新的回弹复位；Done 淡出在途时交给定时器收尾。
@@ -917,10 +757,6 @@ export struct SearchPage {
         });
       }
       this.showPullSkeleton = this.currentListLength() > 0;
-    } else if (status === RefreshStatus.Refresh) {
-      if (this.tab === 'recommend' || this.tab === 'center') {
-        this.showPullSkeleton = false;
-      }
     } else if (status === RefreshStatus.Done) {
       this.dismissPullSkeleton();
     } else if (status === RefreshStatus.Inactive) {
@@ -955,32 +791,17 @@ export struct SearchPage {
 
   /**
    * List 的 onReachEnd。
-   * 三重闸门：正在刷新 / 正在加载更多 / 已经没有下一页，任一命中都直接返回，
+   * 三重闸门：正在刷新 / 正在加载更多 / 正在搜索，任一命中都直接返回，
    * 否则短列表在首帧布局时就会连环触发，一口气把后面几页全拉下来。
    */
   private onReachEnd(): void {
     if (this.refreshing || this.loadingMore || this.loading) {
       return;
     }
-    if (this.homeLoading()) {
-      return;
-    }
     if (!this.hasMore()) {
       return;
     }
-    this.loadMore();
-  }
-
-  private loadMore(): void {
-    if (this.tab === 'search') {
-      this.loadMoreSearch();
-    } else if (this.tab === 'recommend') {
-      this.loadMoreRecommend();
-    } else if (this.tab === 'ranking') {
-      this.revealMoreRanking();
-    } else {
-      this.loadMoreCenter();
-    }
+    this.loadMoreSearch();
   }
 
   private async loadMoreSearch(): Promise<void> {
@@ -989,7 +810,7 @@ export struct SearchPage {
       return;
     }
     this.loadingMore = true;
-    // seq 竞态保护（2026-10-23 审查修复）：翻页在途时提交新搜索（doSearch 会
+    // seq 竞态保护：翻页在途时提交新搜索（doSearch 会
     // ++searchSeq）或下拉刷新，旧响应必须整体丢弃 —— 否则旧关键词的下一页会被
     // push 进新结果数组、并被 SearchStateHolder.save 持久化成「混页」数据。
     const seq: number = this.searchSeq;
@@ -1001,7 +822,7 @@ export struct SearchPage {
           return;
         }
         const list: UserSearchResult[] = resp.result || [];
-        // 空页 ≠ 到底（2026-10-23 审查修复）：风控时接口同样返回空列表
+        // 空页 ≠ 到底：风控时接口同样返回空列表
         //（HTTP 200 / code 0，见 doSearch 首页分支注释）。遇到空页只提示可重试，
         // 不推进 searchPage、不锁定 searchTotalPages；真到底由服务端 numPages 判定。
         if (list.length === 0) {
@@ -1059,118 +880,46 @@ export struct SearchPage {
         return;
       }
       console.error(`loadMoreSearch failed: ${JSON.stringify(e)}`);
-      this.toast('加载更多失败，请稍后重试', 1800);
-    } finally {
-      this.loadingMore = false;
-    }
-  }
-
-  private async loadMoreRecommend(): Promise<void> {
-    this.loadingMore = true;
-    try {
-      const idx: number = this.recommendFreshIdx + 1;
-      const feed: PopularVideo[] = await BilibiliApi.getRecommendedFeed(idx, RECOMMEND_FEED_PS);
-      this.recommendFreshIdx = idx;
-      const before: number = this.recommend.length;
-      // 按 id 去重后增量 push：推荐流翻页常回捞已出现过的视频。
-      const seen: Set<string> = new Set<string>();
-      for (let i = 0; i < this.recommend.length; i++) {
-        seen.add(this.recommend[i].id);
-      }
-      for (let i = 0; i < feed.length; i++) {
-        const t: Track = mapPopular(feed[i]);
-        if (!seen.has(t.id)) {
-          seen.add(t.id);
-          this.recommend.push(t);
-        }
-      }
-      if (feed.length === 0) {
-        this.recommendHasMore = false;
-      } else if (this.recommend.length === before) {
-        // 整整一页都是已看过的内容：继续翻只会原地打转，直接收口
-        this.recommendHasMore = false;
-      }
-    } catch (e) {
-      console.error(`loadMoreRecommend failed: ${JSON.stringify(e)}`);
-      this.toast('加载更多失败，请稍后重试', 1800);
-    } finally {
-      this.loadingMore = false;
-    }
-  }
-
-  /** 排行榜：接口已经一次给全，这里只是多放一屏，不发请求 */
-  private revealMoreRanking(): void {
-    const from: number = this.ranking.length;
-    const next: number = Math.min(from + RANKING_PAGE_SIZE, this.rankingAll.length);
-    for (let i = from; i < next; i++) {
-      this.ranking.push(this.rankingAll[i]);
-    }
-  }
-
-  private async loadMoreCenter(): Promise<void> {
-    this.loadingMore = true;
-    try {
-      const next: number = this.centerPage + 1;
-      const list: MusicCenterItem[] =
-        await BilibiliApi.getMusicComprehensiveRank(CENTER_PAGE_SIZE, next);
-      const before: number = this.center.length;
-      // 按 id 去重后增量 push（分页可能跨页重复）。
-      const fresh: Track[] = mapMusicCenterList(list);
-      const seen: Set<string> = new Set<string>();
-      for (let i = 0; i < this.center.length; i++) {
-        seen.add(this.center[i].id);
-      }
-      for (let i = 0; i < fresh.length; i++) {
-        const t: Track = fresh[i];
-        if (!seen.has(t.id)) {
-          seen.add(t.id);
-          this.center.push(t);
-        }
-      }
-      this.centerPage = next;
-      if (list.length === 0 || this.center.length === before) {
-        this.centerHasMore = false;
-      }
-    } catch (e) {
-      console.error(`loadMoreCenter failed: ${JSON.stringify(e)}`);
-      this.toast('加载更多失败，请稍后重试', 1800);
+      this.toast('加载更多失败，请稍后再试', 1800);
     } finally {
       this.loadingMore = false;
     }
   }
 
   /**
-   * 加载中 / 空数据 / 搜索空态的统一展示区。
-   * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条；扫光带已删除，
-   * 纯静态占位），替换原先的 LoadingProgress 转圈——占位形状对齐内容布局，加载完成内容「落位」不跳。
+   * 加载中 / 空态的统一展示区。
+   * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条，纯静态占位），
+   * 占位形状对齐内容布局，加载完成内容「落位」不跳。
+   * 空态：区分「还没搜」和「搜了但没结果」（换词建议），
+   * 搜 UP 主时说「UP 主」，别沿用视频那句——两者换关键词的方向不一样。
+   * 还没搜：常用搜索词区（CommonWordsSection）常驻初始页，其下方叠
+   * 页签区（HistorySection：最近搜索 / B 站热搜；无历史时只剩热搜页签，
+   * 所以不以历史非空作渲染闸门）。
    */
   @Builder
-  HomeStateArea(): void {
-    if (this.homeLoading() && this.currentListLength() === 0) {
+  SearchStateArea(): void {
+    if (this.loading) {
       this.SkeletonArea()
-    } else if (!this.homeLoading() && this.currentListLength() === 0) {
-      Column() {
-        if (this.tab === 'search') {
-          // 搜 UP 主时说「UP 主」，别沿用视频那句「相关内容」——两者换关键词的方向不一样
-          Text(this.searched
-            ? (this.searchKind === 'user' ? '没有找到相关 UP 主，换个关键词试试' : '没有找到相关内容，换个关键词试试')
-            : '输入关键词开始搜索')
-            .fontSize(16)
-            .fontColor($r('app.color.text_secondary'))
-        } else {
-          Text('暂无数据')
-            .fontSize(16)
-            .fontColor($r('app.color.text_secondary'))
-          Button('点击重试', { type: ButtonType.Normal })
-            .fontSize(13)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .margin({ top: 12 })
-            .onClick((): void => {
-              this.reloadCurrentTab();
-            })
+    } else if (this.currentListLength() === 0) {
+      if (!this.searched) {
+        // height('100%')：外层 Column 高度确定（整屏），本列占满整高 →
+        // 兄弟 Refresh(layoutWeight) 分到剩余 0 高。初始态结果列表为空、
+        // 下拉骨架闸门要求 currentListLength()>0，Refresh 塌缩无功能损失；
+        // 换来下方 HistorySection 能经 layoutWeight 链铺满到屏幕底部
+        // （最近搜索/热搜需延伸到安全区）。
+        Column() {
+          this.CommonWordsSection()
+          this.HistorySection()
         }
+        .height('100%')
+      } else {
+        Column() {
+          Text(this.searchKind === 'user' ? '没有找到相关 UP 主，换个关键词试试' : '没有找到相关内容，换个关键词试试')
+            .fontSize(16)
+            .fontColor($r('app.color.text_secondary'))
+        }
+        .margin({ top: this.listStartOffset() + 48 })
       }
-      .margin({ top: this.listStartOffset() + 48 })
     }
   }
 
@@ -1218,7 +967,7 @@ export struct SearchPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
           // 官方 / 企业认证：匿名搜 UP 时最需要的信息（区分「官方号」与「同名搬运号」）
-          // 阶段 5（2026-10-11）：小字徽标改用系统标准 Chip（不能链式挂属性 → 外层 Row）
+          // 徽标用系统标准 Chip（不能链式挂属性 → 外层 Row）
           if (u.verify_info && u.verify_info.desc.length > 0) {
             Row() {
               Chip({
@@ -1284,57 +1033,6 @@ export struct SearchPage {
     return parts.join(' · ');
   }
 
-  /** 从搜索结果直接进 UP 主页（`openUpSpace` 是给「曲目」用的，这里是 UP 本身） */
-  private openUpSpaceByUser(u: UserSearchResult): void {
-    const mid: string = String(u.mid ?? '');
-    if (mid.length === 0) {
-      this.toast('这个 UP 缺少 mid，无法打开主页', 1800);
-      return;
-    }
-    // 头像一并带过去，UP 主页首帧就有图（否则要等主页自己再拉一次 card）
-    const face: string = u.face_nft && u.face_nft.length > 0 ? u.face_nft : u.upic;
-    NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, u.uname, face));
-  }
-
-  /**
-   * 请求序号（竞态保护）：快速连搜两次时，先发的那次可能后返回，
-   * 不判序号会把新结果覆盖成旧结果。进入时自增取号，await 返回后
-   * 号对不上就整体丢弃（结果、失败提示、loading 复位都不能写）。
-   */
-  private searchSeq: number = 0;
-
-  /**
-   * 搜索类型：`'video'` 搜视频 / `'user'` 搜 UP 主。
-   *
-   * 为什么要这个开关：B 站的 `search_type=bili_user` **匿名完全可用**（实测 code=0，
-   * 「索尼音乐」能搜到官方号并带 `mid`），而搜出来的 UP 可以直接进站内 UP 主页 →
-   * 订阅投稿，等于把「找歌 → 找 UP → 长期收歌」这条链打通了。
-   *
-   * 切换后**不自动重搜**：用户可能只是改了模式还没按搜索，自动请求会白花一次配额
-   * （B 站对匿名搜索也有频率限制）。已经在结果态的话才自动重搜，手感更自然。
-   *
-   * 批 4 迁根栏后为页面 / 根栏共享的双向状态：根栏滑片选段改它，本页读它。
-   */
-  @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
-  /** UP 主搜索结果（`searchKind === 'user'` 时渲染这个，其余时间忽略） */
-  @State @Watch('onListSourceChanged') userResults: UserSearchResult[] = [];
-  private userSource: ArrayDataSource<UserSearchResult> = new ArrayDataSource<UserSearchResult>([]);
-  private userPairs: PairDataSource<UserSearchResult> = new PairDataSource<UserSearchResult>(this.userSource);
-
-  /**
-   * 切换搜索类型（滑块选段，根栏经持有器回调进来）；已在结果态时立刻用新类型重搜同一关键词。
-   * 白片平移动画由根栏滑片自带 .animation 承担（原 animateTo 跨不了组件层，见 SearchTabBar 注释）。
-   */
-  private setSearchKind(kind: string): void {
-    if (this.searchKind === kind) {
-      return;
-    }
-    this.searchKind = kind;
-    if (this.searched && this.keyword.trim().length > 0) {
-      this.doSearch();
-    }
-  }
-
   /** 数字友好化：950682 → 「95.1 万」，避免搜索结果里出现一长串数字 */
   private formatFans(fans: number): string {
     if (!Number.isFinite(fans) || fans <= 0) {
@@ -1349,94 +1047,34 @@ export struct SearchPage {
     return `${(fans / 100000000).toFixed(1)} 亿粉丝`;
   }
 
-  /**
-   * 搜索结果归位（问题 2 修复，2026-10-11）。
-   *
-   * 现场：真机「结果列表已滚动 → 再搜一次」时，新结果沿用旧滚动偏移 ——
-   * 首个可见项是上一屏的中间项、且被 TitleBar 裁掉上半截（dumpLayout 实测：该行 bounds
-   * 顶到 y=132，而静止位首项是 y=528）。用户看到的就是「第一首压在顶栏下面」。
-   * 只有搜索页签有输入框、只有它会「换内容不换列表」，所以只有搜索页签复现。
-   *
-   * 为什么用 scrollEdge(Edge.Top) 而不是 scrollToIndex(0)：
-   *   · Edge.Top 回到**内容起点**，即 contentStartOffset 让位后的静止位（首项在栏下方）；
-   *   · scrollToIndex(0) 会把第 0 项顶到视口物理顶端 —— 正是要避免的「压顶栏」。
-   *
-   * setTimeout(0)：等新结果完成这一帧布局再滚，否则滚的是上一批内容。
-   */
-  private resetResultScroll(): void {
-    setTimeout((): void => {
-      TabScrollerHolder.search.scrollEdge(Edge.Top);
-    }, 0);
-  }
-
-  private async doSearch(): Promise<void> {
-    const kw: string = this.keyword.trim();
-    if (!kw) {
-      this.toast('请输入搜索关键词', 1500);
+  /** 从搜索结果直接进 UP 主页（`openUpSpace` 是给「曲目」用的，这里是 UP 本身） */
+  private openUpSpaceByUser(u: UserSearchResult): void {
+    const mid: string = String(u.mid ?? '');
+    if (mid.length === 0) {
+      this.toast('这个 UP 缺少 mid，无法打开主页', 1800);
       return;
     }
-    const seq: number = ++this.searchSeq;
-    console.info(`[Search] doSearch id=${this.pageId} kw=${kw} kind=${this.searchKind} seq=${seq}`);
-    this.loading = true;
-    this.tab = 'search';
-    this.showHistory = false;
-    // 先记历史再发请求：被风控 / 断网导致搜不出结果时，这次搜索同样算「搜过」，
-    // 否则用户会遇到「明明搜过却不在历史里」。
-    this.history = SearchHistoryStore.addSearchHistory(kw);
-    try {
-      if (this.searchKind === 'user') {
-        const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, 1, SEARCH_PAGE_SIZE);
-        if (seq !== this.searchSeq) {
-          return;
-        }
-        this.userResults = resp.result || [];
-        this.searchKeyword = kw;
-        this.searchPage = 1;
-        this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
-        this.results = [];
-        this.searched = true;
-        this.resetResultScroll();
-        console.info(`[Search] user done id=${this.pageId} n=${this.userResults.length} searched=${this.searched}`);
-        if (this.userResults.length === 0) {
-          this.toast('没有搜到相关 UP 主，换个关键词试试', 2000);
-        }
-        return;
-      }
-      const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE);
-      // 已有更新的搜索在途（或已完成）：旧响应整体丢弃，不覆盖新结果
-      if (seq !== this.searchSeq) {
-        return;
-      }
-      this.results = (resp.result || []).map(mapSearch);
-      this.userResults = [];
-      this.searchKeyword = kw;
-      this.searchPage = 1;
-      this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
-      this.searched = true;
-      this.resetResultScroll();
-      SearchStateHolder.save(kw, this.results);
-      if (this.results.length === 0) {
-        // 搜索接口被风控时也是返回 0 条（HTTP 200 / code 0），明确提示，别让人以为没搜
-        this.toast('没有搜索到结果，请换个关键词或稍后再试', 2000);
-      }
-    } catch (e) {
-      // 失败的旧请求不提示、不碰状态：新请求还在飞，别让用户看到「先成功后报错」
-      if (seq !== this.searchSeq) {
-        return;
-      }
-      this.searched = true;
-      console.error(`doSearch failed: ${JSON.stringify(e)}`);
-      this.toast('搜索失败，请检查网络或登录态', 2000);
-    } finally {
-      // 只有「最新一次」请求有权复位 loading：旧请求的 finally 不能把
-      // 新请求的 loading=true 提前拉回 false（骨架屏会闪没）
-      if (seq === this.searchSeq) {
-        this.loading = false;
-      }
+    // 头像一并带过去，UP 主页首帧就有图（否则要等主页自己再拉一次 card）
+    const face: string = u.face_nft && u.face_nft.length > 0 ? u.face_nft : u.upic;
+    NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, u.uname, face));
+  }
+
+  /**
+   * 切换搜索类型（SearchInputBar 滑片选段经持有器回调进来）；
+   * 已在结果态时立刻用新类型重搜同一关键词。
+   * 白片平移动画由分段按钮自带 .animation 承担（原 animateTo 跨不了组件层）。
+   */
+  private setSearchKind(kind: string): void {
+    if (this.searchKind === kind) {
+      return;
+    }
+    this.searchKind = kind;
+    if (this.searched && this.keyword.trim().length > 0) {
+      this.doSearch();
     }
   }
 
-  /** 「⋯」标准菜单项（阶段 2 迁移：自绘菜单弹窗 → bindMenu + MenuElement 数组） */
+  /** 「⋯」标准菜单项（bindMenu + MenuElement 数组） */
   private trackMenuItems(track: Track): MenuElement[] {
     return [
       {
@@ -1477,8 +1115,8 @@ export struct SearchPage {
    * 「进入 UP 主主页」→ 站内页（UpSpacePage）。
    *
    * mid 有两条来源：
-   *  1. 列表映射时已落下来的（搜索 / 排行榜 / 推荐流都有 owner.mid）—— 直接用，零请求；
-   *  2. 音乐中心、已下载曲目这类结构里没有 mid 的 → 用 bvid 走 `getVideoDetail` 换
+   *  1. 列表映射时已落下来的（搜索结果有 mid）—— 直接用，零请求；
+   *  2. 已下载曲目这类结构里没有 mid 的 → 用 bvid 走 `getVideoDetail` 换
    *     `owner.mid`。该接口带 viewCache（TTL 内），同一首反复点不会重复发请求。
    */
   private async openUpSpace(track: Track): Promise<void> {
@@ -1571,12 +1209,11 @@ export struct SearchPage {
   /**
    * 把歌曲加入指定歌单。
    *
-   * 一个歌单都没有时**自动建一个再放进去**：早期实现是弹一句「还没有歌单，先去歌单页新建一个」
-   * 把用户挡回去，等于让用户为了收藏一首歌先跳页建单、再回来重新找到这首——
-   * 纯粹的摩擦。现在的行为是「点加入歌单 → 自动创建歌单并加入」。
+   * 一个歌单都没有时**自动建一个再放进去**：让用户先跳页建单、再回来重新找到
+   * 这首是纯粹的摩擦，行为是「点加入歌单 → 自动创建歌单并加入」。
    */
   private openPlaylistPicker(track: Track): void {
-    const options: Playlist[] = LibraryStore.getPlaylists();
+    const options: Playlist[] = LibraryStore.getAddablePlaylists();
     if (options.length === 0) {
       // 复用本次已读到的列表（此处为空），不再让下游二次读库
       this.createPlaylistAndAdd(track, options);
@@ -1584,7 +1221,7 @@ export struct SearchPage {
     }
     this.playlistOptions = options;
     this.pickerTrack = track;
-    this.showPlaylistPicker = true;
+    this.playlistPickerController?.open();
   }
 
   /** 没有任何歌单时的兜底：新建歌单并直接把这首放进去（名字取自歌名） */
@@ -1598,8 +1235,7 @@ export struct SearchPage {
   /** 弹层里的「新建歌单并加入」：同样省掉一次跳转 */
   private createPlaylistFromPicker(): void {
     const track: Track | null = this.pickerTrack;
-    this.showPlaylistPicker = false;
-    this.pickerTrack = null;
+    this.playlistPickerController?.close();
     if (!track) {
       return;
     }
@@ -1632,12 +1268,18 @@ export struct SearchPage {
 
   private addToPlaylist(p: Playlist): void {
     const track: Track | null = this.pickerTrack;
-    this.showPlaylistPicker = false;
-    this.pickerTrack = null;
+    this.playlistPickerController?.close();
     if (!track) {
       return;
     }
     const updated: Playlist | null = LibraryStore.addTrackToPlaylist(p.id, track);
+    // 双向收藏夹拦截提示：非 B 站曲目被 store 过滤时明确告知，
+    // 不再说「已加入」（被滤时 addTrackToPlaylist 仍返回歌单对象）
+    const skipped: number = LibraryStore.consumeFavMirrorSkippedCount();
+    if (updated !== null && skipped > 0) {
+      this.toast(`「${p.name}」是双向同步收藏夹，仅支持添加 B 站曲目`, 2200);
+      return;
+    }
     this.toast(updated ? `已加入「${p.name}」` : '加入歌单失败', 1600);
   }
 
@@ -1658,15 +1300,21 @@ export struct SearchPage {
       .then((list: Track[]): void => {
         if (list.length <= 1) {
           this.toast('该视频只有一个分 P', 1500);
+          console.info(`[Collection] 合集仅展开 ${list.length} 条：${bvid}`);
+          recordPlaybackLog(PLAYBACK_LOG_INFO,
+            `合集「${track.title.slice(0, 30)}」仅展开 ${list.length} 条（该视频可能只有一个分P）`);
           return;
         }
         this.pendingCollectionTracks = list;
         this.collectionName = track.title;
         this.collectionSaverController?.open();
+        console.info(`[Collection] 合集加载成功：${list.length} 首（${bvid}）`);
+        recordPlaybackLog(PLAYBACK_LOG_INFO, `合集「${track.title.slice(0, 30)}」加载成功：${list.length} 首`);
       })
       .catch((e: Error): void => {
         console.error(`loadCollection failed: ${JSON.stringify(e)}`);
         this.toast('合集加载失败', 1800);
+        recordPlaybackLog(PLAYBACK_LOG_ERROR, `合集「${track.title.slice(0, 30)}」加载失败：${e.message}`);
       });
   }
 
@@ -1716,64 +1364,566 @@ export struct SearchPage {
     .width('100%')
   }
 
-  build() {
-    Stack() {
+  /**
+   * 搜索行收窄容器（RecentPage recentBarNarrow 同款）：HDS titleBar 的
+   * stackBuilder 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 ——
+   * 大屏上搜索行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
+   * constraintSize（上限与本页内容列同口径），让搜索行与条目列同宽对齐；
+   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
+   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   */
+  @Builder
+  searchBarNarrow(): void {
+    Row() {
       Column() {
-        if (this.loading) {
-          // 搜索加载中：同款骨架屏（搜索页签没有 homeLoading 状态，单独挂）
-          this.SkeletonArea()
+        SearchInputBar()
+      }
+      .width('100%')
+      .height('100%')
+      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  private useHistoryWord(word: string): void {
+    this.keyword = word;
+    this.doSearch();
+  }
+
+  private clearHistory(): void {
+    SearchHistoryStore.clearSearchHistory();
+    this.history = SearchHistoryStore.getSearchHistory();
+    // 历史清空后「最近搜索」页签不再显示，切到「热搜」兜住内容
+    this.searchSectionTab = 'hot';
+    this.loadHotWords();
+    this.toast('已删除搜索记录', 1500);
+  }
+
+  /** 切页签：第一次切到「热搜」时拉取（页面存活期内缓存，「刷新」强制重拉） */
+  private switchSectionTab(tab: string): void {
+    if (this.searchSectionTab === tab) {
+      return;
+    }
+    this.searchSectionTab = tab;
+    if (tab === 'hot') {
+      this.loadHotWords();
+    }
+  }
+
+  /** 拉取 B 站热搜：在途 / 已缓存直接跳过；失败只提示，不动已缓存的旧榜单 */
+  private loadHotWords(): void {
+    if (this.hotLoading || this.hotLoaded) {
+      return;
+    }
+    this.hotLoading = true;
+    BilibiliApi.getHotSearchKeywords(10)
+      .then((words: string[]): void => {
+        this.hotWords = words;
+        this.hotLoaded = true;
+        if (words.length === 0) {
+          this.toast('没有获取到热搜', 1500);
         }
+      })
+      .catch((e: Error): void => {
+        console.error(`loadHotWords failed: ${JSON.stringify(e)}`);
+        this.toast('热搜加载失败，点「刷新」重试', 1800);
+      })
+      .then((): void => {
+        this.hotLoading = false;
+      });
+  }
 
-        this.HomeStateArea()
+  /** 「刷新」：重置缓存强制重拉（旧榜单保留可点，新数据到了整体替换） */
+  private refreshHotWords(): void {
+    this.hotLoaded = false;
+    this.loadHotWords();
+  }
 
-        // 页签行实测就位前不挂列表：contentStartOffset 只在首次布局生效，
-        // 必须等让位量正确再挂（PD 2026-10-08 同款坑；实测链走 STORE_SEARCH_TABS_HEIGHT）
-        if (this.searchTabsHeight > 0) {
-        // 下拉刷新 + 上拉加载更多都挂在 List 上：
-        // Refresh 只包住列表（搜索框/页签不参与下拉），否则在输入框上往下拉也会触发刷新。
-        //
-        // 方案三 · 骨架接管：refreshingContent 只放 0.1vp 静态空占位
-        // （见 PullRefreshPlaceholder），唯一作用是顶掉系统默认刷新头；
-        // 刷新指示完全由 List 首行的骨架行承担。占位在 aboutToAppear 里创建
-        // （ComponentContent 构造依赖 UIContext）。
-        Refresh({
-          refreshing: $$this.refreshing,
-          refreshingContent: this.refreshPlaceholder !== null ? this.refreshPlaceholder : undefined
-        }) {
-          List({ scroller: TabScrollerHolder.search }) {
-            // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
-            // 屏幕顶端（y=0）。占位高度 = 列表内容起始让位量（listStartOffset：
-            // safeTop + 56 + 独立定值 SEARCH_LIST_START_EXTRA_VP，与页签行实测高
-            // 解耦 —— 条目位置与页签栏分别单独调），滚动时占位与条目一起从模糊板
-            // 下方穿过。
-            ListItem() {
-              // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
-              Row()
-                .width('100%')
-                .height(this.listStartOffset())
+  /**
+   * 常用搜索词区（搜索初始页、最近搜索上方）：出厂默认词 + 用户新增词做快捷
+   * 入口 —— 点词直接以该词搜索（useHistoryWord → doSearch 统一记录进最近
+   * 搜索）。胶囊样式与首页分类 chip / 入口搜索框同语言（bg_card 底 +
+   * bg_divider 描边 + press_overlay 按压反馈）。
+   * 末尾「+」胶囊新建词（CustomContentDialog 弹窗）；
+   * 长按任一词进入编辑态 —— 词旁显示红色 ✕（点击删除该词、即时落盘），
+   * 点词体退出编辑态恢复点词搜索。
+   */
+  @Builder
+  CommonWordsSection(): void {
+    Column() {
+      Text('常用搜索')
+        .fontSize(13)
+        .fontColor($r('app.color.text_tertiary'))
+        .width('100%')
+        .margin({ bottom: 8 })
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(this.commonWords, (word: string): void => {
+          Row({ space: 5 }) {
+            Text(word)
+              .fontSize(13)
+              .fontColor($r('app.color.text_primary'))
+            if (this.wordsEditing) {
+              SymbolGlyph($r('sys.symbol.xmark'))
+                .fontSize(12)
+                .fontColor([$r('app.color.state_error')])
+                .onClick((): void => {
+                  this.deleteCommonWord(word);
+                })
             }
+          }
+          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+          .borderRadius(14)
+          .backgroundColor($r('app.color.bg_card'))
+          .border({ width: 0.5, color: $r('app.color.bg_divider') })
+          .margin({ right: 8, bottom: 8 })
+          .alignItems(VerticalAlign.Center)
+          .stateStyles({
+            pressed: { .backgroundColor($r('app.color.press_overlay')) },
+            normal: { .backgroundColor($r('app.color.bg_card')) }
+          })
+          .onClick((): void => {
+            if (this.wordsEditing) {
+              this.wordsEditing = false;
+            } else {
+              this.useHistoryWord(word);
+            }
+          })
+          .gesture(
+            LongPressGesture({ duration: 400 })
+              .onAction((): void => {
+                if (!this.wordsEditing) {
+                  this.wordsEditing = true;
+                  this.toast('点击 ✕ 删除，点击词完成', 1600);
+                }
+              })
+          )
+        }, (word: string): string => `cw_${word}`)
+        // 「+」新建常用搜索词：与词胶囊同语言（同底同描边），点击开弹窗
+        Row() {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(14)
+            .fontColor([$r('app.color.text_secondary')])
+        }
+        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+        .borderRadius(14)
+        .backgroundColor($r('app.color.bg_card'))
+        .border({ width: 0.5, color: $r('app.color.bg_divider') })
+        .margin({ right: 8, bottom: 8 })
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor($r('app.color.bg_card')) }
+        })
+        .onClick((): void => {
+          this.openAddWord();
+        })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16 })
+    .margin({ top: this.listStartOffset() })
+  }
 
-            // 下拉刷新头（方案三 · 骨架接管）：刷新指示复用骨架行本身，不新增视觉元素。
-            // 刻意放 List 首行而非 refreshingContent：ComponentContent 的内容不随页面
-            // @State 刷新（要变只能显式 update），逐帧跟手做不到；普通组件树里才能被
-            // onOffsetChange 的映射即时驱动。index 传 -1：SkeletonTrackItem 的入场错峰
-            // 只认 0..5，-1 即不播入场（扫光带已全局删除，骨架本就纯静态），
-            // 显隐节奏由刷新状态机（onRefreshStateChange）自己管。
-            // 闸门第二条件：整屏骨架在场（列表为空，HomeStateArea 已接管）时绝不渲染，
-            // 否则「顶部一条 + 下面一整屏」。
-            if (this.showPullSkeleton && this.currentListLength() > 0) {
-              ListItem() {
-                SkeletonTrackItem({ index: -1 })
+  /** 打开「新建常用搜索词」弹窗：先退出编辑态，草稿清零再开 */
+  private openAddWord(): void {
+    this.wordsEditing = false;
+    this.newWordDraft = '';
+    this.addWordController?.open();
+  }
+
+  /** 弹窗取消 / 点遮罩关闭：只清草稿（关闭由系统 / 自绘取消键完成） */
+  private cancelAddWord(): void {
+    this.newWordDraft = '';
+  }
+
+  /** 弹窗「添加」：空名 / 与现有词重复时 toast 提示且弹窗保持打开 */
+  private confirmAddWord(): void {
+    const word: string = this.newWordDraft.trim();
+    if (word.length === 0) {
+      this.toast('请输入搜索词', 1500);
+      return;
+    }
+    if (this.commonWords.indexOf(word) >= 0) {
+      this.toast('该搜索词已存在', 1500);
+      return;
+    }
+    this.commonWords.push(word);
+    this.saveCommonWords();
+    this.addWordController?.close();
+    this.newWordDraft = '';
+    this.toast(`已添加「${word}」`, 1400);
+  }
+
+  /** 删除常用搜索词（编辑态点 ✕）：@State 数组 splice 即时刷新，落盘 fire-and-forget */
+  private deleteCommonWord(word: string): void {
+    const idx: number = this.commonWords.indexOf(word);
+    if (idx < 0) {
+      return;
+    }
+    this.commonWords.splice(idx, 1);
+    this.saveCommonWords();
+  }
+
+  /** 常用搜索词完整列表落盘（与设置页写偏好同口径：不等待、失败静默） */
+  private saveCommonWords(): void {
+    AppPreferences.setObject<string[]>(PREF_COMMON_WORDS, this.commonWords);
+  }
+
+  /**
+   * 「新建常用搜索词」对话框内容区：输入框 + 自绘按钮行（取消 / 添加）。
+   * 按钮刻意不走 CustomContentDialog 的 buttons 槽 —— 空名 / 重名校验失败
+   * 要保持弹窗打开，buttons 槽点击即自动关闭（faqs-arkui-986），只能自管关闭时机。
+   */
+  @Builder
+  AddWordBody(): void {
+    Column() {
+      TextInput({ placeholder: '搜索词，如「民谣」', text: this.newWordDraft })
+        .width('100%')
+        .height(44)
+        // 字阶只用六档（24/20/18/16/13/11），与 SaverBody 的输入框同款 16
+        .fontSize(16)
+        .onChange((v: string): void => {
+          this.newWordDraft = v;
+        })
+      Row() {
+        Button('取消', { type: ButtonType.Normal })
+          .layoutWeight(1)
+          .height(44)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor($r('app.color.bg_divider'))
+          .fontColor($r('app.color.text_primary'))
+          .onClick((): void => {
+            this.addWordController?.close();
+            this.cancelAddWord();
+          })
+        Button('添加', { type: ButtonType.Normal })
+          .layoutWeight(1)
+          .height(44)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .backgroundColor(this.themePrimary)
+          .fontColor(this.themeOn)
+          .margin({ left: 12 })
+          .onClick((): void => {
+            this.confirmAddWord();
+          })
+      }
+      .margin({ top: 16 })
+    }
+    .width('100%')
+  }
+
+  /**
+   * 「加入歌单」弹窗正文：副标题（曲名）+「新建歌单并加入」+ 歌单列表。
+   * 标题在 CustomContentDialog 的 primaryTitle；取消在 buttons 槽（自动关闭）。
+   */
+  @Builder
+  PlaylistPickerBody(): void {
+    Column() {
+      Text(this.pickerTrack ? this.pickerTrack.title : '')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .margin({ bottom: 12 })
+      // 第一项就是「新建歌单并加入」：想单独存一首歌时不必再跑到歌单页
+      Row() {
+        Text('＋ 新建歌单并加入')
+          .fontSize(16)
+          .fontColor(this.themeDeep)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .padding({ top: 12, bottom: 12 })
+      .stateStyles({
+        pressed: { .backgroundColor($r('app.color.press_overlay')) },
+        normal: { .backgroundColor(Color.Transparent) }
+      })
+      .onClick((): void => {
+        this.createPlaylistFromPicker();
+      })
+      Divider()
+        .color($r('app.color.bg_divider'))
+      List() {
+        ForEach(
+          this.playlistOptions,
+          (p: Playlist): void => {
+            ListItem() {
+              Row() {
+                Text(p.name)
+                  .fontSize(16)
+                  .fontColor($r('app.color.text_primary'))
+                  .maxLines(1)
+                  .layoutWeight(1)
+                Text(`${p.tracks.length} 首`)
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
               }
               .width('100%')
-              .opacity(this.pullSkelOpacity)
-              .translate({ y: this.pullSkelOffsetY })
+              .padding({ top: 12, bottom: 12 })
+              .stateStyles({
+                pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                normal: { .backgroundColor(Color.Transparent) }
+              })
+              .onClick((): void => {
+                this.addToPlaylist(p);
+              })
             }
+          },
+          // key 含渲染字段（与 PlaylistsPage 同因）：改名/数量变化后行才会重渲染
+          (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
+        )
+      }
+      .width('100%')
+      // 边界回弹：歌单多到可滚时，到边界的反馈动效
+      .edgeEffect(EdgeEffect.Spring)
+      .constraintSize({ maxHeight: 260 })
+    }
+    .width('100%')
+  }
 
-            if (this.tab === 'search') {
+  /**
+   * 页内「最近搜索 / B 站热搜」页签区。
+   *
+   * 渲染条件见 SearchStateArea：还没搜过。两个页签：
+   *   · 最近搜索 —— 有历史才显示该页签；「删除搜索记录」清空后自动切到热搜；
+   *   · 热搜 —— B 站当前热搜词（getHotSearchKeywords，页面存活期内缓存，
+   *     右角「刷新」强制重拉；榜单顺序，前三名序号主题色高亮）。
+   * 点任一词条立即以该词搜索（useHistoryWord → doSearch，统一记进最近搜索）。
+   * 区列 layoutWeight 铺满到屏幕底部安全区沿，
+   * 列表超出部分内部滚动，contentEndOffset 让末条可滚出悬浮播放条上方。
+   */
+  @Builder
+  HistorySection(): void {
+    Column() {
+      Row() {
+        if (this.history.length > 0) {
+          // 「最近搜索 / 热搜」官方分段按钮（CapsuleSegmentButtonV2，B 站粉经
+          // itemSelectedBackgroundColor 覆写，与 SearchTabBar「视频/UP主」同一套语言）。
+          // ⚠️ V2 分段按钮给多大渲染多大（均摊到各段），必须显式宽度。
+          CapsuleSegmentButtonV2({
+            items: this.historySegItems,
+            selectedIndex: this.searchSectionTab === 'hot' ? 1 : 0,
+            onItemClicked: (index: number): void => {
+              this.switchSectionTab(index === 1 ? 'hot' : 'history');
+            },
+            itemSelectedBackgroundColor: this.segColors().selectedBg,
+            itemSelectedFontColor: this.segColors().selectedFont,
+            itemSelectedFontWeight: FontWeight.Medium,
+            itemFontColor: this.segColors().unselectedFont,
+            itemFontWeight: FontWeight.Normal,
+            itemFontSize: LengthMetrics.vp(13),
+            itemSelectedFontSize: LengthMetrics.vp(13),
+            buttonBackgroundColor: this.segColors().grooveBg,
+            buttonBorderRadius: LengthMetrics.vp(8),
+            itemBorderRadius: LengthMetrics.vp(6),
+            // 内部背板最小高度对齐 32（默认约 36 会盖过 .height(32)，SearchTabBar 同款结论）
+            buttonMinHeight: LengthMetrics.vp(32),
+            // 紧凑内边距（系统默认 16vp 空气感过强，SearchTabBar 真机验收同款收到 8vp）
+            itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
+          })
+            .height(32)
+            // 显式宽度：背板 4×2 + 「最近搜索」(≈52+16) + 「热搜」(≈26+16)
+            .width(124)
+        } else {
+          // 没有历史时不显示「最近搜索」页签，热搜独占
+          Text('热搜')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+        }
+        Blank()
+          .layoutWeight(1)
+        if (this.searchSectionTab === 'hot') {
+          Text(this.hotLoading ? '加载中…' : '刷新')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+            .padding({ left: 8, top: 4, bottom: 4 })
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              this.refreshHotWords();
+            })
+        } else {
+          Text('删除搜索记录')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+            .padding({ left: 8, top: 4, bottom: 4 })
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              this.clearHistory();
+            })
+        }
+      }
+      .width('100%')
+      .margin({ bottom: 4 })
+
+      if (this.searchSectionTab === 'hot') {
+        this.HotWordList()
+      } else {
+        List() {
+          ForEach(this.history, (word: string): void => {
+            ListItem() {
+              Text(word)
+                .fontSize(16)
+                .fontColor($r('app.color.text_primary'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+                .padding({ top: 12, bottom: 12 })
+                .stateStyles({
+                  pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                  normal: { .backgroundColor(Color.Transparent) }
+                })
+                .onClick((): void => {
+                  this.useHistoryWord(word);
+                })
+            }
+          }, (word: string): string => word)
+        }
+        .width('100%')
+        // 铺满页签区剩余高度（父列高度确定）；超出部分列表内滚，
+        // contentEndOffset 让末条能滚出底部悬浮播放条上方（与结果列表同口径避让）。
+        .layoutWeight(1)
+        .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+        // 边界回弹：历史多到可滚时，到顶/到底的反馈动效
+        .edgeEffect(EdgeEffect.Spring)
+        .scrollBar(BarState.Off)
+      }
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16 })
+    // 顶距不再用 listStartOffset（让位由上方 CommonWordsSection 承担），
+    // 这里只做区段间距
+    .margin({ top: 24 })
+    // 父列（SearchStateArea 初始态 Column）高度已定，本列吃掉
+    // CommonWordsSection 以下全部剩余高度，直达屏幕底部安全区沿。
+    .layoutWeight(1)
+  }
+
+  /**
+   * 热搜页签列表：榜单顺序（首位最热）、前三名序号主题色高亮；
+   * 空态区分「正在拉取」与「拉取失败/为空」，后者引导点「刷新」。
+   */
+  @Builder
+  HotWordList(): void {
+    if (this.hotWords.length === 0) {
+      Row() {
+        if (this.hotLoading) {
+          LoadingProgress()
+            .width(18)
+            .height(18)
+            .color($r('app.color.text_tertiary'))
+          Text('正在加载热搜…')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+            .margin({ left: 8 })
+        } else {
+          Text('没有获取到热搜，点「刷新」重试')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+        }
+      }
+      .width('100%')
+      .padding({ top: 20, bottom: 20 })
+      .justifyContent(FlexAlign.Center)
+    } else {
+      List() {
+        ForEach(this.hotWords, (word: string, index: number): void => {
+          ListItem() {
+            Row() {
+              Text(`${index + 1}`)
+                .fontSize(13)
+                .fontColor(index < HOT_TOP_RANK_COUNT
+                  ? this.themeDeep : $r('app.color.text_tertiary'))
+                .width(24)
+              Text(word)
+                .fontSize(16)
+                .fontColor($r('app.color.text_primary'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .padding({ top: 12, bottom: 12 })
+            .stateStyles({
+              pressed: { .backgroundColor($r('app.color.press_overlay')) },
+              normal: { .backgroundColor(Color.Transparent) }
+            })
+            .onClick((): void => {
+              this.useHistoryWord(word);
+            })
+          }
+        }, (word: string): string => word)
+      }
+      .width('100%')
+      // 铺满页签区剩余高度；末尾避让与结果列表同口径（悬浮播放条 + 安全区），
+      // 末条可滚出条上方。
+      .layoutWeight(1)
+      .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+      .edgeEffect(EdgeEffect.Spring)
+      .scrollBar(BarState.Off)
+    }
+  }
+
+  build() {
+    HdsNavDestination() {
+      Stack() {
+        Column() {
+          this.SearchStateArea()
+
+          // 下拉刷新 + 上拉加载更多都挂在 List 上：
+          // Refresh 只包住列表（搜索行在 HDS titleBar 内，不参与下拉手势）。
+          //
+          // 骨架接管：refreshingContent 只放 0.1vp 静态空占位
+          // （见 PullRefreshPlaceholder），唯一作用是顶掉系统默认刷新头；
+          // 刷新指示完全由 List 首行的骨架行承担。占位在 aboutToAppear 里创建
+          // （ComponentContent 构造依赖 UIContext）。
+          Refresh({
+            refreshing: $$this.refreshing,
+            refreshingContent: this.refreshPlaceholder !== null ? this.refreshPlaceholder : undefined
+          }) {
+            List({ scroller: this.listScroller }) {
+              // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
+              // 屏幕顶端（y=0）。占位高度 = 列表内容起始让位量（listStartOffset：
+              // safeTop + 56 + 独立定值），滚动时占位与条目一起从模糊板下方穿过。
+              ListItem() {
+                // 下拉刷新头（骨架接管）：刷新指示复用骨架行本身，不新增视觉元素。
+                // 刻意不用 refreshingContent：ComponentContent 的内容不随页面
+                // @State 刷新（要变只能显式 update），逐帧跟手做不到；普通组件树里才能被
+                // onOffsetChange 的映射即时驱动。index 传 -1：SkeletonTrackItem 的入场错峰
+                // 只认 0..5，-1 即不播入场（骨架本就纯静态），
+                // 显隐节奏由刷新状态机（onRefreshStateChange）自己管。
+                // 闸门第二条件：整屏骨架在场（列表为空，SearchStateArea 已接管）时绝不渲染，
+                // 否则「顶部一条 + 下面一整屏」。
+                // 骨架挂在占位条目内的 Stack 里做零布局覆盖：条件挂载若增删普通
+                // ListItem，Drag/Inactive 翻转时会对下方内容产生
+                // ±92vp（64 封面 + 上下 padding 28）布局位移；Stack 定高，
+                // 挂载翻转只增删被定位的覆盖子节点，布局零影响。
+                Stack({ alignContent: Alignment.BottomStart }) {
+                  if (this.showPullSkeleton && this.currentListLength() > 0) {
+                    SkeletonTrackItem({ index: -1 })
+                      .opacity(this.pullSkelOpacity)
+                      .translate({ y: this.pullSkelOffsetY })
+                      // 纯装饰：骨架永不交互；透明期也不吞占位带的触摸（透明节点
+                      // 默认仍参与命中测试，会阻断列表滚动手势起手）。
+                      .hitTestBehavior(HitTestMode.None)
+                  }
+                }
+                .width('100%')
+                .height(this.listStartOffset())
+              }
+
               if (this.searchKind === 'user') {
-                // UP 主结果：List 里混排两种数据源不行，所以拆成两个并列分支。
-                // 横屏宽屏（2026-10-23 两列改造）：UP 行配对两列。
+                // UP 主结果：List 里混排两种数据源不行，与本页视频结果分支互斥。
+                // 横屏宽屏：UP 行配对两列。
                 if (this.isTwoCol()) {
                   LazyForEach(
                     this.userPairs,
@@ -1811,6 +1961,49 @@ export struct SearchPage {
                     (u: UserSearchResult): string => `${u.mid}`
                   )
                 }
+              // 大封面模式（外观设置「条目展示」）：视频结果配对成
+              // 双列网格卡（TrackCard），竖屏 / 横屏均双列，交互契约与行内版一致
+              // （整卡点击播/暂停、「⋯」菜单）；配对数据源复用 resultPairs
+              // （onListSourceChanged 无条件 sync，网格竖屏也是热的）。
+              // UP 结果分支在上方，不受大封面模式影响。
+              } else if (this.isGrid()) {
+                LazyForEach(
+                  this.resultPairs,
+                  (pair: PairOf<Track>): void => {
+                    ListItem() {
+                      Row() {
+                        TrackCard({
+                          track: pair.first,
+                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+                        // 间隔条，末卡与满行卡等宽。
+                        Blank().width(TWO_COL_GAP_VP)
+                        if (pair.second !== null) {
+                          TrackCard({
+                            track: pair.second,
+                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1)
+                        } else {
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                      // 网格行页边距：两边留白 + 封面整体缩小约 15%，
+                      // 见 GRID_EDGE_PADDING_VP 注释。
+                      .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+                      // Top 对齐：卡高随标题行数浮动，Row 默认 Center 会把矮卡
+                      // 垂直居中 → 左右封面错位；Top 让左右封面严格同高起步。
+                      .alignItems(VerticalAlign.Top)
+                    }
+                  },
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                )
               } else if (this.isTwoCol()) {
                 LazyForEach(
                   this.resultPairs,
@@ -1856,530 +2049,180 @@ export struct SearchPage {
                   (t: Track): string => t.id
                 )
               }
-            } else if (this.tab === 'recommend') {
-              if (this.isTwoCol()) {
-                LazyForEach(
-                  this.recommendPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
-                    ListItem() {
-                      Row() {
-                        TrackItem({
-                          track: pair.first,
-                          entranceIndex: pIndex * 2,
-                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        if (pair.second !== null) {
-                          TrackItem({
-                            track: pair.second,
-                            entranceIndex: pIndex * 2 + 1,
-                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
-              } else {
-                LazyForEach(
-                  this.recommendSource,
-                  (t: Track, index: number): void => {
-                    ListItem() {
-                      TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
-                    }
-                  },
-                  (t: Track): string => t.id
-                )
-              }
-            } else if (this.tab === 'ranking') {
-              if (this.isTwoCol()) {
-                LazyForEach(
-                  this.rankingPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
-                    ListItem() {
-                      Row() {
-                        TrackItem({
-                          track: pair.first,
-                          entranceIndex: pIndex * 2,
-                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        if (pair.second !== null) {
-                          TrackItem({
-                            track: pair.second,
-                            entranceIndex: pIndex * 2 + 1,
-                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
-              } else {
-                LazyForEach(
-                  this.rankingSource,
-                  (t: Track, index: number): void => {
-                    ListItem() {
-                      TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
-                    }
-                  },
-                  (t: Track): string => t.id
-                )
-              }
-            } else if (this.isTwoCol()) {
-              LazyForEach(
-                this.centerPairs,
-                (pair: PairOf<Track>, pIndex: number): void => {
-                  ListItem() {
-                    Row() {
-                      TrackItem({
-                        track: pair.first,
-                        entranceIndex: pIndex * 2,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      }).layoutWeight(1)
-                      if (pair.second !== null) {
-                        TrackItem({
-                          track: pair.second,
-                          entranceIndex: pIndex * 2 + 1,
-                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                      } else {
-                        Blank().layoutWeight(1)
-                      }
-                    }
-                    .width('100%')
-                  }
-                },
-                (pair: PairOf<Track>): string =>
-                  `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-              )
-            } else {
-              LazyForEach(
-                this.centerSource,
-                (t: Track, index: number): void => {
-                  ListItem() {
-                    TrackItem({
-                      track: t,
-                      entranceIndex: index,
-                      onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                    })
-                  }
-                },
-                (t: Track): string => t.id
-              )
-            }
 
-            // 加载更多状态条（2026-10-19 常驻 + 固定高度）：只在这一屏有内容时出现；
-            // 只换内容不插拔、高度恒定，数据落地帧尾部 extent 只增不减，底部弹簧
-            // 过滚动不被收缩强制解析（修「加载第二页列表整体跳一下」）。
-            // 加载态从 3 行骨架收成单行转圈：为固定高度做的取舍，首屏/下拉刷新骨架不动。
-            if (this.currentListLength() > 0) {
-              ListItem() {
-                Row() {
-                  if (this.loadingMore) {
-                    LoadingProgress()
-                      .width(18)
-                      .height(18)
-                      .color($r('app.color.text_tertiary'))
-                    Text('加载中…')
-                      .fontSize(12)
-                      .fontColor($r('app.color.text_tertiary'))
-                      .margin({ left: 8 })
-                  } else if (!this.hasMore()) {
-                    Text('已经到底啦')
-                      .fontSize(13)
-                      .fontColor($r('app.color.text_tertiary'))
-                  } else {
-                    Text('上拉加载更多')
-                      .fontSize(13)
-                      .fontColor($r('app.color.text_tertiary'))
+              // 加载更多状态条（常驻 + 固定高度）：只在这一屏有内容时出现；
+              // 只换内容不插拔、高度恒定，数据落地帧尾部 extent 只增不减，底部弹簧
+              // 过滚动不被收缩强制解析（防加载下一页时列表整体跳动）。
+              // 加载态是单行转圈：为固定高度做的取舍，首屏/下拉刷新骨架不动。
+              if (this.currentListLength() > 0) {
+                ListItem() {
+                  Row() {
+                    if (this.loadingMore) {
+                      LoadingProgress()
+                        .width(18)
+                        .height(18)
+                        .color($r('app.color.text_tertiary'))
+                      Text('加载中…')
+                        .fontSize(12)
+                        .fontColor($r('app.color.text_tertiary'))
+                        .margin({ left: 8 })
+                    } else if (!this.hasMore()) {
+                      Text('已经到底啦')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    } else {
+                      Text('上拉加载更多')
+                        .fontSize(13)
+                        .fontColor($r('app.color.text_tertiary'))
+                    }
                   }
+                  .width('100%')
+                  .height(LIST_FOOTER_HEIGHT_VP)
+                  .justifyContent(FlexAlign.Center)
                 }
-                .width('100%')
-                .height(LIST_FOOTER_HEIGHT_VP)
-                .justifyContent(FlexAlign.Center)
               }
             }
+            .width('100%')
+            .height('100%')
+            // 边界回弹：到底的反馈动效；顶部下拉由 Refresh 刷新动画接管。
+            .edgeEffect(EdgeEffect.Spring)
+            .cachedCount(8)
+            // Sumy 式穿透：顶部 HDS 标题栏让位由 List 首个空白占位 ListItem 负责
+            // （见上方占位注释，下载页同款），不用 contentStartOffset ——
+            // 材质层有内容可模糊（浮出效果才可见）。
+            // 末尾让位叠加 safeBottom：二级页悬浮播放条（SubPagePlayBar）盖在
+            // 底部安全区上沿，列表末尾多让这一份避免最后一行被压住。
+            .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+            .onReachEnd((): void => {
+              this.onReachEnd();
+            })
+            // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+            .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+              this.syncTopBlurProgress();
+            })
+            .onScrollStop((): void => {
+              // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              this.syncTopBlurProgress();
+            })
           }
+          .layoutWeight(1)
           .width('100%')
-          .height('100%')
-          // 边界回弹（2026-10-08）：到底的反馈动效；顶部下拉由 Refresh 刷新动画接管。
-          .edgeEffect(EdgeEffect.Spring)
-          .cachedCount(8)
-          // Sumy 式穿透：顶部根栏让位由 List 首个空白占位 ListItem 负责（见上方
-          // 占位注释，下载页同款迁移），不再使用 contentStartOffset —— 材质层有
-          // 内容可模糊（浮出效果才可见）。
-          // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡。
-          // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多，
-          // 否则最后一项会被页签栏 / 迷你条压住。
-          .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-          .onReachEnd((): void => {
-            this.onReachEnd();
+          .onRefreshing((): void => {
+            this.refreshSearch();
           })
-          // [Fling·F1/F2] 边界采样（规格 §F1/F2）：只在状态翻转时写一次 STORE_FLING_ACTIVE
-          // + 打 [Fling] 日志；回调 void 返回，绝不返回 ScrollResult（禁止的 F4a 吃帧）。
-          .onWillScroll((offset: number, state: ScrollState, source: ScrollSource): void => {
-            if (FlingSampler.note(state)) {
-              AppStorage.setOrCreate(STORE_FLING_ACTIVE, state === ScrollState.Fling);
-              console.info(`[Fling] state=${FlingSampler.stateName(state)} src=${source} off=${offset}`);
+          // ── 下拉刷新参数底座 ──
+          // 触发阈值 72vp（同时是骨架淡入进度的分母：拉满 = 不透明 = 「松手即刷」）；
+          // 跟手 55%（跟手但带阻尼）；最大下拉 120vp 封顶，防大力下拉把页面拽出半屏。
+          .refreshOffset(PULL_REFRESH_OFFSET_VP)
+          .pullDownRatio(PULL_REFRESH_RATIO)
+          .maxPullDownDistance(PULL_MAX_DISTANCE_VP)
+          // 五态状态机：跟手闸门 / Done 淡出（见 onRefreshStateChange）
+          .onStateChange((status: RefreshStatus): void => {
+            this.onRefreshStateChange(status);
+          })
+          // 每帧回写下拉进度 → 骨架淡入 + 落位映射（跟手要即时，不套 animateTo）；
+          // 只写状态变量：不发请求 / 改数组 / 打日志。Done 淡出在途时让位给退场动画。
+          .onOffsetChange((offset: number): void => {
+            this.pullOffset = offset;
+            if (this.pullFadeTimer !== -1) {
+              return;
             }
-          })
-          // [任务③·自绘原型] 逐帧驱动自绘渐变模糊层：onDidScroll 在偏移已应用
-          // 后回调（onWillScroll 是应用前，快滑时差一整帧会让模糊层滞后一跳）。
-          .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
-            this.syncTopBlurProgress();
-          })
-          .onScrollStop((): void => {
-            FlingSampler.note(ScrollState.Idle);
-            AppStorage.setOrCreate(STORE_FLING_ACTIVE, false);
-            // [任务③·自绘原型] Idle 校准终态（用户方案 ②）：停点即精确值，
-            // 兜住 Fling 期任何丢帧 / 死区过滤累计的偏差。
-            this.syncTopBlurProgress();
-            console.info('[Fling] stop');
-          })
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .onRefreshing((): void => {
-          this.handleRefresh();
-        })
-        // ── 方案三参数底座 ──
-        // 触发阈值 72vp（同时是骨架淡入进度的分母：拉满 = 不透明 = 「松手即刷」）；
-        // 跟手 55%（跟手但带阻尼）；最大下拉 120vp 封顶，防大力下拉把页面拽出半屏。
-        .refreshOffset(PULL_REFRESH_OFFSET_VP)
-        .pullDownRatio(PULL_REFRESH_RATIO)
-        .maxPullDownDistance(PULL_MAX_DISTANCE_VP)
-        // 五态状态机：跟手闸门 / 整屏骨架让位 / Done 淡出（见 onRefreshStateChange）
-        .onStateChange((status: RefreshStatus): void => {
-          this.onRefreshStateChange(status);
-        })
-        // 每帧回写下拉进度 → 骨架淡入 + 落位映射（跟手要即时，不套 animateTo）；
-        // 只写状态变量：不发请求 / 改数组 / 打日志。Done 淡出在途时让位给退场动画。
-        .onOffsetChange((offset: number): void => {
-          this.pullOffset = offset;
-          if (this.pullFadeTimer !== -1) {
-            return;
-          }
             const p: number = Math.min(this.pullOffset / PULL_REFRESH_OFFSET_VP, 1);
             this.pullSkelOpacity = p;
             this.pullSkelOffsetY = (1 - p) * PULL_SKELETON_SETTLE_VP;
           })
         }
+        .width('100%')
+        .height('100%')
+        .backgroundColor($r('app.color.bg_page'))
+        // ⚠️ 不再整体 padding top：列表视口要铺满全屏（占位条目负责让出栏高），
+        // 否则条目在栏底被裁掉、永远滑不进模糊板下方。骨架/空态区各自补 listStartOffset()。
+        // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp，见 BreakpointConstants）。
+        // 根 Stack 默认居中对齐，直接给内容列挂上限即可，不需要额外包一层。
+        // 横屏宽屏：上限放宽到 840vp，两列每列行宽约 400vp+。
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+
+        // 顶栏渐变模糊层：盖主内容列之上（z 序低于历史面板，低于 HDS
+        // titleBar；弹窗类已全部走官方 CustomContentDialog，不挂根 Stack），
+        // 进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
+        // HDS 滚动效果已由 titleBar styleOptions 第三参关闭（防双重模糊），
+        // 本层承担全部渐变模糊观感。
+        TopGradientBlurOverlay({
+          barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+          updater: this.topBlurUpdater
+        })
       }
       .width('100%')
       .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（contentStartOffset 负责让出栏高），
-      // 否则条目在栏底被裁掉、永远滑不进模糊板下方。骨架/空态区各自补 barTotalHeight()。
-      // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp，见 BreakpointConstants）。
-      // 根 Stack 默认居中对齐，直接给内容列挂上限即可，不需要额外包一层。
-      // 横屏宽屏（2026-10-23 两列改造）：上限放宽到 840vp，两列每列行宽约 400vp+。
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
-
-      // [任务③·自绘原型] 顶栏渐变模糊层：盖主内容列之上（z 序低于历史面板 /
-      // 歌单弹窗，低于 HDS titleBar），进度由列表 onDidScroll/onScrollStop 经
-      // topBlurUpdater 命令式驱动。根栏 HDS 滚动效果已由 Index.titleBarStyle
-      // 关闭（防双重模糊），本层承担全部渐变模糊观感。
-      TopGradientBlurOverlay({
-        barHeightVp: this.barTotalHeight(),
-        updater: this.topBlurUpdater
-      })
-
-      // 搜索历史下拉：遮罩 + 面板，都从根栏整栏下沿（barTotalHeight）起排。
-      // ⚠️ 页面层在根栏 z 序之下，面板够不着页签行 —— 从整栏下沿弹出而非贴搜索行
-      // （迁移前面板盖在页签行上，属旧栏结构的副产品，观感差异见验收清单）。
-      // 遮罩铺满下方 → 点任意空白处收起；根栏内的搜索框 / 页签行不受遮罩影响照常可点。
-      if (this.showHistory) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor($r('app.color.scrim_light'))
-          .position({ x: 0, y: this.barTotalHeight() })
-          .onClick((): void => {
-            this.closeHistory();
-          })
-
-        // 面板宿主：与内容列同宽收窄居中，HistoryPanel 在其内部 position 定位，
-        // 左右才能与收窄后的搜索框对齐（直接挂 Stack 上会贴到屏幕左缘）。
-        // hitTestBehavior(None)：宿主自身不参与命中测试，面板以外的点击
-        // 穿透到下层全屏遮罩，照常收起历史。
-        Column() {
-          this.HistoryPanel()
-        }
-        .width('100%')
-        .height('100%')
-        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
-        .hitTestBehavior(HitTestMode.None)
-      }
-
-      if (this.showPlaylistPicker) {
-        // 全屏点击捕获层：只负责「点弹窗外关闭」，不带遮罩底色
-        //（2026-10-23 用户要求：加入歌单弹窗周围不要暗色/主题色遮罩）
-        Column() {
-        }
-        .width('100%')
-        .height('100%')
-        .onClick((): void => {
-          this.showPlaylistPicker = false;
-          this.pickerTrack = null;
-        })
-        .justifyContent(FlexAlign.Center)
-
-        Column() {
-          Text('加入歌单')
-            .fontSize(18)
-            .fontColor($r('app.color.text_primary'))
-            .margin({ bottom: 8 })
-          Text(this.pickerTrack ? this.pickerTrack.title : '')
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-            .margin({ bottom: 12 })
-          // 第一项就是「新建歌单并加入」：想单独存一首歌时不必再跑到歌单页
-          Row() {
-            Text('＋ 新建歌单并加入')
-              .fontSize(16)
-              .fontColor(this.themeDeep)
-              .layoutWeight(1)
-          }
-          .width('100%')
-          .padding({ top: 12, bottom: 12 })
-          .stateStyles({
-            pressed: { .backgroundColor($r('app.color.press_overlay')) },
-            normal: { .backgroundColor(Color.Transparent) }
-          })
-          .onClick((): void => {
-            this.createPlaylistFromPicker();
-          })
-          Divider()
-            .color($r('app.color.bg_divider'))
-          List() {
-            ForEach(
-              this.playlistOptions,
-              (p: Playlist): void => {
-                ListItem() {
-                  Row() {
-                    Text(p.name)
-                      .fontSize(16)
-                      .fontColor($r('app.color.text_primary'))
-                      .maxLines(1)
-                      .layoutWeight(1)
-                    Text(`${p.tracks.length} 首`)
-                      .fontSize(13)
-                      .fontColor($r('app.color.text_secondary'))
-                  }
-                  .width('100%')
-                  .padding({ top: 12, bottom: 12 })
-                  .stateStyles({
-                    pressed: { .backgroundColor($r('app.color.press_overlay')) },
-                    normal: { .backgroundColor(Color.Transparent) }
-                  })
-                  .onClick((): void => {
-                    this.addToPlaylist(p);
-                  })
-                }
-              },
-              // key 含渲染字段（与 PlaylistsPage 同因）：改名/数量变化后行才会重渲染
-              (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
-            )
-          }
-          .width('100%')
-          // 边界回弹（2026-10-08）：歌单多到可滚时，到边界的反馈动效
-          .edgeEffect(EdgeEffect.Spring)
-          .constraintSize({ maxHeight: 260 })
-          Button('取消', { type: ButtonType.Normal })
-            .width('100%')
-            .height(44)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor($r('app.color.bg_divider'))
-            .fontColor($r('app.color.text_primary'))
-            .margin({ top: 12 })
-            .onClick((): void => {
-              this.showPlaylistPicker = false;
-              this.pickerTrack = null;
-            })
-        }
-        .padding(20)
-        .width('80%')
-        .backgroundColor($r('app.color.bg_card'))
-        .borderRadius(12)
-      }
-    }
-    .width('100%')
-    .height('100%')
-    // ⚠️ 顶栏动作必须在 **onAppear**（真正挂载）里接管，不能放 aboutToAppear：
-    // 平板分支下 HdsNavigation 会先创建一个**临时实例**再销毁它（实测
-    // appear id=1 → appear id=2 → disappear id=2），若在 aboutToAppear 里绑静态
-    // 回调，就会被这个已销毁的临时实例抢走 —— 表现是「搜索请求发出去了、界面不动」。
-    .onAppear((): void => {
-      TabScrollerHolder.searchSubmitOwner = this.pageId;
-      TabScrollerHolder.searchSubmit = (): void => {
-        this.doSearch();
-      };
-      console.info(`[Search] bind id=${this.pageId}`);
-    })
-    .onDisAppear((): void => {
-      // 只清自己的绑定：否则临时实例销毁时会把可见实例的绑定一起清掉
-      if (TabScrollerHolder.searchSubmitOwner === this.pageId) {
-        TabScrollerHolder.searchSubmitOwner = -1;
+      // ⚠️ 栏内动作必须在 **onAppear**（真正挂载）里接管，不能放 aboutToAppear：
+      // 平板分支下 HdsNavigation 会先创建一个**临时实例**再销毁它（实测
+      // appear id=1 → appear id=2 → disappear id=2），若在 aboutToAppear 里绑静态
+      // 回调，就会被这个已销毁的临时实例抢走 —— 表现是「搜索请求发出去了、界面不动」。
+      .onAppear((): void => {
+        TabScrollerHolder.searchSubmitOwner = this.pageId;
         TabScrollerHolder.searchSubmit = (): void => {
+          this.doSearch();
         };
-        console.info(`[Search] unbind id=${this.pageId}`);
+        // 清空输入框 → 回初始页（与 searchSubmit 同生命周期，归属校验共用 owner）
+        TabScrollerHolder.searchReset = (): void => {
+          this.resetToLanding();
+        };
+        console.info(`[Search] bind id=${this.pageId}`);
+      })
+      .onDisAppear((): void => {
+        // 只清自己的绑定：否则临时实例销毁时会把可见实例的绑定一起清掉
+        if (TabScrollerHolder.searchSubmitOwner === this.pageId) {
+          TabScrollerHolder.searchSubmitOwner = -1;
+          TabScrollerHolder.searchSubmit = (): void => {
+          };
+          TabScrollerHolder.searchReset = (): void => {
+          };
+          console.info(`[Search] unbind id=${this.pageId}`);
+        }
+      })
+    }
+    // HDS 沉浸光感标题栏（RecentPage 样板同款）：
+    // avoidLayoutSafeArea 挡状态栏重叠；HDS 滚动效果关闭（styleOptions 第三参
+    // false），让位自绘渐变模糊层（TopGradientBlurOverlay），防双重模糊。
+    // stackBuilder 承载搜索行（SearchInputBar，收窄容器内与条目列对齐）。
+    .titleBar({
+      avoidLayoutSafeArea: true,
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
+      content: {
+        stackBuilder: (): void => {
+          this.searchBarNarrow();
+        }
       }
     })
-  }
-
-  /** 点搜索框：有历史才展开（没有历史弹一个空面板没意义） */
-  private openHistory(): void {
-    this.history = SearchHistoryStore.getSearchHistory();
-    this.showHistory = this.history.length > 0;
-  }
-
-  private closeHistory(): void {
-    this.showHistory = false;
-  }
-
-  private useHistoryWord(word: string): void {
-    this.keyword = word;
-    this.closeHistory();
-    this.doSearch();
-  }
-
-  private clearHistory(): void {
-    SearchHistoryStore.clearSearchHistory();
-    this.history = SearchHistoryStore.getSearchHistory();
-    this.showHistory = false;
-    this.toast('已删除搜索记录', 1500);
-  }
-
-  /**
-   * 搜索历史下拉面板。
-   *
-   * 不接收任何参数：带参 @Builder 是「按值传递」，参数取自状态变量时状态变化不会刷新其内部 UI
-   * （本项目在页签按钮上踩过），所以这里直接读 `this.history` / `this.showHistory`。
-   *
-   * 位置用 `.position()` 绝对定位贴到搜索框正下方：`position` 脱离父容器布局流，
-   * 因此面板展开不会把下面的页签栏和列表推走（面板最大高度另由约束限制，内部滚动）。
-   */
-  @Builder
-  HistoryPanel(): void {
-    Column() {
-      Column() {
-        Text('最近搜索')
-          .fontSize(13)
-          .fontColor($r('app.color.text_tertiary'))
-          .width('100%')
-          .padding({ left: 16, right: 16, top: 12, bottom: 4 })
-
-        List() {
-          ForEach(this.history, (word: string): void => {
-            ListItem() {
-              Text(word)
-                .fontSize(16)
-                .fontColor($r('app.color.text_primary'))
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .width('100%')
-                .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-                .stateStyles({
-                  pressed: { .backgroundColor($r('app.color.press_overlay')) },
-                  normal: { .backgroundColor(Color.Transparent) }
-                })
-                .onClick((): void => {
-                  this.useHistoryWord(word);
-                })
-            }
-          }, (word: string): string => word)
-
-          ListItem() {
-            Text('删除搜索记录')
-              .fontSize(16)
-              .fontColor(this.themeDeep)
-              .width('100%')
-              .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-              .border({ width: { top: 0.5 }, color: $r('app.color.bg_divider') })
-              .stateStyles({
-                pressed: { .backgroundColor($r('app.color.press_overlay')) },
-                normal: { .backgroundColor(Color.Transparent) }
-              })
-              .onClick((): void => {
-                this.clearHistory();
-              })
-          }
-        }
-        .width('100%')
-        .constraintSize({ maxHeight: HISTORY_PANEL_MAX_HEIGHT })
-        // 边界回弹（2026-10-08）：历史多到可滚时，到顶/到底的反馈动效
-        .edgeEffect(EdgeEffect.Spring)
-        .scrollBar(BarState.Off)
-      }
-      .width('100%')
-      .backgroundColor($r('app.color.bg_card'))
-      .borderRadius(12)
-      .border({ width: 0.5, color: $r('app.color.bg_divider') })
-    }
-    .width('100%')
-    .padding({ left: 12, right: 12 })
-    // 贴根栏整栏下沿弹出（barTotalHeight 实测镜像；页面层在根栏之下，够不着页签行）
-    .position({ x: 0, y: this.barTotalHeight() + HISTORY_PANEL_GAP })
-  }
-
-  /**
-   * 切内容页签（根栏 SearchTabsBar 经持有器回调进来）。
-   * 页签行本体已迁根栏（components/SearchTabBar.ets，选中态走 STORE_SEARCH_TAB），
-   * 这里只负责收历史面板 + 数据层动作。
-   */
-  private switchTab(target: string): void {
-    // 切页签时收起历史面板（不收起会一直盖着新页签的结果）
-    this.showHistory = false;
-    // 四个子页签共用同一个 List：换内容不归位就会沿用别页签的滚动偏移 ——
-    // 与「重新搜索后首条压顶栏」同一个病根（问题 2 修复，2026-10-11）。
-    // 首次搜索那条路径由 doSearch 内部归位，这里不重复处理。
-    let needReset: boolean = true;
-    if (target === 'search') {
-      // 已搜过（哪怕 0 条）就别再自动重搜，否则每次切回来都空转一次
-      if (this.results.length === 0 && this.keyword.trim() && !this.searched) {
-        this.doSearch();
-        needReset = false;
-      } else {
-        this.tab = 'search';
-      }
-    } else if (target === 'recommend') {
-      this.tab = 'recommend';
-    } else if (target === 'ranking') {
-      this.tab = 'ranking';
-    } else if (target === 'center') {
-      this.tab = 'center';
-    }
-    if (needReset) {
-      this.resetResultScroll();
-    }
+    // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
+    .bindToScrollable([this.listScroller])
+    // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
+    .translate({ x: this.navTransX })
+    .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
+      return this.navTransitionDelegate(op, isEnter);
+    })
+    // 系统返回拦截：播放页 overlay 打开时吞掉返回并发收起请求
+    //（utils/SubPageBackPress）；否则走默认 pop。
+    .onBackPressed((): boolean => {
+      return handleSubPageBackPress();
+    })
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
+    // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
 
+/**
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ */
+@Builder
+export function SearchPageBuilder(): void {
+  SearchPage()
+}
+
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
+ * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
+export const SearchPageWrapped: WrappedBuilder<[]> = wrapBuilder(SearchPageBuilder);

@@ -1,13 +1,13 @@
 /**
- * [Fling] F1 边界采样器（design/Fling状态触发-两工程对照与AI实施规格.md §F1/F2）。
+ * [Fling] F1 边界采样器（design/Fling状态触发-两工程对照与AI实施规格.md §F1）。
  *
  * 参考两工程共识：「惯性帧不写状态」。本类只做**状态翻转检测**——
  * `note()` 与上次状态比较，翻转才返回 true，调用方据此**只在边界写一次**
- * （打日志 / 写 STORE_FLING_ACTIVE），严禁逐帧写。
+ * （打日志），严禁逐帧写。
  *
  * 硬约束（规格 §6）：
  * - 内部只有普通静态成员，不得声明 @State / @StorageLink；
- * - 调用方回调必须 void 返回，绝不返回 ScrollResult（那是被禁止的 F4a 吃帧）；
+ * - 调用方回调必须 void 返回，绝不返回 ScrollResult（会吃帧）；
  * - 只挂首页签 List 一处（SearchPage），禁止全站铺。
  */
 export class FlingSampler {

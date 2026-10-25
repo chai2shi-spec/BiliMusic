@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Headphones</title>
+  <desc id="desc">耳机方案。主粉底上白色头带弧与两个圆角耳罩构成，剪影完整、左右对称。耳机是「收听」最直接的符号，不依赖任何平台元素。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#FB7299"/>
+  </g>
+
+  <g id="foreground-layer">
+    <path
+      id="headband"
+      d="M 282 516 A 230 230 0 0 1 742 516"
+      fill="none" stroke="#FFFFFF" stroke-width="76" stroke-linecap="round"/>
+    <rect id="cup-left" x="240" y="488" width="150" height="250" rx="75" fill="#FFFFFF"/>
+    <rect id="cup-right" x="634" y="488" width="150" height="250" rx="75" fill="#FFFFFF"/>
+  </g>
+</svg>

@@ -1,21 +1,21 @@
 /**
  * 下载管理页：任务列表（实时进度 / 速度 / **实际码率**）、点击播放已下载音频、
  * 全部暂停 · 全部开始、多选批量删除。
- * 条目右侧「⋯」更多菜单（2026-10-23，歌单页同款）：加入队列 / 加入歌单 /
+ * 条目右侧「⋯」更多菜单（歌单页同款）：加入队列 / 加入歌单 /
  * 进入 UP 主页 / 删除（破坏性操作放最后）；单曲行、分P子行与合集/歌单组头统一。
  *
  * 数据订阅 AppStorage(STORE_DOWNLOAD_TASKS)：DownloadManager 持有内存态任务表，
  * 插入 / 进度 / 完成 / 失败都会推一份新快照，因此无需轮询，也不必重启才看得到状态。
  *
- * 简约 iOS 风格：根栏标题行常显；队列控制（全部开始/暂停）在标题行右侧
- * （留白整改迁入），多选工具条只在多选态出现（标题行正下方，不随列表滚动）。
+ * 简约 iOS 风格：根栏标题行常显；队列控制（全部开始/暂停）在标题行右侧，
+ * 多选工具条只在多选态出现（标题行正下方，不随列表滚动）。
  *
  * ⚠️⚠️ **ForEach 的 key（见 rowKey / groupRowKey）是本页最容易改坏、且症状最迷惑的地方。**
  * `DownloadTask` 是普通 interface 对象而不是 `@Observed` 类，ForEach 只按 key 判等：
  * key 不变就**复用旧节点**，而复用出来的节点里 itemGenerator 的入参 `t` 冻结在
  * 首次渲染那一刻 —— 只读 `t` 的字段，属性怎么变界面都不动。
  * 但保留节点并非死节点：**组件 @State 的读取是活的**，快照/选择/按压状态变化会触发
- * 保留节点局部重渲染（本页的按压缩放 pressedKey、「正在播放」徽标、排队中的
+ * 保留节点局部重渲染（本页的按压缩放 pressedKey、排队中的
  * 「已暂停」后缀都靠这个机制工作，下载中的行则靠下述动画镜像）。
  * 因此 key 只需编入「不靠镜像/局部状态刷新」的变化；改渲染逻辑务必连带检查两个 key：
  *   · status / totalBytes 未知→已知：结构性分支（进度环↔进度条），必须重建；
@@ -47,7 +47,6 @@ import {
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
-  STORE_THEME_SURFACE,
   STORE_THEME_DEEP,
   STORE_THEME_ON,
   formatTrackQuality
@@ -67,16 +66,13 @@ import { CoverImage } from '../components/CoverImage';
 import { showAppAlertDialog } from '../components/AppAlertDialog';
 import { toThumbUrl } from '../utils/TextUtil';
 import fs from '@ohos.file.fs';
-import common from '@ohos.app.ability.common';
-import { Chip, ChipSize } from '@kit.ArkUI';
-// 「⋯」菜单（2026-10-23）：进入 UP 主页要 getVideoDetail 解析 mid，
+import { Chip, ChipSize, CustomContentDialog } from '@kit.ArkUI';
+// 「⋯」菜单：进入 UP 主页要 getVideoDetail 解析 mid，
 // 加入歌单要 LibraryStore / 弹层，跳转要 NavStackHolder —— 与歌单详情页同一套
 import * as BilibiliApi from '../api/BilibiliApi';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { LibraryStore } from '../service/LibraryStore';
-// 2026-10-24 导出：已完成任务经系统保存对话框（AudioViewPicker）导出到文件管理
-import { exportTasks, ExportResult } from '../service/AudioExporter';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
@@ -91,7 +87,7 @@ const ROW_ACTION_HIT: number = 44;
 
 /**
  * 下载页在 Index.HdsTabs 里的页签下标（0 搜索 / 1 歌单 / 2 下载 / 3 设置）。
- * 2026-10-08 卡顿优化：快照门控用它判断「当前是否是本页在前台」。
+ * 快照门控用它判断「当前是否是本页在前台」。
  * ⚠️ 与 Index.build() 里 TabContent 的声明顺序强耦合，调整页签顺序务必同步这里。
  */
 const DOWNLOADS_TAB_INDEX: number = 2;
@@ -127,10 +123,8 @@ interface DownloadGroup {
   /** 组内任务（按创建时间升序 = 分 P 的排队顺序） */
   tasks: DownloadTask[];
   /**
-   * 组内各状态计数（2026-10-08 卡顿优化）：buildGroups 归组时一次算好。
-   * 此前 groupStatusText / groupRowKey 每次重渲染都全组遍历 countGroup，
-   * 组头一行 = 一次 O(组大小) 扫描，多 P 合集下载时 5Hz 快照 × 若干组全在热路径上。
-   * 缓存值与旧 countGroup 输出完全一致 → groupRowKey 的 key 串逐字节不变，无重建风险。
+   * 组内各状态计数：buildGroups 归组时一次算好，组头文案与 groupRowKey 直读缓存，
+   * 渲染热路径不做全组遍历（多 P 合集下载时 5Hz 快照 × 若干组都在热路径上）。
    */
   counts: GroupCounts;
   /** 是否合集（多 P）组（判定逻辑见 isCollectionGroup，归组时一次算好） */
@@ -149,9 +143,8 @@ interface GroupCounts {
 @Component
 export struct DownloadsPage {
   @StorageLink(STORE_DOWNLOAD_TASKS) @Watch('onTasksSnapshot') tasks: DownloadTask[] = [];
-  /** 主题色运行时值：删除确认弹层、「正在播放」徽标与全选 Checkbox 跟随切色刷新 */
+  /** 主题色运行时值：删除确认弹层与全选 Checkbox 跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
-  @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
@@ -165,8 +158,7 @@ export struct DownloadsPage {
   }
   /**
    * 列表滚动控制器：List 直接挂 TabScrollerHolder.downloads（唯一真源，身份恒定），
-   * 由根 HdsNavigation bindToScrollable 绑定驱动顶栏滚动模糊（批 4 起模糊由 HDS 承担；
-   * 2026-10-11 起不再 new 私有实例后注册替换——首开无模糊修复）。
+   * 由根 HdsNavigation bindToScrollable 绑定驱动顶栏滚动模糊（模糊由 HDS 承担）。
    */
   /** 队列级暂停状态：单条任务的 PAUSED 只说明它自己停了，这里表示整条队列都不动了 */
   @StorageLink(STORE_DOWNLOAD_PAUSED) queuePaused: boolean = false;
@@ -178,11 +170,11 @@ export struct DownloadsPage {
    * 实测），需显式 +safeTop。
    */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
-  /** 正在播放的曲目：给对应的下载行打「正在播放」标记 */
+  /** 正在播放的曲目：play() 判定点击是否当前曲目（切换播放/暂停） */
   @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
 
   /**
-   * 当前活动页签（2026-10-08 卡顿优化）：Index 的受控 HdsTabs 写穿 AppStorage。
+   * 当前活动页签：Index 的受控 HdsTabs 写穿 AppStorage。
    * 非本页页签时 onTasksSnapshot 只置脏标记直接返回 —— TabContent 常驻，
    * 切走后下载快照照推，全量重分组 + 镜像动画重定目标都在白跑，还抢滚动帧。
    * @Watch 只在变化时触发：@StorageLink 初值同步不算变化，aboutToAppear 里
@@ -193,9 +185,8 @@ export struct DownloadsPage {
   private snapshotStale: boolean = false;
 
   /**
-    * ControlBar 字色派生缓存（2026-10-08 卡顿优化）：「全部暂停 / 全部开始」的
-   * 可用色原先每次重渲染都对全任务表 some() 一遍（hasActive/canResume），
-   * 镜像动画期间它们跟着每帧重求值。改为每份快照算一次。
+    * ControlBar 字色派生缓存：「全部暂停 / 全部开始」的可用状态每份快照算一次，
+   * 避免镜像动画期间每帧对全任务表重求值。
    * canResume 里的 queuePaused 部分刻意**不**并入缓存 —— queuePaused 是
    * @StorageLink，它自身变化就能驱动重渲染，绑定处写 `queuePaused || queueHasPaused`
    * 保证「全部暂停」按下立即点亮「全部开始」。
@@ -204,8 +195,8 @@ export struct DownloadsPage {
   @State queueHasPaused: boolean = false;
 
   /**
-   * 多选模式开关（批 4 状态迁移）：顶栏迁根容器后，栏内「选择/完成」按钮
-   * （components/DownloadsTabBar.ets）要读它 —— 直接挂 AppStorage 单向镜像给根栏。
+   * 多选模式开关：根栏「选择/完成」按钮（components/DownloadsTabBar.ets）
+   * 要读它 —— 直接挂 AppStorage 单向镜像给根栏。
    */
   @StorageLink(STORE_DL_BAR_SELECTING) selecting: boolean = false;
   /**
@@ -217,13 +208,23 @@ export struct DownloadsPage {
   @State expandedGroups: string[] = [];
   /**
    * 分组视图缓存：buildGroups 是全量重算（Map 归组 + 两次排序），写在 ForEach 参数里
-   * 会在每次重渲染时执行。改为只在 tasks 快照到达时重算一次（onTasksSnapshot），
+   * 会在每次重渲染时执行，因此只在 tasks 快照到达时重算一次（onTasksSnapshot），
    * 镜像动画（animPercent 等）驱动的每帧重渲染直接复用这份缓存。
    */
   @State groups: DownloadGroup[] = [];
+  /**
+   * 用户拖动后的组键顺序（下载优先级排序的页面侧存储）。
+   * 空数组 = 自动模式（快照默认「新在前」排序）；首次拖动后非空，
+   * buildGroups 改为：不在序列中的新组按默认序置顶，其余按本序列排。
+   * 每次重算后从最终结果回写（陈旧键自愈、新组吸收进序列）。
+   * 刻意不落库：顺序随进程退出丢失，与「队列不落库」边界一致。
+   * 普通 @State 之外的字段即可：只在 onGroupMove 写、buildGroups 读，
+   * UI 由 @State groups 驱动，本字段自身无需触发渲染。
+   */
+  private manualGroupOrder: string[] = [];
 
   /**
-   * 按压缩放（TrackItem 模式推广）：当前被按下行的稳定标识，空串＝无按压。
+   * 按压缩放（TrackItem 模式）：当前被按下行的稳定标识，空串＝无按压。
    * 单指操作同一时刻只有一行被按下，一个变量即可驱动任意行缩放，
    * 不必给每个 @Builder 行配独立组件/独立状态。
    * 刻意用稳定 id（任务 id / 合集 bvid）而不是 rowKey —— rowKey 编入了
@@ -232,13 +233,29 @@ export struct DownloadsPage {
   @State pressedKey: string = '';
   /** 重试请求进行中：防止连点重复发（重试是「删旧记录 + 重新入队」，重复发会互相踩） */
   @State retrying: boolean = false;
+  /**
+   * 文件丢失（被第三方从文件管理器删除/移动）的任务 id 集：
+   * 丢失行显示「文件已丢失」+ 重下入口；仅下载页可见时检测。
+   * 刻意用 Set 但每次变更**重建新 Set 整体赋值** —— @State 感知不到 Set 内部变更。
+   */
+  @State lostFileTaskIds: Set<string> = new Set<string>();
+  /** 上次快照已 stat 过的 completed id（增量检测：每份快照只 stat 新完成的） */
+  private knownCompletedIds: Set<string> = new Set<string>();
+  /** 重下请求进行中：防止连点重复发（重下同 retryTasks 是「删旧记录 + 重新入队」） */
+  @State redownloading: boolean = false;
   /** 本实例在 dlPageInstanceSeq 里的序号：静态回调解绑的归属校验用 */
   private instanceId: number = 0;
 
-  // ── 「加入歌单」选择弹层（WatchHistoryPage 同款，多曲支持） ──
-  @State showPlaylistPicker: boolean = false;
+  // ── 「加入歌单」弹窗（官方 CustomContentDialog，多曲支持） ──
   @State playlistOptions: Playlist[] = [];
   @State pickerTracks: Track[] = [];
+  /**
+   * 「加入歌单」弹窗 controller：官方 CustomContentDialog 标准对话框
+   * （默认遮罩 + 官方按钮槽，替代原根 Stack 内自绘弹层）。标题/按钮为
+   * 常量 → 建一次永不重建（faqs-arkui-555 只定格构造参数，动态内容经
+   * contentBuilder 闭包在 open() 时读当次状态）。
+   */
+  private playlistPickerController: CustomDialogController | undefined = undefined;
 
   /** 按压状态回写：Down 记录、Up/Cancel 清除；只清自己，避免误清别的行的按压 */
   private setPressed(type: TouchType, key: string): void {
@@ -277,7 +294,7 @@ export struct DownloadsPage {
    * 「每 5% 一档」细化到「每份快照一小步」，配合进度条已足够平滑。
    */
   private onTasksSnapshot(): void {
-    // Tab 门控（2026-10-08 卡顿优化）：本页不在前台页签时跳过全部重算与镜像动画，
+    // Tab 门控：本页不在前台页签时跳过全部重算与镜像动画，
     // 只留脏标记；切回本页时 onTabChanged 补算。镜像动画在不可见时没有意义。
     if (this.activeTab !== DOWNLOADS_TAB_INDEX) {
       this.snapshotStale = true;
@@ -295,13 +312,12 @@ export struct DownloadsPage {
 
   /**
    * 快照落地：分组重算 + ControlBar 派生缓存 + 镜像动画重定目标。
-   * 2026-10-08 卡顿优化前这段叫 onTasksSnapshot 全量直跑；抽成独立方法后
-   * Tab 门控（onTasksSnapshot）与切回补算（onTabChanged）共用同一条路径，
+   * Tab 门控（onTasksSnapshot）与切回补算（onTabChanged）共用本条路径，
    * 不会出现「门控期间漏掉的派生状态在切回后不更新」。
    */
   private applyTasksSnapshot(): void {
     this.snapshotStale = false;
-    // 选区剪枝（2026-10-23 审查修复）：重试走「删旧任务 + 建新任务」，selectedIds
+    // 选区剪枝：重试走「删旧任务 + 建新任务」，selectedIds
     // 里的旧 id 无人清理 → 选中计数虚高、「全选」误判为已全选、删除选中空转。
     // 每份快照对照当前任务表过滤一次死 id（@Watch syncBarState 同步顶栏镜像）。
     if (this.selectedIds.length > 0) {
@@ -320,6 +336,23 @@ export struct DownloadsPage {
     this.refreshQueueFlags();
     // 顶栏镜像跟着每份快照刷新（有无任务 / 可重试态都随 tasks 变化）
     this.syncBarState();
+    // 文件丢失增量检测：只 stat 本次快照**新出现**的 completed id ——
+    // 进度 notify 每份快照都触发，全量 stat 是刷屏级开销；丢失集非空时也进一次，
+    // 让 detectLostFiles 顺带清理「不再 completed」的死 id（重下中变 PENDING 等）。
+    const freshIds: Set<string> = new Set<string>();
+    for (let i = 0; i < this.tasks.length; i++) {
+      const t: DownloadTask = this.tasks[i];
+      if (t.status === DownloadStatus.COMPLETED
+        && t.localFilePath.length > 0
+        && !this.knownCompletedIds.has(t.id)) {
+        freshIds.add(t.id);
+      }
+    }
+    if (freshIds.size > 0 || this.lostFileTaskIds.size > 0) {
+      this.detectLostFiles(freshIds).catch((e: Error): void => {
+        console.error(`detect lost files failed: ${e.message}`);
+      });
+    }
     const active: DownloadTask | undefined =
       this.tasks.find((t: DownloadTask): boolean => t.status === DownloadStatus.DOWNLOADING);
     if (active === undefined) {
@@ -328,8 +361,8 @@ export struct DownloadsPage {
       this.animGroupKey = '';
       return;
     }
-    // 2026-10-08 卡顿优化：组字节聚合**复用刚算好的 groups**，不再对全表逐条
-    // groupKeyOf（字符串推导 ×N）。active 必然落在这份 groups 里（同一快照归组），
+    // 组字节聚合**复用刚算好的 groups**，不对全表逐条 groupKeyOf（字符串推导 ×N）。
+    // active 必然落在这份 groups 里（同一快照归组），
     // find 不到只可能是逻辑 bug，全 0 兜底表现为「不确定进度环」，无害可观测。
     const gk: string = this.groupKeyOf(active);
     const grp: DownloadGroup | undefined =
@@ -360,6 +393,64 @@ export struct DownloadsPage {
     });
   }
 
+  /**
+   * 文件丢失检测。
+   *
+   * `onlyIds` 缺省 = 全量 sweep（aboutToAppear 一次）；传参 = 增量（快照里新完成
+   * 的 id）。stat 目标是 `localFilePath`（指向公共绝对路径），
+   * 两种落点（沙箱 / Download/BiliMusic）天然都被覆盖。
+   * 文件不在（fs.access 抛错或返回 false）→ 计入丢失；文件回来了 → 移出。
+   * 两个集合的更新一律**重建新 Set 整体赋值**（@State 不追踪 Set 内部变更）。
+   */
+  private async detectLostFiles(onlyIds?: Set<string>): Promise<void> {
+    const targets: DownloadTask[] = [];
+    const completedIds: Set<string> = new Set<string>();
+    for (let i = 0; i < this.tasks.length; i++) {
+      const t: DownloadTask = this.tasks[i];
+      if (t.status !== DownloadStatus.COMPLETED) {
+        continue;
+      }
+      completedIds.add(t.id);
+      // 无路径的完成条目（异常数据）不参与检测：没文件可丢，也不该出重下入口
+      if (t.localFilePath.length === 0) {
+        continue;
+      }
+      if (onlyIds === undefined || onlyIds.has(t.id)) {
+        targets.push(t);
+      }
+    }
+    const lost: Set<string> = new Set<string>(this.lostFileTaskIds);
+    // 清理「不再 completed」的 id：重下中（变 PENDING）/ 被删除的任务不该留在丢失集
+    lost.forEach((id: string): void => {
+      if (!completedIds.has(id)) {
+        lost.delete(id);
+      }
+    });
+    const known: Set<string> = new Set<string>(this.knownCompletedIds);
+    known.forEach((id: string): void => {
+      if (!completedIds.has(id)) {
+        known.delete(id);
+      }
+    });
+    for (let i = 0; i < targets.length; i++) {
+      const t: DownloadTask = targets[i];
+      let missing: boolean = false;
+      try {
+        missing = !(await fs.access(t.localFilePath));
+      } catch (e) {
+        missing = true;
+      }
+      if (missing) {
+        lost.add(t.id);
+      } else {
+        lost.delete(t.id);
+      }
+      known.add(t.id);
+    }
+    this.knownCompletedIds = known;
+    this.lostFileTaskIds = lost;
+  }
+
   /** ControlBar 派生缓存唯一写入口：每份快照扫一遍全表，双条件短路提前退出 */
   private refreshQueueFlags(): void {
     let hasActive: boolean = false;
@@ -377,13 +468,13 @@ export struct DownloadsPage {
     }
     this.queueHasActive = hasActive;
     this.queueHasPaused = hasPaused;
-    // 顶栏镜像（批 4）：根栏工具条「全部开始 / 全部暂停」的可用色读这两份镜像
+    // 顶栏镜像：根栏工具条「全部开始 / 全部暂停」的可用色读这两份镜像
     AppStorage.setOrCreate(STORE_DL_BAR_QUEUE_ACTIVE, hasActive);
     AppStorage.setOrCreate(STORE_DL_BAR_QUEUE_PAUSED, hasPaused);
   }
 
   /**
-   * 顶栏派生镜像唯一写入口（批 4 状态迁移）：把根栏渲染所需的派生状态
+   * 顶栏派生镜像唯一写入口：把根栏渲染所需的派生状态
    * （有无任务 / 选中数 / 全选态 / 可重试态）推到 AppStorage，根栏侧组件
     * （components/DownloadsTabBar.ets + Index 的行 2 门控）@StorageProp 订阅。
    * 触发点：selectedIds @Watch + applyTasksSnapshot（tasks 每份快照）+ aboutToAppear 初值。
@@ -396,10 +487,10 @@ export struct DownloadsPage {
   }
 
   /**
-   * [任务③·推广] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型推广）：
+   * 自绘顶栏渐变模糊层进度更新器 + 校准：
    * onDidScroll / onScrollStop 命令式驱动 opacity（不标 @State，滚动高频
    * 回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater
-   * 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 内截断，边缘回弹负偏移归零 = 死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -409,14 +500,37 @@ export struct DownloadsPage {
   }
 
   aboutToAppear(): void {
-    // 批 4：顶栏迁根容器 —— scroller 与栏内按钮动作注册进持有器，
+    // scroller 与栏内按钮动作注册进持有器，
     // 根 HdsNavigation 经 TabScrollerHolder 转发点击动作
-    // （scroller 不再注册替换——List 直挂 Holder.downloads 唯一真源，2026-10-11）
-    // 2026-10-23 审查修复：登记实例号，销毁时据此做归属校验解绑（见 aboutToDisappear）
+    // （List 直挂 Holder.downloads 唯一真源）
+    // 登记实例号，销毁时据此做归属校验解绑（见 aboutToDisappear）
     this.instanceId = ++dlPageInstanceSeq;
-    // [任务③·推广] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
     // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
     this.syncTopBlurProgress();
+    // 「加入歌单」弹窗：官方标准对话框，标题/按钮常量（见成员声明处注释）。
+    // 关闭路径刻意不清暂存数据：关闭有退场动画，清了会让正文在淡出途中
+    // 先变空；pickerTracks / playlistOptions 每次打开前都会重写，残留值
+    // 无消费方。
+    this.playlistPickerController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '加入歌单',
+        contentBuilder: (): void => {
+          this.PlaylistPickerBody();
+        },
+        buttons: [
+          {
+            value: '取消',
+            buttonStyle: ButtonStyleMode.TEXTUAL,
+            action: (): void => {
+              this.playlistPickerController?.close();
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
     TabScrollerHolder.dlCallbacksOwner = this.instanceId;
     TabScrollerHolder.dlToggleSelecting = (): void => {
       this.toggleSelecting();
@@ -432,10 +546,6 @@ export struct DownloadsPage {
     };
     TabScrollerHolder.dlAddSelectedToPlaylist = (): void => {
       this.addSelectedToPlaylist();
-    };
-    // 2026-10-24 导出功能：多选工具条「导出选中」→ 系统保存对话框批量导出到文件管理
-    TabScrollerHolder.dlExportSelected = (): void => {
-      this.exportSelected();
     };
     TabScrollerHolder.dlResumeAll = (): void => {
       this.resumeAll();
@@ -454,12 +564,18 @@ export struct DownloadsPage {
     DownloadManager.getInstance().ensureLoaded().catch((e: Error): void => {
       console.error(`load downloads failed: ${JSON.stringify(e)}`);
     });
+    // 文件丢失全量 sweep：首屏一次；
+    // ensureLoaded 之前到达的快照已由 @StorageLink 初值同步进 tasks，这里能查到；
+    // 之后到达的快照走 applyTasksSnapshot 里的增量检测。
+    this.detectLostFiles().catch((e: Error): void => {
+      console.error(`detect lost files failed: ${e.message}`);
+    });
   }
 
   /**
-   * 静态回调解绑（2026-10-23 审查修复）：dl* 槽位的闭包捕获 this，实例销毁后
+   * 静态回调解绑：dl* 槽位的闭包捕获 this，实例销毁后
    * 不清理会持续持有已销毁组件（无法 GC）且触发时往死实例的 @State 写值——
-   * 平板/横竖屏分支存在「临时实例先建后销毁」，同病已用 searchSubmitOwner 修过。
+   * 平板/横竖屏分支存在「临时实例先建后销毁」。
    * 归属校验：只有「最后注册的实例」才有权清空，防止先销毁的旧实例误清
    * 后注册新实例的回调（并发实例窗口期）。
    */
@@ -471,7 +587,6 @@ export struct DownloadsPage {
       TabScrollerHolder.dlRetrySelected = (): void => {};
       TabScrollerHolder.dlRemoveSelected = (): void => {};
       TabScrollerHolder.dlAddSelectedToPlaylist = (): void => {};
-      TabScrollerHolder.dlExportSelected = (): void => {};
       TabScrollerHolder.dlResumeAll = (): void => {};
       TabScrollerHolder.dlPauseAll = (): void => {};
     }
@@ -532,6 +647,11 @@ export struct DownloadsPage {
         return parts.join('  ·  ');
       }
       case DownloadStatus.COMPLETED: {
+        // 文件丢失（第三方删除/移动）：覆盖「已完成 · 音质 · 大小」，
+        // 引导用户走行内重试图标 / 菜单「重新下载」恢复
+        if (this.lostFileTaskIds.has(t.id)) {
+          return '文件已丢失，请重新下载';
+        }
         const parts: string[] = ['已完成'];
         const q: string = this.qualityText(t);
         if (q.length > 0) {
@@ -586,7 +706,7 @@ export struct DownloadsPage {
   }
 
   /**
-   * 行标题展示（2026-10-08）：合集子行带 P 序号前缀，展开后一眼看出「第几个分 P」；
+   * 行标题展示：合集子行带 P 序号前缀，展开后一眼看出「第几个分 P」；
    * 普通行 / 老任务（无序号标记）原样显示。序号随任务不变，无需进 rowKey。
    */
   private taskTitleText(t: DownloadTask, nested: boolean): string {
@@ -622,7 +742,7 @@ export struct DownloadsPage {
   }
 
   /**
-   * 组内第一个非空的合集标题（2026-10-08）。多 P 任务入库时每条都带同一份
+   * 组内第一个非空的合集标题。多 P 任务入库时每条都带同一份
    * collectionTitle，取第一个即可；老任务（无该字段）返回空串。
    */
   private collectionTitleOf(g: DownloadGroup): string {
@@ -636,15 +756,15 @@ export struct DownloadsPage {
   }
 
   /**
-   * 是否是合集（多 P）组（2026-10-08）。
+   * 是否是合集（多 P）组。
    *
    * 新任务看显式 `partTotal > 1` 标记；兼容升级前的在途/历史任务——
    * BV 键 + 组内多条也按合集处理（旧推导方式兜底）。
    * 歌单组（`pl:` 键）不算：它的聚合语义是「歌单卡片」，不是分 P 合集。
    * **组内仅剩 1 条的合集也返回 true**：渲染分支用它判定组头，
-   * 避免合集删到只剩一首后退化和普通行无法区分（用户 2026-10-08 的诉求）。
+   * 避免合集删到只剩一首后退化和普通行无法区分。
    *
-   * 2026-10-08 卡顿优化：本方法含全组 some()，**只允许 buildGroups 归组时调用**
+   * 本方法含全组 some()，**只允许 buildGroups 归组时调用**
    * （结果缓存进 g.isCollection）；渲染热路径一律读缓存，别再直接调这里。
    */
   private isCollectionGroup(g: DownloadGroup): boolean {
@@ -658,11 +778,8 @@ export struct DownloadsPage {
   }
 
   /**
-   * 歌单组（`pl:` 键）显示修复（2026-10-21）：批量下载的歌单此前只渲染组内
-   * 第一首的普通行（isCollectionGroup 对 pl: 组返回 false，渲染分支因此跳过
-   * 组头），其余 N-1 首歌在下载页完全不可见，且歌单组行与单曲行视觉无法区分。
-   * 组内 >1 条时渲染为带组头的歌单卡片（标题=歌单名、徽标「歌单」、可展开子行）；
-   * 只剩 1 条（单曲下载同样携带 playlistId、或批量删剩一首）退回普通行，
+   * 歌单组（`pl:` 键）是否按歌单卡片渲染：组内 >1 条时渲染为带组头的歌单卡片
+   * （标题=歌单名、徽标「歌单」、可展开子行）；只剩 1 条退回普通行，
    * 保持单曲下载的既有观感。
    */
   private isPlaylistCard(g: DownloadGroup): boolean {
@@ -675,6 +792,11 @@ export struct DownloadsPage {
    * 与原列表「新在前」的观感保持一致。
    */
   private buildGroups(): DownloadGroup[] {
+    // 列表清空即退出手动排序模式：回到默认「新在前」，
+    // 避免空序列外的陈旧键影响下一轮归组排序
+    if (this.tasks.length === 0) {
+      this.manualGroupOrder = [];
+    }
     const map: Map<string, DownloadGroup> = new Map<string, DownloadGroup>();
     for (let i = 0; i < this.tasks.length; i++) {
       const t: DownloadTask = this.tasks[i];
@@ -682,7 +804,7 @@ export struct DownloadsPage {
       let g: DownloadGroup | undefined = map.get(key);
       if (g === undefined) {
         // 占位派生字段（counts/isCollection）：map.forEach 里逐组重算覆盖。
-        // 对象字面量必须补全这两个字段 —— DownloadGroup 已把它们改成必填。
+        // 对象字面量必须补全这两个字段（DownloadGroup 必填）。
         const created: DownloadGroup = {
           key: key,
           title: '',
@@ -701,16 +823,15 @@ export struct DownloadsPage {
       g.tasks.sort((a: DownloadTask, b: DownloadTask): number => a.createdAt - b.createdAt);
       const head: DownloadTask = g.tasks[0];
       // 歌单组的标题用**歌单名**（组头要能一眼看出是哪张歌单，而不是组内第一首歌名）；
-      // 合集组优先用显式 collectionTitle（2026-10-08）——此前依赖「首条任务标题恰为
-      // 合集标题」的隐式约定，首 P 被删后组标题就退化成分 P 名；老任务无字段时回退旧约定。
+      // 合集组优先用显式 collectionTitle —— 依赖「首条任务标题恰为合集标题」的
+      // 隐式约定会在首 P 被删后退化成分 P 名；老任务无字段时回退该约定。
       const collectionTitle: string = this.collectionTitleOf(g);
       g.title = head.playlistName.length > 0
         ? head.playlistName
         : (collectionTitle.length > 0 ? collectionTitle : head.title);
       g.coverUrl = head.coverUrl;
-      // 派生字段缓存（2026-10-08 卡顿优化）：每份快照每组各算一次，
-      // 渲染热路径（组头文案 / key 生成 / 渲染分支）全部改读缓存，O(组大小) → O(1)。
-      // 值与旧实现（countGroup/isCollectionGroup 逐次现算）完全一致。
+      // 派生字段缓存：每份快照每组各算一次，
+      // 渲染热路径（组头文案 / key 生成 / 渲染分支）全部读缓存，O(组大小) → O(1)。
       g.counts = this.countGroup(g);
       g.isCollection = this.isCollectionGroup(g);
       groups.push(g);
@@ -720,6 +841,29 @@ export struct DownloadsPage {
       const lb: number = b.tasks[b.tasks.length - 1].createdAt;
       return lb - la;
     });
+    // 手动组序应用：拖动过的列表停止自动重排，新组（重下/新请求产生的
+    // 新组键）仍按默认「新在前」置顶——否则下载中途插入一条会让整列跳序。
+    if (this.manualGroupOrder.length > 0) {
+      const ordered: Set<string> = new Set<string>(this.manualGroupOrder);
+      const byKey: Map<string, DownloadGroup> = new Map<string, DownloadGroup>();
+      const fresh: DownloadGroup[] = [];
+      for (let i = 0; i < groups.length; i++) {
+        byKey.set(groups[i].key, groups[i]);
+        if (!ordered.has(groups[i].key)) {
+          fresh.push(groups[i]);
+        }
+      }
+      const result: DownloadGroup[] = fresh.slice();
+      for (let i = 0; i < this.manualGroupOrder.length; i++) {
+        const g: DownloadGroup | undefined = byKey.get(this.manualGroupOrder[i]);
+        if (g !== undefined) {
+          result.push(g);
+        }
+      }
+      // 回写：丢弃已删组的陈旧键、吸收新组键，序列与可视顺序恒一致
+      this.manualGroupOrder = result.map((g: DownloadGroup): string => g.key);
+      return result;
+    }
     return groups;
   }
 
@@ -729,7 +873,40 @@ export struct DownloadsPage {
   }
 
   /**
-   * 组内各状态计数。2026-10-08 卡顿优化后**只允许 buildGroups 归组时调用**
+   * 长按拖动整组重排（ForEach.onMove 回调，仅单列分支注册）。
+   *
+   * onMove 由系统在拖拽**松手后**触发一次（from = 拖起下标，to = 落点下标），
+   * 下标限定在 ForEach 数据（this.groups）内 —— 不含列表顶部的占位条目。
+   *
+   * 一次拖动做三件事：本地 groups 对齐（与系统已完成的视觉移动一致）、
+   * manualGroupOrder 记录（让下一次 500ms 快照重算不冲掉顺序）、
+   * 摊平任务 id 序交给 DownloadManager.reorderQueue（真正改变下载先后）。
+   * 组内 tasks 已按 createdAt 升序（= 分 P 排队顺序），摊平即保持组内顺序。
+   */
+  private onGroupMove(from: number, to: number): void {
+    // 多选态禁用（双保险之二，onMove 注册处已不注册）：
+    // 多选态条目点击语义已让位点选，不允许再拖动。
+    if (this.selecting || from < 0 || from >= this.groups.length) {
+      return;
+    }
+    const moved: DownloadGroup = this.groups[from];
+    const next: DownloadGroup[] = [...this.groups];
+    next.splice(from, 1);
+    const target: number = Math.max(0, Math.min(to, next.length));
+    next.splice(target, 0, moved);
+    this.groups = next;
+    this.manualGroupOrder = next.map((g: DownloadGroup): string => g.key);
+    const taskIds: string[] = [];
+    next.forEach((g: DownloadGroup): void => {
+      g.tasks.forEach((t: DownloadTask): void => {
+        taskIds.push(t.id);
+      });
+    });
+    DownloadManager.getInstance().reorderQueue(taskIds);
+  }
+
+  /**
+   * 组内各状态计数。**只允许 buildGroups 归组时调用**
    * （结果缓存进 g.counts）；渲染热路径读缓存，别再直接调这里。
    */
   private countGroup(g: DownloadGroup): GroupCounts {
@@ -790,15 +967,13 @@ export struct DownloadsPage {
   }
 
   private groupStatusText(g: DownloadGroup): string {
-    // 2026-10-08 卡顿优化：counts / isCollection 全部读 buildGroups
-    // 归组时的缓存值（与旧实现逐次现算的输出一致），组头文案不再全组遍历。
+    // counts / isCollection 全部读 buildGroups 归组时的缓存值，组头文案不做全组遍历。
     const c: GroupCounts = g.counts;
     const total: number = g.tasks.length;
-    // 合集组前缀「N 个分P」（2026-10-08）：与单视频条目拉开区分，折叠态一眼可见规模。
-    // N = 组内剩余任务数（2026-10-19）：此前用 partTotal（任务携带的合集原始分 P 数），
-    // 删除 1P / 多P 后永远显示原值，「剩余 P 数」不刷新；改用组内任务数后与下方
-    // 「已下载 x/N」的 N 同源，删除后随快照立刻变小（tasks.length 在 groupRowKey 里）。
-    // 歌单卡片（2026-10-21 显示修复）同位前缀「N 首」。
+    // 合集组前缀「N 个分P」：与单视频条目拉开区分，折叠态一眼可见规模。
+    // N = 组内剩余任务数（不用 partTotal：它是合集原始分 P 数，删除后不刷新），
+    // 与下方「已下载 x/N」的 N 同源，删除后随快照立刻变小（tasks.length 在 groupRowKey 里）。
+    // 歌单卡片同位前缀「N 首」。
     const prefix: string = g.isCollection
       ? `${total} 个分P  ·  `
       : (this.isPlaylistCard(g) ? `${total} 首  ·  ` : '');
@@ -833,8 +1008,6 @@ export struct DownloadsPage {
    * bucket 仅未接管的分组编入；选择模式刻意不进 key（见 rowKey）。
    */
   private groupRowKey(g: DownloadGroup): string {
-    // 2026-10-08 卡顿优化：counts 读归组缓存 —— 值与旧 countGroup(g) 完全一致，
-    // key 串逐字节不变，保留节点行为不受本次优化影响。
     const c: GroupCounts = g.counts;
     const tracked: boolean = this.animGroupKey === g.key && c.downloading > 0;
     const pct: number = this.groupPercent(g);
@@ -884,7 +1057,7 @@ export struct DownloadsPage {
    * 把一条已下载任务转成可播放曲目。
    *
    * 关键是带上 `localFilePath` —— 播放内核看到它就完全跳过音源解析，直接播沙箱文件
-   * （断网也能放）。id 用 musicId 而不是任务 id，这样行上的「正在播放」标记、
+    * （断网也能放）。id 用 musicId 而不是任务 id，这样行点击的播放/暂停判定（isCurrent）、
    * 以及播放页显示的曲目都和下载条目的音乐身份对得上。
    */
   private toLocalTrack(t: DownloadTask): Track {
@@ -901,7 +1074,7 @@ export struct DownloadsPage {
   private play(t: DownloadTask): void {
     // 点的就是当前曲目：切换播放/暂停（播放中→暂停，暂停中→续播），
     // 与其它列表页 playOrToggle 的语义一致；不重建队列从头重播。
-    // isCurrent 与「正在播放」徽标同一套 id 映射（musicId 优先、回落任务 id）。
+    // isCurrent 与 toLocalTrack 同一套 id 映射（musicId 优先、回落任务 id）。
     if (this.isCurrent(t)) {
       MusicPlayer.getInstance().togglePlay();
       return;
@@ -924,7 +1097,7 @@ export struct DownloadsPage {
 
   private deleteFile(t: DownloadTask): void {
     if (t.localFilePath && t.localFilePath.length > 0) {
-      // （2026-10-16 AppFreeze 加固）unlinkSync → 异步 unlink，不阻塞主线程
+      // 异步 unlink，不阻塞主线程
       fs.unlink(t.localFilePath).catch((): void => {
         // 文件可能已不存在，忽略
       });
@@ -997,7 +1170,7 @@ export struct DownloadsPage {
     });
   }
 
-  // ===== 条目「⋯」菜单（2026-10-23，与歌单详情页同一套交互） =====
+  // ===== 条目「⋯」菜单（与歌单详情页同一套交互） =====
 
   /** 从任务反推 bvid：musicId 形如 `BV1xx…`（单视频）/ `BV1xx…#cid`（分 P）；非 BV（音乐中心）返回空串 */
   private bvidOfTask(t: DownloadTask): string {
@@ -1081,7 +1254,7 @@ export struct DownloadsPage {
 
   /** 单曲行 / 分 P 子行「⋯」菜单（顺序纪律：破坏性的删除放最后） */
   private taskMenuItems(t: DownloadTask): MenuElement[] {
-    return [
+    const items: MenuElement[] = [
       {
         value: '加入队列',
         action: (): void => {
@@ -1099,24 +1272,28 @@ export struct DownloadsPage {
         action: (): void => {
           this.openUpSpaceFromTask(t);
         }
-      },
-      {
-        // 2026-10-24 导出：未完成点选时 toast 拦截（与「加入队列」同款恒显模式）
-        value: '导出到文件管理',
-        action: (): void => {
-          this.exportDownloaded([t]);
-        }
-      },
-      {
-        value: '删除',
-        action: (): void => {
-          this.confirmRemove(t);
-        }
       }
     ];
+    // 文件丢失条目的「重新下载」：插在删除前（破坏性操作恒最后）；
+    // 正常已完成条目不出此入口，防误触重下覆盖好文件
+    if (t.status === DownloadStatus.COMPLETED && this.lostFileTaskIds.has(t.id)) {
+      items.push({
+        value: '重新下载',
+        action: (): void => {
+          this.doRedownload(t);
+        }
+      });
+    }
+    items.push({
+      value: '删除',
+      action: (): void => {
+        this.confirmRemove(t);
+      }
+    });
+    return items;
   }
 
-  /** 组头「⋯」菜单：加入队列取组内已完成、加入歌单收组内全部、UP 主页取第一首、导出取组内已完成、删除 = 整组（沿用二次确认） */
+  /** 组头「⋯」菜单：加入队列取组内已完成、加入歌单收组内全部、UP 主页取第一首、删除 = 整组（沿用二次确认） */
   private groupMenuItems(g: DownloadGroup): MenuElement[] {
     return [
       {
@@ -1138,68 +1315,12 @@ export struct DownloadsPage {
         }
       },
       {
-        // 2026-10-24 导出：组内已完成条目批量导出（导出模块自动过滤未完成）
-        value: '导出已完成',
-        action: (): void => {
-          this.exportDownloaded(g.tasks);
-        }
-      },
-      {
         value: '删除',
         action: (): void => {
           this.confirmRemoveGroup(g);
         }
       }
     ];
-  }
-
-  // ===== 导出到系统文件管理（2026-10-24：下载格式 m4a/flac 正确化 + 文件管理器可见）=====
-
-  /** 导出互斥：系统保存对话框全屏独占，双击入口拉起两个对话框会把结果串台 */
-  private exporting: boolean = false;
-
-  /** 多选工具条「导出选中」：把选区任务交给导出流程 */
-  private exportSelected(): void {
-    const selected: DownloadTask[] =
-      this.tasks.filter((t: DownloadTask): boolean => this.selectedIds.indexOf(t.id) >= 0);
-    this.exportDownloaded(selected);
-  }
-
-  /**
-   * 批量导出已完成任务到系统文件管理。
-   *
-   * 经 AudioViewPicker 拉起系统保存对话框（免权限），用户确认位置后由
-   * AudioExporter 复制沙箱文件过去；命名 `歌名 - 歌手.flac/.m4a/.mp3`
-   * （扩展名按任务实际音质派生）。结果 toast：取消静默、无可导出项提示、
-   * 成功报数量（含失败数时附带）。
-   */
-  private exportDownloaded(tasks: DownloadTask[]): void {
-    if (this.exporting) {
-      return;
-    }
-    const ctx: common.UIAbilityContext =
-      this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.exporting = true;
-    exportTasks(ctx, tasks)
-      .then((result: ExportResult): void => {
-        if (result.cancelled) {
-          // 用户在系统对话框取消：静默返回
-          return;
-        }
-        if (result.nothingToDo) {
-          this.toast('还没有下载完成的歌曲', 1500);
-          return;
-        }
-        const suffix: string = result.failed > 0 ? `，${result.failed} 首失败` : '';
-        this.toast(`已导出 ${result.ok} 首，可在「文件管理」查看${suffix}`, 2400);
-      })
-      .catch((e: Error): void => {
-        console.error(`export failed: ${e.message}`);
-        this.toast('导出失败', 1500);
-      })
-      .finally((): void => {
-        this.exporting = false;
-      });
   }
 
   // ===== 加入歌单（WatchHistoryPage 同款：无歌单自动建单兜底 + 选择弹层；多曲批量走 addTracksToPlaylist） =====
@@ -1217,21 +1338,21 @@ export struct DownloadsPage {
     if (tracks.length === 0) {
       return;
     }
-    const options: Playlist[] = LibraryStore.getPlaylists();
+    const options: Playlist[] = LibraryStore.getAddablePlaylists();
     if (options.length === 0) {
       this.createPlaylistAndAdd(tracks, options);
       return;
     }
     this.playlistOptions = options;
     this.pickerTracks = tracks;
-    this.showPlaylistPicker = true;
+    this.playlistPickerController?.open();
   }
 
   /** 弹层里的「新建歌单并加入」：省掉一次跳转（快照沿用弹层打开时的列表，重名检查基于它即可） */
   private createPlaylistFromPicker(): void {
     const tracks: Track[] = this.pickerTracks;
     const options: Playlist[] = this.playlistOptions;
-    this.dismissPicker();
+    this.playlistPickerController?.close();
     if (tracks.length > 0) {
       this.createPlaylistAndAdd(tracks, options);
     }
@@ -1239,17 +1360,12 @@ export struct DownloadsPage {
 
   private addToPlaylistFromPicker(p: Playlist): void {
     const tracks: Track[] = this.pickerTracks;
-    this.dismissPicker();
+    this.playlistPickerController?.close();
     if (tracks.length === 0) {
       return;
     }
     const updated: Playlist | null = LibraryStore.addTracksToPlaylist(p.id, tracks);
     this.toast(updated ? `已加入「${p.name}」` : '加入歌单失败', 1600);
-  }
-
-  private dismissPicker(): void {
-    this.showPlaylistPicker = false;
-    this.pickerTracks = [];
   }
 
   /**
@@ -1284,7 +1400,7 @@ export struct DownloadsPage {
    */
   private retryFailed(ids: string[]): void {
     if (this.retrying) {
-      // 2026-10-23 审查修复：此前静默 return，连点没有任何反馈
+      // 连点给出反馈，不静默 return
       this.toast('正在重试，请稍候', 1200);
       return;
     }
@@ -1296,7 +1412,7 @@ export struct DownloadsPage {
     DownloadManager.getInstance().retryTasks(ids, false)
       .then((r: DownloadStartResult): void => {
         if (r.blockedReason.length > 0) {
-          // 2026-10-23 审查修复：弹窗是 autoCancel，点遮罩/返回键关闭不触发任何
+          // 弹窗是 autoCancel，点遮罩/返回键关闭不触发任何
           // 按钮回调 → retrying 永久卡 true。先释放再弹：retrying 只表达「网络
           // 请求在途」，弹窗等待期不该占用（真正的重试请求由弹窗按钮再次置起）。
           this.retrying = false;
@@ -1354,6 +1470,86 @@ export struct DownloadsPage {
     }
     const tail: string = r.skipped > 0 ? `，跳过 ${r.skipped} 个非失败任务` : '';
     return `已重新加入队列 ${r.queued} 个${tail}`;
+  }
+
+  /**
+   * 重新下载一条「已完成但文件丢失」的任务。
+   *
+   * redownloadTask 内部仿 retryTasks「删旧记录 + trackOfTask 重建」，刻意不走
+   * requestDownload —— 其 resolveDownloadTracks 会展开 multi-P，重下一个分 P
+   * 会把整视频所有分 P 拉回队列。入口仅对丢失行开放（重试图标 / 菜单项），
+   * 正常已完成条目不出，防误触覆盖好文件。
+   */
+  private doRedownload(t: DownloadTask): void {
+    if (this.redownloading) {
+      this.toast('正在重新下载，请稍候', 1200);
+      return;
+    }
+    this.redownloading = true;
+    DownloadManager.getInstance().redownloadTask(t.id, false)
+      .then((r: DownloadStartResult): void => {
+        this.redownloading = false;
+        this.handleRedownloadResult(t, r);
+      })
+      .catch((e: Error): void => {
+        this.redownloading = false;
+        console.error(`redownload failed: ${e.message}`);
+        this.toast('重新下载失败，请稍后再试', 1800);
+      });
+  }
+
+  /** 重下结果的统一收口：WiFi 拦截弹窗、其余 blockedReason 直出、成功移出丢失集 */
+  private handleRedownloadResult(t: DownloadTask, r: DownloadStartResult): void {
+    if (r.blockedReason === WIFI_ONLY_BLOCKED) {
+      this.confirmRedownloadOnCellular(t);
+      return;
+    }
+    if (r.blockedReason.length > 0) {
+      // 例：「任务信息不足，无法重新下载」（音乐中心条目拆不出 BV 号）
+      this.toast(r.blockedReason, 2000);
+      return;
+    }
+    if (r.queued > 0) {
+      // 成功：立即移出丢失集（重建 Set 赋值），行切回排队/下载进度态；
+      // 任务已变 PENDING，快照增量检测不会再把它标回丢失。
+      const lost: Set<string> = new Set<string>(this.lostFileTaskIds);
+      lost.delete(t.id);
+      this.lostFileTaskIds = lost;
+      const known: Set<string> = new Set<string>(this.knownCompletedIds);
+      known.delete(t.id);
+      this.knownCompletedIds = known;
+      this.toast('已加入重新下载', 1500);
+      return;
+    }
+    this.toast('重新下载失败，请稍后再试', 1800);
+  }
+
+  /** 「仅 WiFi 下载」拦下时的重下询问（与 confirmRetryOnCellular 同一套做法） */
+  private confirmRedownloadOnCellular(t: DownloadTask): void {
+    showAppAlertDialog(this.getUIContext(), {
+      title: '仅 WiFi 下载',
+      message: `${WIFI_ONLY_BLOCKED}\n继续会使用移动数据重新下载「${t.title}」。`,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '继续下载',
+        action: (): void => {
+          this.redownloading = true;
+          DownloadManager.getInstance().redownloadTask(t.id, true)
+            .then((r: DownloadStartResult): void => {
+              this.redownloading = false;
+              this.handleRedownloadResult(t, r);
+            })
+            .catch((e: Error): void => {
+              this.redownloading = false;
+              console.error(`redownload(ignoreWifiLimit) failed: ${e.message}`);
+              this.toast('重新下载失败，请稍后再试', 1800);
+            });
+        }
+      }
+    });
   }
 
   /** 组内失败项的 id 列表（组级「重试」传参）；计数走 g.counts.failed，这里只负责收集 id */
@@ -1486,7 +1682,6 @@ export struct DownloadsPage {
       // 常驻复选框槽位：进出多选的动画位。绝不能用 if(selecting) 条件挂载 ——
       // 节点增删没有过渡；改为槽位 width 0↔44 的布局动画（行内容随之右移/回位），
       // 复选框本体叠 translate 从右侧滑入，clip 保证槽位收拢时内容不外溢。
-      // 阶段 5（2026-10-11）：自绘「✓ 圆圈」换成系统标准 Checkbox（圆形选中圈）。
       Row() {
         Checkbox({ name: t.id, group: 'dlSelect' })
           .select(this.isSelected(t.id))
@@ -1508,8 +1703,7 @@ export struct DownloadsPage {
       .justifyContent(FlexAlign.Center)
       .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-      // 64vp 显示位按 2x 请求缩略图（双行标题改版 2026-10-21 与 TrackItem 同步：
-      // 封面 56→64，高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
+      // 64vp 显示位按 2x 请求缩略图（高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
       // 加载中 / 失败由 CoverImage 兜浅粉占位
       CoverImage({
         url: toThumbUrl(t.coverUrl, 128),
@@ -1522,7 +1716,7 @@ export struct DownloadsPage {
       Column() {
         Row() {
           // 合集子行带 P 序号前缀（见 taskTitleText）：与组头徽标一起构成「合集」的显式区分
-          // 标题双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) + 第二行省略号；
+          // 标题双行显示：maxLines(2) + 第二行省略号；
           // 显式 lineHeight(21) 锁行高（默认随字体浮动会破坏「信息 ≤ 封面」硬预算）。
           Text(this.taskTitleText(t, nested))
             .fontSize(16)
@@ -1531,32 +1725,18 @@ export struct DownloadsPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
             .layoutWeight(1)
-          if (this.isCurrent(t)) {
-            // 阶段 5：小字徽标改用系统标准 Chip（Chip 不能链式挂属性 → 外边距挂外层 Row）
-            Row() {
-              Chip({
-                label: {
-                  text: '正在播放',
-                  fontSize: 11,
-                  fontColor: this.themeDeep
-                },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                backgroundColor: this.themeSurface
-              })
-            }
-            .margin({ left: 6 })
-            .hitTestBehavior(HitTestMode.None)
-          }
         }
-        // 顶对齐（2026-10-21 双行标题）：「正在播放」徽标对齐标题第一行
+        // 顶对齐（双行标题）
         .width('100%')
         .alignItems(VerticalAlign.Top)
 
         // 状态行行高锁 17（13sp）：与标题 lineHeight(21) 构成高度预算（见封面注释）
         Text(this.statusText(t))
           .fontSize(13)
-          .fontColor(t.status === DownloadStatus.ERROR ? $r('app.color.state_error') : $r('app.color.text_secondary'))
+          // 文件丢失的已完成条目同样用警示红：与失败态一个层级的信息
+          .fontColor(t.status === DownloadStatus.ERROR
+            || (t.status === DownloadStatus.COMPLETED && this.lostFileTaskIds.has(t.id))
+            ? $r('app.color.state_error') : $r('app.color.text_secondary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .lineHeight(17)
@@ -1593,7 +1773,7 @@ export struct DownloadsPage {
       .alignItems(HorizontalAlign.Start)
       .margin({ left: 12 })
 
-      // 完成态不再有右侧标记（2026-10-23）：状态行文字「已完成 · 音质 · 大小」已承载该信息。
+      // 完成态无右侧标记：状态行文字「已完成 · 音质 · 大小」已承载该信息。
       // 失败条目的「重试」：这是下载失败后**唯一**不用删掉重找的入口，
       // 必须显式可见（只靠「点整行」太隐蔽，用户根本猜不到整行可点）。
       if (t.status === DownloadStatus.ERROR) {
@@ -1617,8 +1797,31 @@ export struct DownloadsPage {
           this.retryFailed([t.id]);
         })
       }
-      // 「⋯」更多按钮（2026-10-23，歌单页 TrackItem 同款）：右侧垃圾桶退役，
-      // 删除入口收进标准菜单（加入队列 / 加入歌单 / 进入 UP 主页 / 删除），
+      // 文件丢失条目的「重新下载」：与失败重试同位置同款图标 ——
+      // 丢失行是已完成态里唯一需要显式动作入口的；正常完成条目不出（防误触覆盖好文件）
+      if (t.status === DownloadStatus.COMPLETED && this.lostFileTaskIds.has(t.id)) {
+        Row() {
+          SymbolGlyph($r('sys.symbol.arrow_clockwise'))
+            .fontSize(18)
+            .fontColor([this.themeDeep])
+        }
+        .width(ROW_ACTION_HIT)
+        .height(ROW_ACTION_HIT)
+        .justifyContent(FlexAlign.Center)
+        .borderRadius(22)
+        .stateStyles({
+          pressed: { .backgroundColor($r('app.color.press_overlay')) },
+          normal: { .backgroundColor(Color.Transparent) }
+        })
+        .visibility(this.selecting ? Visibility.None : Visibility.Visible)
+        .accessibilityText('重新下载')
+        .accessibilityLevel('yes')
+        .onClick((): void => {
+          this.doRedownload(t);
+        })
+      }
+      // 「⋯」更多按钮（歌单页 TrackItem 同款）：删除入口收进标准菜单
+      // （加入队列 / 加入歌单 / 进入 UP 主页 / 删除），
       // 破坏性操作多一层菜单路径也降低误触。视觉 20px 文字、44vp 命中区
       //（复用 ROW_ACTION_HIT，与 TrackItem 的 MORE_HIT 等值）。
       // 多选时用 visibility 摘出布局 —— 不用 if(selecting)：属性驱动的显隐
@@ -1639,7 +1842,7 @@ export struct DownloadsPage {
     }
     .width('100%')
     .padding({ left: nested ? 44 : 16, right: 4, top: 10, bottom: 10 })
-    // 按压态（TrackItem 模式）：纯缩放形变替代原 stateStyles 底色 —— 不改底色、
+    // 按压态（TrackItem 模式）：纯缩放形变 —— 不改底色、
     // 不加蒙层，scale 挂根 Row 零加层；.animation() 紧随其后，链上其余属性
     // （width/padding）恒定不变，动画只作用于 scale。
     .scale({ x: this.pressedKey === t.id ? PRESS_SCALE : 1, y: this.pressedKey === t.id ? PRESS_SCALE : 1 })
@@ -1659,8 +1862,8 @@ export struct DownloadsPage {
         this.retryFailed([t.id]);
         return;
       }
-      // 下载中 / 排队中：整行点击 = **只暂停这一条**（2026-10-11 新增，
-      // 与「全部暂停」同一套收尾：保留半截文件、恢复时断点续传）
+      // 下载中 / 排队中：整行点击 = **只暂停这一条**
+      // （与「全部暂停」同一套收尾：保留半截文件、恢复时断点续传）
       if (t.status === DownloadStatus.DOWNLOADING || t.status === DownloadStatus.PENDING) {
         this.pauseOne(t);
         return;
@@ -1679,7 +1882,7 @@ export struct DownloadsPage {
   }
 
   /**
-   * 一个下载组的完整内容（2026-10-23 两列改造从 ListItem 内抽出）：
+   * 一个下载组的完整内容：
    * 合集 / 歌单组 = 组头 + 展开的分 P 子行；单曲 / 单 P = 普通行。
    * 单列分支直接做 ListItem 内容；两列分支由配对 Row 的左右槽各调一次
    * （组与组并排，Row 默认顶对齐，合集组与单曲组高度不齐时右侧留白，可接受）。
@@ -1687,11 +1890,9 @@ export struct DownloadsPage {
   @Builder
   GroupContent(g: DownloadGroup): void {
     Column() {
-      // isCollection 读归组缓存（2026-10-08 卡顿优化）。
-      // 判定语义不变（原 isCollectionGroup）：partTotal>1 的显式标记
+      // isCollection 读归组缓存。partTotal>1 的显式标记
       // 让「删到只剩一首的合集」仍渲染组头，不会退化成与单视频无异。
-      // 歌单组显示修复（2026-10-21）：批量下载的歌单（pl: 组 >1 条）
-      // 同样渲染组头卡片，其余歌曲不再不可见；删到剩一首退回普通行
+      // 批量下载的歌单（pl: 组 >1 条）同样渲染组头卡片；删到剩一首退回普通行
       if (g.isCollection || this.isPlaylistCard(g)) {
         this.GroupHeader(g)
         if (this.isExpanded(g.key)) {
@@ -1704,7 +1905,7 @@ export struct DownloadsPage {
           )
         }
       } else {
-        // 单曲 / 单 P：与旧版完全一致的普通行
+        // 单曲 / 单 P：普通行
         this.TaskRow(g.tasks[0], false)
       }
     }
@@ -1739,8 +1940,7 @@ export struct DownloadsPage {
       .justifyContent(FlexAlign.Center)
       .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-      // 64vp 显示位按 2x 请求缩略图（双行标题改版 2026-10-21 与 TrackItem 同步：
-      // 封面 56→64，高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
+      // 64vp 显示位按 2x 请求缩略图（高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 状态行 17 = 63 ≤ 64）；
       // 加载中 / 失败由 CoverImage 兜浅粉占位
       CoverImage({
         url: toThumbUrl(g.coverUrl, 128),
@@ -1752,7 +1952,7 @@ export struct DownloadsPage {
 
       Column() {
         Row() {
-          // 标题双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) + 第二行省略号；
+          // 标题双行显示：maxLines(2) + 第二行省略号；
           // 显式 lineHeight(21) 锁行高（默认随字体浮动会破坏「信息 ≤ 封面」硬预算）。
           Text(g.title)
             .fontSize(16)
@@ -1761,13 +1961,12 @@ export struct DownloadsPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
             .layoutWeight(1)
-          // 「合集/歌单」徽标（2026-10-08）：显式区分可展开组头与普通行——
-          // 此前组头与普通行只差一个小箭头，用户分不清「这是可展开的合集」。
+          // 「合集/歌单」徽标：显式区分可展开组头与普通行
+          // （只差一个小箭头时用户分不清「这是可展开的合集」）。
           // 品牌粉胶囊底 + 白字，10 号小字不抢标题视觉。
-          // isCollection 读归组缓存（2026-10-08 卡顿优化）；
-          // 歌单卡片（pl: 组，2026-10-21 显示修复）同款徽标、文案「歌单」。
+          // isCollection 读归组缓存；歌单卡片（pl: 组）同款徽标、文案「歌单」。
           if (g.isCollection || this.isPlaylistCard(g)) {
-            // 阶段 5：小字徽标改用系统标准 Chip（实底品牌粉 + 白字，与「大会员」同款）
+            // 小字徽标用系统标准 Chip（实底品牌粉 + 白字，与「大会员」同款）
             Row() {
               Chip({
                 label: {
@@ -1784,7 +1983,7 @@ export struct DownloadsPage {
             .hitTestBehavior(HitTestMode.None)
           }
         }
-        // 顶对齐（2026-10-21 双行标题）：「合集」徽标对齐标题第一行
+        // 顶对齐（双行标题）：「合集」徽标对齐标题第一行
         .width('100%')
         .alignItems(VerticalAlign.Top)
 
@@ -1797,7 +1996,7 @@ export struct DownloadsPage {
           .lineHeight(17)
           .margin({ top: 4 })
 
-        // 2026-10-08 卡顿优化：读归组缓存，不再每次渲染全组 some()
+        // 读归组缓存，不每次渲染全组 some()
         if (g.counts.downloading > 0 || g.counts.pending > 0) {
           if (this.groupPercent(g) >= 0) {
             Progress({ value: this.groupPercent(g), total: 100, type: ProgressType.Linear })
@@ -1822,7 +2021,7 @@ export struct DownloadsPage {
 
       // 组级重试：**只在组内有失败项时出现**（整单下载失败几首时最省事的一次操作）。
       // 不常驻显示 —— 组内全成功时挂一个灰按钮只会让人以为还有别的动作。
-      // failed 读归组缓存（2026-10-08 卡顿优化）。
+      // failed 读归组缓存。
       if (g.counts.failed > 0) {
         Row() {
           SymbolGlyph($r('sys.symbol.arrow_clockwise'))
@@ -1844,8 +2043,8 @@ export struct DownloadsPage {
           this.retryFailed(this.groupFailedIds(g));
         })
       }
-      // 组头「⋯」更多按钮（2026-10-23，与 TaskRow 同款）：整组垃圾桶退役，
-      // 删除收进标准菜单（加入队列 = 组内已完成 / 加入歌单 = 组内全部 /
+      // 组头「⋯」更多按钮（与 TaskRow 同款）：删除收进标准菜单
+      // （加入队列 = 组内已完成 / 加入歌单 = 组内全部 /
       // 进入 UP 主页 = 组内第一首 / 删除 = 整组，沿用 confirmRemoveGroup 二次确认）。
       // 多选时 visibility 摘出布局（同 TaskRow 的处理）。
       Row() {
@@ -1862,9 +2061,11 @@ export struct DownloadsPage {
       .accessibilityLevel('yes')
       .bindMenu(this.groupMenuItems(g))
 
-      // 展开指示：复用 arrow_right，展开时旋转 90° 朝下（不引入未验证的新符号名）
+      // 展开指示：复用 arrow_right，展开时旋转 90° 朝下（不引入未验证的新符号名）。
+      // fontSize 16：chevron 形箭头宽约为字号一半，14 时实际渲染 7×14vp 触发
+      // 「图标宽或高小于 8vp」合规检查；16 渲染 8×16vp 达标。
       SymbolGlyph($r('sys.symbol.arrow_right'))
-        .fontSize(14)
+        .fontSize(16)
         .fontColor([$r('app.color.text_secondary')])
         .rotate({ angle: this.isExpanded(g.key) ? 90 : 0 })
         .margin({ right: 14 })
@@ -1873,7 +2074,7 @@ export struct DownloadsPage {
     }
     .width('100%')
     .padding({ left: 16, right: 4, top: 10, bottom: 10 })
-    // 按压态（TrackItem 模式，同 TaskRow）：纯缩放形变替代原 stateStyles 底色。
+    // 按压态（TrackItem 模式，同 TaskRow）：纯缩放形变。
     .scale({ x: this.pressedKey === g.key ? PRESS_SCALE : 1, y: this.pressedKey === g.key ? PRESS_SCALE : 1 })
     .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
     .onTouch((event: TouchEvent): void => {
@@ -1888,25 +2089,13 @@ export struct DownloadsPage {
     })
   }
 
-  /** 「加入歌单」选择弹层（遮罩 + 面板，WatchHistoryPage 同款；多曲时曲名行带「等 N 首」） */
+  /**
+   * 「加入歌单」弹窗正文（官方 CustomContentDialog，多曲时曲名行带
+   * 「等 N 首」）。标题在 primaryTitle；取消在 buttons 槽（自动关闭）。
+   */
   @Builder
-  pickerOverlay(): void {
-    // 全屏点击捕获层：只负责「点弹窗外关闭」，不带遮罩底色
-    //（2026-10-23 用户要求：加入歌单弹窗周围不要暗色/主题色遮罩，与 SearchPage 同步）
+  PlaylistPickerBody(): void {
     Column() {
-    }
-    .width('100%')
-    .height('100%')
-    .onClick((): void => {
-      this.dismissPicker();
-    })
-    .justifyContent(FlexAlign.Center)
-
-    Column() {
-      Text('加入歌单')
-        .fontSize(18)
-        .fontColor($r('app.color.text_primary'))
-        .margin({ bottom: 8 })
       // 曲名行：单曲显示曲名；组头批量入单显示「曲名 等 N 首」
       Text(this.pickerTracks.length > 1
         ? `${this.pickerTracks[0].title} 等 ${this.pickerTracks.length} 首`
@@ -1969,25 +2158,12 @@ export struct DownloadsPage {
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
       .constraintSize({ maxHeight: 260 })
-      Button('取消', { type: ButtonType.Normal })
-        .width('100%')
-        .height(44)
-        .borderRadius(BUTTON_RADIUS_VP)
-        .backgroundColor($r('app.color.bg_divider'))
-        .fontColor($r('app.color.text_primary'))
-        .margin({ top: 12 })
-        .onClick((): void => {
-          this.dismissPicker();
-        })
     }
-    .padding(20)
-    .width('80%')
-    .backgroundColor($r('app.color.bg_card'))
-    .borderRadius(12)
+    .width('100%')
   }
 
   /**
-   * 顶栏在根 HdsNavigation titleBar（留白整改同版）：标题行
+   * 顶栏在根 HdsNavigation titleBar：标题行
    * 「选择」+ 队列控制（全部开始/暂停）+ 多选工具条（仅多选态行 2）由根栏
    * stackBuilder 承载（components/DownloadsTabBar.ets），本页只留列表与状态逻辑；
    * 滚动模糊由根栏 bindToScrollable(TabScrollerHolder.downloads) 驱动。
@@ -2012,23 +2188,26 @@ export struct DownloadsPage {
           }
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
-          // 内容列不再整体 padding top（列表穿透需要），空态自己补栏高避让
+          // 内容列不整体 padding top（列表穿透需要），空态自己补栏高避让
           // （此分支必然 tasks.length === 0，固定栏只有标题行）
           .padding({ top: this.safeTop + NAV_TITLE_BAR_HEIGHT })
         } else {
           List({ scroller: TabScrollerHolder.downloads }) {
             // 顶部空白占位条目：列表视口铺满全屏，条目起始位置在屏幕顶端（y=0）。
-            // 占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底起排（静置位
-            // 与旧 contentStartOffset 等值），滚动时占位与条目一起从模糊板下方穿过。
+            // 占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底起排，
+            // 滚动时占位与条目一起从模糊板下方穿过。
             ListItem() {
               // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
               Row()
                 .width('100%')
                 .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
             }
-            // 横屏宽屏（2026-10-23 两列改造）：下载组配对，每个 ListItem 左右两列
-            //（组 = GroupContent 抽出的完整内容，含组头与展开的分 P 子行）；
-            // 竖屏 / 窄窗口走原单列分支，行为与原先完全一致。
+            // 横屏宽屏：下载组配对，每个 ListItem 左右两列
+            //（组 = GroupContent 的完整内容，含组头与展开的分 P 子行）；
+            // 竖屏 / 窄窗口单列。
+            // ⚠️ 两列分支**不注册 onMove**：长按拖动排序以 ListItem 为单位，
+            // 配对后拖动会以 pair 为单位、组序错乱 —— 横屏宽屏无拖动
+            //（PlaylistsPage 两列分支同款取舍）。
             if (this.isTwoCol()) {
               ForEach(
                 makePairs<DownloadGroup>(this.groups),
@@ -2066,51 +2245,56 @@ export struct DownloadsPage {
                 },
                 (g: DownloadGroup): string => this.groupRowKey(g)
               )
+                // 长按拖动整组重排：ForEach.onMove 官方拖拽路线（系统自带
+                // 浮起/让位动画 + 拖到边缘自动滚动）。下标限定在 ForEach 数据
+                // （this.groups）内，不含顶部占位条目；松手后触发一次，
+                // 顺序落定与队列重排见 onGroupMove。
+                // 多选态不注册：条目点击语义已让位点选，不允许再拖动。
+                .onMove(!this.selecting
+                  ? (from: number, to: number): void => {
+                    this.onGroupMove(from, to);
+                  }
+                  : undefined)
             }
           }
           .layoutWeight(1)
-          // 边界回弹（2026-10-08）：到顶/到底的反馈动效
+          // 边界回弹：到顶/到底的反馈动效
           .edgeEffect(EdgeEffect.Spring)
           .cachedCount(6)
           // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-          //（见上方占位注释），不再使用 contentStartOffset。
-          // 留白整改：常规态队列控制迁标题行（DlQueueActions），不再常驻行 2；
+          //（见上方占位注释）。
+          // 常规态队列控制在标题行（DlQueueActions），不常驻行 2；
           // 多选工具条（行 2）为瞬时覆盖层 —— 占位条目高度恒定（safeTop + 56），
           // 多选时覆盖首项（歌单页同款已接受的行为局限）。
-          // 列表末端常规留白（2026-10-09：不再叠加 safeBottom —— 底部不做避让，
-          // 视口直接扩展进安全区，末行可滚到悬浮胶囊与手势条下）
+          // 列表末端常规留白：底部不做避让，
+          // 视口直接扩展进安全区，末行可滚到悬浮胶囊与手势条下
           .contentEndOffset(CONTENT_END_OFFSET)
-          // [任务③·推广] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
+          // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
           // onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
           .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
             this.syncTopBlurProgress();
           })
           .onScrollStop((): void => {
-            // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+            // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
             this.syncTopBlurProgress();
           })
         }
       }
       .width('100%')
       .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
+      // ⚠️ 不整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
       // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
-      // 横屏宽屏（2026-10-23 两列改造）：上限放宽到 840vp，两列每列行宽约 400vp+。
+      // 横屏宽屏：上限 840vp，两列每列行宽约 400vp+。
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-      // [任务③·推广] 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar 与
+      // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar 与
       // 「加入歌单」选择弹层），进度由列表 onDidScroll/onScrollStop 经
       // topBlurUpdater 命令式驱动。
       TopGradientBlurOverlay({
         barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
         updater: this.topBlurUpdater
       })
-
-      // 「加入歌单」选择弹层：盖在列表之上（catch 层全屏捕获点击关闭）
-      if (this.showPlaylistPicker) {
-        this.pickerOverlay()
-      }
     }
     .width('100%')
     .height('100%')

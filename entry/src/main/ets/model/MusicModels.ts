@@ -1,6 +1,5 @@
 /**
- * BiliMusic 数据模型（原生 ArkTS 版）
- * 对应原 React 项目的 src/types/index.ts 与 services 中的数据结构。
+ * BiliMusic 数据模型。
  */
 
 import util from '@ohos.util';
@@ -31,7 +30,7 @@ export enum DownloadStatus {
   ERROR = 'error'
 }
 
-/** 设置页「仅 WiFi 下载」开关未开启时的默认值（默认不限制，行为与加开关之前一致） */
+/** 设置页「仅 WiFi 下载」开关未开启时的默认值（默认不限制） */
 export const DEFAULT_WIFI_ONLY_DOWNLOAD: boolean = false;
 
 export enum ThemeMode {
@@ -56,9 +55,8 @@ export enum AudioQuality {
 /**
  * 下载音质档位 → B 站音频流 quality id（用户选择的「首选档」）。
  *
- * 映射到 30280(192K) 而不是 30232(132K) 作为「高品质」，是为了**不改变加这个功能之前的默认行为**：
- * 老实现按 bandwidth 取最大，实际拿到的就是 30280；若把「高品质」映射到 132K，
- * 老用户升级后会发现下载的音频反而变差了。
+ * 「高品质」映射到 30280(192K) 而不是 30232(132K)：默认按 bandwidth 取最大时
+ * 实际拿到的就是 30280，映射到 132K 会让默认音质反而变差。
  * 未知取值一律按 192K 处理（与 DEFAULT_APP_SETTINGS.downloadQuality 保持一致）。
  */
 export function downloadQualityId(quality: string): number {
@@ -88,7 +86,7 @@ export interface Track {
   /**
    * 投稿者 mid（B 站 UP 主 id），空串 = 未知。
    *
-   * 「进 UP 主主页」「订阅该 UP 的投稿」都靠它。来源与覆盖率（2026-10-03 实测）：
+   * 「进 UP 主主页」「订阅该 UP 的投稿」都靠它。来源与覆盖率：
    * 搜索结果自带 mid、ranking/v2 与推荐流走 `owner.mid` —— 三处都能直接落；
    * 音乐中心结构里没有 mid、已下载曲目 slimTrack 后只剩 bvid → 这两类走
    * `getVideoDetail(bvid)` 换（有 viewCache，不重复发请求）。
@@ -132,14 +130,11 @@ export interface Track {
   /**
    * 音源实测带宽（bps，来自 playurl 的 `dash.audio[].bandwidth`）。
    *
-   * ⚠️ 2026-10-08 补：`audioQuality` 只是「档位 id」（30216/30280/30250…），
+   * ⚠️ `audioQuality` 只是「档位 id」（30216/30280/30250…），
    * B 站经常**给低码率内容挂高档位标签**（内容侧本身上传的就是 66k，
    * 却按 192k 的档位下发给客户端）—— 只回显档位标签就是骗用户。
    * 所以 `Constants.ts` 里「界面上必须回显实际拿到的码率」这条要求需要**两个字段**：
    * 档位标签给 `audioQuality`，真实码率给本字段，显示时优先用本字段。
-   *
-   * `MusicPlayer.mergeTrack` 此前只搬了 `audioQuality` 把本字段丢了，
-   * 导致播放页链路拿不到实测码率 —— 已修。
    */
   audioBandwidth: number;
   audioMimeType: string;
@@ -188,16 +183,16 @@ export function buildTrack(partial: Partial<Track>): Track {
   };
 }
 
-// 背景（踩过的坑）：`@ohos.data.preferences` 对 **string 类型的 value 有 8192 字节硬上限**，
-// 超限时 `put()` 直接抛错。而 Track 里最大的字段 audioUrl 是带签名 token 的 B 站音频直链
-// （动辄 400~600 字符），把「最近播放 50 首」整体 JSON.stringify 后能到 20KB 以上
-// → 写入失败，且调用侧 fire-and-forget 没有 catch → 整块数据静默丢失
-// （表现就是「最近播放页面永远没有记录」「歌单加了歌不生效」）。
+// ⚠️ `@ohos.data.preferences` 对 **string 类型的 value 有 8192 字节硬上限**，
+// 超限时 `put()` 直接抛错。Track 里最大的字段 audioUrl 是带签名 token 的 B 站
+// 音频直链（动辄 400~600 字符），曲目列表整体 JSON.stringify 很容易超限 →
+// 写入失败，且调用侧 fire-and-forget 没有 catch → 整块数据静默丢失。
 //
 // 因此凡是要落到 Preferences 的曲目列表，都先 slimTrack 去掉当次播放才用的字段。
-// 列表层面的对策分两代（2026-10-12）：最近播放与歌单已改**分片存储**
-// （每片 8 条独立 key，总量不再受单值上限约束）；**fitByByteBudget 目前仅收藏
-// 仍在用**（单键 + 截断），收藏条数同样被截到约 11 条，待后续同模式改造。
+// 列表层面：最近播放、歌单、收藏走**分片存储**（每片 8 条独立 key，总量不受
+// 单值上限约束）；播放器状态（含队列）走**文件存储**（PlayerStateStore），
+// 同样不受单值上限约束。fitByByteBudget 是「单键 + 按字节预算从头截断」的
+// 通用工具，存量调用方已全部迁往上述两种存储，保留备用。
 
 /** Preferences 单值上限为 8192 字节，留出余量按 6000 收口 */
 export const PREF_VALUE_BUDGET_BYTES: number = 6000;
@@ -209,8 +204,8 @@ const utf8Encoder: util.TextEncoder = new util.TextEncoder();
  * 精确 UTF-8 字节数。
  * 不能直接用 `str.length`：上限按字节算，中文一字占 3 字节，
  * 用字符数估算会高估剩余容量，写入照样会超限失败。
- * 2026-10-23 性能审查：改用 @ohos.util TextEncoder 精确编码 ——
- * 旧手算版把增补平面字符（emoji 等 >0xFFFF）算成 2×3=6 字节，实际只占 4。
+ * 用 @ohos.util TextEncoder 精确编码：增补平面字符（emoji 等 >0xFFFF）
+ * 实际占 4 字节，不是按 2 个 3 字节字符估算的 6 字节。
  */
 export function utf8Length(s: string): number {
   return utf8Encoder.encodeInto(s).length;
@@ -352,8 +347,11 @@ export const PLAYER_CLOSE_STYLE_SLIDE: string = 'slide';
 export const PLAYER_COVER_STYLE_DISC: string = 'disc';
 /** 播放页封面风格（AppSettings.playerCoverStyle）：方卡极简 —— 方形圆角大封面不旋转 + 主色净底渐变背景（无模糊图无噪点） */
 export const PLAYER_COVER_STYLE_SQUARE: string = 'square';
-/** 播放页封面风格（AppSettings.playerCoverStyle）：全屏沉浸 —— 封面满屏宽、上沿顶到状态栏（无圆角无投影），封面底部渐变模糊 + 主色溶解过渡到下方主色纵向渐变背景（2026-10-24 改版，替代旧硬切；同日过渡动画改版：特效层随展开飞行渐显、收起先柔退渐隐再回飞，不再瞬间出现/消失） */
-export const PLAYER_COVER_STYLE_IMMERSIVE: string = 'immersive';
+
+/** 条目展示（AppSettings.itemDisplayStyle）：长条 —— 小封面 + 长标题行（默认，现状） */
+export const ITEM_DISPLAY_LIST: string = 'list';
+/** 条目展示（AppSettings.itemDisplayStyle）：大封面 —— 双列网格、大封面 + 小字标题 */
+export const ITEM_DISPLAY_GRID: string = 'grid';
 
 export interface AppSettings {
   sidebarState: string; // 手机端固定为 'auto'
@@ -375,8 +373,10 @@ export interface AppSettings {
   progressStyle: string;
   /** 播放页收起动画风格：PLAYER_CLOSE_STYLE_MORPH（柔退）/ MORPH_SWIPE（柔退+手势）/ SLIDE（下滑） */
   closeAnimStyle: string;
-  /** 播放页封面风格：PLAYER_COVER_STYLE_DISC（唱片）/ SQUARE（方卡）/ IMMERSIVE（全屏） */
+  /** 播放页封面风格：PLAYER_COVER_STYLE_DISC（唱片）/ SQUARE（方卡） */
   playerCoverStyle: string;
+  /** 条目展示：ITEM_DISPLAY_LIST（长条，默认）/ ITEM_DISPLAY_GRID（大封面双列） */
+  itemDisplayStyle: string;
   /** 迷你播放栏进度指示显示开关（底部直线 + 收起态圆环；设置 → 外观；默认开） */
   miniBarProgress: boolean;
   /**
@@ -391,8 +391,35 @@ export interface AppSettings {
   playbackSpeed: number;
   /** 与其他应用同时播放（设置 → 播放；默认关）：开启后激活 AudioSession（CONCURRENCY_MIX_WITH_OTHERS，与其他应用音频双向混音），关闭停用会话恢复默认焦点行为 */
   audioMixEnabled: boolean;
+  /**
+   * 响度均衡（设置 → 播放；默认关，实验性）：开启后按 B 站 playurl 下发的
+   * 服务端响度预测（volume.measured_i）把偏响的歌衰减到目标响度（-14 LUFS 量级），
+   * 不同歌曲音量听感一致。只衰减不放大；本机没解析过音源的曲目不生效。
+   * 运行时镜像 STORE_LOUDNESS_NORM_ENABLED（EntryAbility 启动时写入）。
+   */
+  loudnessNormalizationEnabled: boolean;
   /** 在 B 站打开原视频（设置 → 播放；默认开）：开启后播放页功能行出现跳转 B 站客户端入口 */
   openInBilibiliEnabled: boolean;
+  /**
+   * 听后缓存（设置 → 播放；默认开）：自然听完的
+   * 歌曲后台缓存整首音频到独立 listen_cache 目录（512MB LRU），重播秒开、
+   * 离线可播。流量策略跟随「仅 WiFi 下载」；不混入下载管理列表。
+   */
+  listenCacheEnabled: boolean;
+  /**
+   * 保存到系统下载目录（设置 → 下载与存储；默认关）：开启后每首下载完成自动
+   * 搬入 DOWNLOAD 模式授权的「下载/包名」目录（单份存储，文件管理可见）。
+   */
+  saveToPublicDownloads: boolean;
+  /** 「下载/包名」目录 URI（DOWNLOAD 模式 Picker 返回的持久授权凭证）：路径经 fileUri 现转，不存绝对路径 */
+  publicDownloadsDirUri: string;
+  /**
+   * 公共目录迁移完成标记：true = 启动时已执行过「沙箱 downloads 存量搬入
+   * 下载/包名目录」的一次性迁移。标记在迁移动身前先行写入（at-most-once）：
+   * 即便中途失败也不再自动重跑，避免每次启动重复弹授权 / 重复搬移；
+   * 残留文件经设置页「手动同步」补齐。
+   */
+  publicDirMigrated: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -410,12 +437,18 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   progressStyle: PROGRESS_STYLE_CLASSIC,
   closeAnimStyle: PLAYER_CLOSE_STYLE_MORPH_SWIPE,
   playerCoverStyle: PLAYER_COVER_STYLE_DISC,
+  itemDisplayStyle: ITEM_DISPLAY_LIST,
   miniBarProgress: true,
   miniBarAutoExpand: true,
   speedEnabled: false,
   playbackSpeed: 1.0,
   audioMixEnabled: false,
-  openInBilibiliEnabled: true
+  loudnessNormalizationEnabled: false,
+  openInBilibiliEnabled: true,
+  listenCacheEnabled: true,
+  saveToPublicDownloads: false,
+  publicDownloadsDirUri: '',
+  publicDirMigrated: false
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -456,10 +489,12 @@ export function coverStyleLabelOf(style: string): string {
   if (style === PLAYER_COVER_STYLE_SQUARE) {
     return '方卡';
   }
-  if (style === PLAYER_COVER_STYLE_IMMERSIVE) {
-    return '全屏';
-  }
   return '唱片';
+}
+
+/** 条目展示显示标签（设置页后缀 / toast 用；未知值回落「长条」） */
+export function itemDisplayLabelOf(style: string): string {
+  return style === ITEM_DISPLAY_GRID ? '大封面' : '长条';
 }
 
 /** 逐字片段（卡拉 OK 高亮用） */
@@ -550,25 +585,25 @@ export interface DownloadTask {
    * 来源歌单 id / 歌单名（空串 = 不是从歌单整单下载来的）。
    *
    * 为什么要落库：整单下载的一堆任务在下载管理里必须**聚成一张歌单卡片**、
-   * 展开才看到单曲（用户 2026-10-04 要求）。若只放内存，重启 App 后分组就没了。
+   * 展开才看到单曲。若只放内存，重启 App 后分组就没了。
    *
-   * ⚠️ 这两列是本项目**第一次给 download_task 表加列**，所以 `RdbHelper` 里补了
-   * 幂等迁移（`PRAGMA table_info` 查列 → 缺则 `ALTER TABLE ADD COLUMN`）——
-   * 鸿蒙 RDB 的 `StoreConfig` 没有 version 字段、`RdbStore.version` 只读，
-   * 指望不上自动升级，`CREATE TABLE IF NOT EXISTS` 对已存在的表也**不会补列**。
+   * ⚠️ 表结构变化走 `RdbHelper` 的幂等迁移（`PRAGMA table_info` 查列 →
+   * 缺则 `ALTER TABLE ADD COLUMN`）—— 鸿蒙 RDB 的 `StoreConfig` 没有
+   * version 字段、`RdbStore.version` 只读，指望不上自动升级，
+   * `CREATE TABLE IF NOT EXISTS` 对已存在的表也**不会补列**。
    */
   playlistId: string;
   playlistName: string;
   /**
-   * 合集归属三件套（2026-10-08，多 P 视频下载的显式标记）：
+   * 合集归属三件套（多 P 视频下载的显式标记）：
    * - collectionTitle：展开前的原视频标题（用户视角的「合集名」）；
    * - partNo / partTotal：分 P 序号（1 起）与总 P 数。
    *
-   * 为什么要落库：此前合集信息只隐式存活在「首个分P复用 base 标题」这一约定里，
-   * 下载页分组靠 musicId 的 bvid 前缀反推——首 P 被删后组标题退化成分P名、
-   * 单 P 视频与「删剩 1 条的多 P 合集」无法区分、分 P 序号更是无从展示（用户 2026-10-08
-   * 要求合集条目与单视频条目做区分）。与 playlistId/playlistName 同一套「归属标记」范式，
-   * RdbHelper 幂等迁移补列。单视频：collectionTitle 为空串、partNo/partTotal 为 0。
+   * 为什么要落库：合集信息若只隐式存活在「首个分P复用 base 标题」这一约定里，
+   * 下载页分组只能靠 musicId 的 bvid 前缀反推——首 P 被删后组标题退化成分P名、
+   * 单 P 视频与「删剩 1 条的多 P 合集」无法区分、分 P 序号更是无从展示。
+   * 与 playlistId/playlistName 同一套「归属标记」范式，RdbHelper 幂等迁移补列。
+   * 单视频：collectionTitle 为空串、partNo/partTotal 为 0。
    */
   collectionTitle: string;
   partNo: number;
@@ -583,8 +618,8 @@ export interface SearchResultItem {
   title: string;
   author: string;
   /**
-   * 投稿者 mid。**接口一直有返回**（2026-10-03 实测），只是旧类型声明漏了它，
-   * 导致「进 UP 主主页」拿不到人。声明成可选：字段缺失时退化成空串，不影响整块列表。
+   * 投稿者 mid。**接口一直有返回**，声明成可选：字段缺失时退化成空串，
+   * 不影响整块列表。
    */
   mid?: number;
   play: number;
@@ -632,7 +667,7 @@ export interface VideoDetail {
   pages: VideoPageInfo[];
   pubdate: number;
   /**
-   * B 站「合集」（ugc_season，2026-10-22 补）：多个**独立视频**的集合。
+   * B 站「合集」（ugc_season）：多个**独立视频**的集合。
    * 与多 P（pages，同一视频的分页）是两种形态：合集条目自带 bvid/cid，
    * 各自独立解析音源。无合集的视频该字段缺省（view 响应里无此键）。
    */
@@ -688,7 +723,7 @@ export interface DolbyData {
 }
 
 /**
- * Hi-Res FLAC 容器（2026-10-08 对照 bilibili-API-collect 修正）：`dash.flac = { display, audio }`。
+ * Hi-Res FLAC 容器：`dash.flac = { display, audio }`。
  * 音轨本体在 **flac.audio（单对象，不是数组、也不直接挂在 flac 上）**；无无损音轨或账号
  * 无权限时整个 flac 为 null（audio 亦可为 null）—— 使用处一律真值判断。
  * audio 对象结构与 dash.audio 条目相同（id=30251、baseUrl、bandwidth…）。
@@ -714,14 +749,14 @@ export interface DashData {
  *
  * 这一类响应**完全没有 dash 字段**：整段 mp4（音视频合一）以分段地址给出。
  * 对只看音轨的播放器来说它照样能出声 —— 视频轨白白解码，但没有更好选择：
- * 不接这条兜底，这类视频的表现就是「点哪首都播不出来」（2026-10-22 补，对齐 BBPlayer）。
+ * 不接这条兜底，这类视频的表现就是「点哪首都播不出来」。
  */
 export interface DurlItem {
   /** 分段序号，从 1 开始 */
   order: number;
   /**
-   * 该分段时长，**单位毫秒**（2026-10-22 实测：BV1GJ411x7h7 返回 212394，
-   * 对应 3 分 32 秒的视频里的一段）。用它算码率必须先 /1000。
+   * 该分段时长，**单位毫秒**（实测 BV1GJ411x7h7 返回 212394）。
+   * 用它算码率必须先 /1000。
    */
   length: number;
   /** 该分段字节数 */
@@ -737,6 +772,20 @@ export interface PlayUrlData {
   dash?: DashData;
   /** 老视频 / 降级响应的分段流；与 dash 互斥（dash 缺失时才有值） */
   durl?: DurlItem[];
+  /**
+   * 服务端响度预测（dash 响应携带；durl 降级 / 部分老视频缺失）。
+   * measured_i = 整合响度实测值，target_i = 目标响度（-14 LUFS 量级）。
+   * 缺失时响度均衡对该曲目不生效（增益按 1.0 处理）。
+   */
+  volume?: BiliVolumeData;
+}
+
+/** playurl 响应 volume 对象的直译：B 站服务端对音轨的响度预测结果 */
+export interface BiliVolumeData {
+  /** 整合响度实测值（LUFS，通常为负数；0 视为「无数据」） */
+  measured_i: number;
+  /** 目标响度（LUFS；0 视为缺失，应用侧兜 -14） */
+  target_i: number;
 }
 
 export interface MusicCenterItem {
@@ -775,5 +824,9 @@ export interface TrackSource {
   audioMimeType: string;
   /** 所选音轨的实测带宽（bps）。见 DownloadTask.audioBandwidth 的说明。 */
   audioBandwidth: number;
+  /** 服务端响度预测（playurl volume.measured_i；0 = 该响应未携带，响度均衡不生效） */
+  loudnessMeasuredI: number;
+  /** 目标响度（playurl volume.target_i；0 = 缺失，应用侧兜 -14） */
+  loudnessTargetI: number;
 }
 

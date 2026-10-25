@@ -1,6 +1,6 @@
 /**
  * B 站 WBI 签名。
- * 移植自原 React 版 bilibiliApi.ts：img_key+sub_key 经固定置换表取前 32 位 mixinKey，
+ * img_key+sub_key 经固定置换表取前 32 位 mixinKey，
  * w_rid = md5(字典序排序后的 query + mixinKey)。nav 接口返回的 wbi_img 每日轮换，缓存 6 小时。
  */
 
@@ -13,11 +13,8 @@ import { BILI_API, BILI_REFERER } from '../common/Constants';
 const wbiEncoder: util.TextEncoder = new util.TextEncoder();
 
 /**
- * MD5 摘要（hex 小写）。
- * 2026-10-23 性能审查：WBI 签名路径从手写 JS 版 MD5 换成 @ohos.security.cryptoFramework
- * 官方实现（createMd('MD5')，异步）—— 手写版每次签名要多跑一轮 64 轮位运算的
- * 纯 TS 循环，官方实现走系统 native。WBI 输入经 encodeURIComponent 后必为 ASCII，
- * 输出与手写版逐字节一致（node crypto 校验口径不变）。
+ * MD5 摘要（hex 小写），走 @ohos.security.cryptoFramework 官方实现
+ * （createMd('MD5')，异步）。WBI 输入经 encodeURIComponent 后必为 ASCII。
  */
 async function md5Hex(input: string): Promise<string> {
   const md: cryptoFramework.Md = cryptoFramework.createMd('MD5');

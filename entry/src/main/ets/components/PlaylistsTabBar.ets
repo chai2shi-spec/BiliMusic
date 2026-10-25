@@ -1,5 +1,5 @@
 /**
- * 歌单页顶栏内容件（2026-10-10）。
+ * 歌单页顶栏内容件。
  *
  * - 标题行按钮（PlTitleActions）：根栏 stackBuilder 行 1 歌单页分支右侧槽入
  *   （Index.tabTitleRow）；
@@ -10,8 +10,8 @@
  * - 状态：@StorageProp 订阅 PlaylistsPage 推到 AppStorage 的镜像键
  *   （STORE_PL_BAR_*，唯一写入口 PlaylistsPage.syncBarState / refresh）。
  * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法（页面注册）。
- * - 视觉：工具条内容与原 bottomBuilder / 页面钉顶版逐字一致，保证「换容器不换观感」
- *   （2026-10-16 增补：合并选中左侧新增「删除选中」，批量删歌单入口）。
+ * - 视觉：保证「换容器不换观感」
+ *   （合并选中左侧为「删除选中」，批量删歌单入口）。
  */
 
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
@@ -47,7 +47,7 @@ export struct PlTitleActions {
         .fontSize(13)
         .height(32)
         .borderRadius(BUTTON_RADIUS_VP)
-        // 2026-10-11 真机要求：标题行按钮统一「浅粉底 + 粉字」（原粉底 + 深枣红字）
+        // 标题行按钮统一「浅粉底 + 粉字」
         .backgroundColor(this.themeSurface)
         .fontColor(this.themePrimary)
         .attributeModifier(this.buttonMaterial)
@@ -56,8 +56,7 @@ export struct PlTitleActions {
         })
     } else {
       if (this.canSelect) {
-        // 「选择」原为 bg_divider + text_primary 且**不带光感材质**，
-        // 与同排其它按钮观感不一致（真机反馈）——统一到同一套语言。
+        // 「选择」与同排其它按钮同一套视觉语言（浅粉底 + 粉字 + 光感材质）
         Button('选择', { type: ButtonType.Normal })
           .fontSize(13)
           .height(32)
@@ -88,7 +87,6 @@ export struct PlTitleActions {
  * 多选工具条（根栏 stackBuilder 行 2：Index 侧 position 于标题行下方，
  * plSelecting 态渲染，全宽不随内容列收窄）。
  * 纯内容件：磨砂由根栏 HDS 统一负责（仅覆盖标题栏区，本行无背板）。
- * 内容与原 bottomBuilder 版逐字平移（全选 / 合并选中）。
  */
 @Component
 export struct PlSelectToolbar {
@@ -113,7 +111,7 @@ export struct PlSelectToolbar {
           TabScrollerHolder.plToggleSelectAll();
         })
       Blank()
-      // 删除选中（合并左侧，2026-10-16）：破坏性操作，用错误色与合并区分；
+      // 删除选中（合并左侧）：破坏性操作，用错误色与合并区分；
       // 一个都没选时置灰，点了由页面兜底提示。
       Text(this.selectedCount > 0 ? `删除选中(${this.selectedCount})` : '删除选中')
         .fontSize(13)

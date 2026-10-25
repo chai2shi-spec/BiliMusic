@@ -1,16 +1,9 @@
 ﻿/**
  * 关于页面：项目介绍（从设置页进入）。
  *
- * 2026-10-11 重构：
- *   · 应用图标换成真实 App 图标（`app_icon_bg` + `app_icon_fg` 分层图标按系统同款
- *     圆角裁切；此前是「♪」文字占位方块）；
- *   · 版式改用与设置页同一套 HDS 结构：分组卡片（InsetCard）+ 区块标题/脚注
- *     （SectionHeader / SectionFooter），全站观感统一；
- *   · 「功能特性」小节已按用户要求删除。
- *
- * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，HdsNavigation 迁移批 1 样板页）：
+ * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar）：
  * 材质与滚动模糊由 HDS 统一渲染（样式见 HdsTitleBarStyle，设备不支持 IMMERSIVE 材质时
- * 自动走玻璃色兜底档），内容用 stackBuilder 承载 aboutBar（标题；返回键为 HDS 默认键，2026-10-24 整改）。
+ * 自动走玻璃色兜底档），内容用 stackBuilder 承载 aboutBar（标题；返回键为 HDS 默认键）。
  * 侧滑返回是 Navigation 级能力，不受影响。
  */
 
@@ -24,8 +17,6 @@ import { BusinessError } from '@ohos.base';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
-import { copyText } from '../utils/ClipboardUtil';
-import { showAppToast } from '../components/AppToast';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -34,9 +25,6 @@ import { MaterialTokens } from '../common/style/MaterialTokens';
 /** App 图标显示边长（vp）与圆角（vp）：圆角比例对齐系统图标遮罩 */
 const APP_ICON_SIZE: number = 88;
 const APP_ICON_RADIUS: number = 22;
-
-/** 反馈 Q 群号：点行即复制到剪贴板 */
-const FEEDBACK_QQ_GROUP: string = '1129926978';
 
 @Component
 export struct AboutPage {
@@ -52,10 +40,10 @@ export struct AboutPage {
   private aboutScroller: Scroller = new Scroller();
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（四页签同款）：onDidScroll /
+   * onScrollStop 命令式驱动 opacity（不标 @State，滚动高频回调零重建）；
+   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
+   * 边缘回弹负偏移归零 = 死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -71,8 +59,8 @@ export struct AboutPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
-    // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier
+    // 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
     bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT)
       .then((info: bundleManager.BundleInfo): void => {
@@ -82,13 +70,6 @@ export struct AboutPage {
         // 拿不到就空着，不影响其它内容展示
         console.error(`getBundleInfoForSelf failed: ${e.code} ${e.message}`);
       });
-  }
-
-  /** 点「反馈Q群」行：群号写入剪贴板 + toast 回执（失败也提示，不静默） */
-  private copyQqGroup(): void {
-    copyText(FEEDBACK_QQ_GROUP).then((ok: boolean): void => {
-      showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
-    });
   }
 
   /**
@@ -137,7 +118,7 @@ export struct AboutPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
    * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
    *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
@@ -161,9 +142,8 @@ export struct AboutPage {
   }
 
   /**
-   * App 图标（真图标，不再用「♪」文字占位）：
-   * 分层图标 = 背景层 + 前景层，按系统同款圆角比例裁切（clip 到圆角内），
-   * 再补一层柔和阴影让它「浮」在卡片上。
+   * App 图标：分层图标 = 背景层 + 前景层，按系统同款圆角比例裁切
+   * （clip 到圆角内），再补一层柔和阴影让它「浮」在卡片上。
    */
   @Builder
   appIcon() {
@@ -193,8 +173,7 @@ export struct AboutPage {
           Column() {
             // 顶部占位（官方沉浸口径）：开启沉浸后内容向上穿透进标题栏区域，
             // 让位不能加在滚动容器外层（否则内容被裁在栏底缘之下、材质无内容可采样），
-            // 必须在页面内容内部做占位。高度 = safeTop + 56（MINI 标题栏），
-            // 与旧 Scroll 外层 padding 等值：静止位不变，滚动时内容真正从材质下穿过。
+            // 必须在页面内容内部做占位。高度 = safeTop + 56（MINI 标题栏）。
             Blank()
               .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
               .width('100%')
@@ -202,7 +181,7 @@ export struct AboutPage {
             // ── 应用信息（图标 + 名称 + 版本 + 作者 / 来源 + 一句话简介）──
             // 让位结构与 InsetCard 同款（外层 Row padding 16、内层 Column layoutWeight
             // 承底色）：不能用 width('100%') + margin —— 百分比宽不含外边距，底色会
-            // 向右溢出 16vp，与下方 InsetCard 宽窄不一致（2026-10-22 用户反馈修复）。
+            // 向右溢出 16vp，与下方 InsetCard 宽窄不一致。
             Row() {
               Column() {
                 this.appIcon()
@@ -255,37 +234,6 @@ export struct AboutPage {
                 .padding({ left: 16, right: 16, top: 14, bottom: 14 })
             }
             SectionFooter({ noteText: '本项目与哔哩哔哩官方无关，音频内容版权归原作者所有，请勿将下载内容用于商业用途。' })
-
-            // ── 反馈与交流 ──
-            SectionHeader({ headerText: '反馈与交流' })
-            InsetCard() {
-              // 整行点按 = 复制群号（Blank 撑开让群号与复制图标靠右）
-              Row() {
-                Text('反馈Q群')
-                  .fontSize(15)
-                  .fontColor($r('app.color.text_primary'))
-                Blank()
-                Text(FEEDBACK_QQ_GROUP)
-                  .fontSize(15)
-                  .fontColor($r('app.color.text_secondary'))
-                SymbolGlyph($r('sys.symbol.doc_filled_on_doc'))
-                  .fontSize(16)
-                  .fontColor([$r('app.color.text_secondary')])
-                  .margin({ left: 8 })
-              }
-              .width('100%')
-              .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-              .alignItems(VerticalAlign.Center)
-              .stateStyles({
-                pressed: { .backgroundColor($r('app.color.press_overlay')) },
-                normal: { .backgroundColor(Color.Transparent) }
-              })
-              .accessibilityText(`复制反馈Q群 ${FEEDBACK_QQ_GROUP}`)
-              .accessibilityLevel('yes')
-              .onClick((): void => {
-                this.copyQqGroup();
-              })
-            }
           }
           .width('100%')
           // 内容末尾让开底部手势区（本页内容到底即结束，不再整屏避让）
@@ -294,19 +242,19 @@ export struct AboutPage {
         .width('100%')
         .align(Alignment.Top)
         .scrollBar(BarState.Off)
-        // 边界回弹（2026-10-08）：内容超屏可滚时，到顶/到底的反馈动效
+        // 边界回弹：内容超屏可滚时，到顶/到底的反馈动效
         .edgeEffect(EdgeEffect.Spring)
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp），
         // 根 Stack 默认居中对齐，直接给 Scroll 挂上限即可。
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
         // 标题栏让位已内移为内容首部占位（见 Column 首子），不在滚动容器上加 padding。
-        // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
-        // 签名 (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
+        // 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参签名
+        // (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
         .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState): void => {
           this.syncTopBlurProgress();
         })
         .onScrollStop((): void => {
-          // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+          // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
           this.syncTopBlurProgress();
         })
       }
@@ -314,7 +262,7 @@ export struct AboutPage {
       .height('100%')
       .backgroundColor($r('app.color.bg_page'))
 
-      // [任务③·推广二级页] 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于 HDS
+      // 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于 HDS
       // titleBar），进度由 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动；
       // 本页内容不足一屏时 Scroll 不可滚、进度恒 0（透明无副作用）。
       TopGradientBlurOverlay({
@@ -324,25 +272,18 @@ export struct AboutPage {
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
     // （设备不支持 IMMERSIVE 时自动走玻璃色兜底档，见该文件注释）。
-    // 内容用 stackBuilder 承载 aboutBarNarrow（2026-10-23 平板模式宽度适配：
-    // 收窄容器内标题与内容列同宽对齐）：标题视觉与自绘时代
-    // 一致，HDS 只接管容器与材质（任务书：「用 HDS 的标题栏容器 + 材质能力，
-    // 装各页自己的顶栏内容」）。
+    // 内容用 stackBuilder 承载 aboutBarNarrow（收窄容器内标题与内容列同宽对齐）。
     .titleBar({
       avoidLayoutSafeArea: true,
       style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
-        // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this，同旧 bar 槽写法）
+        // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this）
         stackBuilder: (): void => {
           this.aboutBarNarrow();
         }
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
-    // 史注：2026-10-22 曾因自绘键与默认键在标题栏左上角重叠（dumpLayout 实证：
-    // 自绘键 [224,90][312,178] 压在默认键 [256,94][336,174] 上）而 hideBackButton(true)
-    // 只留自绘键；本次自绘键整体移除，重叠根源消失，默认键恢复显示。
+    // 返回键：使用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.aboutScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -350,19 +291,19 @@ export struct AboutPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
-    // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
+    // 系统返回拦截：播放页 overlay 打开时吞掉返回并发收起请求（留在本页），
+    // 否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
-    // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸口径，
+    // faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由 plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function AboutPageBuilder(): void {
@@ -370,7 +311,7 @@ export function AboutPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const AboutPageWrapped: WrappedBuilder<[]> = wrapBuilder(AboutPageBuilder);
 

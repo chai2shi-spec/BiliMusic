@@ -32,6 +32,18 @@
         "name": "ohos.permission.GET_NETWORK_INFO"
       },
       {
+        // 蓝牙音频路由监听需要读蓝牙设备名（AudioDeviceDescriptor.name），
+        // 用于区分手表/手环与耳机/音箱（WATCH 3 连接误报「蓝牙已断开」的修复）。
+        // user_grant：首启由 AppContainer.requestBluetoothPermission 弹一次系统窗；
+        // 用户拒绝 → 设备名为空 → 名称过滤失效，仅剩「剩余蓝牙设备核查」兜底。
+        "name": "ohos.permission.ACCESS_BLUETOOTH",
+        "reason": "$string:permission_bluetooth_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        }
+      },
+      {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
         "reason": "$string:permission_bg_reason",
         "usedScene": {
@@ -68,6 +80,31 @@
             "actions": ["action.system.home"]
           }
         ]
+      }
+    ],
+    "extensionAbilities": [
+      {
+        // 桌面卡片 Form 扩展：form_config.json 声明的 4 张卡
+        //（2x2/2x4 播控、心动歌词 2x4/4x4、动态歌词 2x4）。
+        // 双进程自给：读 PlayerStateStore 快照 + 自下载封面，不依赖主进程存活。
+        "name": "MusicCardFormAbility",
+        "srcEntry": "./ets/entryformability/MusicCardFormAbility.ets",
+        "label": "$string:MusicCardFormAbility_label",
+        "description": "$string:MusicCardFormAbility_desc",
+        "type": "form",
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
+      },
+      {
+        // 2x2 播控卡溢出互动动效（liveForm）：requestOverflow 后渲染放大 1.5 倍的视觉区。
+        // form_config sceneAnimationParams.abilityName 指向本扩展。
+        "name": "CardLiveFormAbility",
+        "srcEntry": "./ets/uiextensionability/CardLiveFormAbility.ets",
+        "type": "liveForm"
       }
     ]
   }

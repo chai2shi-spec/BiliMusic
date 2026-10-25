@@ -1,10 +1,9 @@
 /**
- * 导航子页面懒加载注册表（2026-10-17 启动优化 Phase 2）。
+ * 导航子页面懒加载注册表。
  *
- * 背景：Index.ets 曾静态 import 全部 11 个导航子页面（播放页 / 歌单详情 / 登录等），
- * 仅 pageMap 一个 Builder 使用 —— 静态 import 使整个子树（含 lyric/* 与
- * components/player/*）在冷启动首帧前解析加载，拖长「应用启动加载完成」耗时。
- * 现改为：Index 只保留四个 Tab 页静态 import；子页面经本注册表动态 import：
+ * Index 只静态 import 四个 Tab 页，子页面经本注册表动态 import，
+ * 避免全部子页面（含 lyric/* 与 components/player/*）在冷启动首帧前
+ * 解析加载拖长启动耗时：
  *   · 路由首次触达时按需加载（LazyDest 显示 LoadingProgress 兜底）；
  *   · Index 在首帧后 1.5s 调 preloadAllLazyPages 低优先级预热，
  *     正常跳转时模块早已就绪、用户无感知。
@@ -13,6 +12,8 @@
  *   · 动态 import 的路径必须是字符串字面量（ArkTS 不支持变量拼接）→ 每页一个 case；
  *   · wrapBuilder 只接受**本文件内的直接 @Builder 引用**（编译期校验），
  *     所以各子页面文件内预包装为 XxxWrapped 导出，本表只取现成对象。
+ *   · 首页四个 Tab 页（含 HomePage）仍是 Index 静态 import，不进本表；
+ *     'Search'（搜索二级页）自首页入口高频触达，排在预热序前列。
  */
 
 type LazyBuilder = WrappedBuilder<[]>;
@@ -48,6 +49,11 @@ async function loadByName(name: string): Promise<void> {
     case 'PlaylistDetail': {
       const m = await import('../pages/PlaylistDetail');
       builders.set(name, m.PlaylistDetailWrapped);
+      break;
+    }
+    case 'Search': {
+      const m = await import('../pages/SearchPage');
+      builders.set(name, m.SearchPageWrapped);
       break;
     }
     case 'Recent': {
@@ -100,9 +106,24 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.AppearanceSettingsPageWrapped);
       break;
     }
+    case 'AppIconSettings': {
+      const m = await import('../pages/AppIconSettingsPage');
+      builders.set(name, m.AppIconSettingsPageWrapped);
+      break;
+    }
     case 'PlaylistBackup': {
       const m = await import('../pages/PlaylistBackupPage');
       builders.set(name, m.PlaylistBackupPageWrapped);
+      break;
+    }
+    case 'PlaybackLog': {
+      const m = await import('../pages/PlaybackLogPage');
+      builders.set(name, m.PlaybackLogPageWrapped);
+      break;
+    }
+    case 'Reward': {
+      const m = await import('../pages/RewardPage');
+      builders.set(name, m.RewardPageWrapped);
       break;
     }
     case 'Login': {
@@ -115,12 +136,10 @@ async function loadByName(name: string): Promise<void> {
   }
 }
 
-/** 预热顺序：最常用的播放页 / 歌单详情优先，其余按导航入口热度排列
- *（2026-10-24 设置页二级菜单化：四个设置二级页排在跨平台导入之后，
- * 设置入口预热到位后跳转无加载等待）。 */
-const PRELOAD_ORDER: string[] = ['Player', 'PlaylistDetail', 'Recent', 'Follows',
+/** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
+const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'Recent', 'Follows',
   'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
-  'AppearanceSettings', 'DownloadSettings', 'PlaylistBackup', 'About', 'Login'];
+  'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'PlaylistBackup', 'PlaybackLog', 'Reward', 'About', 'Login'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

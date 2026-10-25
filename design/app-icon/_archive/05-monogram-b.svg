@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — B Monogram</title>
+  <desc id="desc">字母标方案。主粉底上以等比描边构造的白色几何大写 B，竖干加两个右凸半圆碗，下碗略宽，不含额外装饰，最小尺寸下最易辨认。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#FB7299"/>
+  </g>
+
+  <g id="foreground-layer">
+    <g id="letter-b" fill="none" stroke="#FFFFFF" stroke-width="64" stroke-linecap="round" stroke-linejoin="round">
+      <path id="stem" d="M 372 264 L 372 760"/>
+      <path id="bowl-upper" d="M 372 264 L 496 264 A 124 124 0 0 1 496 512 L 372 512"/>
+      <path id="bowl-lower" d="M 372 512 L 516 512 A 124 124 0 0 1 516 760 L 372 760"/>
+    </g>
+  </g>
+</svg>

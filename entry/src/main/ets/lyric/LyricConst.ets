@@ -1,5 +1,5 @@
 /**
- * 歌词常量（移植自 audio-interaction-master）。
+ * 歌词常量。
  */
 
 export enum LyricScrollEffect {

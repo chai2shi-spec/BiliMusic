@@ -19,7 +19,7 @@ const COLUMNS: string[] = [
   // 来源歌单（整单下载的任务有），空串 = 本人
   'playlistId',
   'playlistName',
-  // 合集归属三件套（2026-10-08）：多 P 视频下载的显式标记，单视频为 ''/0
+  // 合集归属三件套：多 P 视频下载的显式标记，单视频为 ''/0
   'collectionTitle',
   'partNo',
   'partTotal'
@@ -91,7 +91,7 @@ function fromRow(rs: relationalStore.ResultSet): DownloadTask {
       // 这两口在老库里是 NULL，getString 返回空串（不会抛错）
       playlistId: rs.getString(rs.getColumnIndex('playlistId')),
       playlistName: rs.getString(rs.getColumnIndex('playlistName')),
-      // 合集三件套（2026-10-08）：老库补列后是 NULL——getString→''，getDouble→NaN 需兜成 0
+      // 合集三件套：老库补列后是 NULL——getString→''，getDouble→NaN 需兜成 0
       collectionTitle: rs.getString(rs.getColumnIndex('collectionTitle')),
       partNo: rs.getDouble(rs.getColumnIndex('partNo')) || 0,
       partTotal: rs.getDouble(rs.getColumnIndex('partTotal')) || 0

@@ -1,8 +1,8 @@
 /**
- * 登录页（扫码 + 短信验证码合并，2026-10-20 由两个独立路由合并为一页两页签）。
+ * 登录页（扫码 + 短信验证码合并，一页两页签）。
  *
  * 顶部滑块（CapsuleSegmentButtonV2，与观看历史页「观看历史 / 稍后再看」同款）在
- * 「扫码登录」「短信登录」两个页签间切换，不再经 'SmsLogin' 子路由跳转。
+ * 「扫码登录」「短信登录」两个页签间切换。
  *
  * ── 扫码页签 ──
  * 流程：生成二维码（passport web 接口）→ 本地 QRCode 组件渲染 → 每 2s 轮询扫码状态
@@ -74,12 +74,11 @@ import { MaterialTokens } from '../common/style/MaterialTokens';
 const QR_POLL_INTERVAL_MS: number = 2000;
 
 /**
- * 二维码「早失效」判定阈值（ms，2026-10-22 平板登录修复）：
+ * 二维码「早失效」判定阈值（ms）：
  * 正常有效期 ~180s；存活 <30s 且从未进入已扫码态 = 异常作废。
- * 真根因（2026-10-22 定位）：poll 的 GET + queryParams 发空参请求，服务端
- * 查无 qrcode_key 一律答 86038 —— 已在 BilibiliApi.pollQrLogin 改为 key 内联
- * URL 根治。本判定与自动换码保留为安全网：万一再出现异常早失效（真风控等），
- * 自动换码重试（见 pollOnce 86038 分支），超限转手动蒙层。
+ * poll 由 BilibiliApi.pollQrLogin 将 key 内联 URL（queryParams 空参会被答 86038）。
+ * 本判定与自动换码是安全网：异常早失效（真风控等）时自动换码重试
+ * （见 pollOnce 86038 分支），超限转手动蒙层。
  */
 const QR_EARLY_INVALIDATE_MS: number = 30000;
 /** 早失效自动刷新次数上限：防止服务端持续作废时无限「3 秒换一张」循环 */
@@ -99,7 +98,7 @@ const TAB_SMS: number = 1;
 const LOGIN_TABS_ROW_HEIGHT: number = 44;
 
 /**
- * 短信卡底部上移占位（2026-10-22 键盘遮挡修复）：页面内容整体垂直居中，
+ * 短信卡底部上移占位：页面内容整体垂直居中，
  * 弹出输入法时系统避让只保证焦点输入框可见，卡内更下方的验证码按钮仍会被
  * 键盘盖住（平板实测盖住 ~67px）。在短信卡下方补一块占位，把居中点上抬
  * 约一半高度，让「输入框 + 按钮」在手机 / 平板上都落到键盘上方。
@@ -117,16 +116,15 @@ const PHASE_CODE: string = 'input_code';
  * 极验加载看门狗（ms）：到点仍没收到 `gtready` / `gtok` 就判加载失败、显示重试出口。
  *
  * 为什么必须有：极验 fullpage 面板的失败是**静默**的（loader 网络错误、脚本被拦、
- * 域校验不通过都只是"什么都没有"），旧实现既没有 onConsole 也没有超时，
- * 用户看到的就是一片空白、永远等不到回调。取 12s：gettype + 两次 js 加载
- * 在弱网下也要留余量，但比"永远转圈"好。
+ * 域校验不通过都只是"什么都没有"），不设超时用户就是一片空白、永远等不到回调。
+ * 取 12s：gettype + 两次 js 加载在弱网下也要留余量。
  */
 const GEETEST_WATCHDOG_MS: number = 12000;
 /**
  * 极验页的「假 https 地址」：只用于给 Web 一个**真实 https 上下文**
  * （origin = https://www.bilibili.com），内容由 `onInterceptRequest` 直接返回。
  *
- * 为什么不再用 `loadData`：真机实测（2026-10-20 18:26）`loadData(base64)` 在
+ * 为什么不用 `loadData`：真机实测 `loadData(base64)` 在
  * `onControllerAttached` 里**静默失效** —— 探针拿到的是
  * `href=about:blank, origin=null, init=undefined`，HTML 从未执行；
  * 而极验的域校验读的正是 location.origin，`null` 也过不去。
@@ -179,7 +177,7 @@ class GeetestBridge {
 /**
  * 极验验证页 HTML（移植 BBPlayer GeetestVerifyStep.buildGeetestHtml）。
  *
- * 2026-10-20 白屏修复要点（真机症状：「安全验证」整块空白、永远等不到回调）：
+ * 要点：
  *   ① 宿主必须**整屏**：`gettype.php?gt=<B站gt>` 实测返回 `type:"fullpage"`，
  *      fullpage 面板是整屏 fixed 浮层；塞进 360vp 高的卡片里会被裁成空白。
  *      参考实现（BBPlayer）也是 `Portal + absoluteFill + flex:1` 的整屏 WebView。
@@ -341,10 +339,10 @@ export struct LoginPage {
   private loginScroller: Scroller = new Scroller();
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型推广，四页签同款）：
+   * onDidScroll / onScrollStop 命令式驱动 opacity（不标
    * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 0 → 1（updater 内截断，边缘回弹负偏移归零为死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -423,10 +421,10 @@ export struct LoginPage {
   private geetestConsumed: boolean = false;
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
-    // 平板登录诊断（2026-10-22）：若「二维码 3 秒换一张」实为页面被反复重挂
+    // 平板登录诊断：若「二维码 3 秒换一张」实为页面被反复重挂
     //（startQrLogin 被重复触发而非 86038 早失效），短时间内出现多条本日志即可定位。
     console.info(`[Login] appear ts=${Date.now()}`);
     this.bridge.onGeetestResult = (message: string): void => {
@@ -529,9 +527,9 @@ export struct LoginPage {
         const aliveMs: number = Date.now() - this.qrGeneratedAt;
         console.warn(`QR expired: aliveMs=${aliveMs}` +
           `, lastPhase=${this.qrPhase}`);
-        // 早失效自愈（2026-10-22 平板登录修复）：被风控提前作废（存活 <30s 且
+        // 早失效自愈：被风控提前作废（存活 <30s 且
         // 从未扫码）时自动换码重试，退避逐次拉长、上限 QR_AUTO_REFRESH_MAX 次；
-        // 超限、正常 180s 自过期、扫码后作废仍走手动蒙层（行为不变）。
+        // 超限、正常 180s 自过期、扫码后作废仍走手动蒙层。
         if (aliveMs < QR_EARLY_INVALIDATE_MS && this.qrPhase !== 'scanned'
           && this.autoRefreshCount < QR_AUTO_REFRESH_MAX) {
           this.autoRefreshCount++;
@@ -557,8 +555,8 @@ export struct LoginPage {
         this.statusText = '请使用哔哩哔哩客户端扫码';
       }
     } catch (e) {
-      // 单次轮询失败（瞬态断网）跳过本轮，下个周期再试；必须留痕（曾因静默吞错
-      // 丢失 poll 失败的关键证据——HTTP 4xx/5xx 在 HttpUtil 里是先抛错后打日志的）
+      // 单次轮询失败（瞬态断网）跳过本轮，下个周期再试；必须留痕
+      //（HTTP 4xx/5xx 在 HttpUtil 里是先抛错后打日志，不留痕会丢关键证据）
       const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
       console.warn(`pollOnce failed: ${msg}`);
     } finally {
@@ -567,7 +565,7 @@ export struct LoginPage {
   }
 
   /**
-   * 大会员登录福利（2026-10-21）：登录成功后若为大会员/年度大会员（vipStatus===1），
+   * 大会员登录福利：登录成功后若为大会员/年度大会员（vipStatus===1），
    * 把播放音质与下载音质自动提升为「无损」。仅登录成功时设置一次；
    * 用户之后手动调低不再干预（产品决策，见方案确认记录）。
    * @returns 是否实际修改了设置（用于决定 toast 文案）
@@ -745,8 +743,8 @@ export struct LoginPage {
    *
    * `showAppToast` 紧挨着 pop 调用会被一起收掉：toast 挂在当前页的 UIContext 上，
    * 页面一销毁就跟着消失（日志表现 `closeToast(...) → Toast not found`）。
-   * 所以提示延迟到退栈动画之后再发。合并后登录只有一层路由（不再有 'SmsLogin'
-   * 子页），pop 一层即回到来源页（设置 / 关注 / 收藏同步等）。
+   * 所以提示延迟到退栈动画之后再发。登录只有一层路由，
+   * pop 一层即回到来源页（设置 / 关注 / 收藏同步等）。
    */
   private finishSmsLogin(upgraded: boolean): void {
     console.info(`sms login done: pop nav stack, size=${NavStackHolder.stack.size()}`);
@@ -815,7 +813,7 @@ export struct LoginPage {
    * 拦截未命中时的应急回落：用 `data:` 真实导航再喂一次同样的 HTML。
    *
    * 只在「主框架请求真的打到 bilibili.com 并且报错」时触发一次 —— 那种情况说明
-   * 这台设备的 ArkWeb 没拦主框架，`loadData` 又已被实测证明无效，只剩 `data:`
+   * 这台设备的 ArkWeb 没拦主框架，`loadData` 无效（真机实测），只剩 `data:`
    * 这一条能让脚本跑起来的路（origin 会退化成 opaque，先保证有验证可用）。
    */
   private fallbackLoadData(): void {
@@ -995,12 +993,12 @@ export struct LoginPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
    * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
    *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
    * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
+   * sm 回退 600（窗口 <600vp）天然无操作。
    */
   @Builder
   loginBarNarrow() {
@@ -1019,7 +1017,7 @@ export struct LoginPage {
   }
 
   /**
-   * 滑块切换行收窄容器（2026-10-23 平板模式宽度适配）：同 loginBarNarrow 口径 ——
+   * 滑块切换行收窄容器（平板模式宽度适配）：同 loginBarNarrow 口径 ——
    * bottomBuilder 也横跨整列全宽，收窄后滑块行与本页内容列同宽对齐；
    * bottomBuilder 显式高度（LOGIN_TABS_ROW_HEIGHT）不动。sm 天然无操作。
    */
@@ -1108,7 +1106,7 @@ export struct LoginPage {
         .fontColor($r('app.color.text_secondary'))
         .margin({ top: 6 })
       this.qrArea()
-      // 2026-10-24 风格对齐：过期/失败态小字改 themeDeep（白底 13px 品牌粉仅 2.2:1，
+      // 过期/失败态小字用 themeDeep（白底 13px 品牌粉仅 2.2:1，
       // 设计规范红线；themeDeep #C2185B 5.81:1 且随主题切换 —— 双粉策略）
       Text(this.statusText)
         .fontSize(13)
@@ -1122,14 +1120,14 @@ export struct LoginPage {
     .width('100%')
     .backgroundColor($r('app.color.bg_card'))
     .borderRadius(12)
-    // 2026-10-24 风格对齐：左右让位 12→16（InsetCard 分组卡片规范，设置/歌单页同宽）
+    // 左右让位 16（InsetCard 分组卡片规范，设置/歌单页同宽）
     .margin({ left: 16, right: 16, top: 10, bottom: 20 })
     .alignItems(HorizontalAlign.Center)
   }
 
   /**
    * 短信页签主按钮：粉底胶囊（loading 态文案变化 + 禁用防重入）。
-   * 2026-10-24 风格对齐：字阶 15→16、圆角取 BUTTON_RADIUS_VP、补沉浸光感材质
+   * 字阶 16、圆角取 BUTTON_RADIUS_VP、沉浸光感材质
    * （buttonMaterial，全应用兄弟页按钮同款）与禁用态 dim 0.5（FavSyncPage 全宽 CTA 同款）。
    */
   @Builder
@@ -1187,14 +1185,14 @@ export struct LoginPage {
     this.primaryButton(this.busy ? '正在获取…' : '获取验证码', !this.busy, (): void => {
       this.requestCaptcha();
     })
-    // 卡片底部呼吸空间（旧版由「改用扫码登录」链接提供，合并后改由占位承担）
+    // 卡片底部呼吸空间
     Blank()
       .height(22)
   }
 
   /**
-   * 短信第 2 步：卡片里只留「等待验证」提示 —— 极验 WebView 已移到整屏覆盖层
-   * （`geetestOverlay`），这里**不能再挂第二个 Web 实例**。
+   * 短信第 2 步：卡片里只留「等待验证」提示 —— 极验 WebView 挂在整屏覆盖层
+   * （`geetestOverlay`），这里**不能挂第二个 Web 实例**。
    */
   @Builder
   geetestCard() {
@@ -1215,7 +1213,7 @@ export struct LoginPage {
         .textAlign(TextAlign.Center)
         .margin({ top: 16 })
     }
-    // 2026-10-24 风格对齐：字阶 15→16、圆角取 BUTTON_RADIUS_VP、补沉浸光感材质
+    // 字阶 16、圆角取 BUTTON_RADIUS_VP、沉浸光感材质
     Button('取消', { type: ButtonType.Normal })
       .width('100%')
       .height(44)
@@ -1270,13 +1268,13 @@ export struct LoginPage {
     this.primaryButton(this.busy ? '正在登录…' : '登录', !this.busy, (): void => {
       this.doLogin();
     })
-    // 卡片底部呼吸空间（旧版由「重新获取验证码」链接提供，合并后改由占位承担）
+    // 卡片底部呼吸空间
     Blank()
       .height(22)
   }
 
   /**
-   * 极验整屏覆盖层（白屏修复核心，详见 buildGeetestHtml 注释）。
+   * 极验整屏覆盖层（详见 buildGeetestHtml 注释）。
    *
    * 层级：本层是页面根 Stack 的最后一个子节点 → 盖住 Scroll 内容；
    * HDS 标题栏（标题行 + 滑块行）由宿主绘制在上层，所以这里只需让出
@@ -1286,7 +1284,7 @@ export struct LoginPage {
   geetestOverlay() {
     Column() {
       // 覆盖层自己的头（HDS 标题栏仍在上面，这里只做「取消」出口）
-      // 2026-10-24 风格对齐：「安全验证」16 Medium；「取消」改 DlControlBar 文字按钮
+      // 「安全验证」16 Medium；「取消」为 DlControlBar 文字按钮
       // 模式（13 / themeDeep 白底深粉 / 44vp 触达 / press_overlay 按压态）。
       Row() {
         Text('安全验证')
@@ -1315,7 +1313,7 @@ export struct LoginPage {
 
       if (this.geetestError.length > 0) {
         // 失败态：绝不留死白屏 —— 说明原因 + 重试 + 切回扫码
-        // 2026-10-24 风格对齐：主文案 16（WatchHistoryPage 失败态同款）、辅助行 13、
+        // 主文案 16（WatchHistoryPage 失败态同款）、辅助行 13、
         // 按钮字阶 13 + BUTTON_RADIUS_VP + 沉浸光感材质（兄弟页重试按钮同款）。
         Column() {
           Text(this.geetestError)
@@ -1497,10 +1495,10 @@ export struct LoginPage {
               .padding({ left: 20, right: 20 })
               .backgroundColor($r('app.color.bg_card'))
               .borderRadius(12)
-              // 2026-10-24 风格对齐：左右让位 12→16（与扫码卡同口径，InsetCard 规范）
+              // 左右让位 16（与扫码卡同口径，InsetCard 规范）
               .margin({ left: 16, right: 16, top: 10, bottom: 20 })
 
-            // 短信卡上移占位（2026-10-22）：只加在短信页签，扫码页签维持原居中。
+            // 短信卡上移占位：只加在短信页签，扫码页签维持原居中。
             Blank()
               .height(SMS_CARD_LIFT_VP)
               .width('100%')
@@ -1511,22 +1509,22 @@ export struct LoginPage {
         .width('100%')
         .align(Alignment.Top)
         .scrollBar(BarState.Off)
-        // 边界回弹（2026-10-08）：内容超屏可滚时，到顶/到底的反馈动效
+        // 边界回弹：内容超屏可滚时，到顶/到底的反馈动效
         .edgeEffect(EdgeEffect.Spring)
         // 大屏适配：内容列收窄居中（与 AboutPage 同款）
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
         // 标题栏让位已内移为内容首部占位（见 Column 首子），不在滚动容器上加 padding。
-        // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
+        // 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
         // 签名 (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
         .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState): void => {
           this.syncTopBlurProgress();
         })
         .onScrollStop((): void => {
-          // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+          // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
           this.syncTopBlurProgress();
         })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于极验
+        // 顶栏渐变模糊层：盖 Scroll 内容之上（z 序低于极验
         // 覆盖层、低于 HDS titleBar，滑块行属标题栏 bottomBuilder、随整栏一起盖），
         // 进度由 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
         TopGradientBlurOverlay({
@@ -1544,12 +1542,12 @@ export struct LoginPage {
       .width('100%')
       .height('100%')
       .backgroundColor($r('app.color.bg_page'))
-      // 底部不做避让，沉浸到底（2026-10-14 与其余子页同口径，见目的地链上的
+      // 底部不做避让，沉浸到底（与其余子页同口径，见目的地链上的
       // ignoreLayoutSafeArea 声明；内容自顶部起排，不与手势区重叠）。
     }
-    // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
+    // HDS 沉浸光感标题栏（AboutPage 样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    // 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
     //（loginBarNarrow / loginTabsRowNarrow），标题行与滑块行和内容列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
@@ -1573,8 +1571,8 @@ export struct LoginPage {
         }
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏），
+    // 不放自绘键。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页滚动容器交给 HDS 联动
     .bindToScrollable([this.loginScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1582,10 +1580,10 @@ export struct LoginPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 系统返回拦截：播放页 overlay 打开时
     // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由 plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -1593,8 +1591,8 @@ export struct LoginPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function LoginPageBuilder(): void {
@@ -1602,6 +1600,6 @@ export function LoginPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const LoginPageWrapped: WrappedBuilder<[]> = wrapBuilder(LoginPageBuilder);

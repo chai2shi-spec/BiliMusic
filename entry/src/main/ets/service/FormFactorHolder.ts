@@ -1,17 +1,16 @@
 /**
- * 折叠态适配层（2026-10-22 重写）：App 生命周期级的**折叠屏形态唯一真源**。
+ * 折叠态适配层：App 生命周期级的**折叠屏形态唯一真源**。
  *
  * 职责：把 display 的折叠开合状态（FoldDisplayMode）转写成两个全局 AppStorage 键，
  * 供壳层与播放页只读订阅：
  *   · STORE_FOLD_EXPANDED    —— 是否处于展开态（FOLD_DISPLAY_MODE_FULL）；
  *   · STORE_DEVICE_FOLDABLE  —— 本机是否折叠屏设备（诊断 / 预留）。
  *
- * ══════════ 为什么从 PlayerInfoComponent 迁出 ══════════
- * 旧实现（2026-10 阔折叠首配，已删）把 getFoldDisplayMode / foldDisplayModeChange
- * 注册在播放页组件的 aboutToAppear 里：播放页是懒加载 overlay，不挂载就没有
- * 折叠态 —— 壳层（Index 的 phoneShell / tabletShell 选择）在冷启动时根本读不到。
- * 重写后 init() 由 EntryAbility.onCreate 调用（display API 不依赖窗口，早于
- * loadContent / 首帧），App 常驻不反注册，开合全程有状态。
+ * ══════════ 为什么在 EntryAbility.onCreate 初始化 ══════════
+ * 折叠监听不能挂在播放页组件的 aboutToAppear 里：播放页是懒加载 overlay，
+ * 不挂载就没有折叠态 —— 壳层（Index 的 phoneShell / tabletShell 选择）
+ * 在冷启动时根本读不到。init() 由 EntryAbility.onCreate 调用（display API
+ * 不依赖窗口，早于 loadContent / 首帧），App 常驻不反注册，开合全程有状态。
  *
  * 本文件是 .ts（非 .ets）：EntryAbility.ts 不能导入 .ets 模块，与
  * AppContainer / AppPreferences 同款服务层写法；display API 走 @ohos.display，

@@ -1,9 +1,9 @@
 /**
- * 全局偏好存储（替代原 React 版的 localStorage / persistentStorage）。
- * 基于 @ohos.data.preferences，键值持久化。应用启动时由 EntryAbility 调用 init。
+ * 全局偏好存储：基于 @ohos.data.preferences 的键值持久化。
+ * 应用启动时由 EntryAbility 调用 init。
  *
- * 登录态存取（getLoginCookie / setLoginCookie / getLoginUser / setLoginUser）
- * 随扫码登录功能恢复而重建：Cookie 与用户信息分开存（单值 8192 字节上限内均宽裕）。
+ * 登录态存取（getLoginCookie / setLoginCookie / getLoginUser / setLoginUser）：
+ * Cookie 与用户信息分开存（单值 8192 字节上限内均宽裕）。
  */
 
 import dataPreferences from '@ohos.data.preferences';
@@ -14,8 +14,7 @@ import {
   AppSettings,
   ThemeMode,
   PLAYER_COVER_STYLE_DISC,
-  PLAYER_COVER_STYLE_SQUARE,
-  PLAYER_COVER_STYLE_IMMERSIVE
+  PLAYER_COVER_STYLE_SQUARE
 } from '../model/MusicModels';
 import {
   PREF_SETTINGS,
@@ -91,10 +90,10 @@ export async function remove(key: string): Promise<void> {
 }
 
 /**
- * 批量写（2026-10-23 性能审查）：多个 key 共享一次 flush。
+ * 批量写：多个 key 共享一次 flush。
  * 分片存储（recent_tracks_* / favorite_tracks_* / pl_tracks_*）一次落盘要写
- * 十几个 key；旧路径每 key 各自 put + flush，而 flush 是全量落盘操作 ——
- * 写 13 片就全量刷 13 次。这里逐 key put（只动内存缓存层），最后一次 flush。
+ * 十几个 key；flush 是全量落盘操作，每 key 各自 put + flush 会重复全量刷盘。
+ * 这里逐 key put（只动内存缓存层），最后一次 flush。
  */
 export async function putMany(values: Record<string, string>): Promise<void> {
   const p = ensure();
@@ -114,11 +113,10 @@ export async function removeMany(keys: string[]): Promise<void> {
   await p.flush();
 }
 
-/** 封面风格白名单归一化：历史存量已删档（黑胶/磁带）及未知值回落默认唱片档 */
+/** 封面风格白名单归一化：历史存量已删档（黑胶/磁带/全屏沉浸 immersive）及未知值回落默认唱片档 */
 function normalizeCoverStyle(style: string | undefined): string {
   const valid: boolean = style === PLAYER_COVER_STYLE_DISC
-    || style === PLAYER_COVER_STYLE_SQUARE
-    || style === PLAYER_COVER_STYLE_IMMERSIVE;
+    || style === PLAYER_COVER_STYLE_SQUARE;
   return valid && style !== undefined ? style : DEFAULT_APP_SETTINGS.playerCoverStyle;
 }
 
@@ -139,12 +137,18 @@ export function getSettings(): AppSettings {
     progressStyle: stored?.progressStyle ?? DEFAULT_APP_SETTINGS.progressStyle,
     closeAnimStyle: stored?.closeAnimStyle ?? DEFAULT_APP_SETTINGS.closeAnimStyle,
     playerCoverStyle: normalizeCoverStyle(stored?.playerCoverStyle),
+    itemDisplayStyle: stored?.itemDisplayStyle ?? DEFAULT_APP_SETTINGS.itemDisplayStyle,
     miniBarProgress: stored?.miniBarProgress ?? DEFAULT_APP_SETTINGS.miniBarProgress,
     miniBarAutoExpand: stored?.miniBarAutoExpand ?? DEFAULT_APP_SETTINGS.miniBarAutoExpand,
     speedEnabled: stored?.speedEnabled ?? DEFAULT_APP_SETTINGS.speedEnabled,
     playbackSpeed: stored?.playbackSpeed ?? DEFAULT_APP_SETTINGS.playbackSpeed,
     audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled,
-    openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled
+    loudnessNormalizationEnabled: stored?.loudnessNormalizationEnabled ?? DEFAULT_APP_SETTINGS.loudnessNormalizationEnabled,
+    openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled,
+    listenCacheEnabled: stored?.listenCacheEnabled ?? DEFAULT_APP_SETTINGS.listenCacheEnabled,
+    saveToPublicDownloads: stored?.saveToPublicDownloads ?? DEFAULT_APP_SETTINGS.saveToPublicDownloads,
+    publicDownloadsDirUri: stored?.publicDownloadsDirUri ?? DEFAULT_APP_SETTINGS.publicDownloadsDirUri,
+    publicDirMigrated: stored?.publicDirMigrated ?? DEFAULT_APP_SETTINGS.publicDirMigrated
   };
 }
 
@@ -153,11 +157,10 @@ export async function saveSettings(s: AppSettings): Promise<void> {
 }
 
 /**
- * 逐字段拷贝 AppSettings（2026-10-24 设置页二级菜单化改造）。
+ * 逐字段拷贝 AppSettings。
  *
- * 原设置页的 copySettings 私有方法收编至此：设置页拆成主页面 + 四个二级子页后，
- * 逐字段拷贝逻辑被多处共用，集中到本文件统一维护 —— AppSettings 新增必填字段时
- * 只需改这一处（此前分散在各页漏字段会整包编译失败）。
+ * 设置页拆成主页面 + 多个二级子页后，逐字段拷贝逻辑被多处共用，
+ * 集中到本文件统一维护 —— AppSettings 新增必填字段时只需改这一处。
  */
 export function copyAppSettings(s: AppSettings): AppSettings {
   return {
@@ -177,10 +180,16 @@ export function copyAppSettings(s: AppSettings): AppSettings {
     speedEnabled: s.speedEnabled,
     playbackSpeed: s.playbackSpeed,
     audioMixEnabled: s.audioMixEnabled,
+    loudnessNormalizationEnabled: s.loudnessNormalizationEnabled,
     openInBilibiliEnabled: s.openInBilibiliEnabled,
+    listenCacheEnabled: s.listenCacheEnabled,
+    saveToPublicDownloads: s.saveToPublicDownloads,
+    publicDownloadsDirUri: s.publicDownloadsDirUri,
+    publicDirMigrated: s.publicDirMigrated,
     progressStyle: s.progressStyle,
     closeAnimStyle: s.closeAnimStyle,
-    playerCoverStyle: s.playerCoverStyle
+    playerCoverStyle: s.playerCoverStyle,
+    itemDisplayStyle: s.itemDisplayStyle
   };
 }
 
@@ -189,8 +198,7 @@ export function copyAppSettings(s: AppSettings): AppSettings {
  *
  * 各设置页的用法：`this.settings = AppPreferences.updateSettings(mut)`。
  * getSettings 底层是 preferences getSync（内存缓存读，不碰磁盘 IO），
- * 单次用户交互调用一次成本可忽略；saveSettings 落盘 fire-and-forget，
- * 与设置页原有「写完不等待」的行为一致。
+ * 单次用户交互调用一次成本可忽略；saveSettings 落盘 fire-and-forget（写完不等待）。
  */
 export function updateSettings(mut: (s: AppSettings) => void): AppSettings {
   const next: AppSettings = copyAppSettings(getSettings());
@@ -201,9 +209,6 @@ export function updateSettings(mut: (s: AppSettings) => void): AppSettings {
 
 /**
  * 把主题设置真正应用到应用（设置页切换时 + 启动恢复时调用）。
- *
- * 此前 themeMode 只被存储和展示、从未生效：EntryAbility 曾强制锁定浅色，
- * 设置页的「主题」循环点击只改标签不改变际颜色模式。深色模式适配后补上这一环。
  *
  * COLOR_MODE_NOT_SET（-1）即「跟随系统」；setColorMode 是运行时设置，
  * 每次启动都要重新应用（EntryAbility 在 loadContent 前调用），不落盘。
@@ -251,14 +256,14 @@ export async function addListenSeconds(delta: number): Promise<void> {
 
 /**
  * 旧格式最近播放（PREF_RECENT 单键 Track[]）。
- * 2026-10-12 起最近播放读写走分片（LibraryStore 的 recent_tracks_* key），
+ * 最近播放读写走分片（LibraryStore 的 recent_tracks_* key），
  * 本函数仅作**升级迁移的数据源**保留（LibraryStore 无分片数据时回落到这里）。
  */
 export function getRecentTracks<T>(): T[] {
   return getObject<T[]>(PREF_RECENT) ?? [];
 }
 
-/** @deprecated 已无调用方（LibraryStore 改分片存储，2026-10-12）。保留供回滚。 */
+/** @deprecated 已无调用方（LibraryStore 走分片存储）。保留供回滚。 */
 export async function saveRecentTracks<T>(list: T[]): Promise<void> {
   await setObject<T[]>(PREF_RECENT, list.slice(0, 50));
 }
@@ -307,10 +312,6 @@ export function getPlayerState<T>(): T | null {
   return getObject<T>(PREF_PLAYER_STATE);
 }
 
-export async function savePlayerState<T>(state: T): Promise<void> {
-  await setObject<T>(PREF_PLAYER_STATE, state);
-}
-
 // ===================== 登录态（扫码登录） =====================
 
 /** 登录 Cookie 串（SESSDATA / bili_jct / DedeUserID / DedeUserID__ckMd5），空 = 未登录 */
@@ -334,8 +335,8 @@ export async function setLoginUser<T>(user: T): Promise<void> {
 /**
  * 登录撤销令牌（refresh_token）。
  *
- * ⚠️ **当前无调用方**（2026-10-08 实测 grep 确认）：续期链路尚未开工，
- * 这个键只写不读。见common/Constants.ts 里 PREF_LOGIN_REFRESH_TOKEN 的注释。
+ * ⚠️ **当前无调用方**：续期链路尚未开工，这个键只写不读。
+ * 见 common/Constants.ts 里 PREF_LOGIN_REFRESH_TOKEN 的注释。
  */
 export function getLoginRefreshToken(): string {
   return getString(PREF_LOGIN_REFRESH_TOKEN, '');
@@ -392,7 +393,6 @@ export const AppPreferences = {
   getFavoriteTombstones,
   saveFavoriteTombstones,
   getPlayerState,
-  savePlayerState,
   getSearchHistory,
   saveSearchHistory,
   getLoginCookie,

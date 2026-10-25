@@ -1,10 +1,8 @@
 /**
- * 沉浸式材质兼容层（移植自 Sumy-Music）。
+ * 沉浸式材质兼容层。
  *
- * ⚠️ 更正一条曾经写错的结论：早先这里注释说「本机 HarmonyOS SDK 并未提供
- * @kit.UIDesignKit」—— 那是只翻了 `sdk/default/openharmony/ets/kits` 得出的误判。
- * 该 kit 在 **hms 侧**（`sdk/default/hms/ets/kits/@kit.UIDesignKit.d.ets`），
- * 已实测可编译（HdsTabs / hdsMaterial 均可用），故现在把 HDS 这一路补回来。
+ * ⚠️ @kit.UIDesignKit 在 **hms 侧**（`sdk/default/hms/ets/kits/@kit.UIDesignKit.d.ets`），
+ * 不在 openharmony 侧 kits 目录；HdsTabs / hdsMaterial 均可用。
  *
  * 两条并列的「沉浸材质」通路，用途不同、别混用：
  * - **HDS 通路**（`hdsMaterial` + `systemMaterialEffect`）：给 HdsTabs 等 HDS 组件用。
@@ -13,13 +11,12 @@
  * - **uiMaterial 通路**（`uiMaterial.ImmersiveMaterial` + `.systemMaterial()`）：
  *   给自绘组件（Row / Column 等）用。低版本或运行时能力缺失时返回 undefined，
  *   调用方再用 `MaterialCompat.effect()` 走 backgroundEffect 模拟毛玻璃。
- *   ⚠️ 官方《沉浸光感常见问题》生效范围（2026-10-24 真机实锤）：「其他组件」的
+ *   ⚠️ 官方《沉浸光感常见问题》生效范围（真机实证）：「其他组件」的
  *   systemMaterial 仅在 Navigation/NavDestination 标题栏或横向 Tabs 底部
  *   TabBar（barPosition=End）内生效，其他区域**静默不渲染**——自绘 Row 直接
  *   挂 .systemMaterial() 就是全透明。当前工程无 uiMaterial 消费方：二级页
- *   悬浮播放栏（SubPagePlayBar）2026-10-24 终版走 HDS 内部材质通路（二号
- *   HdsTabs miniBar + systemMaterialEffect，与首页胶囊同源），普通 Tabs
- *   barFloatingStyle.systemMaterial 载体（B案）真机生效但观感不达预期已弃。
+ *   悬浮播放栏（SubPagePlayBar）走 HDS 内部材质通路（二号
+ *   HdsTabs miniBar + systemMaterialEffect，与首页胶囊同源）。
  */
 
 // ⚠️ @ohos.arkui.uiMaterial 整个模块 26.0.0 才有：API 23/24 设备上静态 import 会在

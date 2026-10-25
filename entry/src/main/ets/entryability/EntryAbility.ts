@@ -1,46 +1,164 @@
 /**
- * 应用入口（Stage 模型）。替代原 Android Application / MainActivity 与 PC 版 Electron 容器。
- * 负责初始化全局依赖、申请必要权限、加载首页。
+ * 应用入口（Stage 模型）。负责初始化全局依赖、申请必要权限、加载首页。
  */
 
 import {
   UIAbility,
   Configuration,
-  ConfigurationConstant
+  ConfigurationConstant,
+  Want,
+  AbilityConstant
 } from '@kit.AbilityKit';
+import { rpc } from '@kit.IPCKit';
 import window from '@ohos.window';
 import display from '@ohos.display';
 import hiAppEvent from '@ohos.hiviewdfx.hiAppEvent';
 import { BusinessError } from '@ohos.base';
 import { AppContainer } from '../service/AppContainer';
 import { AppPreferences } from '../preferences/AppPreferences';
-import { AppSettings } from '../model/MusicModels';
+import { AppSettings, Track } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
+import { flushPendingLibraryPersist } from '../service/LibraryStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
-import { STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED } from '../common/Constants';
+import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
+import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_LOUDNESS_NORM_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_CARD_OPEN_PLAYER_SEQ } from '../common/Constants';
+
+/**
+ * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
+ * 桌面卡片 call 通道无回传数据需求，返回空实现即可（官方 Call 样例同款做法）。
+ */
+class EmptyParcelable implements rpc.Parcelable {
+  marshalling(dataOut: rpc.MessageSequence): boolean {
+    return true;
+  }
+
+  unmarshalling(dataIn: rpc.MessageSequence): boolean {
+    return true;
+  }
+}
 
 export default class EntryAbility extends UIAbility {
-  onCreate(): void {
-    // 深色模式已适配：不再强制浅色，应用跟随系统颜色模式。
-    // 页面用色全部走 $r('app.color.*') 语义 token，深色值在 resources/dark/element/color.json
-    // 中覆盖（未覆盖的品牌色 / 播放页白色系自动回落 base）；$r('sys.color.*') 系统资源
-    // 本身随系统深浅切换，无需代码干预。
+  /**
+   * 桌面卡片播控指令（call 拉起，后台可执行不弹界面）。
+   * 冷启动时初始化链可能尚未跑完 —— await initRest（幂等 Promise）兜底，
+   * 与 onWindowStageCreate 的 fire-and-forget 调用共享同一条链不双跑。
+   */
+  private playByActionCall = (data: rpc.MessageSequence): rpc.Parcelable => {
+    try {
+      const params: Record<string, string> = JSON.parse(data.readString()) as Record<string, string>;
+      const action: string = `${params.playActionType ?? ''}`;
+      console.info(`[EntryAbility] playByActionCall action=${action}`);
+      AppContainer.initRest(this.context)
+        .then((): void => {
+          const player: MusicPlayer = MusicPlayer.getInstance();
+          if (action === PlayActionType.PLAY) {
+            player.play();
+          } else if (action === PlayActionType.PAUSE) {
+            player.pause();
+          } else if (action === PlayActionType.PREVIOUS) {
+            player.prev();
+          } else if (action === PlayActionType.NEXT) {
+            player.next();
+          }
+        })
+        .catch((e: Error): void => {
+          console.error(`[EntryAbility] playByActionCall initRest failed: ${e.message}`);
+        });
+    } catch (e) {
+      console.error(`[EntryAbility] playByActionCall failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+    return new EmptyParcelable();
+  };
+
+  /**
+   * 桌面卡片收藏指令（call 拉起）。
+   * 防倒挂：卡片快照可能滞后（切歌瞬间点击）—— 请求值与当前曲目 isLiked
+   * 现值不一致才 toggleLike；songId 对不上当前曲目（卡片已过期）直接忽略。
+   */
+  private collectActionCall = (data: rpc.MessageSequence): rpc.Parcelable => {
+    try {
+      const params: Record<string, string> = JSON.parse(data.readString()) as Record<string, string>;
+      const action: string = `${params.collectActionType ?? ''}`;
+      const songId: string = `${params.songId ?? ''}`;
+      console.info(`[EntryAbility] collectActionCall action=${action} songId=${songId}`);
+      AppContainer.initRest(this.context)
+        .then((): void => {
+          const track: Track | undefined = AppStorage.get<Track>(STORE_CURRENT_TRACK);
+          if (track === undefined || track.id !== songId) {
+            console.info('[EntryAbility] collectActionCall ignored: stale card snapshot');
+            return;
+          }
+          const wantCollected: boolean = action === CollectAction.COLLECTED;
+          if (wantCollected !== track.isLiked) {
+            MusicPlayer.getInstance().toggleLike(track);
+          }
+        })
+        .catch((e: Error): void => {
+          console.error(`[EntryAbility] collectActionCall initRest failed: ${e.message}`);
+        });
+    } catch (e) {
+      console.error(`[EntryAbility] collectActionCall failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+    return new EmptyParcelable();
+  };
+
+  /**
+   * 卡片路由 want 解析（onCreate / onNewWant 共用）：
+   * 卡片根节点 / FormLink 的 router 请求 → seq++ 发布，
+   * Index 侧 @StorageProp + @Watch + aboutToAppear 补刀消费后展开播放页。
+   */
+  private handleCardRouter(want: Want): void {
+    try {
+      const raw: Object | undefined = want.parameters !== undefined ? want.parameters['params'] : undefined;
+      if (typeof raw !== 'string' || raw.length === 0) {
+        return;
+      }
+      const params: Record<string, string> = JSON.parse(raw) as Record<string, string>;
+      const type: string = `${params.type ?? ''}`;
+      console.info(`[EntryAbility] handleCardRouter type=${type}`);
+      if (type === RouterType.PLAYER || type === RouterType.LYRICS) {
+        const seq: number = (AppStorage.get<number>(STORE_CARD_OPEN_PLAYER_SEQ) ?? 0) + 1;
+        AppStorage.setOrCreate(STORE_CARD_OPEN_PLAYER_SEQ, seq);
+      }
+    } catch (e) {
+      console.error(`[EntryAbility] handleCardRouter failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+  }
+
+  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    // 卡片路由：冷启动直达播放页（Index aboutToAppear 补刀消费 seq）
+    this.handleCardRouter(want);
+    // 卡片播控 / 收藏 call 通道（postCardAction CALL → callee）
+    try {
+      this.callee.on(CallMethod.PLAY_BY_ACTION, this.playByActionCall);
+      this.callee.on(CallMethod.COLLECT_ACTION, this.collectActionCall);
+    } catch (e) {
+      console.error(`[EntryAbility] callee register failed: ${JSON.stringify(e)}`);
+    }
+    // 应用跟随系统颜色模式：页面用色全部走 $r('app.color.*') 语义 token，
+    // 深色值在 resources/dark/element/color.json 中覆盖（未覆盖的品牌色 /
+    // 播放页白色系自动回落 base）；$r('sys.color.*') 系统资源本身随系统深浅
+    // 切换，无需代码干预。
     this.registerAppFreezeWatcher();
-    // 折叠态适配层（2026-10-22 重写）：App 生命周期常驻的折叠开合唯一真源，
+    // 折叠态适配层：App 生命周期常驻的折叠开合唯一真源，
     // 必须在首帧前 init —— Index 的壳选择（折叠屏展开一律手机壳）与播放页
     // 分栏都读 STORE_FOLD_EXPANDED，晚了会先渲染错壳再跳变。display API
     // 不依赖窗口，onCreate 即可调用。失败内部兜底为「非折叠」。
     FormFactorHolder.init();
   }
 
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    // 应用已在运行时卡片 router 再入（热启动直达播放页）
+    this.handleCardRouter(want);
+  }
+
   /**
-   * （2026-10-16 AppFreeze 加固）订阅系统 APP_FREEZE 事件。
+   * 订阅系统 APP_FREEZE 事件。
    *
-   * 背景：应用市场审核驳回的 THREAD_BLOCK_6S 在送审真机上没有留下可拉取的 faultlog，
-   * 只能靠应用侧 watcher 兜底 —— 下次冻结真正发生时把事件参数打进 error 日志，
-   * 复测 / 回归时用 hdc 日志即可反推卡顿点（主线程当时卡在哪个调用栈）。
-   * 注册失败不影响应用运行。
+   * 送审真机上冻结事件可能没有可拉取的 faultlog，只能靠应用侧 watcher 兜底 ——
+   * 冻结真正发生时把事件参数打进 error 日志，复测 / 回归时用 hdc 日志即可
+   * 反推卡顿点（主线程当时卡在哪个调用栈）。注册失败不影响应用运行。
    */
   private registerAppFreezeWatcher(): void {
     try {
@@ -62,11 +180,17 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    try {
+      this.callee.off(CallMethod.PLAY_BY_ACTION);
+      this.callee.off(CallMethod.COLLECT_ACTION);
+    } catch (e) {
+      console.error(`[EntryAbility] callee unregister failed: ${JSON.stringify(e)}`);
+    }
     MusicPlayer.getInstance().release();
   }
 
   /**
-   * 2026-10-08（B4 记忆播放兜底）：应用退后台时立即把播放快照落盘。
+   * 应用退后台时立即把播放快照落盘。
    *
    * 为什么必须有这个钩子：播放中的进度落盘走 timeUpdate 的 5s 粗节流，
    * 「正在播放 → 直接划卡杀进程」会丢最后一拍；且 onDestroy 在划卡时
@@ -74,8 +198,8 @@ export default class EntryAbility extends UIAbility {
    * savePlayerStateNow 内部 fire-and-forget，偶发失败只记日志不阻塞退后台。
    */
   onForeground(): void {
-    // 前后台标志（2026-10-21 后台耗电优化）：PlayBar/CoverDisc/PlayButton 动画门控
-    // 与 MusicPlayer 落盘节流（5s/30s）的依据。启动时系统也会回调本钩子，
+    // 前后台标志：PlayBar/CoverDisc/PlayButton 动画门控与 MusicPlayer 落盘节流
+    // （5s/30s）的依据。启动时系统也会回调本钩子，
     // 组件 @StorageProp 默认 true 与之双保险；标志缺失一律按前台处理。
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
   }
@@ -84,6 +208,10 @@ export default class EntryAbility extends UIAbility {
     // 退后台：动画门控关闭（animator/呼吸链冻结，回前台续转）
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, false);
     try {
+      // 歌单落盘走去抖异步（见 LibraryStore 的 PERSIST_DEBOUNCE_MS），
+      // 去抖窗口内划卡杀进程会丢最后一次写，退后台立刻冲掉待写队列
+      // （正在跑的落盘不受影响）。
+      flushPendingLibraryPersist();
       MusicPlayer.getInstance().savePlayerStateNow();
     } catch (e) {
       console.error(`save player state on background failed: ${JSON.stringify(e)}`);
@@ -115,9 +243,8 @@ export default class EntryAbility extends UIAbility {
     // ② 必须在 loadContent 之前把避让区尺寸写进 AppStorage：首页 build 的首帧就要用它
     //    算「根容器底部让位 / 页签层顶部让位」，晚一拍会看到内容先贴边再弹回来。
     this.publishSafeArea(windowStage);
-    // ③ 2026-10-17 启动优化：只等 Preferences（首帧必须就位的主题模式 / 主题色 /
-    //    底栏布局都只依赖它），RDB / 下载表 / AVSession 等重初始化与页面加载并行。
-    //    原实现把 AppContainer 全量 init 串在 loadContent 之前，是启动超时的主因。
+    // ③ 只等 Preferences（首帧必须就位的主题模式 / 主题色 / 底栏布局都只依赖它），
+    //    RDB / 下载表 / AVSession 等重初始化与页面加载并行。
     AppPreferences.initPreferences(this.context)
       .then((): void => {
         // 偏好就绪后、首帧加载前恢复持久化的主题模式（浅色 / 深色 / 跟随系统）。
@@ -140,10 +267,13 @@ export default class EntryAbility extends UIAbility {
         // 播放页收起动画风格（设置页可切，三档：柔退 / 柔退+手势 / 下滑）同批首发：
         // Index.closePlayer 据此分流收起实现，PlayerPage 据此决定挂不挂下拉手势。
         AppStorage.setOrCreate(STORE_PLAYER_CLOSE_ANIM, settings.closeAnimStyle);
-        // 播放页封面风格（设置页可切，三档：唱片/方卡/全屏）同批首发：
+        // 播放页封面风格（设置页可切，两档：唱片/方卡）同批首发：
         // CoverDiscComponent 的封面形态与 SurfaceLayers 的背景分层据此分流，
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_PLAYER_COVER_STYLE, settings.playerCoverStyle);
+        // 条目展示（外观设置页可切，两档：长条 / 大封面双列）同批首发：
+        // 各列表页的 @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_ITEM_DISPLAY_STYLE, settings.itemDisplayStyle);
         // 迷你栏进度指示开关（设置页可切）同批首发：PlayBar 的 @StorageProp
         // 初值只是占位，真值必须首帧 build 前就位，否则关开关的用户启动时
         // 会先看到进度条再消失。
@@ -159,6 +289,9 @@ export default class EntryAbility extends UIAbility {
         // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
         // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);
+        // 响度均衡开关同批首发：MusicPlayer prepared 挂点读它决定是否应用
+        // LoudnessStore 增益，首播 prepared 回调前必须就位。
+        AppStorage.setOrCreate(STORE_LOUDNESS_NORM_ENABLED, settings.loudnessNormalizationEnabled);
         // 「在 B 站打开原视频」开关同批首发：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则关掉开关的
         // 用户启动时会先看到跳转图标再消失。
@@ -177,7 +310,7 @@ export default class EntryAbility extends UIAbility {
           .catch((e: Error): void => {
             console.error(`AppContainer initRest failed: ${JSON.stringify(e)}`);
           });
-        // ⑤ 立即加载首页（不再等 initRest）
+        // ⑤ 立即加载首页（与 initRest 并行）
         windowStage.loadContent('pages/Index', (err: BusinessError): void => {
           if (err.code) {
             console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
@@ -236,10 +369,10 @@ export default class EntryAbility extends UIAbility {
     *                TYPE_NAVIGATION_INDICATOR.bottomRect) （手势导航时 = 指示条区域高度）
     * 取两者较大值，三键 / 手势两种导航模式都能拿到正确高度。
     *
-    * 同时**分开**发布两个来源（2026-10-22 修「大屏展开底部导航不居中」）：
-    *   STORE_NAV_BAR_BOTTOM       = TYPE_SYSTEM 底部矩形（>0 即三键导航）
-    *   STORE_NAV_INDICATOR_BOTTOM = TYPE_NAVIGATION_INDICATOR 底部矩形（手势指示条）
-    * 悬浮胶囊按「避让区来源」判导航模式选避让策略，不再按固定高度阈值猜 ——
+   * 同时**分开**发布两个来源：
+   *   STORE_NAV_BAR_BOTTOM       = TYPE_SYSTEM 底部矩形（>0 即三键导航）
+   *   STORE_NAV_INDICATOR_BOTTOM = TYPE_NAVIGATION_INDICATOR 底部矩形（手势指示条）
+   * 悬浮胶囊按「避让区来源」判导航模式选避让策略，不能按固定高度阈值猜 ——
     * 阔折叠 / 阔直板大屏展开态的高度与手机不同，按阈值猜必错。
     *
     * top（状态栏高度）由页签层消费，用来把 Tabs 内容顶到状态栏下方。
@@ -267,8 +400,8 @@ export default class EntryAbility extends UIAbility {
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
       const topVp: number = sys.topRect.height / density;
-      // 水平安全区（2026-10-24 播放页横屏方案）：横屏下状态栏若以侧边条带
-      // 上报，避让值在 leftRect / rightRect；竖屏两值通常为 0，纯增量发布。
+      // 水平安全区：横屏下状态栏若以侧边条带上报，避让值在 leftRect / rightRect；
+      // 竖屏两值通常为 0，纯增量发布。
       const leftVp: number = sys.leftRect.width / density;
       const rightVp: number = sys.rightRect.width / density;
       const navBarBottomVp: number = sys.bottomRect.height / density;
@@ -285,8 +418,8 @@ export default class EntryAbility extends UIAbility {
       // 后续折叠开合 / 分屏 / 转屏由 Index 的 HdsTabs.onAreaChange 持续回写。
       const windowWidthVp: number = win.getWindowProperties().windowRect.width / density;
       AppStorage.setOrCreate(STORE_WINDOW_WIDTH_VP, windowWidthVp);
-      // 窗口内容区高度（vp）：下滑收起动画（2026-10-24）的终点距离与手势压暗
-      // 进度分母，与宽度同源同批写入（见 Constants 的 STORE_WINDOW_HEIGHT_VP 注释）。
+      // 窗口内容区高度（vp）：下滑收起动画的终点距离与手势压暗进度分母，
+      // 与宽度同源同批写入（见 Constants 的 STORE_WINDOW_HEIGHT_VP 注释）。
       const windowHeightVp: number = win.getWindowProperties().windowRect.height / density;
       AppStorage.setOrCreate(STORE_WINDOW_HEIGHT_VP, windowHeightVp);
     } catch (e) {

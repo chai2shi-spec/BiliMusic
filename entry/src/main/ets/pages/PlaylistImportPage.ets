@@ -1,5 +1,5 @@
 /**
- * 歌单导入向导页（网易云 / QQ 音乐 → 本地歌单，2026-10-16）。
+ * 歌单导入向导页（网易云 / QQ 音乐 → 本地歌单）。
  * 方案见 design/歌单导入方案-网易云与QQ音乐.md §5：单页 5 态状态机，不做多页转场。
  *
  *   [1 输入] → 识别 → [2 预览] → 开始匹配 → [3 匹配中] → [4 报告] ⇄ [5 复核] → 完成导入
@@ -130,10 +130,10 @@ export struct PlaylistImportPage {
   private scroller: Scroller = new Scroller();
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准：onDidScroll / onScrollStop 命令式
+   * 驱动 opacity（不标 @State，滚动高频回调零重建）；yOffset 0 →
+   * TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，边缘回弹负偏移
+   * 归零为死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -147,7 +147,7 @@ export struct PlaylistImportPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
     // 单例任务可能还在跑（用户离开后返回）：按任务阶段接续页面状态
@@ -235,7 +235,7 @@ export struct PlaylistImportPage {
    *
    * ⚠️ 关键分支：命中平台域名却提不出歌单 ID 时**必须明确提示**（`isExternalPlaylistLink`），
    * 不能落进文本解析 —— 否则形如「分享歌单《xxx》https://… (来自@网易云音乐)」的整串分享
-   * 文本会被当成一首歌名去搜 B 站，报告页全显「未找到」（2026-10-16 实测根因）。
+   * 文本会被当成一首歌名去搜 B 站，报告页全显「未找到」。
    */
   private async recognize(): Promise<void> {
     if (this.recognizing) {
@@ -599,7 +599,7 @@ export struct PlaylistImportPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
    * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
    *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
@@ -1162,13 +1162,13 @@ export struct PlaylistImportPage {
           .width('100%')
           .edgeEffect(EdgeEffect.Spring)
           .cachedCount(8)
-          // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
-          // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+           // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+           // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
           .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
             this.syncTopBlurProgress();
           })
           .onScrollStop((): void => {
-            // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+            // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
             this.syncTopBlurProgress();
           })
           // 标题栏让位已内移为首个 ListItem 占位（见 List 首项），不在 List 上加 padding。
@@ -1178,7 +1178,7 @@ export struct PlaylistImportPage {
         .backgroundColor($r('app.color.bg_page'))
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
         // titleBar），进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater
         // 命令式驱动。
         TopGradientBlurOverlay({
@@ -1189,7 +1189,7 @@ export struct PlaylistImportPage {
     }
     // HDS 沉浸光感标题栏（FavSyncPage / FollowsPage 同款）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder 走收窄容器（pageBarNarrow），
+    // stackBuilder 走收窄容器（pageBarNarrow），
     // 标题行与本页内容列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
@@ -1200,8 +1200,7 @@ export struct PlaylistImportPage {
         }
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.scroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -1209,7 +1208,7 @@ export struct PlaylistImportPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 系统返回拦截：播放页 overlay 打开时
     // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸口径）；
@@ -1219,7 +1218,7 @@ export struct PlaylistImportPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
  * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
@@ -1228,7 +1227,7 @@ export function PlaylistImportPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const PlaylistImportPageWrapped: WrappedBuilder<[]> = wrapBuilder(PlaylistImportPageBuilder);
 

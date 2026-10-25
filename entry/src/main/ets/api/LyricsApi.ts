@@ -1,16 +1,15 @@
 /**
- * 歌词服务（多源竞速版）—— 数据层移植自 BBPlayer 的
- * `lib/services/lyricService.ts` + `lib/api/{netease,qqmusic}/api.ts`。
+ * 歌词服务（多源竞速版）。
  *
- * 与旧版的区别（旧版只接 OIAPI 一个第三方 QQ 歌词代理）：
+ * 设计：
  *   1. **三个源并行竞速**：网易云 / QQ 音乐 / OIAPI，谁先给出可用结果用谁。
  *      网易云给「主歌词 + 中文翻译 + 罗马音」，QQ 给「主歌词 + 翻译」，
  *      OIAPI 只兜底（没有翻译轨）。
  *   2. **候选打分**：沿用 `TextUtil.scoreCandidate`（标题包含 / 歌手命中 /
  *      时长分档 / 伴奏·翻唱降权），从三源合并后的候选里挑最优；
  *      自动搜索失败时还有第二轮「换关键词重搜」。
- *   3. **缓存改文件**：见 `service/LyricCacheStore.ts`（Preferences 单值 8192
- *      字节上限，旧实现写两首就静默失败）。
+ *   3. **缓存走文件**：见 `service/LyricCacheStore.ts`（Preferences 单值有
+ *      8192 字节上限，超限会静默失败）。
  *   4. **逐字 / 翻译 / 罗马音**：统一解析成 `LyricLine{ translation, romaji, words }`，
  *      显示层直接可用。
  *   5. **用户可控**：手动指定候选（`chooseLyricCandidate`）、跳过（`skipLyricForTrack`）、
@@ -45,6 +44,7 @@ import {
   SOURCE_OIAPI,
   SOURCE_QQ
 } from './LyricSourceApi';
+import { fetchSubtitleLyric, SOURCE_BILI_AI, SOURCE_BILI_CC } from './SubtitleLyricApi';
 import {
   deleteLyricCache,
   isMissFresh,
@@ -404,8 +404,8 @@ function fetchCandidateResult(candidate: LyricCandidate): Promise<LyricResult | 
 
 /** 缓存用的「信息键」：标题 / 歌手 / 时长是否已知变化都要允许重搜 */
 function cacheKeyOf(track: Track): string {
-  // v2（2026-10-23 歌词匹配修复：歌手参与搜索与打分、Top1 优先取词）。
-  // 旧 v1 键不再相等 → 存量自动缓存整体自动重搜一次；manual 缓存永远优先不受影响，
+  // 键带 v2 版本前缀（歌手参与搜索与打分、Top1 优先取词）：键格式变化
+  // 会让存量自动缓存整体重搜一次；manual 缓存永远优先不受影响，
   // 旧自动结果仍作重搜失败时的兜底（见 getLyricForTrack）。
   return `v2|${track.id}|${track.title}|${track.artist}|${track.duration > 0 ? 'd' : 'n'}`;
 }
@@ -434,9 +434,9 @@ function toEntry(
 /**
  * 组装自动搜索关键词（歌名 + 歌手优先，仅歌名兜底）。
  *
- * 2026-10-23 修匹配：此前只用标题搜词，同名曲 / 翻唱 / 伴奏极易误中。
- * 现在第一优先级是「标题关键词 + track.artist 首段」的组合词 ——
- * artist 可能是 UP 主名（不是真实歌手），所以组合词排前面、仅歌名关键词跟在后面：
+ * 只用标题搜词时同名曲 / 翻唱 / 伴奏极易误中，所以第一优先级是
+ * 「标题关键词 + track.artist 首段」的组合词 —— artist 可能是 UP 主名
+ * （不是真实歌手），所以组合词排前面、仅歌名关键词跟在后面：
  * 轮次机制天然形成「先试组合词、搜不到再回退仅歌名」的两级策略。
  */
 function buildAutoQueries(track: Track): string[] {
@@ -519,9 +519,9 @@ async function autoSearch(track: Track): Promise<LyricResult | null> {
       continue;
     }
 
-    // Top1 优先取词（2026-10-23 修匹配）：旧实现所有候选一起竞速「先成功者胜」，
-    // 排名第 2/3 的错误候选只要响应更快就会抢走最优解。现在分数最高的候选先取，
-    // 失败才竞速其余 —— 代价是 Top1 挂掉时多等一轮（有 FETCH_TIMEOUT_MS 兜底），正确率优先。
+    // Top1 优先取词：分数最高的候选先取，失败才竞速其余 ——
+    // 全员竞速「先成功者胜」会让排名第 2/3 的错误候选靠响应更快抢走最优解；
+    // 代价是 Top1 挂掉时多等一轮（有 FETCH_TIMEOUT_MS 兜底），正确率优先。
     let result: LyricResult | null = plausible.length > 0
       ? await fetchCandidateResult(plausible[0])
       : null;
@@ -597,6 +597,16 @@ export async function getLyricForTrack(track: Track): Promise<LyricResult | null
   if (cached !== null && cached.status === LYRIC_CACHE_OK && cached.result !== null) {
     return cached.result;
   }
+
+  // B 站字幕兜底：外部曲库全链落空（VOCALOID 原创 / 二次创作 / 电台片段这类
+  // 搜不到的歌）时，读视频 CC / AI 字幕当逐行 LRC —— 时间轴与音轨天然对齐。
+  // 未登录 / 无字幕 / 接口失败都落 null，同 miss 一起被 24h 缓存闸住。
+  const subtitle: LyricResult | null = await fetchSubtitleLyric(track);
+  if (subtitle !== null) {
+    void writeLyricCache(toEntry(track, key, subtitle, false, null));
+    return subtitle;
+  }
+
   void writeLyricCache(toEntry(track, key, null, false, null));
   console.info(`[Lyric] miss track=${track.title} artist=${track.artist}`);
   return null;
@@ -675,6 +685,12 @@ export function sourceLabel(source: string | undefined): string {
   }
   if (source === SOURCE_OIAPI) {
     return 'QQ 音乐（代理）';
+  }
+  if (source === SOURCE_BILI_CC) {
+    return 'B站字幕';
+  }
+  if (source === SOURCE_BILI_AI) {
+    return 'B站AI字幕';
   }
   return '';
 }

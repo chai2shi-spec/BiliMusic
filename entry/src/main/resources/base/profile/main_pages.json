@@ -2,6 +2,7 @@
   "src": [
     "pages/GradientBlurDemoPage",
     "pages/Index",
-    "pages/FloatingBarDemoPage"
+    "pages/FloatingBarDemoPage",
+    "uiextensionability/pages/Index"
   ]
 }

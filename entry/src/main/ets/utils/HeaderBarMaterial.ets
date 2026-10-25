@@ -3,22 +3,19 @@
  *
  * 顶栏通路（HeaderBarMaterialModifier）：固定 backgroundEffect 真高斯模糊。
  * systemMaterial 在设备不支持沉浸材质（模拟器常见）或材质档为 SMOOTH 时
- * **静默不渲染**——曾是「API 已到 26 却看不到毛玻璃」的直接原因，故弃用。
+ * **静默不渲染**，故顶栏不走 systemMaterial。
  *
  * 另有按钮通路（ButtonMaterialModifier）：给搜索 / 新建 / 选择等胶囊按钮用。
  * 按钮自带链式实色底作为兜底，修饰器低版本 no-op 即可，不需要塞 backgroundColor。
  *
- * 自绘容器通路结论（2026-10-24，RowMaterialModifier 已随官方载体迁移退役）：
- * 官方《沉浸光感常见问题》明确「其他组件」的 systemMaterial 仅在 Navigation/
- * NavDestination 标题栏或横向 Tabs 底部 TabBar 生效，其他区域静默不渲染 ——
- * 自绘 Row 直接挂 .systemMaterial() 真机透明正栽在这条生效范围上。二级页
- * 悬浮播放栏已改走官方载体（见 SubPagePlayBar.ets，终版为二号 HdsTabs
- * miniBar 通路），本文件不再提供自绘容器修饰器。
+ * 自绘容器通路：官方《沉浸光感常见问题》明确「其他组件」的 systemMaterial 仅在
+ * Navigation/NavDestination 标题栏或横向 Tabs 底部 TabBar 生效，其他区域静默
+ * 不渲染 —— 自绘 Row 直接挂 .systemMaterial() 就是全透明。二级页悬浮播放栏
+ * 走 HDS 载体（见 SubPagePlayBar.ets，二号 HdsTabs miniBar 通路），
+ * 本文件不提供自绘容器修饰器。
  *
- * 分段按钮配色（SegmentColors / makeBiliSegmentColors，2026-10-11 组件标准化
- * 迁移）：CapsuleSegmentButtonV2 等标准组件的 B 站粉着色参数组——自绘
- * Stack+粉片 translate 滑片体系随本次迁移退役（原 ColumnMaterialModifier
- * 已删，备份 bak5）。
+ * 分段按钮配色（SegmentColors / makeBiliSegmentColors）：
+ * CapsuleSegmentButtonV2 等标准组件的 B 站粉着色参数组。
  *
  * ⚠️ 属性优先级：ArkUI 链式属性优先级高于 attributeModifier，挂本修饰器的 Row
  * 上不要再链式设置 background / backgroundEffect，否则会被链式值覆盖。
@@ -48,7 +45,7 @@ export class HeaderBarMaterialModifier implements AttributeModifier<RowAttribute
     try {
       console.info('[HeaderBarMaterial] apply -> backgroundEffect frost (radius 40)');
       instance.backgroundEffect({
-        // P0（2026-10-24 沉浸光感改造）：radius 抽入 MaterialTokens.FROST_RADIUS（值不变）
+        // radius 统一取 MaterialTokens.FROST_RADIUS
         radius: MaterialTokens.FROST_RADIUS,
         saturation: 1.3,
         brightness: 1.0,

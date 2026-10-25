@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Speaker</title>
+  <desc id="desc">扬声器方案。主粉底上一枚白色梯形喇叭口，右侧三层同心声波弧由内向外扩散，弧顶间距均匀。梯形加弧线的组合在十案中唯一，是「正在播放声音」最直白的图形。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#FB7299"/>
+  </g>
+
+  <g id="foreground-layer">
+    <path
+      id="cone"
+      d="M 262 424 L 388 424 L 516 308 L 516 716 L 388 600 L 262 600 Z"
+      fill="#FFFFFF" stroke="#FFFFFF" stroke-width="20" stroke-linejoin="round"/>
+    <g id="waves" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round">
+      <path id="wave-1" d="M 566 436 A 90 90 0 0 1 566 588"/>
+      <path id="wave-2" d="M 636 386 A 160 160 0 0 1 636 638"/>
+      <path id="wave-3" d="M 700 336 A 230 230 0 0 1 700 688"/>
+    </g>
+  </g>
+</svg>

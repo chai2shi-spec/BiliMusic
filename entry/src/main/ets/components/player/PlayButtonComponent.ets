@@ -1,12 +1,11 @@
 /**
- * 播放 / 暂停主按钮（独立子组件，从 ControlAreaComponent 抽出）。
+ * 播放 / 暂停主按钮（独立子组件）。
  *
- * 基础样式：无底板纯图标（磨砂圆底已按需求移除），居中播放/暂停图标。
+ * 基础样式：无底板纯图标，居中播放/暂停图标。
  *
- * 动效（2026-10-23 官方化改造）：
- *   · 播放态 —— 官方 ScaleSymbolEffect 连续脉冲（isActive 形态挂在
- *     SymbolGlyph 上，isPlay 翻转即启停；官方匀速节奏，替代原自绘随机
- *     呼吸链 breathGen/breathTimer 及前后台 @Watch，定时器全部删除）；
+ * 动效：
+ *   · 播放态 —— ScaleSymbolEffect 连续脉冲（isActive 形态挂在
+ *     SymbolGlyph 上，isPlay 翻转即启停，无需 @Watch）；
  *   · 点击 —— keyframeAnimateTo 一次快速缩小回弹（1→0.88→1.02→1，400ms），
  *     作用在 Column 命中区上，与 glyph 上的官方脉冲分属不同节点，互不叠加。
  */
@@ -16,7 +15,7 @@ import { BreakpointConstants } from '../../common/constants/BreakpointConstants'
 import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { STORE_IS_PLAYING } from '../../common/Constants';
 
-/** 图标字号（沿用原控制区规格） */
+/** 图标字号 */
 const PLAY_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 44, md: 44, lg: 52 });
 /** 透明命中区直径（vp），不渲染底板 */
 const PLAY_BUTTON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 64, md: 64, lg: 76 });

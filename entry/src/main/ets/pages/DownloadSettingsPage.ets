@@ -1,14 +1,15 @@
 /**
- * 下载与存储页（2026-10-24 设置页二级菜单化改造）：
- * 原设置页「下载」卡整体迁入本二级页，行序与逻辑原样保留。
+ * 下载与存储页（设置二级页）。
  *
- * 内容：仅 WiFi 下载 / 下载音质（SelectDialog 弹窗）/ 缓存（占用统计 + 清理）。
+ * 内容：仅 WiFi 下载 / 下载音质（SelectDialog 弹窗）/ 保存到系统下载目录
+ * （DOWNLOAD 模式持久授权 + 单份存储搬移）/ 同步已完成歌曲 /
+ * 缓存（占用统计 + 清理）/ 听后缓存（开关 + 清理）。
  *
  * 「仅 WiFi 下载」只写偏好，**拦截逻辑在 DownloadManager.requestDownload 入口**
  * （见 service/DownloadManager.ts）：开关打开且当前是蜂窝网络时，那次下载请求会带着
  * `blockedReason` 返回，由调用页（搜索页）弹框询问后再带 `ignoreWifiLimit` 重试。
  *
- * 缓存统计 / 清理走 TaskPool 异步（2026-10-16 AppFreeze 加固，防主线程阻塞 6s+），
+ * 缓存统计 / 清理走 TaskPool 异步（防主线程阻塞 6s+），
  * 轮次令牌防「快速进出页时旧轮结果覆盖新轮」。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）。
@@ -39,6 +40,9 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { QUALITY_OPTIONS, QualityOption, formatBytes } from '../utils/SettingsShared';
+import { ensureDirUri, PublicSyncResult } from '../service/PublicDownloadsSaver';
+import { DownloadManager } from '../service/DownloadManager';
+import { countListenCache, listenCacheUsage, clearListenCache } from '../service/ListenCacheStore';
 
 @Component
 export struct DownloadSettingsPage {
@@ -64,13 +68,21 @@ export struct DownloadSettingsPage {
   @State storageFooterText: string = '';
   /** 清理进行中（防重入 + 文案「清理中…」）：清理改 TaskPool 异步后必要 */
   @State clearing: boolean = false;
+  /** 同步已完成歌曲进行中（防重入 + 行标题「同步中…」） */
+  @State syncing: boolean = false;
+  /** 听后缓存占用：进页统计 + 清理后刷新 */
+  @State listenCacheUsageText: string = '0 B';
+  /** 听后缓存条数副文案（「已缓存 N 首，点击清理」/「暂无缓存」） */
+  @State listenCacheDescText: string = '暂无缓存';
+  /** 听后缓存清理进行中（防重入 + 主文案「清理中…」） */
+  @State clearingListenCache: boolean = false;
   private cacheDirPath: string = '';
   /** 应用级缓存目录（…/base/cache），与模块级 cacheDirPath 一起统计 */
   private appCacheDirPath: string = '';
   private downloadDirPath: string = '';
   /**
-   * 缓存统计轮次令牌（2026-10-16 AppFreeze 加固）：统计改异步后，
-   * 快速进出设置页会有多轮统计在飞，旧轮结果不得覆盖新轮（对比 seq 丢弃）。
+   * 缓存统计轮次令牌：统计是异步的，快速进出设置页会有多轮统计在飞，
+   * 旧轮结果不得覆盖新轮（对比 seq 丢弃）。
    */
   private cacheSizeSeq: number = 0;
   /**
@@ -87,9 +99,10 @@ export struct DownloadSettingsPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // 偏好读取延后一拍，首帧 build 全程零磁盘读（与原设置页同款模式）。
+    // 偏好读取延后一拍，首帧 build 全程零磁盘读。
     setTimeout((): void => {
       this.settings = AppPreferences.getSettings();
+      this.refreshListenCacheUsage();
     }, 0);
     this.refreshCacheSize();
   }
@@ -143,9 +156,8 @@ export struct DownloadSettingsPage {
       this.cacheText = '不可用';
       return;
     }
-    // 递归统计走 TaskPool（2026-10-16 AppFreeze 加固，修审核 THREAD_BLOCK_6S）：
-    // 原实现在主线程跑 listFileSync/statSync 递归，image_file_cache 等目录文件数
-    // 无上界，主线程可被阻塞 6s+。现主线程只拿最终字节数。
+    // 递归统计走 TaskPool（防审核 THREAD_BLOCK_6S）：image_file_cache 等目录
+    // 文件数无上界，主线程同步递归会被阻塞 6s+；主线程只拿最终字节数。
     const seq: number = ++this.cacheSizeSeq;
     const cacheP: Promise<number> = taskpool.execute(dirSizeTask, this.cacheDirPath) as Promise<number>;
     const appCacheP: Promise<number> = taskpool.execute(dirSizeTask, this.appCacheDirPath) as Promise<number>;
@@ -201,8 +213,8 @@ export struct DownloadSettingsPage {
     }
     this.clearing = true;
     this.cacheText = '清理中…';
-    // 递归删除走 TaskPool（2026-10-16 AppFreeze 加固）：原实现在主线程同步
-    // unlinkSync 整个缓存目录，文件多时阻塞 6s+（审核 THREAD_BLOCK_6S 根因候选）。
+    // 递归删除走 TaskPool：主线程同步 unlinkSync 整个缓存目录，
+    // 文件多时阻塞 6s+（审核 THREAD_BLOCK_6S 风险）。
     const cacheClearP: Promise<number> =
       taskpool.execute(clearDirContentsTask, this.cacheDirPath) as Promise<number>;
     const appCacheClearP: Promise<number> =
@@ -220,6 +232,60 @@ export struct DownloadSettingsPage {
         console.error(`clear cache failed: ${e.message}`);
         this.toast('清理失败，请稍后重试', 1800);
         this.refreshCacheSize();
+      });
+  }
+
+  /**
+   * 刷新听后缓存占用与条数。
+   * 占用统计是异步 stat 循环（缓存目录有 512MB 上限、文件数百级），不阻塞 UI。
+   */
+  private refreshListenCacheUsage(): void {
+    listenCacheUsage()
+      .then((bytes: number): void => {
+        this.listenCacheUsageText = formatBytes(bytes);
+        const count: number = countListenCache();
+        this.listenCacheDescText = count > 0 ? `已缓存 ${count} 首，点击清理` : '暂无缓存';
+      })
+      .catch((e: Error): void => {
+        console.error(`refresh listen cache usage failed: ${e.message}`);
+        this.listenCacheUsageText = '不可用';
+      });
+  }
+
+  /** 清理听后缓存前确认：明确「已下载歌曲与播放记录不受影响」 */
+  private confirmClearListenCache(): void {
+    showAppAlertDialog(this.getUIContext(), {
+      title: '清理听后缓存',
+      message: '将删除全部听后缓存音频。已下载的歌曲、歌单与播放记录不受影响。',
+      primaryButton: {
+        value: '取消'
+      },
+      secondaryButton: {
+        value: '清理',
+        action: (): void => {
+          this.doClearListenCache();
+        }
+      }
+    });
+  }
+
+  private doClearListenCache(): void {
+    // 防重入：清理还在跑时重复点击直接忽略
+    if (this.clearingListenCache) {
+      return;
+    }
+    this.clearingListenCache = true;
+    clearListenCache()
+      .then((removed: number): void => {
+        this.clearingListenCache = false;
+        this.toast(removed > 0 ? `已清理 ${removed} 首缓存` : '没有需要清理的缓存', 1800);
+        this.refreshListenCacheUsage();
+      })
+      .catch((e: Error): void => {
+        this.clearingListenCache = false;
+        console.error(`clear listen cache failed: ${e.message}`);
+        this.toast('清理失败，请稍后重试', 1800);
+        this.refreshListenCacheUsage();
       });
   }
 
@@ -276,6 +342,75 @@ export struct DownloadSettingsPage {
     });
     this.downloadQualityDialog = dialog;
     dialog.open();
+  }
+
+  /**
+   * 「保存到系统下载目录」开关翻转。
+   *
+   * 打开：先走 DOWNLOAD 模式 Picker 取「下载/BiliMusic」目录 URI（持久授权、
+   * 免选择界面；须在本次点击手势内拉起）—— 拿到才写偏好开开关；拿不到
+   * （用户取消 / 异常）保持关闭，并强制重读快照把 SuffixSwitch 的本地翻转
+   * 态刷回「关」（同值新对象引用即可触发重渲染）。
+   * 关闭：只写偏好；已授权 URI 与已搬移文件都保留（重新打开直接复用 URI）。
+   */
+  private onPublicDownloadsToggle(v: boolean): void {
+    if (!v) {
+      this.update((s: AppSettings): void => {
+        s.saveToPublicDownloads = false;
+      });
+      this.toast('已关闭：新下载只存应用沙箱', 1600);
+      return;
+    }
+    // 误触发守卫（wifiOnlyDownload 同款）：已是开态的重复回调不重复授权
+    if (this.settings.saveToPublicDownloads) {
+      return;
+    }
+    const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    ensureDirUri(ctx).then((uri: string): void => {
+      if (uri.length === 0) {
+        this.toast('未获得目录授权，开关未开启', 2000);
+        this.settings = AppPreferences.getSettings();
+        return;
+      }
+      this.update((s: AppSettings): void => {
+        s.saveToPublicDownloads = true;
+      });
+      this.toast('已开启：下载完成后自动保存到「下载/BiliMusic」', 2400);
+    });
+  }
+
+  /**
+   * 「同步已完成歌曲」：把已完成且文件仍在沙箱的任务批量搬入「下载/BiliMusic」
+   * （DownloadManager.syncCompletedToPublicDir，批内去重命名 + 失败计数）。
+   * 防重入（syncing）；结果 toast 三态：无待同步 / 全成功 / 部分失败。
+   */
+  private syncCompletedToPublic(): void {
+    if (this.syncing) {
+      return;
+    }
+    if (!this.settings.saveToPublicDownloads) {
+      this.toast('请先开启「保存到系统下载目录」', 1800);
+      return;
+    }
+    this.syncing = true;
+    DownloadManager.getInstance().syncCompletedToPublicDir()
+      .then((r: PublicSyncResult): void => {
+        this.syncing = false;
+        if (r.total === 0) {
+          this.toast('没有需要同步的歌曲', 1800);
+          return;
+        }
+        if (r.failed === 0) {
+          this.toast(`已同步 ${r.ok} 首到「下载/BiliMusic」`, 2200);
+          return;
+        }
+        this.toast(`已同步 ${r.ok} 首，${r.failed} 首失败（可重试）`, 2400);
+      })
+      .catch((e: Error): void => {
+        this.syncing = false;
+        console.error(`sync to public dir failed: ${e.message}`);
+        this.toast('同步失败，请稍后重试', 1800);
+      });
   }
 
   /**
@@ -355,9 +490,9 @@ export struct DownloadSettingsPage {
                 isCheck: this.settings.wifiOnlyDownload,
                 selectColor: this.themePrimary,
                 onChange: (v: boolean): void => {
-                  // 进页不再弹提示（2026-10-24）：settings 延后一拍读真值时
-                  // isCheck 翻转会让 SuffixSwitch 误触发 onChange —— 用翻转前值
-                  // 守卫，只有值真的从关翻到开才提醒；误触发时 v 与持久值一致被拦下。
+                  // settings 延后一拍读真值时，isCheck 翻转会让 SuffixSwitch
+                  // 误触发 onChange —— 用翻转前值守卫，只有值真的从关翻到开才提醒；
+                  // 误触发时 v 与持久值一致被拦下。
                   const turningOn: boolean = v && !this.settings.wifiOnlyDownload;
                   this.update((s: AppSettings): void => {
                     s.wifiOnlyDownload = v;
@@ -390,6 +525,45 @@ export struct DownloadSettingsPage {
 
             CardDivider()
 
+            // 保存到系统下载目录：开启后每首下载
+            // 完成自动搬入「下载/BiliMusic」（单份存储，系统文件管理可见）；
+            // 打开瞬间走 DOWNLOAD 模式 Picker 持久授权（免选择界面）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '保存到系统下载目录' },
+                secondaryText: { text: '下载完成后自动移入「下载/BiliMusic」，文件管理可见' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.saveToPublicDownloads,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.onPublicDownloadsToggle(v);
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 同步已完成歌曲：开关开启前 / 授权前的存量任务批量搬移入口。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: this.syncing ? '同步中…' : '同步已完成歌曲' },
+                secondaryText: { text: '把开关开启前已下载的歌曲移入「下载/BiliMusic」' }
+              },
+              suffixItem: new SuffixText({ text: '同步' }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.syncCompletedToPublic();
+              }
+            })
+
+            CardDivider()
+
             // 缓存：占用统计 + 点击清理。提示词并入本行副标题（精简为一行）：
             // 点击本行清理临时缓存；有已下载歌曲时前置「不受影响」说明。
             HdsListItemCard({
@@ -405,6 +579,52 @@ export struct DownloadSettingsPage {
                 this.confirmClearCache();
               }
             })
+
+            CardDivider()
+
+            // 听后缓存：自然听完的歌曲后台缓存整首到
+            // 独立 listen_cache 目录（512MB LRU），重播免解析、不耗流量、离线可播；
+            // 流量策略跟随本页「仅 WiFi 下载」，不混入下载管理列表。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '听后缓存' },
+                secondaryText: { text: '自然听完的歌曲自动缓存，重播不耗流量' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.listenCacheEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 翻转前值守卫，防进页误触发弹提示（见「仅 WiFi 下载」注释）
+                  const turningOn: boolean = v && !this.settings.listenCacheEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.listenCacheEnabled = v;
+                  });
+                  if (turningOn) {
+                    this.toast('已开启：听完的歌曲将自动缓存', 1800);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 清理听后缓存：占用统计 + 条数副文案，点击弹确认框（已下载歌曲不受影响）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: this.clearingListenCache ? '清理中…' : '清理听后缓存' },
+                secondaryText: { text: this.listenCacheDescText }
+              },
+              suffixItem: new SuffixText({ text: this.listenCacheUsageText }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.confirmClearListenCache();
+              }
+            })
           }
         }
       }
@@ -416,7 +636,7 @@ export struct DownloadSettingsPage {
       .cachedCount(10)
       // 底部让位：列表末尾可滚动至手势区上方，不被遮挡
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-      // 大屏适配：内容列收窄居中（与原设置页同口径走 TwoColumnLayout.contentMaxWidth）
+      // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策

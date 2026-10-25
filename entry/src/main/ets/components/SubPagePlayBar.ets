@@ -1,7 +1,7 @@
 /**
- * 二级页沉浸光感悬浮播放栏（2026-10-23 建栏，2026-10-24 改 HDS miniBar 官方通路）：
+ * 二级页沉浸光感悬浮播放栏：
  * push 出的 NavDestination 盖住整个 HdsNavigation 内容区（含首页 HDS 悬浮胶囊），
- * 二级页此前底部无任何播放栏、也无法进播放页 —— 本组件补这个缺口。
+ * 二级页底部无其他播放栏、也无进播放页入口 —— 本组件补这个缺口。
  *
  * 架构：Index 根 Stack **全局单实例**挂载（在壳之后、播放页 overlay 之前），
  * 由 NavStackHolder 双写的 STORE_SUB_PAGE_ACTIVE 门控（任意 NavDestination
@@ -15,33 +15,32 @@
  * 摘除 —— 全窗口同一时刻只有一套 GEOMETRY_ID_PLAYER_DISC / _SURFACE 锚点，
  * 摘除与挂载在同一次 Index 重渲染（同一帧）完成。
  *
- * 内容复用 PlayBar（standalone 模式）：切歌 / 进度 / 唱片旋转 / 封面
+ * 内容复用 PlayBar（standalone 模式）：切歌 / 进度 / 封面
  * geometryTransition 飞行 / openPlayer 全部白拿，与首页胶囊同源。
  *
- * 视觉（A案：HDS miniBar 通路，2026-10-24）：二号 HdsTabs 挂根 Stack，
+ * 视觉（HDS miniBar 通路）：二号 HdsTabs 挂根 Stack，
  * PlayBar 放唯一 TabContent 对应的 miniBar（恒 EXPAND），沉浸光感走
  * systemMaterialEffect（IMMERSIVE + EXQUISITE/ADAPTIVE）+ lightColor 主题色
  * 光晕 —— 与首页 HDS 胶囊完全同源的真机已验证通路。页签胶囊用
  * barOpacity:0 隐藏（唯一 TabContent 的 tabBar 为空内容、barWidth 压到 2vp
  * 缩小隐形死区）。
- * 方案沿革（根因存档，官方《沉浸光感常见问题》）：「其他组件」的
+ * 约束（官方《沉浸光感常见问题》）：「其他组件」的
  * systemMaterial 仅在 Navigation/NavDestination 标题栏或横向 Tabs 底部
- * TabBar 生效 —— 初版自绘 Row 直接挂 .systemMaterial() 真机静默全透明；
- * B案普通 Tabs barFloatingStyle.systemMaterial 生效但观感不达预期；
- * 本版（A案）回到 HDS 内部材质通路，与首页视觉语言完全一致。
+ * TabBar 生效 —— 自绘 Row 直接挂 .systemMaterial() 真机静默全透明，
+ * 必须走 HDS 内部材质通路，与首页视觉语言一致。
  * ⚠️ 已知风险（真机验证项）：HdsTabsMiniBar.enableMiniBarBackground 语义
  * 「迷你栏背景跟随页签栏」—— barOpacity:0 可能连带 miniBar 材质一起隐藏
- * （Index 曾实测 enableMiniBarBackground:false 会导致 IMMERSIVE 材质与
- * lightColor 均不渲染）；若真机复现，回退 B案或恢复毛玻璃版（备份可回）。
+ * （enableMiniBarBackground:false 会导致 IMMERSIVE 材质与
+ * lightColor 均不渲染）；若真机复现需重估通路。
  *
  * 定位与避让：HdsTabs 全屏载体（barPosition End + barOverlap(true)），
  * 悬浮位置由 barFloatingStyle 唯一决定：barBottomMargin = 2 + (三键导航栏
- * > 0 ? 三键导航栏 : 手势指示条)（与旧版同公式同口径）；miniBar 宽 =
+ * > 0 ? 三键导航栏 : 手势指示条)；miniBar 宽 =
  * 一级页 miniBar 展开态实测槽位宽（Index.onBarStyleChange 经
- * STORE_MAIN_MINI_BAR_WIDTH 回传，2026-10-24 起 —— HDS 默认宽在编译产物
+ * STORE_MAIN_MINI_BAR_WIDTH 回传 —— HDS 默认宽在编译产物
  * 里不可推导，实测是唯一可靠口径；未测量首帧回退自算「载体宽 − 50 封顶
  * 600」）；水平 barSideMargin = (载体宽 − miniBar宽) ÷ 2 精确居中
- * （2026-10-24 修「右缘离屏距 ≠ 左缘」，见 floatingStyle 内注释）。
+ * （见 floatingStyle 内注释）。
  * 载体 hitTestBehavior
  * Transparent —— 栏外空白 TabContent 区点击穿透到下方页面，列表照常可点可
  * 可滚。挂载 / 卸载挂 250ms OPACITY transition 软化浮现。列表末条避让由
@@ -69,12 +68,12 @@ import {
 
 /**
  * miniBar 宽度预算里的左右边距分量（vp，对齐首页内容区 NAV_H_PADDING 口径）。
- * ⚠️ 2026-10-24 起不再是「可见边距」：可见胶囊由 barSideMargin 精确居中
+ * ⚠️ 不是「可见边距」：可见胶囊由 barSideMargin 精确居中
  * （见 floatingStyle 内注释），实际左右离屏距 = 本值 + (隐藏页签宽 + 间距
  * 预算) ÷ 2 = 16 + 9 = 25vp —— 对称优先于精确 16。
  */
 const SUB_PAGE_BAR_SIDE_MARGIN_VP: number = 16;
-/** 胶囊净离底间距（vp）：与旧版悬浮胶囊同值（HDS 版净距沿用，别叠第二层 padding） */
+/** 胶囊净离底间距（vp）：别在容器再叠第二层 padding */
 const SUB_PAGE_BAR_BOTTOM_MARGIN_VP: number = 2;
 /** 宽屏下 miniBar 最大宽度（vp）：收窄居中，防阔折叠 / 平板上横贯过宽（仅未测量回退分支用） */
 const SUB_PAGE_BAR_MAX_WIDTH_VP: number = 600;
@@ -110,8 +109,7 @@ export struct SubPagePlayBar {
   /**
    * 一级页 miniBar 展开态槽位实测宽（vp，0 = 尚未测量，见 Constants 键注释）：
    * Index.onBarStyleChange 回写。宽度直接采用该值 —— 与一级页底栏恒同宽
-   * （2026-10-24 修「二级页播放栏宽 ≠ 一级页底栏宽」：此前自算
-   * 「载体宽 − 50 封顶 600」与一级页 HDS 默认宽天然不等）。
+   * （自算「载体宽 − 50 封顶 600」与一级页 HDS 默认宽天然不等）。
    */
   @StorageProp(STORE_MAIN_MINI_BAR_WIDTH) mainMiniBarWidthVp: number = 0;
 
@@ -140,8 +138,8 @@ export struct SubPagePlayBar {
 
   /**
    * miniBar 宽（vp）：一级页实测宽优先 —— 直接采用 Index.onBarStyleChange
-   * 发布的一级页 miniBar 展开态槽位宽（2026-10-24 修「二级页播放栏宽 ≠
-   * 一级页底栏宽」，HDS 默认宽不可从源码推导，实测回传唯一可靠口径），
+   * 发布的一级页 miniBar 展开态槽位宽（HDS 默认宽不可从源码推导，实测回传
+   * 唯一可靠口径），
    * 仅在超出载体宽时分屏极端场景夹取；barSideMargin 居中公式自动还原
    * 一级页同款左右边距。未测量（0，理论仅首帧 / 首次进二级页）回退自算
    * 公式：载体宽扣边距、隐藏页签宽与间距预算后取值，宽屏收窄 600。
@@ -205,13 +203,13 @@ export struct SubPagePlayBar {
         largeWidth: SUB_PAGE_HIDDEN_TAB_WIDTH_VP
       },
       miniBar: mini,
-      // 底部避让（与旧版同公式同口径）：净距 2 + (三键导航栏 > 0 ? 三键导航栏
+      // 底部避让：净距 2 + (三键导航栏 > 0 ? 三键导航栏
       // : 手势指示条)。⚠️ 全屏布局下 HdsTabs 底边 = 物理屏幕底边，避让必须
       // 全部折在这一个值里，别在容器再叠 padding.bottom（双重避让坑）。
       barBottomMargin: SUB_PAGE_BAR_BOTTOM_MARGIN_VP + (this.navBarBottom > 0
         ? this.navBarBottom
         : this.navIndicatorBottom),
-      // 水平居中（2026-10-24 修「播放栏右缘离屏距 ≠ 左缘」）：悬浮行里可见
+      // 水平居中：悬浮行里可见
       // miniBar 旁还排着 2vp 隐藏页签 + HDS 内部间距（预算 16vp），默认布局
       // 把整行当组处理 → 可见胶囊左右离屏距相差「隐藏页签宽 + 间距」≈18vp
       // （方向取决于 HDS 把 miniBar 排在行首还是行尾，真机目视两边不等宽）。
@@ -220,9 +218,8 @@ export struct SubPagePlayBar {
       // （= 16 + (2 + 16) ÷ 2 = 25vp，与 HDS 内部把边距折在行哪一侧无关，
       // 两种模型同解）。宽屏 600 收窄后公式自动给出对称大边距，无需分支。
       barSideMargin: sideMargin,
-      // 沉浸光感（与首页胶囊完全同源的真机已验证配方）
-      // P0（2026-10-24 沉浸光感改造）：材质类型/档位抽入 MaterialTokens 令牌，
-      // 与 Index.barFloatingStyle 同源（本步零观感变化，值不变）。
+      // 沉浸光感（与首页胶囊完全同源的真机已验证配方）：材质类型/档位用
+      // MaterialTokens 令牌，与 Index.barFloatingStyle 同源。
       systemMaterialEffect: {
         materialType: MaterialTokens.BAR_MATERIAL_TYPE,
         materialLevel: MaterialTokens.materialLevel()

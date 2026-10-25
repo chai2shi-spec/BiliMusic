@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Danmaku Note</title>
+  <desc id="desc">弹幕音符方案，保留 B 站属性的唯一方向且不涉及商标。深粉底上白色八分音符，符尾直接接出三条右对齐的弹幕横条，形成一个连续图形。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#C2185B"/>
+  </g>
+
+  <g id="foreground-layer">
+    <g id="note-head" transform="rotate(-20 436 612)">
+      <ellipse cx="436" cy="612" rx="92" ry="76" fill="#FFFFFF"/>
+    </g>
+    <rect id="stem" x="504" y="256" width="42" height="384" rx="21" fill="#FFFFFF"/>
+    <path
+      id="flag"
+      d="M 525 280 C 566 292 596 322 612 352"
+      fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round"/>
+    <g id="danmaku-bars" fill="#FFFFFF">
+      <rect id="d-1" x="612" y="332" width="188" height="40" rx="20"/>
+      <rect id="d-2" x="648" y="416" width="152" height="40" rx="20"/>
+      <rect id="d-3" x="684" y="500" width="116" height="40" rx="20"/>
+    </g>
+  </g>
+</svg>

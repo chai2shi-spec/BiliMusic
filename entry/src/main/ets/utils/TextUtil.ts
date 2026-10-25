@@ -1,6 +1,6 @@
 /**
  * 文本处理工具：B 站图片转 https、歌词标题清洗、LRC 解析、候选评分。
- * 移植自原 React 版 src/services/lyrics.ts（移除 DOM / localStorage 依赖）。
+ * 无 DOM / localStorage 依赖。
  */
 
 import type { LyricLine, LyricCandidate, Track } from '../model/MusicModels';
@@ -72,7 +72,7 @@ export function cleanTitle(raw: string): string {
 }
 
 /**
- * 音质档位 / mimeType → 音频文件扩展名（不含点），2026-10-24 下载格式正确化引入。
+ * 音质档位 / mimeType → 音频文件扩展名（不含点）。
  *
  * B 站 DASH 音轨是 audio-only fMP4，字节层面与 .m4a 同构，原样落盘即是合法
  * m4a（无需任何转码，两代参考实现一致）；需要别的扩展名的只有两档：
@@ -93,7 +93,7 @@ export function audioFileExt(audioQuality: number, mimeType: string): string {
 }
 
 /**
- * 文件名清洗（2026-10-24 导出文件命名用）：去文件系统非法字符（\ / : * ? " < > |）
+ * 文件名清洗（导出文件命名用）：去文件系统非法字符（\ / : * ? " < > |）
  * 与控制字符，压缩空白，去首尾空格与结尾的点（结尾点在部分文件系统上是非法项）。
  * 长度上限 120 —— 超长歌名不清会把系统保存对话框的文件名输入撑爆。
  */
@@ -326,7 +326,7 @@ export function scoreCandidate(c: LyricCandidate, ctx: ScoreContext): number {
   let score: number = 0;
   score += normIncludes(ctx.rawTitle, c.trackName) ? 360 : dice(c.trackName, ctx.clean) * 180;
   score += normIncludes(ctx.rawTitle, c.artistName) ? 280 : 0;
-  // 歌手对比加分（2026-10-23 修匹配）：本机 artist 与候选歌手命中即加分。
+  // 歌手对比加分：本机 artist 与候选歌手命中即加分。
   // 只加分不扣分 —— B 站 artist 常是 UP 主名，扣分会误伤正确候选。
   if (ctx.artist !== undefined && ctx.artist.length > 0) {
     const segs: string[] = artistSegments(ctx.artist);
@@ -375,9 +375,8 @@ export { plainToLines };
  * 返回**空串**表示「没有时长」而不显示占位：`!(total > 0)` 的写法顺带把
  * `NaN` / undefined / 0 全挡掉（音乐中心等无时长条目显示 `0:00` 会像信息错乱）。
  *
- * 2026-10-23 性能审查收敛点：此前 TrackItem / RecentPage / WatchHistoryPage /
- * PlaylistImportPage 各持一份本地实现（细节漂移：PlaylistImportPage 用 round、
- * 其余用 floor；RecentPage 无空串守卫），统一到 TextUtil 一份导出。
+ * 各页面（TrackItem / RecentPage / WatchHistoryPage / PlaylistImportPage）的
+ * 时长格式统一走这一份导出，避免本地实现细节漂移。
  */
 export function formatDurationText(seconds: number): string {
   const total: number = Math.floor(seconds);
@@ -411,8 +410,8 @@ export function stripHtmlTags(raw: string): string {
 /**
  * HTML 实体解码（`&amp;` `&lt;` `&quot;` `&#39;` 等）。
  *
- * 原来只在 `PlaylistImporter` 里（解析 B 站标题噪声段用），2026-10-22 提到这里共用 ——
- * HTML 搜索页兜底通道（`BilibiliApi.searchVideoByHtml`）解析卡片 `title="..."` 属性时，
+ * 供 `PlaylistImporter`（解析 B 站标题噪声段用）与 HTML 搜索页兜底通道
+ * （`BilibiliApi.searchVideoByHtml`）共用 —— 解析卡片 `title="..."` 属性时，
  * 标题里的引号 / 尖括号全被转义过，不解码会把 `&quot;` 原样带进歌名、导致打分对不上。
  *
  * ⚠️ 只覆盖 B 站实际会出现的几种，不做通用实体表（会被 `&#xxxx;` 数字实体绕过，

@@ -6,8 +6,8 @@
  * 数据流：本类持有**内存态**任务表，任何进度/状态变化都会重新生成快照并写入
  * AppStorage(STORE_DOWNLOAD_TASKS)，下载页用 @StorageLink 订阅即可实时刷新。
  *
- * 早期实现只在写库后等页面重查，而页面只在 aboutToAppear 拉一次数据，
- * 结果就是「点了下载看不到进度、重启应用才出现」。故改为推送式。
+ * 必须推送而不是等页面重查：页面只在 aboutToAppear 拉一次数据，
+ * 轮询式会让「点了下载」迟迟看不到进度。
  *
  * ══════════ 三条容易改坏的设计（改之前先读） ══════════
  *
@@ -72,17 +72,15 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { isUnmeteredNetwork } from '../utils/NetworkUtil';
 import { audioFileExt } from '../utils/TextUtil';
 import { BackgroundPlayback } from './BackgroundPlayback';
+import { recordLoudness } from './LoudnessStore';
+import { moveTaskFile, PublicSyncResult } from './PublicDownloadsSaver';
+import { exportBaseNameOf, exportExtOf } from './AudioExporter';
 
 /**
  * UI 刷新节流：dataReceiveProgress 触发极频繁，无需每次都重绘。
- * 2026-10-08 卡顿优化：200 → 300。每份快照都会触发下载页的全量重分组
- * （rebuildGroups）+ 镜像动画重定目标，200ms（5Hz）在多 P 合集下载时
- * 与滚动帧竞争主线程。300ms（3.3Hz）脉冲开销降 40%，进度数字步进
- * 略粗但人眼无感；配套把动画窗口 DOWNLOAD_SMOOTH_MS 提到 250ms 保连续。
- * 2026-10-23 性能审查：300 → 500。前台每份快照仍要走「全表拷贝 + 排序 +
- * rebuildGroups + ForEach diff」整条流水线，2Hz 足够平滑（视觉连续性由
- * 下载页 520ms 镜像插值 animateTo 兜底，ControlAreaComponent 同款手法），
- * 批量下载时前台 CPU 占用再降一档。
+ * 每份快照都要走「全表拷贝 + 排序 + rebuildGroups + ForEach diff」整条
+ * 流水线，2Hz 足够平滑（视觉连续性由下载页 520ms 镜像插值 animateTo 兜底，
+ * ControlAreaComponent 同款手法），更快的频率只会在批量下载时挤占主线程。
  */
 const UI_NOTIFY_INTERVAL: number = 500;
 /** 落库节流：避免每个数据分片都写一次 RDB */
@@ -90,8 +88,8 @@ const DB_WRITE_INTERVAL: number = 800;
 /**
  * 流式接收的「停滞」判据（ms）。
  *
- * 不能用「从开始算起的固定总超时」：一首 10MB 的音频在弱网下可能下几分钟，
- * 固定 10s 会把正常下载误判为失败。这里改成**空闲超时** —— 只要有数据推进就刷新，
+ * 不用「从开始算起的固定总超时」：一首 10MB 的音频在弱网下可能下几分钟，
+ * 固定 10s 会把正常下载误判为失败。用**空闲超时** —— 只要有数据推进就刷新，
  * 连续这么久一个字节都没来，才认定是真的断了。
  */
 const STREAM_IDLE_TIMEOUT_MS: number = 30000;
@@ -143,11 +141,11 @@ export const WIFI_ONLY_BLOCKED: string =
 /**
  * 下载来源（可选）：整单下载时由调用方传入，任务会带上这两个字段，
  * 下载管理页据此把同一歌单的曲目**聚成一张歌单卡片**（展开才见单曲）。
- * 单曲下载不传 → `playlistId` 为空串 → 行为与从前完全一致。
+ * 单曲下载不传 → `playlistId` 为空串 → 不归组。
  *
- * 2026-10-08 扩展：合集归属三件套（可选项）。多 P 展开入队时由 requestDownload
+ * 合集归属三件套（可选项）。多 P 展开入队时由 requestDownload
  * 逐条标记（原视频标题 + 分 P 序号 + 总 P 数），让下载页能显式区分「合集条目」
- * 与单视频条目，不再依赖「首个分P复用 base 标题」的隐式约定。
+ * 与单视频条目，而不依赖「首个分P复用 base 标题」的隐式约定。
  */
 export interface DownloadSource {
   playlistId: string;
@@ -194,8 +192,7 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * 把异常转成可读文本。
- * `JSON.stringify(err)` 对 Error 实例只会打印 `{}`（message/stack 都是不可枚举属性），
- * 之前所有下载失败的日志都是这么变成废话的。
+ * `JSON.stringify(err)` 对 Error 实例只会打印 `{}`（message/stack 都是不可枚举属性）。
  */
 function describeError(e: Object): string {
   if (e instanceof Error) {
@@ -210,15 +207,14 @@ function describeError(e: Object): string {
  * 为什么必须有这一步：B 站音频 CDN 在直链过期 / 被限流时，会返回 **HTTP 200 + 一段 HTML
  * 或 JSON 错误页**。此时下载流程「顺利」走完，文件也是一段合法字节，只是永远播不出来。
  *
- * 魔数按实际容器分四类判定（2026-10-24 下载格式正确化：此前只认 ftyp，把
- * 无损档（30251，raw FLAC 字节）全部误杀成「Downloaded file is not valid audio」）：
+ * 魔数按实际容器分四类判定：
  *   · `ftyp`（offset 4~7）—— fMP4 容器：DASH 音轨（30280 等）本体即 m4a；
  *   · `fLaC`（offset 0~3）—— Hi-Res 无损档的裸 FLAC 流；
  *   · `ID3`（offset 0~2）—— 64K 档（audio/mpeg）带 ID3v2 头的 MP3；
  *   · `0xFF 0xEx`（帧同步）—— 无 ID3 头的裸 MP3。
  */
 async function isValidAudioFile(path: string): Promise<boolean> {
-  // （2026-10-16 AppFreeze 加固）探测改异步 fs：不再在主线程 statSync/openSync/readSync。
+  // 探测用异步 fs，避免主线程 statSync/openSync/readSync 阻塞。
   let probe: fs.File | null = null;
   try {
     const stat: fs.Stat = await fs.stat(path);
@@ -303,7 +299,7 @@ export class DownloadManager {
    */
   private paused: boolean = false;
   /**
-   * **单条暂停**的任务集合（2026-10-11 新增：下载页点「下载中」的行 = 只暂停这一条）。
+   * **单条暂停**的任务集合（下载页点「下载中」的行 = 只暂停这一条）。
    *
    * 与 `paused`（全部暂停）的分工：
    *   · `paused` 是队列级总闸，消费者整体退出；
@@ -341,7 +337,7 @@ export class DownloadManager {
   }
 
   /**
-   * 同步查询「该曲目是否已下载完成」（2026-10-08 本地优先播放）：
+   * 同步查询「该曲目是否已下载完成」（本地优先播放）：
    * 命中返回本地文件路径，否则空串。
    *
    * 供播放内核做「本地优先」判定（MusicPlayer.loadAndPlay 在线解析之前先问这里）：
@@ -375,7 +371,7 @@ export class DownloadManager {
           // 上次进程被杀留下的中间态，文件多半不完整，标为失败以免永远停在“下载中”。
           // 半截文件一并删掉：既占沙箱空间，又可能被误当成可播的本地缓存。
           if (t.localFilePath.length > 0) {
-            // （2026-10-16 AppFreeze 加固）删半截文件改异步，不阻塞主线程
+            // 删半截文件走异步，不阻塞主线程
             fs.unlink(t.localFilePath).catch((): void => {
               // 文件可能不存在，忽略
             });
@@ -438,8 +434,8 @@ export class DownloadManager {
       // 详情页 / 下载页的分组键会退化成任务 id（表现为「整单下载又散成一行行」）
       playlistId: t.playlistId ?? '',
       playlistName: t.playlistName ?? '',
-      // 合集三件套同理（2026-10-08）：漏掉的话 UI 快照里的任务全变成「单视频」，
-      // 合集徽标 / P 序号会消失（就是上面 playlistId 踩过的同一类坑）
+      // 合集三件套同理：漏掉的话 UI 快照里的任务全变成「单视频」，
+      // 合集徽标 / P 序号会消失（与上面 playlistId 是同一类坑）
       collectionTitle: t.collectionTitle ?? '',
       partNo: t.partNo ?? 0,
       partTotal: t.partTotal ?? 0
@@ -492,7 +488,7 @@ export class DownloadManager {
         await deleteDownload(existing.id);
         this.tasks.delete(existing.id);
       }
-      // 合集归属标记（2026-10-08）：展开出多条（= 真·多 P 合集）时，
+      // 合集归属标记：展开出多条（= 真·多 P 合集）时，
       // 逐条打上「原视频标题 + 第几个分 P + 共几个」，下载页据此显示合集徽标与 P 序号；
       // 单条（单 P 视频或展开失败回落）不打标——partNo/partTotal 保持 0，UI 视作单视频。
       // partNo 用展开列表的原始下标：即使某些分 P 因已下载被跳过，序号依然对应 B 站分 P 顺序。
@@ -584,7 +580,7 @@ export class DownloadManager {
       return null;
     }
     const dir: string = `${this.context.filesDir}/downloads`;
-    // （2026-10-16 AppFreeze 加固）建目录改异步；已存在时报错直接吞掉
+    // 建目录走异步；已存在时报错直接吞掉
     try {
       await fs.mkdir(dir, true);
     } catch (e) {
@@ -611,8 +607,8 @@ export class DownloadManager {
       // 来源歌单：整单下载时由调用方传入，单曲下载为空串（下载管理里不归组）
       playlistId: source ? source.playlistId : '',
       playlistName: source ? source.playlistName : '',
-      // 合集归属三件套（2026-10-08）：多 P 展开时由 requestDownload 逐条标记；
-      // 单视频 / 老调用路径为 ''/0，UI 靠 partTotal>1 识别合集，不受影响
+      // 合集归属三件套：多 P 展开时由 requestDownload 逐条标记；
+      // 单视频为 ''/0，UI 靠 partTotal>1 识别合集
       collectionTitle: source && source.collectionTitle ? source.collectionTitle : '',
       partNo: source && source.partNo ? source.partNo : 0,
       partTotal: source && source.partTotal ? source.partTotal : 0
@@ -635,7 +631,7 @@ export class DownloadManager {
       return;
     }
     this.pumping = true;
-    // 2026-10-08 消费者启动即申报下载保活意愿：退后台/锁屏后队列继续跑。
+    // 消费者启动即申报下载保活意愿：退后台/锁屏后队列继续跑。
     // 必须放在这里而不是 runDownload 里——排队中的任务同样需要保活，
     // 且串行队列从头到尾只该申报一次（协调器内部有幂等，但语义上以队列为单位）。
     this.syncTransferTask();
@@ -658,7 +654,7 @@ export class DownloadManager {
   }
 
   /**
-   * 把「队列是否有活」同步给长时任务协调器（2026-10-08 后台持续下载）。
+   * 把「队列是否有活」同步给长时任务协调器。
    *
    * 判定：未被全部暂停，且（消费者活着 **或** 还有排队任务）。
    *   - `pumping` 覆盖了传输中、解析音源中、失败重试的退避等待中——弱网退避
@@ -774,8 +770,8 @@ export class DownloadManager {
     }
 
     try {
-      // 下载音质：这条链路读 downloadQuality。播放侧（MusicPlayer.loadAndPlay）
-      // 同样已接入偏好（读 playQuality，2026-10-08 起生效）—— 两边各自读各自档位。
+          // 下载音质：这条链路读 downloadQuality。播放侧（MusicPlayer.loadAndPlay）
+          // 读 playQuality —— 两边各自读各自档位。
       const preferred: number = downloadQualityId(AppPreferences.getSettings().downloadQuality);
       let done: boolean = false;
       for (let attempt = 1; attempt <= DOWNLOAD_MAX_ATTEMPTS && !done; attempt++) {
@@ -795,10 +791,16 @@ export class DownloadManager {
             aid: track.aid,
             cid: track.cid
           }, preferred);
+          // 响度记录扼点（下载侧）：下载解析音源时顺手记录响度，
+          // 离线播放（本地文件不查 playurl）也能命中 LoudnessStore 查表均衡。
+          // sourceCache 旧条目缺字段时 undefined > 0 为 false，安全跳过。
+          if (source.loudnessMeasuredI > 0) {
+            recordLoudness(track.id, source.loudnessMeasuredI, source.loudnessTargetI);
+          }
           task.url = source.audioUrl;
           task.audioQuality = source.audioQuality;
           task.audioBandwidth = source.audioBandwidth;
-          // （2026-10-24 下载格式正确化）按实际音源修正落盘扩展名（flac/mp3/m4a）。
+          // 按实际音源修正落盘扩展名（flac/mp3/m4a）。
           // DASH 音轨本体即 m4a；无损档（30251）是 raw FLAC 字节、64K 档（30216）是
           // 裸 MP3，建任务时的占位名（硬编码 .m4a）在这两档下名不副实。
           // ⚠️ 扩展名变化 = 音源格式变化：半截文件的字节与新格式不兼容（m4a 前缀
@@ -829,14 +831,20 @@ export class DownloadManager {
           }
           task.speed = 0;
           task.status = DownloadStatus.DOWNLOADING;
-          // localFilePath 一并落库（2026-10-24）：updateDownloadStatus 对缺省参数
-          // 会把 '' 原样写进列，此前每次进入 DOWNLOADING 都把 DB 里的路径抹空、
-          // 靠 finishTask 兜底回填；路径修正后立即同步，中断重启不再拿到旧占位名。
+          // localFilePath 一并落库：updateDownloadStatus 对缺省参数
+          // 会把 '' 原样写进列；路径修正后立即同步，中断重启不会拿到旧占位名。
           await updateDownloadStatus(task.id, DownloadStatus.DOWNLOADING, task.localFilePath);
           this.notify();
 
           await this.downloadFile(source.audioUrl, task.localFilePath, task.id);
           await this.finishTask(task, DownloadStatus.COMPLETED, task.localFilePath, '');
+          // 公共下载目录搬移（PublicDownloadsSaver.moveTaskFile）：
+          // 开关开启时单份存储搬到「下载/包名」（成功后 localFilePath 已指向
+          // 公共绝对路径并回写 RDB，补 notify 刷新快照）；失败兜底保留沙箱
+          // 原件零损伤，设置页「同步已完成歌曲」可重试。开关关闭恒 false 零开销。
+          if (await moveTaskFile(task)) {
+            this.notify();
+          }
           done = true;
         } catch (e) {
           const message: string = e instanceof Error ? e.message : '';
@@ -936,17 +944,66 @@ export class DownloadManager {
   }
 
   /**
+   * 把「已完成且文件仍在沙箱」的任务批量搬移到「下载/包名」（设置页
+   * 「同步已完成歌曲」入口）。
+   *
+   * 与完成点自动搬移共用 moveTaskFile（含单份存储语义与失败兜底：单条失败
+   * 计数继续不中断批次，沙箱原件无损）；批内重名加 " (2)"、" (3)"…
+   *（AudioExporter 导出同款去重 —— 批量场景同曲多任务混排，自动搬移的
+   * 覆盖语义会静默吞歌）。同步成功后 notify 一次刷新快照。
+   */
+  async syncCompletedToPublicDir(): Promise<PublicSyncResult> {
+    const result: PublicSyncResult = { total: 0, ok: 0, failed: 0 };
+    if (!AppPreferences.getSettings().saveToPublicDownloads) {
+      return result;
+    }
+    // 沙箱路径前缀过滤：已完成 + localFilePath 仍在沙箱 downloads 下才参与
+    //（已搬过的路径在公共目录，indexOf !== 0 天然排除；半截/失败路径已清空）。
+    const sandboxPrefix: string = `${this.context ? this.context.filesDir : ''}/downloads`;
+    const pending: DownloadTask[] = [];
+    this.tasks.forEach((t: DownloadTask): void => {
+      if (t.status === DownloadStatus.COMPLETED
+        && t.localFilePath.length > 0
+        && t.localFilePath.indexOf(sandboxPrefix) === 0) {
+        pending.push(t);
+      }
+    });
+    result.total = pending.length;
+    const usedNames: string[] = [];
+    for (let i = 0; i < pending.length; i++) {
+      const t: DownloadTask = pending[i];
+      const base: string = exportBaseNameOf(t);
+      const ext: string = exportExtOf(t);
+      let candidate: string = `${base}.${ext}`;
+      let seq: number = 2;
+      while (usedNames.indexOf(candidate) >= 0) {
+        candidate = `${base} (${seq}).${ext}`;
+        seq += 1;
+      }
+      usedNames.push(candidate);
+      if (await moveTaskFile(t, candidate)) {
+        result.ok += 1;
+      } else {
+        result.failed += 1;
+      }
+    }
+    if (result.ok > 0) {
+      this.notify();
+    }
+    return result;
+  }
+
+  /**
    * 把音频流写进应用沙箱文件。
    *
-   * ⚠️ 三条铁律（每一条都对应一次真实故障）：
+   * ⚠️ 四条铁律：
    *
    * 1. **`requestInStream` 的 Promise 只代表「响应头已到」，不代表数据收完。**
-   *    数据会继续通过 `dataReceive` 推送，直到 `dataEnd` 事件。早前的实现在 await 返回后
-   *    立刻 `off` + `closeSync` + `destroy()`，而此刻流还在传输 —— 于是
+   *    数据会继续通过 `dataReceive` 推送，直到 `dataEnd` 事件。在 await 返回后
+   *    立刻 `off` + `closeSync` + `destroy()` 会切断还在传输的流：
    *    ① 后续 `dataReceive` 往**已关闭的 fd** 写入；② `destroy()` 一个进行中的流式请求。
-   *    两者都会在 native 层把进程直接干掉：**用户点击下载 → App 闪退**，而任务早已写进库、
-   *    状态停在 downloading —— 重启后就成了下载页里那条「任务已中断」。
-   *    参考工程 `BiliMusic-main/service/BiliService.ets` 的做法就是**轮询等 `dataEnd`**。
+   *    两者都会在 native 层把进程直接干掉。**必须轮询等 `dataEnd`**
+   *    （参考工程 `BiliMusic-main/service/BiliService.ets` 的做法）。
    *
    * 2. **事件名必须是 `headersReceive`。** `headerReceive`（单数）自 API 8 起已废弃，
    *    而且它的回调签名是 `AsyncCallback<Object>`，即 `(err, data)` **两个参数**。
@@ -988,8 +1045,8 @@ export class DownloadManager {
     try {
       const file: fs.File = await fs.open(
         destPath,
-        // （2026-10-16 AppFreeze 加固）去掉 APPEND：写入位置已由 write 的显式
-        // offset 指定，不再依赖「追加到末尾」语义（APPEND 下显式偏移行为未定义）。
+        // 不用 APPEND：写入位置已由 write 的显式 offset 指定
+        // （APPEND 下显式偏移行为未定义）。
         fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE
       );
       fd = file.fd;
@@ -1026,9 +1083,8 @@ export class DownloadManager {
     /** 进度显示用的基准：真续传时是 resumeFrom，走「清空重下」时是 0 */
     let baseBytes: number = resumeFrom;
     /**
-     * （2026-10-16 AppFreeze 加固）异步写链：dataReceive 原来逐块 fs.writeSync 在
-     * 主线程落盘，快网络 / 大文件时主线程累计阻塞明显。现改为每个数据块按**显式
-     * position** 走异步 fs.write，用 writeChain 串行排队 —— 写入位置由 position
+     * 异步写链：每个数据块按**显式 position** 走异步 fs.write（主线程只记账、
+     * 不逐块落盘），用 writeChain 串行排队 —— 写入位置由 position
      * 显式给出，正确性与链的完成顺序无关。
      * ⚠️ 不变量：任何触碰 fd 的路径（截断 / 回滚 / 关闭 / 校验）必须发生在
      * `await writeChain` 之后，否则会与在途写入竞争。
@@ -1135,13 +1191,13 @@ export class DownloadManager {
             // 服务端不认 Range（回了 200 全量）：把断点前的旧字节清掉再从头写。
             // 这是**安全方向**的降级 —— 最坏只是白下一次，绝不会把两段数据首尾相接，
             // 拼出一个「能播但内容是错的」文件（那种问题几乎无法从现象反推）。
-            // （2026-10-16 AppFreeze 加固）截断进写链排队，保证先于后续所有数据写入执行。
+            // 截断进写链排队，保证先于后续所有数据写入执行。
             baseBytes = 0;
             writeOffset = 0;
             writeChain = writeChain.then((): Promise<void> => fs.truncate(fd, 0));
           }
         }
-        // （2026-10-16 AppFreeze 加固）显式 offset + 异步写：主线程只记账、不落盘。
+        // 显式 offset + 异步写：主线程只记账、不落盘。
         const offset: number = writeOffset;
         writeOffset += data.byteLength;
         writeChain = writeChain
@@ -1219,7 +1275,7 @@ export class DownloadManager {
         await sleep(STREAM_POLL_INTERVAL_MS);
       }
 
-      // （2026-10-16 AppFreeze 加固）先等写链上全部数据块落盘再校验 / 收尾，
+      // 先等写链上全部数据块落盘再校验 / 收尾，
       // 否则魔数探测可能读到还没写完的文件。
       await writeChain;
       if (writeFailed) {
@@ -1233,7 +1289,7 @@ export class DownloadManager {
         throw new Error('Downloaded file is not valid audio');
       }
     } catch (e) {
-      // （2026-10-16 AppFreeze 加固）暂停 / 取消 / 失败从轮询循环抛出时，写链上
+      // 暂停 / 取消 / 失败从轮询循环抛出时，写链上
       // 可能还有在途的数据块 —— 必须等链落定再动文件（关闭 / 回滚），否则与写入竞争。
       try {
         await writeChain;
@@ -1337,7 +1393,6 @@ export class DownloadManager {
     }
   }
 
-  /** 供页面删除后同步内存态 */
   /**
    * 任务 → 曲目（重试时用来重建音源解析所需的信息）。
    *
@@ -1392,7 +1447,7 @@ export class DownloadManager {
       await deleteDownload(t.id);
       this.tasks.delete(t.id);
       // 歌单来源带回（重试不重新展开分 P，归属信息只能从旧任务抄回来）；
-      // 合集三件套同理（2026-10-08）——重排的任务必须保持「第 n / N 个分 P」的标记，
+      // 合集三件套同理——重排的任务必须保持「第 n / N 个分 P」的标记，
       // 否则重试后它在下载页会从合集组里掉出去、退化成无标识的单条。
       const hasPlaylist: boolean = t.playlistId.length > 0;
       const hasCollection: boolean = t.collectionTitle.length > 0 || t.partTotal > 0;
@@ -1414,6 +1469,96 @@ export class DownloadManager {
     if (result.queued > 0) {
       this.notify();
       this.pump();
+    }
+    return result;
+  }
+
+  /**
+   * 是否存在「已完成且文件仍在沙箱 downloads 目录」的任务。
+   * 升级迁移的触发判定（AppContainer.runPublicDirMigration）：
+   * 新装用户没有沙箱存量 → 不触发迁移、不打扰；已搬过的任务
+   * localFilePath 已指向公共目录（前缀不匹配）天然排除。
+   */
+  hasSandboxCompletedTask(): boolean {
+    if (!this.context) {
+      return false;
+    }
+    const sandboxPrefix: string = `${this.context.filesDir}/downloads`;
+    let found: boolean = false;
+    this.tasks.forEach((t: DownloadTask): void => {
+      if (!found && t.status === DownloadStatus.COMPLETED
+        && t.localFilePath.length > 0
+        && t.localFilePath.indexOf(sandboxPrefix) === 0) {
+        found = true;
+      }
+    });
+    return found;
+  }
+
+  /**
+   * 重新下载**已完成但文件丢失**的任务。
+   *
+   * 与 retryTasks 的分工：那边只认 ERROR；这里面向 COMPLETED —— 文件被用户从
+   * 文件管理器删掉后条目仍是「已完成」，两道既有门（requestDownload 的 COMPLETED
+   * skip、retryTasks 的 ERROR 过滤）都进不去。入口仅由下载页在检测到文件丢失时
+   * 开放（UI 侧保证），正常已完成条目不出重下入口、防止误触覆盖好文件。
+   *
+   * 同样不走 requestDownload：其 resolveDownloadTracks 会展开 multi-P，重下
+   * 一个分 P 会把整视频所有分 P 拉回队列。精确重排这一条：删旧记录 →
+   * trackOfTask 重建 → createPendingTask；source 各字段从旧任务抄回，分组不断。
+   */
+  async redownloadTask(id: string, ignoreWifiLimit: boolean = false): Promise<DownloadStartResult> {
+    const result: DownloadStartResult = { queued: 0, skipped: 0, blockedReason: '' };
+    await this.ensureLoaded();
+    const t: DownloadTask | undefined = this.tasks.get(id);
+    if (!t || t.status !== DownloadStatus.COMPLETED) {
+      result.skipped = 1;
+      return result;
+    }
+    if (!ignoreWifiLimit && this.isWifiOnlyBlocked()) {
+      result.blockedReason = WIFI_ONLY_BLOCKED;
+      return result;
+    }
+    const track: Track = this.trackOfTask(t);
+    // 音乐中心纯音乐 id 拆不出 BV 号：重排了也解析不出音源（retryTasks 重启恢复
+    // 路径的同款局限），直接拦下提示，不白排一个注定失败的任务。
+    if (this.bvidOf(track).indexOf('BV') !== 0) {
+      result.blockedReason = '任务信息不足，无法重新下载';
+      return result;
+    }
+    // 用户点「重新下载」＝明确想要下载，解除「全部暂停」（同 retryTasks）。
+    this.paused = false;
+    this.publishPaused();
+    // 旧记录先清掉（与 retryTasks 同款顺序）：COMPLETED 记录会让
+    // getDownloadByMusicId 认为已下载而跳过重排；旧文件一般已丢失，
+    // 防御性 unlink 失败（不存在）直接忽略。
+    await deleteDownload(t.id);
+    this.tasks.delete(t.id);
+    try {
+      await fs.unlink(t.localFilePath);
+    } catch (e) {
+      // 文件本就不在了，忽略
+    }
+    // 分组信息从旧任务原样抄回（歌单来源 + 合集三件套），重下后不掉组
+    const hasPlaylist: boolean = t.playlistId.length > 0;
+    const hasCollection: boolean = t.collectionTitle.length > 0 || t.partTotal > 0;
+    const source: DownloadSource | undefined = (hasPlaylist || hasCollection)
+      ? {
+        playlistId: t.playlistId,
+        playlistName: t.playlistName,
+        collectionTitle: t.collectionTitle,
+        partNo: t.partNo,
+        partTotal: t.partTotal
+      }
+      : undefined;
+    const created: DownloadTask | null = await this.createPendingTask(track, source);
+    if (created) {
+      this.queue.push({ task: created, track: track });
+      result.queued = 1;
+      this.notify();
+      this.pump();
+    } else {
+      result.skipped = 1;
     }
     return result;
   }
@@ -1476,7 +1621,7 @@ export class DownloadManager {
   async pauseAll(): Promise<void> {
     await this.ensureLoaded();
     this.paused = true;
-    // 2026-10-08 暂停即撤销下载保活意愿：正传的那条会被中止，任务留着只会
+    // 暂停即撤销下载保活意愿：正传的那条会被中止，任务留着只会
     // 白耗电并留一条「传输中」的常驻通知。消费者退出时 pump 的收尾对账
     // 也会再确认一次，这里提前撤销可以让通知尽快消失。
     this.syncTransferTask();
@@ -1485,7 +1630,7 @@ export class DownloadManager {
   }
 
   /**
-   * **单条暂停**（2026-10-11 新增，下载页点「下载中 / 排队中」的行）。
+   * **单条暂停**（下载页点「下载中 / 排队中」的行）。
    *
    * 两条路径：
    *   · 正在传输的那条 —— 打 `pausedIds` 标记，传输循环在下一个轮询点（20ms）抛哨兵，
@@ -1608,10 +1753,47 @@ export class DownloadManager {
     if (this.queue.length > 0) {
       this.pump();
     }
-    // 2026-10-08 恢复后重新申报保活。放在 pump() 之后：pump 成功拉起时其内部
+    // 恢复后重新申报保活。放在 pump() 之后：pump 成功拉起时其内部
     // 已申报过，这里是对「队列仍为空（无可恢复任务）」情况的无害兜底
     // （active=false 时协调器快速返回，无副作用）。
     this.syncTransferTask();
+  }
+
+  /**
+   * 按页面给的组序摊平的任务 id 序列，原地重排内存队列（下载页拖动排序）。
+   *
+   *  · 只重排顺序，不改任何状态：正在传输的条目不在队列里，天然不受影响；
+   *  · taskIdOrder 之外的条目（理论上不应有）保持原相对顺序缀在末尾；
+   *  · 同组多个分 P 在序列中相邻且按组内顺序给出，稳定保序；
+   *  · 队列不落库：顺序随进程退出丢失，与既有设计边界一致（见文件头④）。
+   *  · queue 是 readonly 引用，只能原地 length=0 再回填，不能整体赋值。
+   */
+  reorderQueue(taskIdOrder: string[]): void {
+    if (this.queue.length === 0 || taskIdOrder.length === 0) {
+      return;
+    }
+    const byId: Map<string, QueuedDownload> = new Map<string, QueuedDownload>();
+    const rest: QueuedDownload[] = [];
+    for (let i = 0; i < this.queue.length; i++) {
+      const item: QueuedDownload = this.queue[i];
+      if (taskIdOrder.indexOf(item.task.id) >= 0) {
+        byId.set(item.task.id, item);
+      } else {
+        rest.push(item);
+      }
+    }
+    const next: QueuedDownload[] = [];
+    for (let i = 0; i < taskIdOrder.length; i++) {
+      const item: QueuedDownload | undefined = byId.get(taskIdOrder[i]);
+      if (item !== undefined) {
+        next.push(item);
+      }
+    }
+    const merged: QueuedDownload[] = next.concat(rest);
+    this.queue.length = 0;
+    for (let i = 0; i < merged.length; i++) {
+      this.queue.push(merged[i]);
+    }
   }
 
   /** 发布队列级暂停状态（页面据此显示「已暂停」横幅并切换按钮可用性） */

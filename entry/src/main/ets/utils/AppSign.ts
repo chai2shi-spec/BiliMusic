@@ -1,5 +1,5 @@
 /**
- * B 站 APP 域接口签名（appkey + ts + sign），2026-10-24 移植自 PiliPlus。
+ * B 站 APP 域接口签名（appkey + ts + sign）。
  *
  * 为什么需要：Web 域（api.bilibili.com + WBI）和 APP 域（appkey/appsec + md5）
  * 是**两套完全独立的风控策略**。同一条视频，Web playurl 可能因账号/IP 被判 -352，

@@ -1,15 +1,14 @@
 /**
- * SPL（Salt Player Lyrics）歌词解析层 —— 移植自 BBPlayer `packages/splash/src`。
+ * SPL（Salt Player Lyrics）歌词解析层。
  *
- * 原实现（`parser/index.ts` / `parser/spans.ts` / `parser/merge.ts` / `utils/time.ts`
- * / `converter/netease.ts`）是纯函数，与 React Native 无关，这里按 ArkTS 规范重写：
- *   - 去掉 `neverthrow` / `SplParseError` 抛错（歌词数据脏，抛错会连带整首丢失）；
- *   - 不再在解析阶段 Object.assign 改写 span（ArkTS 对象展开受限，直接构造新对象）；
- *   - 增加 `MAX_END_MS`：末行不给 `start+10s` 而是给一个足够大的值，
+ * 设计约束：
+ *   - 不抛错（`neverthrow` / `SplParseError` 一类）：歌词数据脏，抛错会连带整首丢失；
+ *   - 解析阶段不改写 span 对象，直接构造新对象；
+ *   - 末行结束时间不给 `start+10s` 而是给 `LAST_LINE_END_MS`（足够大的值），
  *     避免「最后一句唱完就不再高亮」。
  *
- * 为什么值得移植：
- *   1. **翻译 / 罗马音按时间戳合并**（`merge.ts`），并有 20% 覆盖率门控 ——
+ * 能力：
+ *   1. **翻译 / 罗马音按时间戳合并**，并有 20% 覆盖率门控 ——
  *      时间轴对不齐的翻译会被整体丢弃，不会出现「日文歌词配中文翻译错位」；
  *   2. **逐字 spans**（`<mm:ss.SSS>` 标签）—— 网易云 YRC / 酷狗 KRC 都能转成
  *      这种格式，LrcView 的卡拉 OK 高亮直接可用。
@@ -185,7 +184,7 @@ function parseSpans(rawContent: string, lineStartTime: number): SpanParseResult 
  * 解析 SPL / LRC 文本为行数组（未合并翻译）。
  *
  * 同一时间戳出现多行时：**第一行是主歌词，其余按出现顺序作为附加行**
- * （BBPlayer 的 `translations` 语义；本工程把附加行丢弃，翻译统一走
+ * （本工程把附加行丢弃，翻译统一走
  * `parseAndMergeLyrics` 的独立轨合并，避免两套翻译逻辑打架）。
  */
 export function parseSpl(lrcContent: string): SplLyricLine[] {
@@ -402,7 +401,7 @@ interface YrcJsonLine {
 /**
  * 网易云 `yrc`（逐字）→ SPL 文本。
  *
- * 实测（2026-10-22）`/api/song/lyric/v1?...&yv=-1` 的 `lrc.lyric` 有两种形态：
+ * `/api/song/lyric/v1?...&yv=-1` 的 `lrc.lyric` 有两种形态：
  *   a) **逐字行**：`[1234,567](1234,120,0)词(1354,120,0)语…`
  *   b) **JSON 行**：`{"t":1234,"c":[{"tx":"词"},{"tx":"语"}]}`（无词级时间）
  * 两种都要能转：a 转成带 `<mm:ss.SSS>` 的 SPL（保留逐字），b 只能降级成行级。

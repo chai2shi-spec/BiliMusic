@@ -1,7 +1,7 @@
 /**
- * 播放页顶栏（移植自 audio-interaction-master 的 TopAreaComponent）。
+ * 播放页顶栏。
  *
- * 左侧收起按钮（2026-10-21 组件状态切换动画改版）：chevron_down，点击发
+ * 左侧收起按钮：chevron_down，点击发
  * STORE_PLAYER_CLOSE_REQUEST（seq 递增）→ Index.closePlayer 逆向收起镜像
  * （容器缩回、封面回飞、页签图标恢复）。收起按钮在 overlay 深层组件树里，
  * 跨层信号走 AppStorage（与 toast 同款 seq 写法），不走回调穿透。
@@ -34,15 +34,14 @@ export struct TopAreaComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**）：
-   * 顶栏 200ms EaseIn 柔退淡出（2026-10-24 三风格收起改版，替代 2026-10-22 的
-   * 单帧瞬隐；首批退场 LAYER_EXIT_DELAY_TOP=0，与控制区/歌词错峰）。
+   * 顶栏 200ms EaseIn 柔退淡出（首批退场 LAYER_EXIT_DELAY_TOP=0，与控制区/歌词错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /** 瞬隐闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把顶栏点亮 */
   private exitRequested: boolean = false;
 
   /**
-   * 分层入场（方案 B）：顶栏在主动画落位后第一批淡入，**只淡入不位移** ——
+   * 分层入场：顶栏在主动画落位后第一批淡入，**只淡入不位移** ——
    * 顶栏上下位移会像「从上面掉下来」，与「从下往上长出来」的整页方向相冲。
    * 必须是 `@State`：普通成员只在创建时初始化一次，父组件重渲染不会重新赋值。
    */

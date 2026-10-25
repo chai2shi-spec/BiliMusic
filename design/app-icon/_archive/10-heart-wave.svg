@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Heart Wave</title>
+  <desc id="desc">心形声波方案。深粉底上白色心形，心中以负形镂空三根高低错落的竖条，构成一段声波。心形对应收藏与喜欢这条主链路，是三根竖条唯一一次被装进情感化轮廓里的形态。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#C2185B"/>
+  </g>
+
+  <g id="foreground-layer">
+    <path
+      id="heart"
+      d="M 512 793 C 512 793 204 588 204 393 C 204 285 289 219 384 219 C 454 219 498 258 512 303 C 526 258 570 219 640 219 C 735 219 820 285 820 393 C 820 588 512 793 512 793 Z"
+      fill="#FFFFFF"/>
+    <g id="wave" fill="#C2185B">
+      <rect id="wave-1" x="406" y="460" width="52" height="120" rx="26"/>
+      <rect id="wave-2" x="486" y="410" width="52" height="220" rx="26"/>
+      <rect id="wave-3" x="566" y="460" width="52" height="120" rx="26"/>
+    </g>
+  </g>
+</svg>

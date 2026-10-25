@@ -1,11 +1,10 @@
 /**
  * 子页标题行（HdsNavDestination.titleBar 的 stackBuilder 内容）—— 全站唯一实现。
  *
- * 2026-10-24 返回键避开状态栏整改：自绘返回键整体移除，返回职责移交
- * HdsNavDestination 默认返回键（各页不再 hideBackButton(true)，"<" 系统样式，
- * 位置由 HDS 管理以避开状态栏）。本组件只承载标题：
+ * 返回职责在 HdsNavDestination 默认返回键（"<" 系统样式，
+ * 位置由 HDS 管理以避开状态栏），本组件只承载标题：
  *
- * 结构（真机实证 2026-10-24，Mate 80 Pro Max dumpLayout 像素级解码）：
+ * 结构（真机实证，Mate 80 Pro Max dumpLayout 像素级解码）：
  *   Column(height '100%', justifyContent Center)   ← ⚠️ 必须居中锚定，见下
  *     Row(height 56)                               ← 标题行
  *       Blank(48vp 定宽占位)                        ← 让出 HDS 默认键区域
@@ -18,9 +17,9 @@
  *     被裁剪不显示，dumpLayout 的 bounds 即裁剪后可见区。
  *   · 因此 56vp 定高行的锚定方式决定成败（三种都真机实测过）：
  *     Start 顶对齐 → 行沉到布局框顶（扩边区内、状态栏下方），标题被裁、
- *     顶格在安全区下缘（2026-10-24「标题顶格」回归）；
+ *     顶格在安全区下缘；
  *     End 底对齐   → 行沉到布局框底（容器下方扩边区），压低 19.6vp 与
- *     bottomBuilder 重叠（2026-10-24「标题位置靠下」回归）；
+ *     bottomBuilder 重叠；
  *     **Center 居中 → 行恰好落在可见容器 [safeTop, safeTop+56] 内，
  *     标题中心 ≈67vp 与 HDS 默认返回键同轴（布局框与容器共中心，任意
  *     安全区高度下均成立）——唯一正确锚定**。

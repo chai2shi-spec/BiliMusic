@@ -1,12 +1,12 @@
 /**
- * 播放页封面页（移植自 audio-interaction-master 的 MusicInfoComponent）。
+ * 播放页封面页。
  *
  * 结构：圆形大封面 + 呼吸光晕（CoverDiscComponent，与 miniBar 唱片同 id 的
  * geometryTransition 一镜到底）+ 歌名 / 歌手 + 底部控制区（ControlAreaComponent）。
  * 数据源全部来自既有播放状态（STORE_CURRENT_TRACK），不引入新数据。
  */
 
-import { PLAYER_COVER_STYLE_DISC, PLAYER_COVER_STYLE_IMMERSIVE, Track } from '../../model/MusicModels';
+import { Track } from '../../model/MusicModels';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
@@ -22,7 +22,6 @@ import {
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_LOGIN_REV,
-  STORE_PLAYER_COVER_STYLE,
   formatTrackQuality
 } from '../../common/Constants';
 import { getLoginUser, LoginUser } from '../../service/LoginStore';
@@ -37,7 +36,7 @@ import {
 @Component
 export struct MusicInfoComponent {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读（2026-10-22 迁移） */
+  /** 折叠屏展开态：全局 FormFactorHolder 唯一写入，本组件只读 */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
 
@@ -55,13 +54,6 @@ export struct MusicInfoComponent {
   @StorageLink(STORE_LOGIN_REV) loginRev: number = 0;
 
   /**
-   * 封面风格（三档，设置页可切）：全屏档（immersive）下 PlayerInfoComponent 的
-   * SM 调用点去掉了本组件的左右内边距（封面满屏宽），标题块需在此补回边距，
-   * 否则歌名/歌手/音质文字贴屏幕边缘；其余两档调用点内边距原样，补 0。
-   */
-  @StorageProp(STORE_PLAYER_COVER_STYLE) coverStyle: string = PLAYER_COVER_STYLE_DISC;
-
-  /**
    * 圆盘边长上限（vp）：0 = 首帧尚未实测（先按旧的宽度驱动渲染，实测后收敛）。
    * 圆盘本身 aspectRatio(1) 宽变高，列宽接近列高的形态（宽折叠展开 / 折起外屏）
    * 会把控制区挤出屏幕；这里按「列高 − 标题块 − 控制区」的实测预算钳住它。
@@ -69,7 +61,7 @@ export struct MusicInfoComponent {
   @State discSize: number = 0;
 
   /**
-   * 是否在本页内渲染底部控制区（2026-10-23 SM 固定控制区改版）。
+   * 是否在本页内渲染底部控制区。
    * 默认 true：折叠屏展开分支等既有调用不传参，行为不变。
    * SM 手机 Swiper 里传 false —— 控制区移到 Swiper 外固定（见
    * PlayerInfoComponent 的 SM 分支），右滑切歌词页时只有封面/歌词区域滑动，
@@ -78,7 +70,7 @@ export struct MusicInfoComponent {
   @Prop isShowControl: boolean = true;
 
   /**
-   * 分层入场（方案 B）：**标题块**（歌名 / 歌手）延迟 `LAYER_DELAY_INFO` 淡入 + 上移。
+   * 分层入场：**标题块**（歌名 / 歌手）延迟 `LAYER_DELAY_INFO` 淡入 + 上移。
    *
    * 为什么单独给标题块加状态、而不是给整个 `GridRow` 根节点加：
    * 根节点里还装着 `CoverDiscComponent`（geometryTransition 独占形变），
@@ -96,9 +88,8 @@ export struct MusicInfoComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：标题块 200ms EaseIn 柔退淡出 + 回沉（2026-10-24 三风格
-   * 收起改版，替代 2026-10-22 的单帧瞬隐；与 PlayerInfoComponent 自持标题块
-   * 同档 LAYER_EXIT_DELAY_INFO 错峰）。
+   * 仅柔退路径递增）：标题块 200ms EaseIn 柔退淡出 + 回沉（与
+   * PlayerInfoComponent 自持标题块同档 LAYER_EXIT_DELAY_INFO 错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把标题块点亮 */
@@ -165,10 +156,10 @@ export struct MusicInfoComponent {
 
   /**
    * 圆盘边长 = min(列宽, 列高 − 标题块 [− 控制区])。
-   * 控制区不在页内（isShowControl=false，SM 固定控制区改版）→ 预算只减标题块；
-   * 在页内时沿用旧口径（列高 − 标题块 − 控制区）。
+   * 控制区不在页内（isShowControl=false）→ 预算只减标题块；
+   * 在页内时预算 = 列高 − 标题块 − 控制区。
    * 预算为负时退回宽度驱动。瘦长屏（普通手机）预算大于列宽，min 取列宽 ——
-   * 与旧行为完全一致，只有空间不足的形态才会收缩圆盘。
+   * 只有空间不足的形态才会收缩圆盘。
    */
   private recomputeDisc(): void {
     if (this.colW <= 0 || this.colH <= 0 || this.titleH <= 0) {
@@ -204,7 +195,7 @@ export struct MusicInfoComponent {
   }
 
   /**
-   * 音质回显文案（2026-10-08）。
+   * 音质回显文案。
    *
    * 为什么要回显：`Constants.ts` 的 AUDIO_Q_* 注释记着一条实测结论 ——
    * B 站侧只有一份低码率音源时，30280/30250/30251 三个档位会**指向同一份 66k 数据**。
@@ -275,28 +266,22 @@ export struct MusicInfoComponent {
         Column() {
           this.CoverInfo()
           // 标题块包一层测高容器：@Builder 调用不能链属性，onAreaChange 挂在包装上
-          // 全屏档（immersive）：调用点左右内边距已去（封面满屏宽），此处补回
-          // common_padding，标题/歌手/音质文字不贴屏幕边缘；其余两档补 0 零影响。
           Column() {
             this.MusicInfo()
           }
-          .padding({
-            left: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? $r('app.float.common_padding') : 0,
-            right: this.coverStyle === PLAYER_COVER_STYLE_IMMERSIVE ? $r('app.float.common_padding') : 0
-          })
           .onAreaChange((_old: Area, n: Area): void => {
             this.titleH = this.toVp(n.height);
             this.recomputeDisc();
           })
-          // 分层入场（方案 B）：只挂 transform 系属性，不动 width/height/padding。
+          // 分层入场：只挂 transform 系属性，不动 width/height/padding。
           // 这一层是「封面之外的容器」，所以不会影响 CoverDisc 的 geometryTransition 目标框。
           // 收起为柔退退场（onContentExit 的 200ms EaseIn 淡出 + 回沉）。
           .opacity(this.titleOpacity)
           .translate({ y: this.titleOffsetY })
           Blank()
           // 控制区同样包一层测高容器，实测高度参与圆盘预算。
-          // SM 固定控制区改版（2026-10-23）：isShowControl=false 时不渲染 ——
-          // 控制区由 PlayerInfoComponent 放在 Swiper 外固定，本页不再内嵌一份。
+          // SM 固定控制区：isShowControl=false 时不渲染 ——
+          // 控制区由 PlayerInfoComponent 放在 Swiper 外固定，本页不内嵌。
           if (this.isShowControl) {
             Column() {
               ControlAreaComponent()
@@ -354,7 +339,7 @@ export struct MusicInfoComponent {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
 
-      // 音质回显（2026-10-08）：见 qualityText() 的注释。
+      // 音质回显：见 qualityText() 的注释。
       // 空串 = 整行不渲染（正在解析音源 / 本地文件 / 无数据），不占位不留空隙。
       if (this.qualityText().length > 0) {
         Text(this.qualityText())

@@ -1,6 +1,6 @@
 /**
  * 媒体库存储（收藏 / 歌单 / 最近播放 / 删除墓碑）。
- * 移植自原 React 版 src/utils/storage.ts，存储后端由 localStorage 改为 Preferences（JSON）。
+ * 存储后端为 Preferences（JSON）。
  */
 
 import { AppPreferences } from '../preferences/AppPreferences';
@@ -13,6 +13,10 @@ import {
   Track,
   utf8Length
 } from '../model/MusicModels';
+import { isFolderTwoway } from './FavTwowayStore';
+import { enqueueFavPushes, FavPushIntent, purgeFavPushesForFolder } from './FavPushStore';
+import { scheduleFavPushFlush } from './FavPushRunner';
+import { HomeCardStore } from './HomeCardStore';
 
 function createId(): string {
   return `pl_${Date.now()}_${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -20,13 +24,9 @@ function createId(): string {
 
 /**
  * 最近播放的条数上限（分片存储后即为**真实**上限）。
- *
- * 历史：旧实现把整份列表塞进 `PREF_RECENT` 单键，被
- * `fitByByteBudget(PREF_VALUE_BUDGET_BYTES=6000)` 截到约 11 条 ——
- * `RECENT_MAX_ITEMS` 只是碰不到的名义值。分片存储（每片 8 条 × 最多 13 片，
- * 同歌单 `pl_tracks_*` 模式）后单值上限不再约束总量，100 即真实封顶。
- * 2026-10-16：50 → 100（用户需求）；存量数据零迁移 —— 读侧按
- * ceil(RECENT_MAX_ITEMS/8) 探测分片，扩容后自然读满。
+ * 分片存储（每片 8 条 × 最多 13 片，同歌单 `pl_tracks_*` 模式）后单值上限
+ * 不再约束总量，100 即真实封顶；读侧按 ceil(RECENT_MAX_ITEMS/8) 探测分片，
+ * 存量数据零迁移、扩容后自然读满。
  */
 const RECENT_MAX_ITEMS: number = 100;
 
@@ -125,7 +125,7 @@ function loadRecentChunks(): Track[] | null {
 
 export function getRecentTracks(): Track[] {
   if (recentCache === null) {
-    // 优先分片格式（2026-10-12 扩容改造）；无分片数据时回落旧格式
+    // 优先分片格式；无分片数据时回落旧格式
     // （PREF_RECENT 单键 Track[]），旧数据在下次落盘时迁入分片并清理旧键
     // （见 persistRecentTracks 的迁移收尾）。
     const chunked: Track[] | null = loadRecentChunks();
@@ -154,11 +154,10 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
   recentCache = capped;
 
   try {
-    // 分片落盘（2026-10-12 扩容改造，同歌单 pl_tracks_* 模式）：
-    // 每片 8 条 slimTrack 后的曲目 ≈ 4.5KB，单值 8192 上限不再约束总量，
-    // 100 条全部可持久化（旧实现被 fitByByteBudget 截到约 11 条，重启即丢）。
-    // 2026-10-23 性能审查：分片攒进一个 Record 走 putMany（一次 flush），
-    // 旧路径每片各自 put + flush，写满 13 片 = 13 次全量落盘。
+    // 分片落盘（同歌单 pl_tracks_* 模式）：每片 8 条 slimTrack 后的曲目
+    // ≈ 4.5KB，单值 8192 上限不再约束总量，100 条全部可持久化。
+    // 分片攒进一个 Record 走 putMany（一次 flush），避免每片各自 put + flush
+    // 造成十几次全量落盘。
     const slim: Track[] = capped.map((t: Track): Track => slimTrack(t));
     const chunkCount: number = Math.ceil(slim.length / RECENT_CHUNK_ITEMS);
     const writes: Record<string, string> = {};
@@ -176,7 +175,7 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
       console.error(`save recent chunks failed: ${e.message}`);
     });
     // 条目变少时清掉多余分片，否则旧 key 会一直占着磁盘
-    //（2026-10-23：连旧键迁移一起攒进 removeMany，一次 flush 清完）
+    //（连旧键迁移一起攒进 removeMany，一次 flush 清完）
     const removes: string[] = [];
     for (let c = chunkCount; c < lastRecentChunkCount; c++) {
       removes.push(`${RECENT_CHUNK_PREFIX}${c}`);
@@ -273,19 +272,17 @@ export function getRecentProgressSec(id: string): number {
 /**
  * 收藏内存快照。
  *
- * 与 recentCache 同源的两个理由（2026-10-08 补齐，此前收藏是全工程**唯一**没有保护的写路径）：
+ * 与 recentCache 同源的两个理由：
  *  1) `AppPreferences` 异步落盘、读取走同步 `getSync` → 连续快速切换
  *     收藏会基于陈旧数组写回，**丢条目**；
- *  2) `PREF_FAVORITES` 曾是**单个 key**，Preferences 单值有 8192 字节硬上限，
- *     旧实现靠 `fitByByteBudget(6000)` 静默截断 —— 收藏超过约 11 条后，
- *     每次落盘只保住前 11 条，**重启即丢尾巴**（2026-10-23 审查修复 #1：
- *     改为分片存储 `favorite_tracks_{n}`，同 recent_tracks_* / pl_tracks_* 模式，
- *     单值上限不再约束总量，收藏多少存多少）。
+ *  2) 收藏采用分片存储 `favorite_tracks_{n}`（同 recent_tracks_* / pl_tracks_*
+ *     模式）：Preferences 单值有 8192 字节硬上限，整份列表塞单 key 必然超限，
+ *     分片后单值上限不再约束总量，收藏多少存多少。
  */
 let favoriteCache: Track[] | null = null;
 
 /**
- * 收藏**分片存储**（2026-10-23 审查修复 #1）：曲目按每片 8 条拆到
+ * 收藏**分片存储**：曲目按每片 8 条拆到
  * `favorite_tracks_{n}` 独立 key（slimTrack 后一条约 520 字节，8 条 ≈ 4.2KB，
  * 离 6000 字节预算有余量）。
  */
@@ -358,10 +355,9 @@ function persistFavoriteTracks(list: Track[]): void {
   favoriteCache = capped;
 
   try {
-    // 分片落盘（2026-10-23 审查修复 #1）：不再 fitByByteBudget 静默截断 ——
-    // 收藏是用户主动攒的数据，截断即丢数据；分片后单值 8192 上限不再约束总量。
-    // 2026-10-23 性能审查：分片攒进一个 Record 走 putMany（一次 flush），
-    // 旧路径每片各自 put + flush，收藏攒到 100 片就是 100 次全量落盘。
+    // 分片落盘：收藏是用户主动攒的数据，绝不 fitByByteBudget 静默截断；
+    // 分片后单值 8192 上限不再约束总量。分片攒进一个 Record 走 putMany
+    // （一次 flush），避免每片各自 put + flush 造成上百次全量落盘。
     const slim: Track[] = capped.map((t: Track): Track => slimTrack(t));
     const chunkCount: number = Math.ceil(slim.length / FAVORITE_CHUNK_ITEMS);
     const writes: Record<string, string> = {};
@@ -378,7 +374,7 @@ function persistFavoriteTracks(list: Track[]): void {
       console.error(`save favorite chunks failed: ${e.message}`);
     });
     // 条目变少时清掉多余分片，否则旧 key 会一直占着磁盘
-    //（2026-10-23：连旧键迁移一起攒进 removeMany，一次 flush 清完）
+    //（连旧键迁移一起攒进 removeMany，一次 flush 清完）
     const removes: string[] = [];
     for (let c = chunkCount; c < lastFavoriteChunkCount; c++) {
       removes.push(`${FAVORITE_CHUNK_PREFIX}${c}`);
@@ -434,17 +430,16 @@ let playlistCache: Playlist[] | null = null;
  * 歌单曲目**分片存储**。
  *
  * 为什么要分片：`@ohos.data.preferences` 单个 value 有 **8192 字节硬上限**，超了 `put()`
- * 直接抛错。而 slimTrack 后的**一条曲目实测约 519 字节**（2026-10-03 逐字段统计：
- * 字段名与引号占大头，封面 URL 单独就 ~70 字节）→ 整张歌单塞进一个 key 时，
+ * 直接抛错。而 slimTrack 后的**一条曲目实测约 519 字节**（字段名与引号占大头，
+ * 封面 URL 单独就 ~70 字节）→ 整张歌单塞进一个 key 时，
  * **超过约 11 首就写不进去**，表现是「加了歌，重启后消失」。
  * 所以：元信息（名字/封面/时间/订阅来源）留在 PREF_PLAYLISTS，曲目按每片 8 条拆到
  * `pl_tracks_{歌单id}_{片号}` 独立 key。8 × 519 ≈ 4.1KB，离 6000 字节预算还有余量。
  */
 const PLAYLIST_CHUNK_ITEMS: number = 8;
-/** 单个歌单最多存多少首（兜底上限。2026-10-10：200→500 修「合并歌单超 200 首丢尾巴」；
- * 2026-10-23：500→10000，放宽本地歌单容量。
+/** 单个歌单最多存多少首（兜底上限）。
  * 分片按固定 PLAYLIST_CHUNK_ITEMS 条/片切，单片尺寸与总量无关（仍 ~4.1KB，离单 value
- * 8192 字节硬上限远）；10000 首 ≈ 1250 片 ≈ 5.2MB/歌单，防无节制增长仍保留兜底） */
+ * 8192 字节硬上限远）；10000 首 ≈ 1250 片 ≈ 5.2MB/歌单，防无节制增长仍保留兜底 */
 export const PLAYLIST_MAX_ITEMS: number = 10000;
 const PL_TRACKS_PREFIX: string = 'pl_tracks_';
 
@@ -535,10 +530,92 @@ export function getPlaylists(): Playlist[] {
   return playlistCache.slice();
 }
 
+// ===== 歌单落盘（防 AppFreeze/THREAD_BLOCK_6S） =====
+//
+// 全库 slimTrack + 逐片 JSON.stringify 不能同步压在主线程上：任何一次歌单写
+// 操作（重命名 / 拖动 / 收藏夹同步逐夹 applyFavMirror…）都会全量重写所有
+// 歌单的所有分片，万首级库单次就是数百 ms，收藏夹同步 N 个夹 = N 次串联，
+// 主线程事件循环被连续占满，输入事件 6 秒得不到处理即 THREAD_BLOCK_6S。
+//
+// 结构分三段：
+//  1) persistPlaylists 只做**同步换缓存 + 广播刷新**（微秒级）——内存缓存是
+//     唯一真源，后续同步读（getPlaylists）立即可见新状态，页面刷新不等待；
+//  2) schedulePersist 去抖合并：突发写（同步轮里逐夹 updatePlaylist）收敛为
+//     一次落盘，全库重序列化从 N 次降为 1 次；
+//  3) runPersist 异步执行，每序列化 PERSIST_YIELD_EVERY_CHUNKS 片就让出主线程
+//     一拍（宏任务级 setTimeout），输入 / 渲染事件得以插队 —— 无论库多大，
+//     主线程单次连续占用都被压在几 ms 量级，6s 冻结在结构上不再可能。
+
+/** 落盘去抖窗口：突发写合并；窗口内内存缓存已是新值，UI 无感知 */
+const PERSIST_DEBOUNCE_MS: number = 200;
+/** 连续序列化多少个分片后让出主线程一拍（16 片 = 128 条 ≈ 数 ms） */
+const PERSIST_YIELD_EVERY_CHUNKS: number = 16;
+
+let persistTimer: number = -1;
+let persistRunning: boolean = false;
+let persistAgain: boolean = false;
+
 function persistPlaylists(list: Playlist[]): void {
-  // 曲目一律瘦身落盘（audioUrl 不入库，理由见 slimTrack 注释）。
-  // 歌单曲目**不截断**（截断等于悄悄丢用户的歌），只在超过 PLAYLIST_MAX_ITEMS 时截并告警。
-  const metas: StoredPlaylist[] = [];
+  // 内存缓存保留**完整**曲目（含 localFilePath 等不落盘字段），播放与下载走的就是这份
+  playlistCache = list;
+  // 立即广播：页面刷新依赖 libraryRev，不能等落盘
+  notifyLibraryChanged();
+  schedulePersist();
+}
+
+function schedulePersist(): void {
+  // 已有落盘在跑：只登记「跑完再来一次」，避免并发 runPersist 交叉写同一批 key
+  if (persistRunning) {
+    persistAgain = true;
+    return;
+  }
+  if (persistTimer !== -1) {
+    return;
+  }
+  persistTimer = setTimeout((): void => {
+    persistTimer = -1;
+    runPersist().catch((e: Error): void => {
+      console.error(`persist playlists failed: ${e.message}`);
+    });
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+/** 让出主线程一拍（宏任务级）：序列化分批让位，输入/渲染事件得以插队处理 */
+function yieldMainThread(): Promise<void> {
+  return new Promise<void>((resolve: (value: void) => void): void => {
+    setTimeout(resolve, 0);
+  });
+}
+
+/**
+ * 立即触发尚未执行的歌单落盘（EntryAbility.onBackground 兜底）。
+ *
+ * 去抖窗口（PERSIST_DEBOUNCE_MS）内用户直接划卡杀进程时，定时器来不及跑，
+ * 最后一次歌单写会丢 —— 退后台是最后一个可靠时机，把窗口内的待写立刻冲掉。
+ * 落盘已在跑（persistRunning）时不重复触发：本次跑完会经 persistAgain 补一次。
+ */
+export function flushPendingLibraryPersist(): void {
+  if (persistTimer !== -1) {
+    clearTimeout(persistTimer);
+    persistTimer = -1;
+  }
+  if (!persistRunning) {
+    runPersist().catch((e: Error): void => {
+      console.error(`persist playlists failed: ${e.message}`);
+    });
+  }
+}
+
+async function runPersist(): Promise<void> {
+  persistRunning = true;
+  try {
+    const list: Playlist[] | null = playlistCache;
+    if (list === null) {
+      return;
+    }
+    // 曲目一律瘦身落盘（audioUrl 不入库，理由见 slimTrack 注释）。
+    // 歌单曲目**不截断**（截断等于悄悄丢用户的歌），只在超过 PLAYLIST_MAX_ITEMS 时截并告警。
+    const metas: StoredPlaylist[] = [];
   const oldChunkCounts: Map<string, number> = new Map();
   const oldStored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
   if (Array.isArray(oldStored)) {
@@ -547,10 +624,11 @@ function persistPlaylists(list: Playlist[]): void {
     }
   }
 
-  // 2026-10-23 性能审查：所有分片 + 元信息攒进一个 putMany（一次 flush）——
-  // 旧路径每片各自 put + flush，订阅拉新 / 批量入单动辄几十片，就是几十次全量落盘。
+  // 所有分片 + 元信息攒进一个 putMany（一次 flush），避免每片各自 put + flush
+  //（订阅拉新 / 批量入单动辄几十片，就是几十次全量落盘）。
   const writes: Record<string, string> = {};
   const removes: string[] = [];
+    let chunksSinceYield: number = 0;
   for (let i = 0; i < list.length; i++) {
     const p: Playlist = list[i];
     let capped: Track[] = p.tracks;
@@ -563,9 +641,14 @@ function persistPlaylists(list: Playlist[]): void {
     const slim: Track[] = capped.map((t: Track): Track => slimTrack(t));
     const chunkCount: number = Math.ceil(slim.length / PLAYLIST_CHUNK_ITEMS);
     for (let c = 0; c < chunkCount; c++) {
-      const part: Track[] = slim.slice(c * PLAYLIST_CHUNK_ITEMS, (c + 1) * PLAYLIST_CHUNK_ITEMS);
-      writes[chunkKeyOf(p.id, c)] = JSON.stringify(part);
-    }
+        const part: Track[] = slim.slice(c * PLAYLIST_CHUNK_ITEMS, (c + 1) * PLAYLIST_CHUNK_ITEMS);
+        writes[chunkKeyOf(p.id, c)] = JSON.stringify(part);
+        chunksSinceYield++;
+        if (chunksSinceYield >= PERSIST_YIELD_EVERY_CHUNKS) {
+          chunksSinceYield = 0;
+          await yieldMainThread();
+        }
+      }
     // 条目变少时清掉多余分片，否则旧 key 会一直占着磁盘
     const oldCount: number | undefined = oldChunkCounts.get(p.id);
     if (oldCount !== undefined && oldCount > chunkCount) {
@@ -593,26 +676,30 @@ function persistPlaylists(list: Playlist[]): void {
     });
   }
 
-  // 内存缓存保留**完整**曲目（含 localFilePath 等不落盘字段），播放与下载走的就是这份
-  playlistCache = list;
   const metasJson: string = JSON.stringify(metas);
-  const bytes: number = utf8Length(metasJson);
-  if (bytes > PREF_VALUE_BUDGET_BYTES) {
-    // 元信息不含曲目，正常情况只有几百字节；走到这里说明歌单数量异常多
-    console.error(`playlists meta too large: ${bytes} bytes (budget ${PREF_VALUE_BUDGET_BYTES})`);
-  }
-  // 元信息也并进同一批（同一次 flush 落盘），不再走 savePlaylists 单独 flush
-  writes[PREF_PLAYLISTS] = metasJson;
-  // fire-and-forget：与既有风格一致（内存快照才是真源，见 playlistCache 注释）
-  AppPreferences.putMany(writes).catch((e: Error): void => {
-    console.error(`savePlaylists failed: ${e.message}`);
-  });
-  if (removes.length > 0) {
-    AppPreferences.removeMany(removes).catch((e: Error): void => {
-      console.error(`remove playlist chunk keys failed: ${e.message}`);
+    const bytes: number = utf8Length(metasJson);
+    if (bytes > PREF_VALUE_BUDGET_BYTES) {
+      // 元信息不含曲目，正常情况只有几百字节；走到这里说明歌单数量异常多
+      console.error(`playlists meta too large: ${bytes} bytes (budget ${PREF_VALUE_BUDGET_BYTES})`);
+    }
+    // 元信息也并进同一批（同一次 flush 落盘）
+    writes[PREF_PLAYLISTS] = metasJson;
+    // fire-and-forget：与既有风格一致（内存快照才是真源，见 playlistCache 注释）
+    await AppPreferences.putMany(writes).catch((e: Error): void => {
+      console.error(`savePlaylists failed: ${e.message}`);
     });
+    if (removes.length > 0) {
+      await AppPreferences.removeMany(removes).catch((e: Error): void => {
+        console.error(`remove playlist chunk keys failed: ${e.message}`);
+      });
+    }
+  } finally {
+    persistRunning = false;
+    if (persistAgain) {
+      persistAgain = false;
+      schedulePersist();
+    }
   }
-  notifyLibraryChanged();
 }
 
 let libraryRev: number = 0;
@@ -655,7 +742,7 @@ export function getPlaylist(id: string): Playlist | null {
 }
 
 /**
- * 移动歌单在列表中的位置（歌单列表页「长按拖动排序」落库，2026-10-22）。
+ * 移动歌单在列表中的位置（歌单列表页「长按拖动排序」落库）。
  *
  * 歌单顺序是纯本地展示态：新建/订阅走 unshift 进头部（与手动顺序天然兼容），
  * 收藏夹同步 / 订阅拉新都只改既有歌单内容、不重建列表顺序，所以任何类型的歌单
@@ -690,7 +777,7 @@ export function updatePlaylist(updated: Playlist): void {
 /**
  * 歌单名截断长度（全角字符数）。B 站标题动辄三四十字（带【】前缀、英文歌名、多个 slash），
  * 落库前截断，保证歌单页能完整显示。
- * 阈值按双行标题容量（2026-10-21 双行改版）推算：信息列可用宽 ≈ 251vp
+ * 阈值按双行标题容量推算：信息列可用宽 ≈ 251vp
  * （屏宽 391vp − 行内边距 20 − 封面 64 − 间距 12 − 「⋮」44），16fp 全角字宽 16vp
  * → 一行 ≈ 15.7 字、两行 ≈ 31.4 全角。取 36：含半角（英文/数字/符号）的
  * 混合标题（渲染宽约为全角一半）双行完整显示；纯中文超长名显示层
@@ -796,7 +883,7 @@ export interface SortAllResult {
 /**
  * 把所有歌单的条目按歌名排序，并**打开持续规则**（此后新增自动按名插入）。
  *
- * ⚠️ **当前没有 UI 入口**（2026-10-06：用户决定撤掉顶栏「一键排全部」按钮与歌单菜单入口）。
+ * ⚠️ **当前没有 UI 入口**。
  * 底层能力刻意保留：排序标记 `titleSorted` 已经落盘且被持续规则读取
  * （`addTrackToPlaylist` / `mergeUpTracks`），拆掉数据结构要动落盘格式与导入导出，
  * 代价远大于留着。想加回来只需在页面上接一个入口调这个函数。
@@ -829,7 +916,7 @@ export function sortAllPlaylistsByTitle(): SortAllResult {
 }
 
 /**
- * 把一个歌单按歌名排序（原为歌单菜单「按名称排序」，入口已撤，能力保留）。
+ * 把一个歌单按歌名排序（当前无 UI 入口，能力保留）。
  *
  * 与 `sortAllPlaylistsByTitle` 的区别只是范围；持续规则（此后新增自动按名插入）两者一致。
  * @returns 排序后的歌单；id 不存在返回 null
@@ -855,7 +942,7 @@ export function sortPlaylistByTitle(playlistId: string): Playlist | null {
 }
 
 /**
- * 关掉某个歌单的「按名称排序」规则（原为歌单菜单「停止按名称排序」，入口已撤，能力保留）。
+ * 关掉某个歌单的「按名称排序」规则（当前无 UI 入口，能力保留）。
  *
  * **刻意不还原已有顺序** —— 原顺序在排序那一刻就丢了，没有任何地方备份过。
  * 重新排序随时能再排一次，谎称能「恢复原样」比不说更糟。
@@ -885,21 +972,137 @@ export function clearPlaylistTitleSort(playlistId: string): Playlist | null {
 function purgePlaylistData(id: string): void {
   addPlaylistTombstone(id);
   // 连分片一起清掉：留着不会被误读（读只取 chunkCount 个 key），但会一直占磁盘。
+  // 攒一批走 removeMany（一次 flush），避免逐片 remove 造成上千次串行 flush。
   const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
   if (Array.isArray(stored)) {
+    const keys: string[] = [];
     for (let i = 0; i < stored.length; i++) {
       if (stored[i].id !== id) {
         continue;
       }
       const chunkCount: number = stored[i].chunkCount ?? 0;
       for (let c = 0; c < chunkCount; c++) {
-        AppPreferences.remove(chunkKeyOf(id, c));
+        keys.push(chunkKeyOf(id, c));
       }
+    }
+    if (keys.length > 0) {
+      AppPreferences.removeMany(keys).catch((e: Error): void => {
+        console.error(`purge playlist chunk keys failed: ${e.message}`);
+      });
     }
   }
 }
 
+// ===== 双向收藏夹写回挂钩 =====
+// addTrackToPlaylist / addTracksToPlaylist / removeTracksFromPlaylist 是全部
+// 「本地加 / 删曲目」入口的唯一汇聚点（7+ 页面都走这里），在这里挂钩即可全覆盖；
+// applyFavMirror（同步拉取）走 updatePlaylist 直写，不经过这些入口，零误触发。
+
+/** 上一批 add 操作中因「双向夹只收 B 站曲目」被跳过的条数（UI 读后清零） */
+let favMirrorSkippedLast: number = 0;
+
+/**
+ * 读走最近一次「加入双向夹」被跳过的非 B 站曲目数（读后清零）。
+ * 调用方（加歌入口页）在 toast 里追加「N 首非 B 站曲目已跳过」。
+ */
+export function consumeFavMirrorSkippedCount(): number {
+  const n: number = favMirrorSkippedLast;
+  favMirrorSkippedLast = 0;
+  return n;
+}
+
+/** 取曲目的有效 bvid（优先 Track.bvid，兜底 Track.id；非 BV 号返回空串） */
+function bvidOf(t: Track): string {
+  const bv: string = t.bvid.length > 0 ? t.bvid : t.id;
+  return bv.indexOf('BV') === 0 && bv.length >= 12 ? bv : '';
+}
+
+/**
+ * 双向夹加歌**过滤**阶段：非 B 站曲目（无 BV 号，本地文件 / 外部导入）无法写回
+ * B 站，**禁止入单**并计数（UI 经 consumeFavMirrorSkippedCount 提示）。
+ * 单向夹 / 普通歌单直接原样放行。
+ */
+function filterTwowayAddTracks(playlist: Playlist, tracks: Track[]): Track[] {
+  if (!isFavMirror(playlist)) {
+    return tracks;
+  }
+  const mediaId: number = favMediaIdOf(playlist);
+  if (!isFolderTwoway(mediaId)) {
+    return tracks;
+  }
+  const allowed: Track[] = [];
+  for (let i = 0; i < tracks.length; i++) {
+    if (bvidOf(tracks[i]).length > 0) {
+      allowed.push(tracks[i]);
+    } else {
+      favMirrorSkippedLast = favMirrorSkippedLast + 1;
+    }
+  }
+  return allowed;
+}
+
+/**
+ * 双向夹加歌**入队**阶段（过滤之后、去重命中之外真正新增的曲目）：
+ * 生成 add 意图入「待推送」队列并安排实时冲刷。去重命中的不入队（防重复意图）。
+ */
+function hookTwowayAdds(playlist: Playlist, fresh: Track[]): void {
+  if (fresh.length === 0 || !isFavMirror(playlist)) {
+    return;
+  }
+  const mediaId: number = favMediaIdOf(playlist);
+  if (!isFolderTwoway(mediaId)) {
+    return;
+  }
+  const intents: FavPushIntent[] = [];
+  for (let i = 0; i < fresh.length; i++) {
+    const bv: string = bvidOf(fresh[i]);
+    if (bv.length > 0) {
+      intents.push({ mediaId: mediaId, bvid: bv, op: 'add' });
+    }
+  }
+  if (intents.length > 0) {
+    enqueueFavPushes(intents);
+    scheduleFavPushFlush();
+  }
+}
+
+/** 双向夹移除挂钩：被移除曲目入「待推送」队列（del = B 站取消收藏）并安排实时冲刷 */
+function hookTwowayRemoves(playlist: Playlist, removed: Track[]): void {
+  if (removed.length === 0 || !isFavMirror(playlist)) {
+    return;
+  }
+  const mediaId: number = favMediaIdOf(playlist);
+  if (!isFolderTwoway(mediaId)) {
+    return;
+  }
+  const intents: FavPushIntent[] = [];
+  for (let i = 0; i < removed.length; i++) {
+    const bv: string = bvidOf(removed[i]);
+    if (bv.length > 0) {
+      intents.push({ mediaId: mediaId, bvid: bv, op: 'del' });
+    }
+  }
+  if (intents.length > 0) {
+    enqueueFavPushes(intents);
+    scheduleFavPushFlush();
+  }
+}
+
 export function deletePlaylist(id: string): void {
+  // 已加入首页快捷卡行的歌单被删：同步清掉 HomeCardStore 残留 id，
+  // 否则死 id 占着 HOME_PLAYLIST_CARDS_MAX 配额（加满 9 → 删 1 →
+  // 再也加不进新歌单）。removeHomePlaylist 不在架时无操作；bump 一次
+  // STORE_LIBRARY_REV 幂等无害，随后 persistPlaylists 还会再 bump。
+  // 收口在此处 = PlaylistsPage 单删 / 多选删、FavSyncManager 镜像删全覆盖。
+  HomeCardStore.removeHomePlaylist(id);
+  const dying: Playlist | null = getPlaylist(id);
+  if (dying !== null && isFavMirror(dying)) {
+    const mediaId: number = favMediaIdOf(dying);
+    if (mediaId > 0) {
+      // 删除本地镜像 = 停止镜像：未冲刷的写回意图一并放弃（B 站收藏夹本身不受影响）
+      purgeFavPushesForFolder(mediaId);
+    }
+  }
   purgePlaylistData(id);
   persistPlaylists(getPlaylists().filter((p: Playlist): boolean => p.id !== id));
 }
@@ -921,22 +1124,37 @@ export function renamePlaylist(id: string, name: string): Playlist | null {
 export function addTrackToPlaylist(playlistId: string, track: Track): Playlist | null {
   const playlists: Playlist[] = getPlaylists();
   let updatedPlaylist: Playlist | null = null;
+  let dirty: boolean = false;
   const next: Playlist[] = playlists.map((playlist: Playlist): Playlist => {
     if (playlist.id !== playlistId) {
       return playlist;
     }
-    const exists: boolean = playlist.tracks.some((t: Track): boolean => t.id === track.id);
+    // 双向夹只收 B 站曲目（无 BV 号无法写回 B 站）：被滤曲目不入单，
+    // 调用方凭 consumeFavMirrorSkippedCount() 追加提示；单向夹 / 普通歌单原样放行。
+    const candidates: Track[] = filterTwowayAddTracks(playlist, [track]);
+    if (candidates.length === 0) {
+      // 全部被滤：歌单原样返回（不重写盘、不入队）
+      updatedPlaylist = playlist;
+      return playlist;
+    }
+    const tr: Track = candidates[0];
+    const exists: boolean = playlist.tracks.some((t: Track): boolean => t.id === tr.id);
+    // 双向夹写回：真正新增的曲目入推送队列（去重命中不入队，防重复 add 意图）
+    if (!exists) {
+      hookTwowayAdds(playlist, [tr]);
+    }
     // 持续规则：打过「按名称排序」标记的歌单，新增曲目要插到**按名的正确位置**，
     // 而不是默认追加到末尾（追加只在未排序的歌单上才是对的）。
     // 加入时间戳盖章（拷贝，不污染与队列 / 最近播放共享的原实例）：
     // 歌单详情「按加入时间」排序靠它。
     const appended: Track[] = exists ? playlist.tracks
-      : [...playlist.tracks, Object.assign({}, track, { addedAt: new Date().toISOString() })];
+      : [...playlist.tracks, Object.assign({}, tr, { addedAt: new Date().toISOString() })];
+    dirty = true;
     updatedPlaylist = {
       id: playlist.id,
       name: playlist.name,
       description: playlist.description,
-      coverUrl: playlist.coverUrl || track.coverUrl,
+      coverUrl: playlist.coverUrl || tr.coverUrl,
       tracks: isTitleSorted(playlist) ? sortTracksByTitle(appended) : appended,
       createdAt: playlist.createdAt,
       updatedAt: new Date().toISOString(),
@@ -949,14 +1167,14 @@ export function addTrackToPlaylist(playlistId: string, track: Track): Playlist |
     };
     return updatedPlaylist;
   });
-  if (updatedPlaylist) {
+  if (updatedPlaylist && dirty) {
     persistPlaylists(next);
   }
   return updatedPlaylist;
 }
 
 /**
- * 批量加入歌单（下载页组头「加入歌单」用，2026-10-23）。
+ * 批量加入歌单（下载页组头「加入歌单」用）。
  *
  * 语义与 `addTrackToPlaylist` 一致 —— 按 id 去重、addedAt 盖章、
  * 「按名称排序」歌单插到正确位置、coverUrl 兜底、收藏夹镜像逐条回推 ——
@@ -970,17 +1188,24 @@ export function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playli
   }
   const playlists: Playlist[] = getPlaylists();
   let updatedPlaylist: Playlist | null = null;
+  let dirty: boolean = false;
   /** 本次真正新增的曲目（去重后追加的；封面兜底取第一首用） */
   const added: Track[] = [];
   const next: Playlist[] = playlists.map((playlist: Playlist): Playlist => {
     if (playlist.id !== playlistId) {
       return playlist;
     }
+    // 双向夹只收 B 站曲目：被滤曲目不入单（调用方凭 consumeFavMirrorSkippedCount 提示）
+    const candidates: Track[] = filterTwowayAddTracks(playlist, tracks);
+    if (candidates.length === 0) {
+      updatedPlaylist = playlist;
+      return playlist;
+    }
     // 去重集合：先装歌单已有的 id，逐条入单时同步登记，批内重复也拦掉
     const seen: Set<string> = new Set<string>(playlist.tracks.map((t: Track): string => t.id));
     const appended: Track[] = [...playlist.tracks];
-    for (let i = 0; i < tracks.length; i++) {
-      const tr: Track = tracks[i];
+    for (let i = 0; i < candidates.length; i++) {
+      const tr: Track = candidates[i];
       if (seen.has(tr.id)) {
         continue;
       }
@@ -990,6 +1215,9 @@ export function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playli
       appended.push(stamped);
       added.push(stamped);
     }
+    // 双向夹写回：真正新增（去重后）的曲目入推送队列
+    hookTwowayAdds(playlist, added);
+    dirty = true;
     updatedPlaylist = {
       id: playlist.id,
       name: playlist.name,
@@ -1007,7 +1235,7 @@ export function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playli
     };
     return updatedPlaylist;
   });
-  if (updatedPlaylist) {
+  if (updatedPlaylist && dirty) {
     persistPlaylists(next);
   }
   return updatedPlaylist;
@@ -1024,6 +1252,9 @@ export function removeTracksFromPlaylist(playlistId: string, trackIds: string[])
     if (playlist.id !== playlistId) {
       return playlist;
     }
+    // 双向夹写回：被移除的曲目入推送队列（del = B 站取消收藏，实时冲刷）
+    const removedNow: Track[] = playlist.tracks.filter((t: Track): boolean => ids.has(t.id));
+    hookTwowayRemoves(playlist, removedNow);
     updatedPlaylist = {
       id: playlist.id,
       name: playlist.name,
@@ -1292,6 +1523,17 @@ export function isUpSubscription(p: Playlist): boolean {
   return p.upMid.length > 0;
 }
 
+/**
+ * 可作为「加入歌单」目标的歌单：排除 UP 订阅歌单。
+ * 订阅歌单内容随 UP 投稿自动更新（拉取新投稿整单重建），手动加入的歌曲
+ * 会在下次拉新时被淹没，且它在本应用的行点击语义是「进 UP 主页」——
+ * 所有「选目标歌单」的弹层/菜单统一用这份列表，订阅歌单不出现。
+ * ⚠️ 判定必须用 isUpSubscription：收藏夹镜像（fav_x）有 upMid 但可正常加歌。
+ */
+export function getAddablePlaylists(): Playlist[] {
+  return getPlaylists().filter((p: Playlist): boolean => !isUpSubscription(p));
+}
+
 /** 是否「B 站收藏夹镜像」歌单 */
 export function isFavMirror(p: Playlist): boolean {
   return p.sourceKind === 'fav';
@@ -1363,7 +1605,7 @@ export function mergeUpTracks(playlistId: string, incoming: Track[]): {
   return { playlist: next, added: fresh.length, dropped: dropped };
 }
 
-// ===== 曲目排序（歌单详情页：长按拖动 + 自动排序，2026-10-22） =====
+// ===== 曲目排序（歌单详情页：长按拖动 + 自动排序） =====
 
 /**
  * 自动排序键（歌单详情页「排序」菜单）：
@@ -1378,7 +1620,7 @@ export function mergeUpTracks(playlistId: string, incoming: Track[]): {
 export type PlaylistSortKey = 'title' | 'duration' | 'playCount' | 'addedTime';
 
 /**
- * 移动单曲到目标下标（歌单详情页「长按拖动排序」落库，2026-10-22）。
+ * 移动单曲到目标下标（歌单详情页「长按拖动排序」落库）。
  *
  * 语义按 **trackId 定位、toIndex 落点**：from 由拖拽方在数据里查（切片下标即全量
  * 下标 —— 详情页 tracks 是 playlist.tracks 的前缀切片），这里不接收 from 下标，
@@ -1415,7 +1657,7 @@ export function movePlaylistTrack(playlistId: string, trackId: string, toIndex: 
 }
 
 /**
- * 「按加入时间」排序前的存量物化（2026-10-22）：
+ * 「按加入时间」排序前的存量物化：
  * 老数据 / 拖动过的歌单没有 addedAt 戳，真实加入序已不可恢复，只能按加歌
  * 方向推定 ——
  *  · 普通歌单：加歌尾插（数组序 = 加入正序）→ 无戳条目按 index 升序补戳；
@@ -1458,7 +1700,7 @@ function materializeAddedAt(playlist: Playlist, indexed: { track: Track; index: 
 }
 
 /**
- * 歌单曲目自动排序（歌单详情页「排序」菜单落库，2026-10-22）。
+ * 歌单曲目自动排序（歌单详情页「排序」菜单落库）。
  * 排序方向见 PlaylistSortKey 注释；同值条目保持原相对顺序（排序稳定性由
  * 下标兜底，同 compareByTitle 的做法，不依赖引擎 sort 稳定性）。
  * @returns 排序后的歌单；id 不存在返回 null。
@@ -1562,7 +1804,7 @@ export function subscribeUpPlaylist(
   return { playlist: withTracks, added: kept.length, dropped: dropped, reused: false };
 }
 
-// ===== 收藏夹镜像（B 站收藏夹 → 本地歌单，2026-10-13）=====
+// ===== 收藏夹镜像（B 站收藏夹 → 本地歌单）=====
 
 /** 收藏夹镜像应用结果：同步管理器据此汇总「新增 / 移除 / 复用」 */
 export interface FavMirrorResult {
@@ -1584,7 +1826,7 @@ export interface FavMirrorResult {
  *   · `true`（已确认服务端数据完整）→ **以服务端为准**：按服务端顺序重建，服务端已没有
  *     的本地条目被移除。
  *
- * ⚠️ 同步是**单向的（B 站 → 本地）**（2026-10-23 起移除本地→B 站回推）：本地对镜像歌单
+ * ⚠️ 同步是**单向的（B 站 → 本地）**：本地对镜像歌单
  *   的增删改动**不会写回 B 站**，因此下一轮同步会把本地状态对齐回服务端 —— 本地新加的
  *   歌会被移除、本地删掉的歌会重新拉回。这是有意的产品语义。
  *
@@ -1607,7 +1849,7 @@ export function applyFavMirror(
   const existing: Playlist | null = getFavMirrorByMediaId(mediaId);
 
   /**
-   * 第三道防线（2026-10-22）：`serverTracks` 为空时**一律禁止删除**。
+   * 第三道防线：`serverTracks` 为空时**一律禁止删除**。
    * 上层 FavSyncManager 已按「emptySuspect」门控过一次，这里再拦一次 ——
    * 「0 条」既可能是用户清空，也可能是风控把响应拦成空，二者从数据上无法区分，
    * 而误删的代价是整张歌单消失。所以宁可少删（下次同步再对齐），不可错删。
@@ -1898,6 +2140,7 @@ export const LibraryStore = {
   getFavoriteTracks,
   toggleFavoriteTrack,
   getPlaylists,
+  getAddablePlaylists,
   createPlaylist,
   nextPlaylistNameForTrack,
   getPlaylist,
@@ -1926,6 +2169,7 @@ export const LibraryStore = {
   getFavMirrorByMediaId,
   favMediaIdOf,
   applyFavMirror,
+  consumeFavMirrorSkippedCount,
   createPlaylistsExport,
   importPlaylistsFromText
 };

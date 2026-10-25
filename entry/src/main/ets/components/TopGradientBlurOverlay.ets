@@ -1,22 +1,21 @@
 /**
- * 自绘顶栏渐变模糊层（任务③「松手抛行阶段顶栏渐变模糊消失」新方案，2026-10-24）。
+ * 自绘顶栏渐变模糊层。
  *
- * 背景（MaterialTokens / HdsTitleBarStyle 简史 ⑧⑨）：渐变类滚动效果
- * （GRADIENT_BLUR / IMMERSIVE_GRADIENT_BLUR）在 ScrollState.Fling 阶段被
- * 渲染管线丢弃渐变 pass；COMMON_BLUR 均匀模糊抛行不丢，但无渐变软边，
- * 用户否决其观感（硬边不符「沉浸光感」）。
+ * 背景：渐变类滚动效果（GRADIENT_BLUR / IMMERSIVE_GRADIENT_BLUR）在
+ * ScrollState.Fling 阶段被渲染管线丢弃渐变 pass；COMMON_BLUR 均匀模糊抛行
+ * 不丢，但无渐变软边（硬边不符「沉浸光感」）。
  *
  * 本层用「均匀模糊 + 渐变 alpha 打孔」伪造渐变软边：
  * - 外层 Column：backgroundEffect 均匀高斯模糊（radius=TITLE_BLUR_RADIUS_VP，
  *   与 COMMON_BLUR 同通路，抛行期存活——COMMON_BLUR 真机实证支持）；
  * - 内层 Column：linearGradient 渐变 + blendMode(DST_IN)，在外层离屏合成
  *   （blendMode(SRC_OVER, OFFSCREEN)）缓冲内对外层模糊结果逐像素打孔 ——
- *   栏区不透明、尾部 32vp（TITLE_MASK_EXTRA_VP）渐隐到透明，得到渐变软边；
+ *   栏区不透明、尾部 24vp（TITLE_FADE_TAIL_VP）渐隐到透明，得到渐变软边；
  * - 进度（0→1 随滚动 0→TITLE_BLUR_END_VP）由 TopBlurProgressUpdater 经
  *   attributeModifier 命令式写 opacity：不标 @State、不触发 build，滚动
- *   高频回调零重建（用户方案 ①②：禁 @State 驱动模糊）；
+ *   高频回调零重建（禁 @State 驱动模糊）；
  * - 页面驱动方负责：onDidScroll 逐帧更新 + onScrollStop Idle 校准终态 +
- *   yOffset ≤ 0 死区归零（用户方案 ②③，见 SearchPage.syncTopBlurProgress）。
+ *   yOffset ≤ 0 死区归零（见 SearchPage.syncTopBlurProgress）。
  *
  * 挂载位置：页面根 Stack 内、主内容列之上、面板/弹窗之下；z 序在 HDS
  * titleBar 之下（页面层 < 标题栏），栏区文字不被本层遮挡。
@@ -28,12 +27,18 @@ import { AttributeUpdater } from '@ohos.arkui.modifier';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
- * 整层不透明上限（⑦ 2026-10-24 用户观感反馈「overlay 可以更透明一些」）：
- * progress 满档 1 时整层合成结果按此系数与下层内容混合（0.9 = 模糊浓度降
- * 一成，0.8 档实测后回调）。尾带渐隐曲线（⑤ 三次缓出）不动；只调满档浓度，
- * 页面侧零改动。
+ * 整层不透明上限：progress 满档 1 时整层合成结果按此系数与下层内容混合
+ * （0.9 = 模糊浓度降一成）。只调满档浓度，页面侧零改动。
  */
 const TITLE_MAX_OVERLAY_OPACITY: number = 0.9;
+
+/**
+ * 尾部渐隐区长度（vp）。
+ * 与 MaterialTokens.TITLE_MASK_EXTRA_VP（32，HDS 官方 maskExtraHeight 语义）
+ * **解耦**：该令牌在 COMMON_BLUR 下是死参数，尾带实际只由本层消费；调令牌
+ * 会误伤 HDS 语义，故立本地常量。
+ */
+const TITLE_FADE_TAIL_VP: number = 24;
 
 /**
  * 渐变模糊层进度更新器：命令式写 opacity（0~1）。
@@ -48,7 +53,7 @@ export class TopBlurProgressUpdater extends AttributeUpdater<ColumnAttribute> {
   }
 
   /**
-   * 写入进度：越界截断到 0~1（边缘回弹负偏移归零 = 用户方案 ③ 死区）；
+   * 写入进度：越界截断到 0~1（边缘回弹负偏移归零死区）；
    * |Δ|<0.01 抖动过滤。this.attribute?.opacity() 不标状态变量，不触发 build。
    */
   setProgress(p: number): void {
@@ -64,7 +69,7 @@ export class TopBlurProgressUpdater extends AttributeUpdater<ColumnAttribute> {
 /**
  * 顶栏渐变模糊层组件（原型先行 SearchPage，验收后推广其余页签）。
  * barHeightVp 传根栏整栏高（状态栏 + 标题行 + 页签行）；本层高度 =
- * barHeightVp + TITLE_MASK_EXTRA_VP（尾部渐隐区）。
+ * barHeightVp + TITLE_FADE_TAIL_VP（尾部渐隐区）。
  */
 @Component
 export struct TopGradientBlurOverlay {
@@ -101,33 +106,35 @@ export struct TopGradientBlurOverlay {
     .hitTestBehavior(HitTestMode.None)
   }
 
-  /** 本层总高（vp）：整栏高 + 尾部渐隐区 */
+  /** 本层总高（vp）：整栏高 + 尾部渐隐区（本地常量，与 HDS 令牌解耦） */
   private totalHeightVp(): number {
-    return this.barHeightVp + MaterialTokens.TITLE_MASK_EXTRA_VP;
+    return this.barHeightVp + TITLE_FADE_TAIL_VP;
   }
 
   /**
    * 渐变打孔色标（颜色任意，DST_IN 只用 alpha）：栏区不透明，尾部渐隐。
-   * 尾部曲线（2026-10-24 用户验收①~⑥）：①~③「更浅」×3；④ 栏底陡降版
-   *（避开搜索框 / 两个滑块，但 100→25% 陡降在栏底形成可见台阶）——
-   * 用户实测后要求恢复上一版；⑤ 恢复 **85% 栏高渐隐起点 + 三次缓出
-   * (1-t)³**（t=0.25→0x6B、t=0.5→0x20、t=0.75→0x04）；⑥（状态栏封盖 +
-   * 行区透明版）真机实测封盖与栏下软边不可见，整体回退到⑤，根因未查
-   *（overlay 渐变 / 材质板移除 / HDS 默认背板三者谁吞了封盖待查）。
-   * ⑦ 2026-10-24 用户反馈「整体更透明」→ 满档 opacity 经
-   * TITLE_MAX_OVERLAY_OPACITY 收到 0.9（0.8 实测后回调一档；曲线不动，只降浓度）。
+   * 尾部曲线用**半余弦 0.5×(1+cos(πt))** 八段色标近似（每 0.125 span 一档）：
+   * 两端零斜率，渐隐起点缓降、不形成可见陡边（三次缓出 (1-t)³ 在 t=0.25 处
+   * alpha 已跌到 42%，是栏下可见陡边主因；半余弦同处 85%）。
+   * 渐隐起点取 85% 栏高（再往上收要连 tabs 行背板一起评估可读性）。
    */
   private gradientStops(): Array<[ResourceColor, number]> {
     const barRatio: number = this.barHeightVp / this.totalHeightVp();
     // 渐隐起点：栏高 85%（再往上收要连 tabs 行背板一起评估可读性）
     const fadeStart: number = barRatio * 0.85;
     const span: number = 1 - fadeStart;
+    // 半余弦 0.5×(1+cos(πt)) 八段近似（每 0.125 span 一档，段内线性插值）：
+    // t=0.125→0x F5、0.25→DA、0.375→B0、0.5→80、0.625→4F、0.75→25、0.875→0A。
     const stops: Array<[ResourceColor, number]> = [
       ['#FF000000', 0.0],
       ['#FF000000', fadeStart],
-      ['#6B000000', fadeStart + 0.25 * span],
-      ['#20000000', fadeStart + 0.5 * span],
-      ['#04000000', fadeStart + 0.75 * span],
+      ['#F5000000', fadeStart + 0.125 * span],
+      ['#DA000000', fadeStart + 0.25 * span],
+      ['#B0000000', fadeStart + 0.375 * span],
+      ['#80000000', fadeStart + 0.5 * span],
+      ['#4F000000', fadeStart + 0.625 * span],
+      ['#25000000', fadeStart + 0.75 * span],
+      ['#0A000000', fadeStart + 0.875 * span],
       ['#00000000', 1.0]
     ];
     return stops;

@@ -1,11 +1,10 @@
 ﻿/**
  * 最近播放页：展示**本机播放记录**。
  *
- * 条数上限 100（LibraryStore 分片存储后为真实上限，2026-10-16 自 50 扩容；
- * 旧实现被 Preferences 单值字节预算截到约 11 条，重启即丢），超出挤掉最旧的；
+ * 条数上限 100（LibraryStore 分片存储的真实上限），超出挤掉最旧的；
  * 只保留最近 7 天（LibraryStore.RECENT_KEEP_MS，按 playedAt 过滤）。
  * 页面上用 「最近 7 天 · N 首」显示真实条数。
- * 条目加载（2026-10-16，PlaylistDetail 同款前端切片）：全量在 allTracks
+ * 条目加载（PlaylistDetail 同款前端切片）：全量在 allTracks
  * （本地数据，不发请求），@State tracks 只装已揭示切片，onReachEnd 每次多放
  * RECENT_REVEAL_PAGE_SIZE 条；refresh() 重载保留已揭示条数（至少一批），
  * 移除 / 新增记录后列表不跳回第一批。
@@ -13,7 +12,7 @@
  * 这里只负责展示与回放：播放全部 / 单曲播放 / 加入队列 / 单条移除 / 清空。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 标题 + 按钮行，批 1 样板同款；返回键为 HDS 默认键）：avoidLayoutSafeArea 挡状态栏重叠，
+ * 标题 + 按钮行；返回键为 HDS 默认键）：avoidLayoutSafeArea 挡状态栏重叠，
  * 列表穿透让位（下载页同款顶部占位条目），滚动模糊由 HDS scrollEffectOpts 接管；
  * 侧滑返回是 Navigation 级能力，不受影响。
  *
@@ -21,10 +20,11 @@
  * 不随内容滚出视口。
  */
 
-import { Track } from '../model/MusicModels';
+import { Track, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { LibraryStore } from '../service/LibraryStore';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
+import { TrackCard } from '../components/TrackCard';
 import { formatDurationText } from '../utils/TextUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
@@ -38,6 +38,7 @@ import {
   STORE_LIBRARY_REV,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
+  STORE_ITEM_DISPLAY_STYLE,
   RESUME_MIN_SEC,
   RESUME_TAIL_SEC,
   CONTENT_END_OFFSET,
@@ -50,6 +51,7 @@ import {
   PairOf,
   makePairs,
   TWO_COL_GAP_VP,
+  GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
@@ -87,7 +89,7 @@ export struct RecentPage {
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 按钮行 44（有记录时）。
    * 标题行与 bottomBuilder 按钮行高度均为定值，无需实测——
-   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值（旧 onAreaChange 实测机制已废弃）。
+   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
@@ -95,10 +97,10 @@ export struct RecentPage {
   }
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准：onDidScroll / onScrollStop 命令式
+   * 驱动 opacity（不标 @State，滚动高频回调零重建）；yOffset 0 →
+   * TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，边缘回弹负偏移
+   * 归零为死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -131,6 +133,14 @@ export struct RecentPage {
   private isTwoCol(): boolean {
     return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
   }
+
+  /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
+  @StorageProp(STORE_ITEM_DISPLAY_STYLE) itemDisplay: string = ITEM_DISPLAY_LIST;
+
+  /** 大封面模式：条目以双列网格卡（TrackCard）渲染，竖屏 / 横屏均双列 */
+  private isGrid(): boolean {
+    return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
   private player: MusicPlayer = MusicPlayer.getInstance();
 
   /** 曲目列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
@@ -145,7 +155,7 @@ export struct RecentPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
     this.refresh();
@@ -215,7 +225,7 @@ export struct RecentPage {
       return;
     }
     // 增量揭示（SearchPage.revealMoreRanking 同款）：push 揭示区间，
-    // 不再 slice 整表重新赋值，ForEach 只 diff 新增 key。
+    // 不 slice 整表重新赋值，ForEach 只 diff 新增 key。
     const from: number = this.tracks.length;
     const next: number = Math.min(from + RECENT_REVEAL_PAGE_SIZE,
       this.allTracks.length);
@@ -225,7 +235,7 @@ export struct RecentPage {
   }
 
   /**
-   * 条目「上次听到 x:xx」文案（位置记忆，2026-10-12）。
+   * 条目「上次听到 x:xx」文案（位置记忆）。
    * 显示条件与续播阈值（MusicPlayer.playRecentFromHistory）完全一致：
    * ≥ RESUME_MIN_SEC 且距结尾 ≥ RESUME_TAIL_SEC —— 显示的就是会续播的位置；
    * 听完重置为 0 / 没听够 / 临近结尾 / 旧数据无字段 → 空串不渲染。
@@ -246,7 +256,7 @@ export struct RecentPage {
     showAppToast(message, duration);
   }
 
-  /** 「⋯」标准菜单项（阶段 2 迁移：双按钮 AlertDialog → bindMenu + MenuElement 数组） */
+  /** 「⋯」标准菜单项（bindMenu + MenuElement 数组） */
   private trackMenuItems(track: Track): MenuElement[] {
     return [
       {
@@ -311,7 +321,7 @@ export struct RecentPage {
         .fontSize(13)
         .height(32)
         .borderRadius(BUTTON_RADIUS_VP)
-        // 真机要求：播放全部改为浅粉底 + 粉字（原粉底深枣红字）
+        // 真机要求：浅粉底 + 粉字
         .backgroundColor(this.themeSurface)
         .fontColor(this.themePrimary)
         .attributeModifier(this.buttonMaterial)
@@ -345,7 +355,7 @@ export struct RecentPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
    * 标题行会贴到整列左缘、与居中条目错位（平板横屏每侧 ~220vp）。外层 Row 居中 +
    * 内层 Column constraintSize（上限与本页内容列 constraintSize 完全同口径），
@@ -369,7 +379,7 @@ export struct RecentPage {
   }
 
   /**
-   * 「播放全部 / 清空」行收窄容器（2026-10-23 平板模式宽度适配）：同
+   * 「播放全部 / 清空」行收窄容器（平板模式宽度适配）：同
    * recentBarNarrow 口径 —— bottomBuilder 也横跨整列全宽，收窄后按钮行与本页
    * 条目列同宽对齐；bottomBuilder 显式高度（RECENT_ACTIONS_ROW_HEIGHT）不动，
    * 外层 Row 100%×100% 填满槽位。sm 天然无操作，手机零变化。
@@ -400,8 +410,8 @@ export struct RecentPage {
             List({ scroller: this.listScroller }) {
               // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
               // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
-              // safeTop + 56 + 按钮行 44），首个真实条目恰从栏底起排（静置位与旧
-              // padding 让位等值），滚动时占位与条目一起从沉浸材质下方穿过。
+               // safeTop + 56 + 按钮行 44），首个真实条目恰从栏底起排，
+               // 滚动时占位与条目一起从沉浸材质下方穿过。
               ListItem() {
                 // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
                 Row()
@@ -409,10 +419,58 @@ export struct RecentPage {
                   .height(this.barTotalHeight())
               }
               // 条目渲染（PlaylistDetail 同款）：@State tracks 揭示切片直接驱动
-              // ForEach，追加 / 整表替换靠数组赋值，不再经 ArrayDataSource 双份拷贝。
-              // 横屏宽屏（2026-10-23 两列改造）：条目配对，每个 ListItem 左右两列；
+              // ForEach，追加 / 整表替换靠数组赋值，不经 ArrayDataSource 双份拷贝。
+               // 横屏宽屏：条目配对，每个 ListItem 左右两列；
               // 占位 / 尾部状态条保持整行宽（配对方案不动整行结构，见 TwoColumnList 注释）。
-              if (this.isTwoCol()) {
+               // 大封面模式（外观设置「条目展示」）：条目配对成双列
+              // 网格卡（TrackCard），交互契约与行内版一致（整卡点击续播、「⋯」菜单）。
+              if (this.isGrid()) {
+                ForEach(
+                  makePairs<Track>(this.tracks),
+                  (pair: PairOf<Track>): void => {
+                    ListItem() {
+                      Row() {
+                        TrackCard({
+                          track: pair.first,
+                          heardText: this.heardTextOf(pair.first),
+                          onPlay: (tr: Track): void => {
+                            this.player.playRecentFromHistory(tr);
+                          },
+                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                        }).layoutWeight(1)
+                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+                        // 间隔条，末卡与满行卡等宽。
+                        Blank().width(TWO_COL_GAP_VP)
+                        if (pair.second !== null) {
+                          TrackCard({
+                            track: pair.second,
+                            heardText: this.heardTextOf(pair.second),
+                            onPlay: (tr: Track): void => {
+                              this.player.playRecentFromHistory(tr);
+                            },
+                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                          }).layoutWeight(1)
+                        } else {
+                          // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                       // 网格行页边距：两边留白 + 封面整体
+                      // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+                      .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+                       // Top 对齐：卡高随标题行数 /
+                      // heardText 浮动，Row 默认 Center 会把矮卡垂直居中 → 左右
+                      // 封面错位；Top 让左右封面严格同高起步。
+                      .alignItems(VerticalAlign.Top)
+                    }
+                  },
+                  (pair: PairOf<Track>): string =>
+                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                )
+              } else if (this.isTwoCol()) {
                 ForEach(
                   makePairs<Track>(this.tracks),
                   (pair: PairOf<Track>, pIndex: number): void => {
@@ -491,7 +549,7 @@ export struct RecentPage {
               }
             }
             .layoutWeight(1)
-            // 边界回弹（2026-10-08）：到顶/到底的反馈动效
+            // 边界回弹：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
             .cachedCount(8)
             // 列表末端常规留白 + 前端切片上拉加载（PlaylistDetail 同款）。
@@ -499,18 +557,18 @@ export struct RecentPage {
             .onReachEnd((): void => {
               this.onReachEnd();
             })
-            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
             // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
             .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
               this.syncTopBlurProgress();
             })
             .onScrollStop((): void => {
-              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
               this.syncTopBlurProgress();
             })
             // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem
             // 负责（见上方占位注释，下载页同款）——占位条目不占滚动量，F = raw，
-            // (30, 80) 模糊参数直接生效；不再使用 contentStartOffset / 整体 padding。
+            // (30, 80) 模糊参数直接生效；不使用 contentStartOffset / 整体 padding。
           } else if (this.allTracks.length === 0) {
             Column() {
               Text('最近 7 天还没有播放记录')
@@ -523,23 +581,23 @@ export struct RecentPage {
             }
             .layoutWeight(1)
             .justifyContent(FlexAlign.Center)
-            // 内容列不再整体 padding top（列表穿透需要），空态自己补让位（标题栏总让位量）
+            // 内容列不整体 padding top（列表穿透需要），空态自己补让位（标题栏总让位量）
             .padding({ top: this.barTotalHeight() })
           }
         }
         .width('100%')
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
-        // ⚠️ 不再整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
-        // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）；
+        // ⚠️ 不整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
+        // 扩展进底部安全区（不做底部避让，沉浸到底）；
         // （列表自身 padding 负责让出「状态栏+原生栏+条带」），滚动时曲目从
         // 条带材质下穿过。
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp），
         // 根 Stack 默认居中对齐，直接给内容列挂上限即可。
-        // 横屏宽屏（2026-10-23 两列改造）：上限放宽到 840vp，每列行宽约 400vp+。
+        // 横屏宽屏：上限放宽到 840vp，每列行宽约 400vp+。
         .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
         // titleBar，按钮行属标题栏 bottomBuilder、随整栏一起盖），进度由列表
         // onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
         TopGradientBlurOverlay({
@@ -548,9 +606,9 @@ export struct RecentPage {
         })
       }
     }
-    // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
+    // HDS 沉浸光感标题栏（样板同款，真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    // 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
     //（recentBarNarrow / recentActionsNarrow），标题行与按钮行和条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
@@ -573,8 +631,7 @@ export struct RecentPage {
         } : undefined
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -582,10 +639,10 @@ export struct RecentPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 系统返回拦截：播放页 overlay 打开时
     // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -593,8 +650,8 @@ export struct RecentPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function RecentPageBuilder(): void {
@@ -602,7 +659,7 @@ export function RecentPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const RecentPageWrapped: WrappedBuilder<[]> = wrapBuilder(RecentPageBuilder);
 

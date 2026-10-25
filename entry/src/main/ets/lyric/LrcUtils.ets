@@ -1,5 +1,5 @@
 /**
- * 歌词解析工具（移植自 audio-interaction-master，去掉 RawFile 读取与外部 Logger 依赖）。
+ * 歌词解析工具。
  *
  * 本项目歌词由 LyricsApi（QQ 音乐 LRC）提供行级时间轴，行级数据在
  * LyricsComponent 里直接转 LrcEntry；这里的 LRC / KRC 解析器保留备用

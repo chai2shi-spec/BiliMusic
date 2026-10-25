@@ -2,13 +2,12 @@
  * 单曲列表项。网络封面直接由 Image 加载（需 INTERNET 权限）。
  * 通过函数属性 onPlay / moreMenuItems 把交互交回父页面。
  *
- * 标题双行显示（2026-10-21 用户要求）：maxLines(2) + 第二行省略号，长标题更完整；
- * 封面随之 56→64vp，配显式 lineHeight（标题 21 ×2 + 间距 4 + 副行 17 = 63 ≤ 64）
+ * 标题双行显示：maxLines(2) + 第二行省略号，长标题更完整；
+ * 封面 64vp，配显式 lineHeight（标题 21 ×2 + 间距 4 + 副行 17 = 63 ≤ 64）
  * 硬保证「信息高度不超过封面高度」；短标题单行时行高不变（封面固定高驱动行高）。
  *
- * ⚠️ 条目内**不放播放图标**（曾有一个粉色的 `Text('▶')`）：
- * 整行本身就是 `onPlay` 的点击区，条目右侧再挂一个播放三角是重复入口，
- * 也和右侧「⋯」挤在一起。播放靠「点整行」，不要加回来。
+ * ⚠️ 条目内**不放播放图标**：整行本身就是 `onPlay` 的点击区，条目右侧再挂
+ * 一个播放三角是重复入口，也和右侧「⋯」挤在一起。播放靠「点整行」，不要加。
  *
  * 第二行＝「歌手 + 发布时间 + 时长」：发布时间、时长依次排在歌手后（右侧对齐），
  * 歌手过长先省略，右侧元信息始终可见；发布时间无数据时整块不渲染。
@@ -29,7 +28,13 @@ import { Chip, ChipSize } from '@kit.ArkUI';
 import { Track, buildTrack } from '../model/MusicModels';
 import { toThumbUrl, formatDurationText } from '../utils/TextUtil';
 import { CoverImage } from './CoverImage';
-import { STORE_THEME_DEEP, STORE_THEME_SURFACE } from '../common/Constants';
+import {
+  STORE_CURRENT_TRACK,
+  STORE_THEME_DEEP,
+  STORE_THEME_PRIMARY,
+  STORE_THEME_SURFACE
+} from '../common/Constants';
+import { MaterialCompat } from '../utils/MaterialCompat';
 import {
   PRESS_SCALE,
   PRESS_ANIM_MS,
@@ -37,16 +42,16 @@ import {
   ENTRANCE_DURATION_MS,
   ENTRANCE_STAGGER_MS,
   ENTRANCE_DELAY_CAP_MS,
-  ENTRANCE_WINDOW_MS
+  ENTRANCE_WINDOW_MS,
+  SELECT_SLOT_VP,
+  SELECT_TOGGLE_MS
 } from '../common/constants/InteractionConstants';
 
 /** 「⋯」命中区边长，也是它占位的宽高（视觉仍是 20px 字号，靠居中留白撑开） */
 const MORE_HIT: number = 44;
 
-/**
- * 时长文本已收敛到 TextUtil.formatDurationText（2026-10-23 性能审查：
- * 4 份本地实现统一，消除 round/floor 边界漂移）。
- */
+/** 「正在播放」整行高亮底色的透明度（淡主题色蒙层）：与 NavRail 活动胶囊同档 */
+const PLAYING_TINT_ALPHA: number = 0.10;
 
 /**
  * 发布时间文本（unix 秒 → B 站式混合格式）。
@@ -88,15 +93,12 @@ function formatPubdate(seconds: number): string {
  * 开窗，窗内创建的条目才算「首屏批次」参与错峰；窗外创建（滚动中 LazyForEach
  * 懒加载）的条目 0 延迟速入 —— 同样入场动画，只是不排队，拖动跟手。
  *
- * 2026-10-24 回归修复（用户复现「上滑后第 21 条已出现、前面还有没显示的」）：
- * 2026-10-14 的断层修复成立前提是「所有条目同一批挂载、同批错峰」（ForEach 时代）。
- * 2026-10-23 列表迁 LazyForEach + @Reusable 后前提被打破 —— 首屏错峰批次还在
- * 预隐藏排队（等待下标 × 35ms 延迟）时，滚动途中 **复用节点绕过 aboutToAppear
- * 整行直出**、**窗外懒建节点 0 延迟速入**，都先于上层排队条目亮起（下层先亮）。
- * 修法：错峰延迟不再烘焙进 animateTo 的 delay（已排程无法撤销），改为**定时器
- * 到点起播 + 排队登记**；任一条目以「窗外速入 / 复用直出」方式出现时立即
- * **冲刷队列**，排队条目全部转为立即入场 —— 无论用户何时开始滚动，
- * 条目亮起顺序都不会倒挂。
+ * ⚠️ 错峰延迟不烘焙进 animateTo 的 delay（已排程无法撤销），改为**定时器
+ * 到点起播 + 排队登记**：LazyForEach + @Reusable 下，滚动途中**复用节点绕过
+ * aboutToAppear 整行直出**、**窗外懒建节点 0 延迟速入**，都先于仍在等待
+ * 下标 × 35ms 延迟的上层排队条目亮起（下层先亮断层）—— 任一条目以
+ * 「窗外速入 / 复用直出」方式出现时立即**冲刷队列**，排队条目全部转为
+ * 立即入场，无论用户何时开始滚动，条目亮起顺序都不会倒挂。
  */
 class TrackEntranceQueue {
   /** 开窗时刻（Date.now()）；0 = 从未开窗，按首屏批次对待（不依赖创建顺序） */
@@ -125,13 +127,13 @@ class TrackEntranceQueue {
 }
 
 /**
- * @Reusable（2026-10-23 性能审查）：列表页迁 LazyForEach 后启用节点复用 ——
- * 滚动时滑出的行进复用池、滑入的行直接换数据，省掉整棵子树销毁重建。
+ * @Reusable：列表页 LazyForEach 启用节点复用 —— 滚动时滑出的行进复用池、
+ * 滑入的行直接换数据，省掉整棵子树销毁重建。
  * 复用安全性：所有外部数据经 @Prop 进来（复用时框架重赋值即刷新），
  * 入场动画只在 aboutToAppear 预置；复用节点绕过 aboutToAppear 整行直出
  * （错峰只播一次的语义由 aboutToReuse 复位保证，含排队中途回收的节点
- * 复用后不渲染成空白行），且直出时冲刷首屏错峰排队（2026-10-24 回归修复，
- * 见 TrackEntranceQueue 注释）；按压缩放是瞬时交互态、复用残留会被下一次触摸覆盖。
+ * 复用后不渲染成空白行），且直出时冲刷首屏错峰排队
+ * （见 TrackEntranceQueue 注释）；按压缩放是瞬时交互态、复用残留会被下一次触摸覆盖。
  */
 @Reusable
 @Component
@@ -142,20 +144,23 @@ export struct TrackItem {
   /** 主题色运行时值：「正在播放」徽标的浅底与深字跟随切色刷新 */
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
+  /** 当前播放曲目（AppStorage 订阅）：正在播放的条目整行高亮 + 标题主题色，切歌自动跟随 */
+  @StorageProp(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
+  /** 主题色运行时值：正在播放条目的高亮底色与标题颜色跟随切色刷新 */
+  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   onPlay: (track: Track) => void = (): void => {};
   /**
-   * 「⋯」的标准菜单项（阶段 2 迁移，2026-10-11）：bindMenu 的 MenuElement 数组
-   * 由父页面提供，点「⋯」弹出系统标准菜单。
+   * 「⋯」的标准菜单项：bindMenu 的 MenuElement 数组由父页面提供，
+   * 点「⋯」弹出系统标准菜单。
    */
   moreMenuItems: (track: Track) => MenuElement[] = (_track: Track): MenuElement[] => [];
 
   /**
    * 按压缩放（独立动画状态，本条目独占）：按下 0.9，抬起/取消回 1.0。
    *
-   * 设计约束（按压反馈改版结论）：
-   * - **只做形变**：不碰 backgroundColor、不加按压蒙层/底色/高亮 —— 上一版
-   *   stateStyles 的 press_overlay 底色方案已按新规范移除（资源本身其他页面
-   *   仍在用，保留）。
+    * 设计约束：
+    * - **只做形变**：不碰 backgroundColor、不加按压蒙层/底色/高亮
+    *   （press_overlay 资源本身其他页面仍在用，保留）。
    * - **独立隔离**：专用 @State + 紧跟 .scale() 的独立 .animation()，
    *   不与任何其他组件的动画状态（HdsTabs、miniBar 唱片旋转、播放按钮形变、
    *   搜索框动画）共用变量，互不干扰。
@@ -174,20 +179,29 @@ export struct TrackItem {
    */
   @Prop entranceIndex: number = -1;
   /**
-   * 已下载徽标（2026-10-08）：true = 歌手行最右显示「已下载」小字
-   * （2026-10-23 用户要求：从标题行右侧移到副行行尾）。
+   * 已下载徽标：true = 副行行尾显示「已下载」小字。
    * 默认 false —— 本组件被搜索 / 最近播放 / UP 主页 / 歌单详情四页共用，
    * 只有歌单详情（订阅了下载快照）会传 true，其余页面零改动零影响。
    * 与下载页「正在播放」徽标同一套视觉（11 号 brand_deep 小字），保持全局一致。
    */
   @Prop downloaded: boolean = false;
   /**
-   * 「上次听到 x:xx」（可选，2026-10-12 位置记忆）：最近播放页传入的续播位置
+   * 「上次听到 x:xx」（可选，位置记忆）：最近播放页传入的续播位置
    * 提示，空串整块不渲染。显示条件（≥ RESUME_MIN_SEC 且距结尾 ≥
    * RESUME_TAIL_SEC）由调用方判定，本组件只负责展示 ——
    * 搜索 / 歌单 / 下载 / UP 主页等共用页面不传该参，零改动零影响。
    */
   @Prop heardText: string = '';
+  /**
+   * 多选模式开关（可选）：true = 点条目切换选中而非播放、隐藏「⋯」、
+   * 左侧勾选槽位展开。默认 false —— 共用页面（搜索 / 最近播放）
+   * 不传时槽位宽 0 且路由不变，布局与交互零改动零影响。
+   */
+  @Prop selecting: boolean = false;
+  /** 本条目是否选中：父页面 selectedIds 驱动，勾选框只读回显（装饰性） */
+  @Prop selected: boolean = false;
+  /** 选择模式下点条目 / 点勾选槽位的切换回调 */
+  onToggleSelect: (track: Track) => void = (_track: Track): void => {};
   /** 入场位移（vp）：10 → 0；所有参与入场的条目在挂载时被置为起始值 */
   @State enterOffsetY: number = 0;
   /** 入场透明度：0 → 1 */
@@ -216,7 +230,7 @@ export struct TrackItem {
     this.entranceInWindow = TrackEntranceQueue.openedAt !== 0 &&
       Date.now() - TrackEntranceQueue.openedAt <= ENTRANCE_WINDOW_MS;
     if (!this.entranceInWindow) {
-      // 窗外速入条目先冲刷排队批次（2026-10-24 回归修复）：它自己 0 延迟起播，
+      // 窗外速入条目先冲刷排队批次：它自己 0 延迟起播，
       // 若不冲刷会先于上层仍在等待错峰延迟的排队条目亮起（下层先亮断层）。
       TrackEntranceQueue.flushPending();
     }
@@ -225,7 +239,7 @@ export struct TrackItem {
   }
 
   /**
-   * 复用直出（@Reusable，2026-10-24 回归修复补充）：复用节点绕过
+   * 复用直出（@Reusable）：复用节点绕过
    * aboutToAppear / onAppear 直接整行可见 —— 若首屏错峰批次还在排队，
    * 本条会先于上层排队条目亮起，必须立即冲刷；同时把入场状态复位为
    * 「已入场」：排队中途被回收进池的节点 enterOpacity 还停在 0
@@ -267,12 +281,25 @@ export struct TrackItem {
     return formatPubdate(this.track.pubdate);
   }
 
+  /** 本条目是否正在播放：id 精确匹配（QueueSheet / DownloadsPage 同一语义，多 P 条目 id 唯一） */
+  private isPlayingTrack(): boolean {
+    const cur: Track | null = this.currentTrack;
+    return cur !== null && cur.id === this.track.id;
+  }
+
+  /** 行背景：正在播放 = 淡主题色高亮；否则透明 */
+  private rowBackground(): ResourceColor {
+    return this.isPlayingTrack()
+      ? MaterialCompat.withAlpha(this.themePrimary, PLAYING_TINT_ALPHA)
+      : Color.Transparent;
+  }
+
   /**
    * 入场：挂载后一次性触发（entranceDone 防重播）。
    * 只动画 aboutToAppear 里**被预隐藏**的条目（enterOpacity === 0）——
    * 未预隐藏（未启用入场）的直接显示；这样任何被预隐藏的条目
    * 必然会被自己的 onAppear 动画回可见，不存在「卡在透明」的状态。
-   * 延迟策略（2026-10-24 回归修复）：首屏批次 = 定时器延迟下标 × 35ms
+   * 延迟策略：首屏批次 = 定时器延迟下标 × 35ms
    * （封顶 ENTRANCE_DELAY_CAP_MS）到点起播 —— **不烘焙进 animateTo 的
    * delay**，那样一旦排程就无法在复用 / 窗外条目出现时撤销；同时登记
    * 立即起播回调，队列被冲刷时提前起播。窗外懒建 / 已冲刷 = 0 延迟速入。
@@ -327,9 +354,34 @@ export struct TrackItem {
 
   build() {
     Row() {
+      // 多选勾选槽位（可选）：宽 0 ↔ SELECT_SLOT_VP + clip 收展 —— 绝不能用
+      // if 条件挂载（节点增删没有过渡，还会顶动布局）；勾选框叠 translate
+      // 从右侧滑入，clip 保证槽位收拢时内容不外溢（下载页任务行同款）。
+      // 勾选框只读回显 selected、装饰性（hitTestBehavior None）：切换入口是
+      // 整行点击（selecting 态 onClick 路由到 onToggleSelect）。
+      // name 用 track.id 保证组内唯一，group 'upSelect' 与父页面多选组一致。
+      Row() {
+        Checkbox({ name: this.track.id, group: 'upSelect' })
+          .select(this.selected)
+          .selectedColor(this.themeDeep)
+          .unselectedColor($r('app.color.text_disabled'))
+          .shape(CheckBoxShape.CIRCLE)
+          .width(20)
+          .height(20)
+          .translate({ x: this.selecting ? 0 : SELECT_SLOT_VP })
+          .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
+          .hitTestBehavior(HitTestMode.None)
+          .accessibilityLevel('no')
+      }
+      .width(this.selecting ? SELECT_SLOT_VP : 0)
+      .height(20)
+      .clip(true)
+      .justifyContent(FlexAlign.Center)
+      .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
+
       if (this.showCover) {
-        // 64vp 显示位按 2x 请求图床缩略图（双行标题改版 2026-10-21：封面 56→64，
-        // 高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17) = 63 ≤ 64）；
+        // 64vp 显示位按 2x 请求图床缩略图
+        // （高度预算 = 标题两行 lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17) = 63 ≤ 64）；
         // 加载中 / 失败由 CoverImage 兜浅粉占位
         // altText 让读屏把这行念成「歌名」，而不是跳过封面或念一串 URL
         CoverImage({
@@ -346,11 +398,11 @@ export struct TrackItem {
         // 显式 lineHeight(21) 锁行高（默认行高随字体浮动，会破坏
         // 「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
         Row() {
-          // 标题双行显示（2026-10-21 用户要求）：maxLines(2) + 第二行省略号，
-          // 长标题更完整。
+          // 标题双行显示：maxLines(2) + 第二行省略号，长标题更完整。
+          // 正在播放的条目标题用主题色（配合整行高亮底，一眼定位当前曲）。
           Text(this.track.title)
             .fontSize(16)
-            .fontColor($r('app.color.text_primary'))
+            .fontColor(this.isPlayingTrack() ? this.themePrimary : $r('app.color.text_primary'))
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
@@ -395,9 +447,8 @@ export struct TrackItem {
               .maxLines(1)
               .margin({ left: 8 })
           }
-          // 「已下载」徽标（2026-10-08，2026-10-23 用户要求移到歌手行最右）：
-          // 与下载页「正在播放」同款视觉，告诉用户这首已存到本地（播放走本地
-          // 文件，不耗流量）。阶段 5（2026-10-11）：小字徽标统一改用系统标准 Chip。
+          // 「已下载」徽标：与下载页「正在播放」同款视觉（系统标准 Chip），告诉
+          // 用户这首已存到本地（播放走本地文件，不耗流量）。
           // ⚠️ Chip 是 @Builder 组件，**不能链式挂属性** → 外边距 / 命中策略挂在外层 Row。
           // 装饰徽标：不参与命中测试，点它等同点整行（播放）。
           if (this.downloaded) {
@@ -426,6 +477,8 @@ export struct TrackItem {
 
       // 「⋯」：视觉 20px 文字不变，但命中区撑到 44×44（居中留白），
       // 并把原来 left:14 的 margin 收进自身宽度，避免热区与整行 onPlay 重叠。
+      // 多选模式下隐藏（Visibility.None 不占布局）：更多入口让位给选择交互，
+      // 防误弹菜单。
       // 无障碍：图形字符读屏念不出来，必须补描述动作的文字
       Row() {
         SymbolGlyph($r('sys.symbol.more'))
@@ -435,17 +488,25 @@ export struct TrackItem {
       .width(MORE_HIT)
       .height(MORE_HIT)
       .justifyContent(FlexAlign.Center)
+      .visibility(this.selecting ? Visibility.None : Visibility.Visible)
       .accessibilityText('更多操作')
       .accessibilityLevel('yes')
       .bindMenu(this.moreMenuItems(this.track))
     }
     .width('100%')
     .padding({ left: 16, right: 4, top: 10, bottom: 10 })
+    // 「正在播放」整行高亮：淡主题色底 + 12 圆角（与卡片圆角同档）。
+    // 声明在 .animation() 之前 → 切歌时高亮随 150ms EaseOut 淡出/淡入
+    //（隐式动画接管，无需额外代码）。
+    .backgroundColor(this.rowBackground())
+    .borderRadius(12)
     // 按压态：整行可点但原先**零反馈**，用户点下去不知道是否命中。
     // 反馈方式＝纯缩放形变（见 pressScale 注释）：按下收到 0.9 的收缩确认，
-    // 抬起/取消回弹到 1.0 —— 不改底色、不加蒙层，scale 直接挂根 Row 不加层。
-    // .animation() 紧跟 .scale() 且位于链尾：只对 scale 这一个可变属性生效，
-    // width/padding 在其之前但从不变化，不会被卷进动画。
+    // 抬起/取消回弹到 1.0 —— 按压不改底色、不加蒙层（高亮底是「正在播放」
+    // 状态色，与按压反馈互不掺和），scale 直接挂根 Row 不加层。
+    // .animation() 紧跟 .scale() 且位于链尾：接管 scale（按压）与在它之前
+    // 声明的 backgroundColor（高亮切换）两个可变属性 —— 两者都走 150ms
+    // EaseOut 是有意为之；width/padding 在其之前但从不变化，不会被卷进动画。
     .scale({ x: this.pressScale, y: this.pressScale })
     .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
     // 入场错峰：translate/opacity 必须声明在 .animation() **之后** ——
@@ -467,6 +528,11 @@ export struct TrackItem {
       }
     })
     .onClick((): void => {
+      // 多选态：整行是「切换选中」的命中区而非播放（与「⋯」隐藏配套）
+      if (this.selecting) {
+        this.onToggleSelect(this.track);
+        return;
+      }
       this.onPlay(this.track);
     })
   }

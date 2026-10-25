@@ -1,7 +1,7 @@
 import { curves } from '@kit.ArkUI';
 
 /**
- * 按压缩放交互参数（TrackItem 首创，各列表条目推广共用）。
+ * 按压缩放交互参数（各列表条目共用）。
  *
  * 按下收到 0.9 的收缩确认，抬起/取消回弹 1.0：只做形变，
  * 不改底色、不加按压蒙层/高亮。150ms + EaseOut 落在 120~180ms
@@ -17,8 +17,8 @@ export const PRESS_ANIM_MS: number = 150;
 
 /**
  * ══════════ 统一按钮圆角 ══════════
- * 所有按钮（含弹层 44 高大按钮）与搜索页滑块选段统一 8vp 圆角（用户指定）：
- * 原 Capsule 全圆（32 高 = 16）药丸感过强，收小到 8 保留圆润又不至于全圆。
+ * 所有按钮（含弹层 44 高大按钮）与搜索页滑块选段统一 8vp 圆角：
+ * 保留圆润又不至于全圆药丸感。
  */
 export const BUTTON_RADIUS_VP: number = 8;
 
@@ -28,19 +28,12 @@ export const BUTTON_RADIUS_VP: number = 8;
  * 主动画总时长 700ms（= `PLAYER_TRANSITION_MS`，必须与驱动封面 geometryTransition 的时长一致，
  * 否则会出现「封面已停住、整页还在飘」的错位）。
  *
- * 2026-10-21 晚间修订（用户反馈「生硬」）：内容层不再等主动画完全结束后依次弹出
- * （旧规格 450/540/660 会让页面空一拍再 pop-pop-pop，总落定 ~910ms），改为
- * **随背景面覆盖进度空间序淡入** —— 背景面自底向上生长：底部区域最先被盖住、
+ * 内容层**随背景面覆盖进度空间序淡入** —— 背景面自底向上生长：底部区域最先被盖住、
  * 中部 ~210ms、顶部 ~530ms（按 PLAYER_MAIN_CURVE @700ms 推算），各层延迟对齐
  * 其所在区域被盖住的时刻，淡入与飞行尾部重叠，读感为「页面边生长边显内容」，
  * 总落定 ~780ms。
- *
- * 2026-10-21 深夜再调（用户反馈「太快了」，参考华为音乐）：整体从 450ms 档放慢到
- * 700ms 档（延迟 260/300/340 → 400/470/530）。
- * 2026-10-22 收起规格再改（用户要求「除封面和背景的其他元素直接消失」）：退场从
- * 「跟着收缩俯冲向迷你栏」改为「内容层瞬隐」—— closePlayer 在主动画闭包**外**
- * 递增 STORE_PLAYER_CONTENT_EXIT，各内容层 @Watch 复位落在隐式动画作用域外 →
- * 单帧直接消失；封面 / 背景仍走 700ms 几何转场（俯冲常量 LAYER_EXIT_* 已删除）。
+ * 收起时 closePlayer 在主动画闭包**外**递增 STORE_PLAYER_CONTENT_EXIT，各内容层
+ * @Watch 复位落在隐式动画作用域外 → 单帧直接消失；封面 / 背景仍走 700ms 几何转场。
  *
  * ⚠️ **封面（CoverDiscComponent）刻意不参与分层**：它的形变由 `geometryTransition` 独占
  * （那个 `Image` 节点上还挂着 `rotate`）。若给它的父容器再叠 scale/translate，
@@ -57,7 +50,7 @@ export const LAYER_DELAY_INFO: number = 470;
 export const LAYER_DELAY_CONTROL: number = 400;
 
 /**
- * ══════════ 收起分层柔退（2026-10-24 三风格收起动画改版）══════════
+ * ══════════ 收起分层柔退 ══════════
  *
  * morph 风格收起时内容层不再单帧瞬隐，改为**反向错峰柔和退场**（镜像入场节奏）：
  * 背景收缩自顶部揭起 → 顶栏先退、标题块次之、控制区/歌词最后；各层 200ms
@@ -74,16 +67,7 @@ export const LAYER_EXIT_DELAY_INFO: number = 70;
 /** 控制区 / 歌词柔退延迟（ms）：与入场 LAYER_DELAY_CONTROL 同批语义 */
 export const LAYER_EXIT_DELAY_CONTROL: number = 140;
 /**
- * 全屏档封面特效层（模糊+溶解）柔退时长（ms）：同时是 Index.closePlayer 的
- * 预熔窗口宽度（两处必须同源，柔隐完成即回飞）。独立于内容层
- * LAYER_EXIT_DURATION_MS(200) —— 初版 150ms EaseIn 用户反馈「消失太快」，
- * 2026-10-24 调优定稿 300ms EaseInOut（全屏档 morph 收起总时长 =
- * 本值 + 700ms 回飞 = 1000ms）。
- */
-export const IMMERSIVE_FX_EXIT_MS: number = 300;
-/**
- * 背景面收起末端渐隐曲线（2026-10-24 用户拍板「末端渐隐」，推翻 10-24 上午
- * 「落位才消失」规格）：透明度 1→0 但曲线前 ~65% 恒持 ≈1、末端加速衰减 ——
+ * 背景面收起末端渐隐曲线：透明度 1→0 但曲线前 ~65% 恒持 ≈1、末端加速衰减 ——
  * 背景面收缩接近迷你栏时融入下层页面，替代落位瞬间硬切。调早调晚改 x1。
  */
 export const PLAYER_BG_EXIT_CURVE = curves.cubicBezierCurve(0.65, 0, 1, 1);
@@ -100,7 +84,7 @@ export const SLIDE_DIM_MAX: number = 0.4;
 /** 手势不足阈值回弹时长（ms，EaseOut） */
 export const SLIDE_BACK_MS: number = 250;
 /**
- * 上滑展开（2026-10-24 展开动画三风格区分，仅 slide 风格打开路径）：
+ * 上滑展开（仅 slide 风格打开路径）：
  * 整页从屏幕底部减速上滑 + 渐显，与下滑收起的「加速下滑」镜像 ——
  * easeOutCubic（起步果断、到位时柔和收住），重力感对称。
  */
@@ -110,7 +94,6 @@ export const SLIDE_OPEN_MS: number = 350;
 /**
  * 播放页主动画曲线（打开 / 收起共用）：果断起步 + 长尾柔和收住（iOS 全屏展开
  * 同款手感）。GT 配对（背景面 / 唱片）、页签图标淡出均由该曲线驱动。
- * 2026-10-21 晚间从 Curve.FastOutSlowIn 换用（用户反馈「生硬」）。
  * 注：cubicBezierCurve 的返回类型 ICurve 在 SDK 声明里未导出、无法显式标注，
  * 此处靠类型推断（消费方只把它塞进 animateTo 的 curve 参数，无需命名该类型）。
  */
@@ -135,16 +118,9 @@ export const ENTRANCE_STAGGER_MS: number = 35;
  * 首屏批次入场延迟封顶（ms）：下标 × 35ms 超过它就不再累加，批尾条目共享
  * 同一延迟一起入场 —— 总入场时长有界（≤ 封顶 + 250ms 动画 ≈ 0.53s），
  * 批尾不会越靠下等越久。
- * 2026-10-14 两轮实测结论：原下标闸门（ENTRANCE_INDEX_MAX=12 → 20）都会在
- * 「首屏预建批次（可视区 + 缓存区，约 16 条）」与「直出条目」之间露出断层
- * （第 13 条、抬闸后第 17 条先于上层出现）。取消闸门改为全员入场后，
- * 本封顶承担「批尾与窗外速入条目几乎同帧落定、不出现下层先亮」的职责，
- * 故从 420 收紧到 280（= 8 × 35）。
- * 2026-10-24 回归修复（用户复现「第 21 条先于上层出现」）：LazyForEach +
- * @Reusable 迁移后「同帧落定」的时序前提被打破（复用节点整行直出、窗外
- * 懒建 0 延迟，都可能早于排队批尾）—— 改由 TrackItem 内的排队冲刷机制
- * （TrackEntranceQueue.flushPending）硬保证不倒挂，本封顶只负责无人滚动时
- * 错峰总时长有界，数值维持 280 不动。
+ * 「批尾与窗外速入条目不倒挂（下层先亮）」由 TrackItem 内的排队冲刷机制
+ * （TrackEntranceQueue.flushPending）硬保证，本封顶只负责无人滚动时
+ * 错峰总时长有界。
  */
 export const ENTRANCE_DELAY_CAP_MS: number = 280;
 /**
@@ -193,10 +169,8 @@ export const SELECT_TOGGLE_MS: number = 250;
  * 快照到达时用 animateTo fast Linear 把进度条平滑推到新值；
  * 重定目标从当前视觉值起算，快照连发时进度条连续滑动不跳变。
  *
- * 2026-10-08 卡顿优化：150 → 250。快照节流从 200ms 放宽到 300ms 后
- * （见 DownloadManager.UI_NOTIFY_INTERVAL），150ms 的动画窗口只覆盖两份
- * 快照间隔的一半，进度条会「滑一段、停一拍」；250ms 覆盖 83%，
- * 观感连续且动画总开销反而更低（重定目标频率降了 40%）。
+ * 取 250ms：快照节流为 300ms（见 DownloadManager.UI_NOTIFY_INTERVAL），
+ * 250ms 覆盖 83% 的快照间隔，观感连续且重定目标频率更低。
  */
 export const DOWNLOAD_SMOOTH_MS: number = 250;
 
@@ -213,17 +187,16 @@ export const LARGE_TITLE_COLLAPSE_DIST: number = 72;
 /**
  * ══════════ 列表尾部加载状态条 ══════════
  * 常驻 + 固定高度：列表有内容时尾部条不插拔，只换内容（转圈 / 到底文案 / 上拉提示）。
- * 数据落地帧尾部 extent 只增不减（新条目追加），底部弹簧过滚动不被收缩强制解析
- * —— 修「加载第二页完成时列表整体跳一下」（2026-10-19，四页统一）。
+ * 数据落地帧尾部 extent 只增不减（新条目追加），底部弹簧过滚动不被收缩强制解析。
  */
 export const LIST_FOOTER_HEIGHT_VP: number = 48;
 
 /**
- * ══════════ 搜索页下拉刷新（方案三 · 骨架接管）══════════
+ * ══════════ 搜索页下拉刷新（骨架接管）══════════
  *
  * 刷新指示器复用 SkeletonTrackItem，不新增任何视觉元素：下拉时骨架行从
  * 上方 12vp 落位 + 按下拉进度淡入（onOffsetChange 跟手映射，不套 animateTo）；
- * 松手触发后骨架停在原位保持纯静态（扫光带已全局删除）；Done 后 250ms 淡出上移退场。
+ * 松手触发后骨架停在原位保持纯静态；Done 后 250ms 淡出上移退场。
  * 触发阈值 72vp 同时是淡入进度的分母：拉满 = 不透明 = 「松手即刷」。
  */
 /** 触发刷新的下拉偏移量（vp）＝ 骨架淡入进度的分母 */
@@ -238,3 +211,21 @@ export const PULL_SKELETON_SETTLE_VP: number = 12;
 export const PULL_SKELETON_EXIT_VP: number = -6;
 /** Done 后骨架淡出时长（ms，normal 档） */
 export const PULL_SKELETON_FADE_MS: number = 250;
+
+/**
+ * ══════════ 装饰动画 LTPO 期望帧率 ══════════
+ *
+ * 唱片旋转 / 进度条流光脉冲 / 歌词滚动等装饰性动画以 vsync 满帧（最高 120fps）
+ * 驱动渲染管线，形成持续 GPU/CPU 高负载 —— 官方 LTPO 低功耗文档点名反模式
+ * （「无限循环转盘动画长时间保持高帧率导致手机发热」「应用以 120fps 响应 vsync」），
+ * 整机被判重载后系统自动进入「性能模式」。
+ *
+ * 声明 `setExpectedFrameRateRange`（API 12+）后渲染管线按期望帧率分频，
+ * LTPO 屏自适应降刷新率，持续负载显著下降。官方建议小区域微动效取 15~30Hz，
+ * 缓慢旋转/呼吸/流光取上沿 30 无肉眼差异；歌词 400ms 换行补间 @30fps 亦够顺。
+ */
+export const DECORATIVE_ANIM_FRAME_RATE: ExpectedFrameRateRange = {
+  min: 0,
+  max: 120,
+  expected: 30
+};

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Microphone</title>
+  <desc id="desc">话筒方案。深粉底上白色立式话筒（胶囊头 + 柄 + 底座），头部三条镂空格栅，两侧对称声波短线向外扩散。竖向结构在十案里唯一，远看不会与任何已有方案混淆。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#C2185B"/>
+  </g>
+
+  <g id="foreground-layer">
+    <g id="waves" fill="#FFFFFF">
+      <rect id="wave-l1" x="268" y="384" width="76" height="34" rx="17"/>
+      <rect id="wave-l2" x="248" y="500" width="96" height="34" rx="17"/>
+      <rect id="wave-r1" x="680" y="384" width="76" height="34" rx="17"/>
+      <rect id="wave-r2" x="680" y="500" width="96" height="34" rx="17"/>
+    </g>
+    <rect id="stand" x="406" y="704" width="212" height="76" rx="38" fill="#FFFFFF"/>
+    <rect id="stem" x="466" y="544" width="92" height="188" rx="46" fill="#FFFFFF"/>
+    <rect id="capsule" x="396" y="196" width="232" height="380" rx="116" fill="#FFFFFF"/>
+    <g id="grille" fill="#C2185B">
+      <rect x="436" y="308" width="152" height="28" rx="14"/>
+      <rect x="436" y="392" width="152" height="28" rx="14"/>
+      <rect x="436" y="476" width="152" height="28" rx="14"/>
+    </g>
+  </g>
+</svg>

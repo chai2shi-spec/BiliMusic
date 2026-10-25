@@ -1,0 +1,6 @@
+{
+  "layered-image": {
+    "background": "$media:alt_icon_bg_pink",
+    "foreground": "$media:alt_icon_fg_01"
+  }
+}

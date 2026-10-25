@@ -28,10 +28,10 @@ export interface HttpRequestOptions {
   /**
    * 只跳过**登录** Cookie（buvid 通道保留），等价「退出登录后的匿名请求」。
    *
-   * 用途（2026-10-23「登录后不能播放」修复）：B 站对部分账号做**绑定登录 Cookie**
-   * 的风控 —— view/playurl 只要带 SESSDATA 就被拒（-352/-412/-799 或 HTTP 412），
-   * 不带反而正常（这正是「退出登录又能播放」的成因）。音源解析链撞到这类错误时，
-   * 用它把该次请求降级成匿名重发一轮，buvid 必须保留（缺它部分接口会 412）。
+   * 用途：B 站对部分账号做**绑定登录 Cookie** 的风控 —— view/playurl 只要带
+   * SESSDATA 就被拒（-352/-412/-799 或 HTTP 412），不带反而正常。音源解析链
+   * 撞到这类错误时，用它把该次请求降级成匿名重发一轮，buvid 必须保留
+   * （缺它部分接口会 412）。
    */
   skipLoginCookie?: boolean;
   /** 跳过自动附加的 Referer 头（passport 轮询同样不需要）。 */
@@ -162,29 +162,28 @@ export class HttpUtil {
   }
 
   /**
-   * ⚠️ 2026-10-24 修「POST 发不出 body」—— requestText / requestTextWithCookies
-   * 两个入口都必须**同时**传 `extraData` 与 `body`：
+   * ⚠️ requestText / requestTextWithCookies 两个入口都必须**同时**传
+   * `extraData` 与 `body`：
    *
    * API 26 起 `HttpRequestOptions` 拆出了独立的 `body` 字段，文档写明
    * 「body 与 extraData 同时配置时 **body 优先**，extraData 被忽略」。
-   * 只传 extraData 时，本机实测**请求体完全没发出去** —— 抓包证据：POST 请求头里
+   * 只传 extraData 时请求体可能完全发不出去 —— 抓包证据：POST 请求头里
    * 既无 content-length 也无 transfer-encoding，服务端收到 `bodyLen=0`，
-   * 于是 ExClimbWuzhi 恒答 `{"code":-400,"message":"请求错误"}`（而同样的 body
-   * 用 node 发是 code=0，排查了两轮才定位到这里）。
+   * 于是 ExClimbWuzhi 恒答 `{"code":-400,"message":"请求错误"}`。
    *
    * 两个字段内容相同，引擎按优先级取其一，不会重复发送；低版本没有 `body`
-   * 字段时由 `extraData` 兜住，行为与旧版一致。
+   * 字段时由 `extraData` 兜住。
    */
 
   static async requestText(url: string, options?: HttpRequestOptions): Promise<string> {
-    // 全局节流闸门（2026-10-24）：B 站域请求排队取名额（节流 + 并发上限 +
+    // 全局节流闸门：B 站域请求排队取名额（节流 + 并发上限 +
     // 高优先插队 + 风控熔断），非 B 站 URL 直接放行（gated=false 不必 release）
     const gated: boolean = await BiliRequestGate.acquire(url);
     const req: http.HttpRequest = http.createHttp();
     try {
-      // 请求侧留痕（er/ 播放失败诊断报告的整改项）：resp 只打基础 URL，
-      // queryParams 走独立通道不进日志，参数错了（如 view 的 bvid 为空 → -400）
-      // 之前完全无从分辨。参数序列化开销可忽略，仅在 requestText 出口打一条。
+      // 请求侧留痕：resp 只打基础 URL，queryParams 走独立通道不进日志，
+      // 打参数日志是为了分辨「参数错了」（如 view 的 bvid 为空 → -400）。
+      // 参数序列化开销可忽略，仅在 requestText 出口打一条。
       const paramsText: string = options && options.params ? JSON.stringify(options.params) : '';
       hilog.info(0x0000, 'BiliMusicHttp', 'req %{public}s params=%{public}s', url, paramsText);
       const resp: http.HttpResponse = await req.request(url, {
@@ -223,7 +222,7 @@ export class HttpUtil {
   /**
    * 探测重定向目标（**不跟随**）：发一次 `maxRedirects: 0` 的 GET，读 3xx 响应的
    * `Location` 头。用于解析分享短链 —— QQ 音乐 `c6.y.qq.com/base/fcgi-bin/u?__=xxx`
-   * 这类 URL 里**不含**歌单 ID，只能靠 302 反查（2026-10-16 实测：Location 与 UA 无关，
+   * 这类 URL 里**不含**歌单 ID，只能靠 302 反查（实测：Location 与 UA 无关，
    * 稳定给出 `…playlist.html?…&id=9725916480`）。
    *
    * **绝不抛错**：引擎对 maxRedirects 的支持程度、响应头键名大小写、服务器是否直接
@@ -302,15 +301,15 @@ export class HttpUtil {
         HttpUtil.reportGateRisk(resp.responseCode, HttpUtil.resultAsText(resp));
       }
       if (resp.responseCode >= 400) {
-        // >=400 直接抛异常不打 resp 日志，会把关键诊断信息吞掉（曾导致一次 poll 失败无任何痕迹）
+        // >=400 直接抛异常不打 resp 日志，会把关键诊断信息吞掉
         hilog.warn(0x0000, 'BiliMusicHttp', 'HTTP %{public}d for %{public}s',
           resp.responseCode, url);
         throw new Error(`HTTP ${resp.responseCode} for ${url}`);
       }
       const text: string = resp.result as string;
       // Cookie 提取绝不允许抛错向上传播：登录成功帧是一次性的，提取失败只降级为
-      // 空 Cookie（2026-10-07 实测教训：成功帧在提取链路抛 "undefined is not callable"，
-      // 登录 Cookie 被永久吞掉）。错误留痕后照常返回响应体。
+      // 空 Cookie（成功帧若在提取链路抛错，登录 Cookie 会被永久吞掉）。
+      // 错误留痕后照常返回响应体。
       let responseCookies: string = '';
       try {
         responseCookies = HttpUtil.extractResponseCookies(resp);
@@ -334,7 +333,7 @@ export class HttpUtil {
    *
    * 两个来源，**响应头优先**（对齐 RN 的 response.headers.get('Set-Cookie')，BBPlayer 同款）：
    *   · header['set-cookie']：ohos 把同名多条头用 ', ' 拼成一条，parseJoinedSetCookie 切回；
-   *   · resp.cookies 字段：2026-10-07 实测格式异常（串内无任何可解析 k=v、疑似 URL 编码，
+   *   · resp.cookies 字段：实测格式异常（串内无任何可解析 k=v、疑似 URL 编码，
    *     2297 字符解析出 0 个键），降级为兜底。
    * 两个来源都打格式指纹日志（不含值内容），若提取再失败可一次请求锁定原始格式。
    */
@@ -345,8 +344,8 @@ export class HttpUtil {
     for (let i = 0; i < keys.length; i++) {
       if (keys[i].toLowerCase() === 'set-cookie') {
         // ⚠️ 多条同名 set-cookie 头时，ohos 运行时给的值可能是「数组」而非字符串，
-        // 直接当字符串调 .split 会抛 "undefined is not callable"（2026-10-07 成功帧
-        // 崩溃根因之一）——统一走 normalizeSetCookieHeader 归一化。
+        // 直接当字符串调 .split 会抛 "undefined is not callable" ——
+        // 统一走 normalizeSetCookieHeader 归一化。
         headerCookie = HttpUtil.normalizeSetCookieHeader(header[keys[i]] as Object);
         break;
       }
@@ -442,7 +441,7 @@ export class HttpUtil {
   /**
    * Cookie 串里是否含指定键名。
    * **不要用 Array.includes 替代**：ArkTS 运行时可能没有 Array.prototype.includes
-   * （2026-10-07 实测教训——成功帧处理抛 "undefined is not callable"，登录 Cookie 被吞）。
+   * （调用会抛 "undefined is not callable"）。
    */
   static cookieHasKey(cookie: string, key: string): boolean {
     return HttpUtil.cookieKeys(cookie).indexOf(key) >= 0;
@@ -452,7 +451,7 @@ export class HttpUtil {
    * 解析被 ', ' 拼接的多条 Set-Cookie，返回 k=v; k=v 串。
    * 切分边界：逗号后的片段若以「标识符=」开头则视为新 Cookie；否则（如 Expires 日期
    * 里逗号后的 " 21 Oct..."，以数字开头）并回上一条。**不用正则实现**——本运行时存在
-   * 内建缺失的先例（Array.includes、lookahead 正则均有风险，2026-10-07 教训）。
+   * 内建缺失的先例（Array.includes、lookahead 正则均有风险）。
    * 每条只保留第一个 k=v，丢弃 Path=/Domain/Expires/HttpOnly 等属性。
    */
   private static parseJoinedSetCookie(joined: string): string {

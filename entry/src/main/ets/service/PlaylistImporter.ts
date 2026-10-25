@@ -1,5 +1,5 @@
 /**
- * 歌单导入服务（网易云 / QQ 音乐 → 本地歌单，2026-10-16）。
+ * 歌单导入服务（网易云 / QQ 音乐 → 本地歌单）。
  * 方案见 design/歌单导入方案-网易云与QQ音乐.md，三层管线：
  *
  *   ① 获取：文本粘贴（主路径，永不失效）/ 网易云链接直连（v6 拿 ID → v3 分批查详情）/
@@ -9,9 +9,8 @@
  *      提示**，绝不静默降级成「一行一首」把整串分享文本当歌名去搜。
  *      直连均为非公开接口，失败一律抛错由调用方降级提示。
  *   ② 匹配：B 站搜索 + 打分分档（强匹配自动选中 / 弱匹配人工复核 / 未找到兜底手动搜），
- *      **并发 4 + 全局节流 200ms**（每首候选取 30 条）+ 轮内同曲去重 + 风控即停
- *      （-352/-412/-509/-799），保留进度可续。旧版「串行 + 每首硬等 1.0~1.5s」已废弃，
- *      见下方 MATCH_CONCURRENCY 处的实测依据。
+ *      **并发 2 + 全局节流 800ms**（每首候选取 30 条）+ 轮内同曲去重 + 风控即停
+ *      （-352/-412/-509/-799），保留进度可续（实测依据见 MATCH_CONCURRENCY 处）。
  *   ③ 落库：一次建单落盘（createPlaylist + updatePlaylist 两次 persist，禁止逐首
  *      addTrackToPlaylist —— 它每调一次全量重写所有分片，逐首调用 = I/O 灾难）。
  *
@@ -151,8 +150,7 @@ export function parseSongListText(text: string): ExternalSong[] {
     // 含链接的行**整行丢弃**。分享文本形如
     //   「分享歌单《暴露年龄！90后MP3里的经典老歌》https://c6.y.qq.com/… @… 音乐」
     // 若不过滤，整行（90+ 字符）会当成一首「歌名」去搜 B 站：模糊搜索照样返回结果，
-    // 但打分要求「视频标题包含歌名」→ 全部出局 → 报告页显示「未找到」
-    // （2026-10-16 实测根因之一）。
+    // 但打分要求「视频标题包含歌名」→ 全部出局 → 报告页显示「未找到」。
     if (URL_LINE_RE.test(line)) {
       continue;
     }
@@ -209,11 +207,9 @@ export function defaultImportName(): string {
 //
 
 /**
- * 网易云歌单链接识别。覆盖三种真实形态（2026-10-16 按用户**实际分享链接**扩宽）：
+ * 网易云歌单链接识别。覆盖三种真实形态：
  *   · PC 网页  `music.163.com/#/playlist?id=123`、`music.163.com/playlist?id=123`
  *   · App 分享 `music.163.com/m/playlist?id=17747519380&creatorId=…`
- *     —— 旧正则要求 host 后**紧跟** `playlist`，`/m/` 这一节直接把它挡在门外，
- *     这正是「网易云显示未找到」的根因之一
  *   · 旧路径   `music.163.com/playlist/123`
  *
  * 判定与提取拆成两步：先认平台域名（NETEASE_HOST_RE），再依次找 `?id=` / `/playlist/id`。
@@ -275,7 +271,7 @@ export function detectQqPlaylistId(text: string): string {
 /**
  * 文本里是否含外部平台**链接**（含短链）。
  * 用途：把「粘了链接但提取不出 ID」（该给明确提示）与「粘了歌曲列表」（正常解析）
- * 区分开 —— 旧版对前者静默降级成「一行一首」，导致整串分享文本被当成一首歌去搜。
+ * 区分开。
  */
 export function isExternalPlaylistLink(text: string): boolean {
   return NETEASE_HOST_RE.test(text) || QQ_HOST_RE.test(text)
@@ -307,7 +303,7 @@ export function detectShareShortLink(text: string): ShareShortLink | null {
 /**
  * 解析分享短链 → 歌单 ID（空串 = 解析失败）。
  * 两级策略：① 禁用重定向读 302 的 `Location`（轻量，首选）；② 兜底跟随请求落点页，
- * 从 `og:url` / `canonical` 里提 `/playlist/<id>`（2026-10-16 实测两条路都可用，
+ * 从 `og:url` / `canonical` 里提 `/playlist/<id>`（实测两条路都可用，
  * ①可能因引擎不支持 maxRedirects 而失效，故保留 ②）。
  * 隐私红线同文件头：第三方请求必须 skipCookie + skipReferer。
  */
@@ -371,7 +367,7 @@ interface NeteaseV3Resp {
 }
 
 /**
- * 网易云歌单直连（方案 §6.1，2026-10-12 实测口径）：
+ * 网易云歌单直连（方案 §6.1）：
  * ① /api/v6/playlist/detail 拿 name / coverImgUrl / trackIds（完整 ID 顺序表，
  *    其 tracks 数组只含前约 6 首，不能当全量用）；
  * ② /api/v3/song/detail?c=[{"id":N},…] 按 ID 分批查详情。
@@ -472,7 +468,7 @@ interface QqResp {
 }
 
 /**
- * QQ 音乐歌单直连（方案 §6.2，2026-10-12 实测口径）：一次拿全量纯 JSON
+ * QQ 音乐歌单直连（方案 §6.2）：一次拿全量纯 JSON
  * （json=1 生效无 JSONP 壳）。g_tk=5381 是固定匿名值，平台加校验就会整体失效
  * —— 失败由调用方降级提示「改用文本粘贴」。
  */
@@ -561,13 +557,12 @@ const SCORE_OUT: number = -100;
 const RISK_CODES: number[] = [-352, -412, -509, -799];
 
 /**
- * HTML 实体解码已上移到 `utils/TextUtil.ts`（`decodeHtmlEntities`，2026-10-22）：
- * HTML 搜索页兜底通道解析卡片 `title="..."` 属性时也要用，两处共用一份。
+ * HTML 实体解码在 `utils/TextUtil.ts`（`decodeHtmlEntities`），HTML 搜索页
+ * 兜底通道解析卡片 `title="..."` 属性时也要用，两处共用一份。
  *
- * 背景（保留原注释，说明为什么必须有它）：B 站搜索结果的 `title` 里存在 HTML 实体
+ * 为什么必须有它：B 站搜索结果的 `title` 里存在 HTML 实体
  * （`Shatter the God&#x27;s Crown`），而 `stripHtmlTags` 只去标签、不解码 ——
  * 不解码时 `God&#x27;s` 归一成 `god&x27;s`，与歌名 `God's` 永远对不上，整首直接出局。
- * 实测这是 268 首歌单里一批曲目「搜得到却匹配不上」的直接原因之一。
  */
 
 /**
@@ -769,15 +764,8 @@ function matchTitleTier(songTitle: string, videoTitle: string): TitleMatch {
 }
 
 /**
- * 打分（2026-10-21 重写，实测口径见 design/歌单导入-匹配算法改进.md）。
- *
- * 旧版三个硬伤，都会把「其实搜到了」变成「未找到」：
- *   ① 歌名完全不清洗，视频标题却走 `cleanTitle` —— `错位时空 (DJ版)` 的
- *      `(dj版)` 永远不可能出现在清洗后的标题里，直接出局；
- *   ② `stripHtmlTags` 只去标签、不解码实体（`God&#x27;s`）；
- *   ③ 多歌手整串比（`A/B/C`）几乎不可能在标题里出现，白丢 2 分降到「待确认」。
- *
- * 现在：三级标题匹配（A5 / B4 / C3）+ 子歌手逐个比 + 版本一致性校验。
+ * 打分（实测口径见 design/歌单导入-匹配算法改进.md）：
+ * 三级标题匹配（A5 / B4 / C3）+ 子歌手逐个比 + 版本一致性校验。
  * 返回 SCORE_OUT 表示标题对不上任何一档。
  */
 export function scoreCandidate(song: ExternalSong, item: SearchResultItem): number {
@@ -872,16 +860,11 @@ function matchCacheKey(song: ExternalSong): string {
 //
 
 /**
- * 匹配并发与节流（2026-10-22 第二次调参：**主动降速规避风控**）。
+ * 匹配并发与节流（**主动降速规避风控**）。
  *
- * 历史：方案 §3.3 原是「严格串行 + 每首硬等 1.0~1.5s」（500 首要 14 分钟，13 分钟在睡）；
- * 10-16 实测短跑（并发 2/3/5/8 各打 16 首）全部零风控，于是改成「并发 4 + 间隔 200ms」
- * ≈ 5 QPS。**但那个结论只在 16 首的短窗口成立**：真机导入 268 首时，跑到第 86 首就吃到
- * HTTP 412，之后每首都失败（这正是「很多没找到」的另一半原因）。
- *
- * 结论：B 站卡的不是瞬时 QPS，而是**同一 buvid/IP 在几分钟内的累计请求量**。
- * 故稳态按 ~1.25 QPS 走（并发 2 + 全局间隔 800ms）：268 首约 4~5 分钟，
- * 慢 3~4 倍但能整轮跑完，比「跑 1 分钟撞墙、剩下 180 首全废」划算得多。
+ * B 站卡的不是瞬时 QPS，而是**同一 buvid/IP 在几分钟内的累计请求量**：
+ * 短窗口高并发（≈5 QPS）实测零风控，但长歌单（268 首级）中途必撞 HTTP 412。
+ * 故稳态按 ~1.25 QPS 走（并发 2 + 全局间隔 800ms）：慢 3~4 倍但能整轮跑完。
  * 想让速度再退一档，把 MATCH_MIN_GAP_MS 改 1000 即可（约 60 次/分钟），其余逻辑自洽。
  *
  * 仍保留自适应兜底（见 RISK_* ）：万一还是撞墙，会自动降速 + 等待后**自动继续**，
@@ -901,7 +884,7 @@ const GAP_EASE_AFTER_OK: number = 30;
 const GAP_EASE_FACTOR: number = 0.75;
 /** 退避等待的分段长度（ms）：每隔这么久刷一次倒计时文案，让用户知道没卡死 */
 const BACKOFF_TICK_MS: number = 5000;
-/** 单次搜索取的候选数（20→30：实测 rt 完全一致，候选多 50% 能提高命中率、减少手工复核） */
+/** 单次搜索取的候选数（多取候选能提高命中率、减少手工复核，rt 实测完全一致） */
 const MATCH_PAGE_SIZE: number = 30;
 /**
  * 广播节流（ms）：并发后每秒会 notify 近 20 次，每次都是「新建 items 数组」的全量快照，
@@ -1210,7 +1193,7 @@ export class ImportTaskManager {
    * 一轮轮跑池子，**命中风控时自动降速 + 退避 + 续跑**（最多 RISK_RETRY_LIMIT 次）。
    *
    * worker 只在「做完手上这一首」后才退出，故停止/风控时 `cursor` 之前的条目必定已定状态，
-   * resume 语义与旧串行版完全一致（不跳曲、不重复标记）。
+   * resume 语义一致（不跳曲、不重复标记）。
    *
    * 为什么不让用户手动点「继续」：一是他未必知道要点；二是限流通常只持续几十秒，
    * 手动续跑几乎必然在还没解除时再次撞墙，白跑一轮。降速后自动接上才是正解。
@@ -1326,7 +1309,7 @@ export class ImportTaskManager {
   /**
    * 判断一次失败是不是「被限流」。
    *
-   * ⚠️ 必须同时认两种形态（2026-10-21 真机踩到）：
+   * ⚠️ 必须同时认两种形态：
    *   ① 业务码：`BiliApiError` 的 `code` 落在 RISK_CODES 里（-352 等）；
    *   ② **HTTP 状态码**：`HttpUtil` 对 `responseCode >= 400` 抛的是**普通 `Error`**
    *      （`HTTP 412 for <url>`），不是 `BiliApiError`。
@@ -1521,7 +1504,7 @@ export class ImportTaskManager {
   /**
    * 匹配一首：搜「歌名 歌手」→（零结果降级纯歌名）→ 打分 → 分档。
    *
-   * 2026-10-21 增补：**首轮候选全部出局时**，用「中文段 + 第一歌手」再召回一次。
+   * **首轮候选全部出局时**，用「中文段 + 第一歌手」再召回一次。
    * 依据是双语标题（`格拉默的余烬 The Embers of Glamoth`）整串搜索召回极差，
    * 中文段单独搜反而直接命中。只在失败分支触发，正常曲目不增加任何请求。
    */

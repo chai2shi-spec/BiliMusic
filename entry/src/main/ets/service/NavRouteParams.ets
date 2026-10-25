@@ -1,10 +1,8 @@
 /**
- * 路由参数类（2026-10-22 Navigation 差距收敛）。
+ * 路由参数类。
  *
- * 背景：此前跨页传参走 NavStackHolder 的静态字段（upMid/upName/upFace/
- * selectedPlaylistId），写入与读取分离在不同页面，既无法在路由栈上追溯
- * （getParamByName 拿不到），也容易残留上一个入口的旧值（静态字段不清零
- * 就带着上一位用户的数据进页）。现统一为 pushPathByName 显式路由参数：
+ * 跨页传参统一为 pushPathByName 显式路由参数（不用静态字段：静态字段无法在
+ * 路由栈上追溯（getParamByName 拿不到），也容易残留上一个入口的旧值）：
  *   · 生产端 push 时 new 一个参数对象随路由入栈；
  *   · 消费端 getParamByName 取回后 instanceof 判型再读字段
  *    （SDK 返回值不透明，必须判型，不做结构推断）。

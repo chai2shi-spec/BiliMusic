@@ -1,7 +1,7 @@
 /**
  * ══════════ 顶栏渐变模糊「抛行丢遮罩」绕行 Demo（可运行示例）══════════
  *
- * 背景（2026-10-24）：主工程 HdsNavigation titleBar 的 HDS 内建滚动模糊
+ * 背景：主工程 HdsNavigation titleBar 的 HDS 内建滚动模糊
  * （GRADIENT_BLUR 与 IMMERSIVE_GRADIENT_BLUR 两种渐变管线均真机复现）在
  * 手指松手后的惯性滚动（ScrollState.Fling）阶段被系统渲染管线丢弃、
  * 渐变模糊消失，滚动停止后恢复；拖拽阶段始终正常。HDS 管线内无参数可
@@ -20,14 +20,14 @@
  * ══════════ 三个可疑根因与本 Demo 对策 ══════════
  *
  * 1. 抛滑阶段业务代码主动禁用高开销模糊效果
- *    → [状态机⑤] onWillScroll 区分 Idle/Drag/Fling；Fling 阶段**只把
+ *    → onWillScroll 区分 Idle/Drag/Fling；Fling 阶段**只把
  *      模糊半径上限从 20 降到 12（性能降级），绝不移除/隐藏渐变效果**；
  *      onScrollStop 兜底校正偏移漂移并恢复全质量档。
  *
  * 2. Tabs / TabContent 默认 clip=true 裁剪掉越界的渐变遮罩
  *    → 本方案渐变渲染在 List 内容自身、无越界遮罩层，机制上已消除；
  *      仍按需求在 Tabs / TabContent / List 全部显式 clip(false) 防御
- *      （[裁剪修复⑥]，若未来叠加越界遮罩层则必须保留）。
+ *      （若未来叠加越界遮罩层则必须保留）。
  *
  * 3. 遮罩写在 Scroll 内部、BlendMode 未用 OFFSCREEN 合成丢失
  *    → ⚠️ 本 SDK（6.1.0 / API 23）mask() **没有渐变/Column 重载**
@@ -37,25 +37,17 @@
  *      L19107，fractionStops + direction，API 12+）。渐变直接进列表内容，
  *      无独立遮罩层、无混合模式依赖 → 该根因从机制上消除。
  *
- * ══════════ 第④轮实测结论（2026-10-24）与本轮对策 ══════════
+ * ══════════ 实测结论与本 Demo 对策 ══════════
  *
  * 内容级 linearGradientBlur 在默认抛行速度（惯性初速上限 9000 vp/s）下
  * 同样丢模糊 → HDS 两条渐变管线 + 内容级渐变三条渲染路径同症，而拖拽
- * 速度（约 2-3k vp/s）下三条路径全部存活 → 触发因子是**滚动速度带来的
- * 帧负载**，不是具体模糊管线。对策（用户拍板：改低负载实现）：
- * [低负载④] flingSpeedLimit 压惯性初速 9000→2500 vp/s，使抛行全程负载
- * 等效慢拖。仍丢则降 1500 再验；稳了可上调 3500/4000 试上限；若丢模糊
- * 与速度无关（Fling 状态本身触发），备选 onScrollFrameBegin 逐帧钳制
- * （List API 9+，common.d.ts L1832）。
+ * 速度（约 2-3k vp/s）下三条路径全部存活；flingSpeedLimit 压到 2500
+ * 仍丢 → 定论：丢模糊由 ScrollState.Fling **状态本身**触发，与速度/
+ * 负载无关。SDK 状态语义（list.d.ts L29-71）：拖拽=Scroll；系统惯性/
+ * 回弹/控制器**动画**方法=Fling；控制器**非动画**方法=**Idle**。
+ * → 唯一不丢模糊的位移通道：Idle。
  *
- * ══════════ 第⑤轮（2026-10-24）：自驱惯性（Idle 通道）══════════
- *
- * 第④轮真机实测：flingSpeedLimit 2500 下抛行仍丢模糊 → 定论：丢模糊由
- * ScrollState.Fling **状态本身**触发，与速度/负载无关。SDK 状态语义
- * （list.d.ts L29-71）：拖拽=Scroll；系统惯性/回弹/控制器**动画**方法
- * =Fling；控制器**非动画**方法=**Idle**。→ 唯一未尝试的位移通道：Idle。
- *
- * 机制：onWillScroll 对 Fling 帧返回 { offsetRemain: 0 } 整帧吃掉系统
+ * 机制（自驱惯性，Idle 通道）：onWillScroll 对 Fling 帧返回 { offsetRemain: 0 } 整帧吃掉系统
  * 惯性（列表不再产生任何 Fling 态位移）→ Animator.onFrame 按二次减速
  * 曲线逐帧计算位移 → scroller.scrollBy（**非动画**，ScrollState.Idle）
  * 驱动惯性 → 抛行全程只有 Idle/Scroll 态，渐变模糊理论上全程在场
@@ -63,7 +55,7 @@
  * 已知取舍：拖过底边缘松手的回弹动画同为 Fling 态、也被吃掉 → 不回弹，
  * 待下次触摸恢复（Demo 已知限制）。
  *
- * ══════════ 结构（需求④）══════════
+ * ══════════ 结构 ══════════
  *
  * 外层 Stack → HdsNavigation（titleBar 显式 enableScrollEffect:false 关闭
  * HDS 内建滚动模糊管线 = 绕开丢 pass 源头；不再 bindToScrollable）
@@ -88,7 +80,7 @@ import { STORE_SAFE_TOP } from '../common/Constants';
 /** 渐变模糊全质量档半径上限（vp）：Idle / Drag 阶段生效 */
 const DEMO_FULL_BLUR_RADIUS: number = 20;
 
-/** 惯性滚动（Fling）性能降级档半径上限（vp）：只降档、绝不移除（需求⑤） */
+/** 惯性滚动（Fling）性能降级档半径上限（vp）：只降档、绝不移除 */
 const DEMO_FLING_BLUR_RADIUS: number = 12;
 
 /** 偏移→模糊强度线性过渡区间（vp）：对齐主工程 0→20 口径，滚过 20vp 封顶 */
@@ -96,8 +88,8 @@ const DEMO_BLUR_END_OFFSET: number = 20;
 
 /**
  * 惯性滚动初速上限（vp/s，flingSpeedLimit，系统默认 9000）。
- * 第④轮实测：2500 下抛行仍丢模糊 → 速度不是触发因子（Fling 状态才是）。
- * 第⑤轮起系统惯性帧被 onWillScroll 整帧吃掉，本属性退化为冗余保险
+ * 实测 2500 下抛行仍丢模糊 → 速度不是触发因子（Fling 状态才是）。
+ * 系统惯性帧被 onWillScroll 整帧吃掉，本属性退化为冗余保险
  * （若吃帧机制失效，系统抛行至少仍被限速）。
  */
 const DEMO_FLING_SPEED_LIMIT: number = 2500;
@@ -175,7 +167,7 @@ struct GradientBlurDemoPage {
   /**
    * 当前生效的渐变模糊半径（vp）。
    * · 顶部原始态（强度 0）不模糊，保持干净原始观感；
-   * · Fling 只降**上限**（20→12）做性能降级，效果本体永不下线（需求⑤）；
+   * · Fling 只降**上限**（20→12）做性能降级，效果本体永不下线；
    * · 半径随强度线性进入，等价 HDS blurEffectiveStart/EndOffset 的过渡语义。
    */
   private currentBlurRadius(): number {
@@ -193,7 +185,7 @@ struct GradientBlurDemoPage {
   }
 
   /**
-   * [自驱⑤] onWillScroll 分发（滚动发生前回调）：
+   * onWillScroll 分发（滚动发生前回调）：
    * · Fling 帧（系统惯性/回弹）：返回 { offsetRemain: 0 } **整帧吃掉**，
    *   列表不再产生任何 Fling 态位移；首次 Fling 帧启动自驱惯性接管。
    * · Scroll 帧（拖拽）：累计偏移 + 采样速度；若自驱惯性仍在跑先取消
@@ -254,7 +246,7 @@ struct GradientBlurDemoPage {
   }
 
   /**
-   * [自驱⑤] 自驱惯性：Animator.onFrame 按二次减速曲线 s(p)=D·(1-(1-p)²)
+   * 自驱惯性：Animator.onFrame 按二次减速曲线 s(p)=D·(1-(1-p)²)
    * 逐帧取位移增量，经**非动画** scroller.scrollBy（ScrollState.Idle 通道）
    * 驱动 → 惯性全程无 Fling 态。初速 v0 由拖拽采样估算，D = v0·T/2000
    * （二次减速下初始速度 2D/T = v0）。
@@ -318,7 +310,7 @@ struct GradientBlurDemoPage {
   }
 
   /**
-   * [兜底⑧] onScrollStop：滚动停止时以 Scroller 实测偏移**校正** onWillScroll
+   * onScrollStop：滚动停止时以 Scroller 实测偏移**校正** onWillScroll
    * 增量累加的漂移（回弹、动画滚动等场景），清空速度采样并恢复全质量档。
    */
   private handleScrollStop(tab: DemoTab): void {
@@ -365,20 +357,20 @@ struct GradientBlurDemoPage {
     }
     .width('100%')
     .height('100%')
-    .clip(false)                                              // [裁剪修复⑥] 防御性：显式关闭默认裁剪
+    .clip(false)                                              // 防御性：显式关闭默认裁剪
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
-    .flingSpeedLimit(DEMO_FLING_SPEED_LIMIT)                  // [冗余保险④] 系统惯性已被吃帧，此属性仅兜底限速
+    .flingSpeedLimit(DEMO_FLING_SPEED_LIMIT)                  // 冗余保险：系统惯性已被吃帧，此属性仅兜底限速
     .contentStartOffset(this.safeTop + DEMO_TITLE_BAR_HEIGHT) // 内容起始让位状态栏+标题栏；滚动时内容仍从栏下穿过
-    .linearGradientBlur(this.currentBlurRadius(), {           // [核心⑦] 内容级线性渐变模糊（本 SDK 唯一官方渐变模糊通路）
+    .linearGradientBlur(this.currentBlurRadius(), {           // 内容级线性渐变模糊（本 SDK 唯一官方渐变模糊通路）
       fractionStops: DEMO_FRACTION_STOPS,                     //   顶部全模糊 → 24% 视口高度渐隐归零
       direction: GradientDirection.Bottom                     //   渐变轴从上到下
     })
     .onWillScroll((scrollOffset: number, scrollState: ScrollState, scrollSource: ScrollSource) => {
-      return this.handleWillScroll(tab, scrollOffset, scrollState)   // [自驱⑤] Fling 帧吃掉 + 拖拽采样 + 偏移累计
+      return this.handleWillScroll(tab, scrollOffset, scrollState)   // Fling 帧吃掉 + 拖拽采样 + 偏移累计
     })
     .onScrollStop(() => {
-      this.handleScrollStop(tab)                              // [兜底⑧] 停止校正 + 恢复全质量
+      this.handleScrollStop(tab)                              // 停止校正 + 恢复全质量
     })
   }
 
@@ -391,10 +383,10 @@ struct GradientBlurDemoPage {
               this.DemoList(tab)
             }
             .tabBar(tab.label)
-            .clip(false)                                      // [裁剪修复⑥]
+            .clip(false)
           }, (tab: DemoTab) => tab.label)
         }
-        .clip(false)                                          // [裁剪修复⑥]
+        .clip(false)
         .onChange((index: number) => {
           this.handleTabChange(index)
         })

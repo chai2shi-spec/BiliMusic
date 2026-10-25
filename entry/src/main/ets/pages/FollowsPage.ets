@@ -10,7 +10,7 @@
  * LibraryStore 会递增该版本号）。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，stackBuilder 承载
- * 标题 + 「共 N 人」计数行，批 1 样板同款，与 RecentPage 同构；返回键为 HDS 默认键）。
+ * 标题 + 「共 N 人」计数行，与 RecentPage 同构；返回键为 HDS 默认键）。
  *
  * 未登录自检：设置页入口已拦截未登录，但路由仍可能被其他入口触达，
  * 页面自己再查一次登录态，未登录渲染登录引导空态而非「没数据」。
@@ -125,7 +125,7 @@ export struct FollowsPage {
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 计数行 28（有关注时）。
    * 标题行与 bottomBuilder 计数行高度均为定值，无需实测——
-   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值（旧 onAreaChange 实测机制已废弃）。
+   * 顶部占位条目（下载页同款）与空态 padding 直接绑定该值。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT
@@ -133,10 +133,10 @@ export struct FollowsPage {
   }
 
   /**
-   * [任务③·推广二级页] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型
-   * 推广，四页签同款）：onDidScroll / onScrollStop 命令式驱动 opacity（不标
-   * @State，滚动高频回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射
-   * 0 → 1（updater 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（四页签同款）：onDidScroll /
+   * onScrollStop 命令式驱动 opacity（不标 @State，滚动高频回调零重建）；
+   * yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，
+   * 边缘回弹负偏移归零 = 死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -150,7 +150,7 @@ export struct FollowsPage {
   /** 列表数据源：与 @State ups 同步（整表重载统一走 upSource.reload） */
   private upSource: ArrayDataSource<FollowedUp> = new ArrayDataSource<FollowedUp>([]);
   /**
-   * 两列视图数据源（无状态视图，2026-10-23 两列改造）：读 upSource 现场构造
+   * 两列视图数据源（无状态视图）：读 upSource 现场构造
    * PairOf，不缓存不注册 listener —— upSource 数据变化处显式调 upPairs.sync()
    * （见 TwoColumnList.PairDataSource 注释）。
    */
@@ -161,7 +161,7 @@ export struct FollowsPage {
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
-    // [任务③·推广二级页] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
     this.checkLoginAndLoad();
@@ -258,9 +258,8 @@ export struct FollowsPage {
       const data: FollowingsData = await getFollowings(user.mid, next);
       // 成功才推进 page：失败时下次 onReachEnd 仍从当前页重试
       this.page = next;
-      // 增量追加（2026-10-19 修「加载第二页列表整体跳一下」）：
-      // 不再整表 reload（onDataReloaded 会让可视区节点失效重建、锚点重算），
-      // 改为按 mid 去重后 push 进镜像数组 + upSource.append 只发 onDataAdd。
+      // 增量追加：不整表 reload（onDataReloaded 会让可视区节点失效重建、
+      // 锚点重算，列表整体跳动），按 mid 去重后 push 进镜像数组 + upSource.append 只发 onDataAdd。
       const seen: Set<string> = new Set<string>();
       for (let i = 0; i < this.ups.length; i++) {
         seen.add(String(this.ups[i].mid));
@@ -393,7 +392,7 @@ export struct FollowsPage {
   }
 
   /**
-   * 标题行收窄容器（2026-10-23 平板模式宽度适配）：HDS titleBar 的 stackBuilder
+   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
    * 横跨目的地整列全宽，而本页条目内容列被 constraintSize 收窄居中 —— 大屏上
    * 标题行会贴到整列左缘、与居中条目错位。外层 Row 居中 + 内层 Column
    * constraintSize（上限与本页内容列完全同口径），标题行与条目列同宽对齐；
@@ -417,7 +416,7 @@ export struct FollowsPage {
   }
 
   /**
-   * 「共 N 人」计数行收窄容器（2026-10-23 平板模式宽度适配）：同 followsBarNarrow
+   * 「共 N 人」计数行收窄容器（平板模式宽度适配）：同 followsBarNarrow
    * 口径 —— bottomBuilder 也横跨整列全宽，收窄后计数行与本页条目列同宽对齐；
    * bottomBuilder 显式高度（FOLLOWS_COUNT_ROW_HEIGHT）不动。sm 天然无操作。
    */
@@ -467,7 +466,7 @@ export struct FollowsPage {
       .margin({ left: 12 })
 
       if (getPlaylistByUpMid(String(up.mid)) !== null) {
-        // 阶段 5：小字徽标改用系统标准 Chip（原为粉色描边自绘胶囊）。
+        // 小字徽标用系统标准 Chip。
         // ⚠️ Chip 是 @Builder 组件，不能链式挂属性 → 外边距挂外层 Row。
         Row() {
           Chip({
@@ -590,15 +589,15 @@ export struct FollowsPage {
             List({ scroller: this.listScroller }) {
               // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在
               // 屏幕顶端（y=0）。占位高度 = 标题栏总让位量（barTotalHeight：
-              // safeTop + 56 + 计数行 28），首个真实条目恰从栏底起排（静置位与旧
-              // contentStartOffset 等值），滚动时占位与条目一起从沉浸材质下方穿过。
+              // safeTop + 56 + 计数行 28），首个真实条目恰从栏底起排，
+              // 滚动时占位与条目一起从沉浸材质下方穿过。
               ListItem() {
                 // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
                 Row()
                   .width('100%')
                   .height(this.barTotalHeight())
               }
-              // 横屏宽屏（2026-10-23 两列改造）：upRow 配对两列（左右槽各渲染一次，
+              // 横屏宽屏：upRow 配对两列（左右槽各渲染一次，
               // 行内订阅徽标 / 点击按行独立）；占位与尾部状态条保持整行宽。
               if (this.isTwoCol()) {
                 LazyForEach(
@@ -638,7 +637,7 @@ export struct FollowsPage {
                   (up: FollowedUp): string => String(up.mid)
                 )
               }
-              // 尾部状态条（2026-10-19 常驻 + 固定高度）：只换内容不插拔条目，
+              // 尾部状态条（常驻 + 固定高度）：只换内容不插拔条目，
               // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
               ListItem() {
                 Row() {
@@ -667,21 +666,21 @@ export struct FollowsPage {
               }
             }
             .layoutWeight(1)
-            // 边界回弹（2026-10-08）：到顶/到底的反馈动效
+            // 边界回弹：到顶/到底的反馈动效
             .edgeEffect(EdgeEffect.Spring)
             .cachedCount(8)
-            // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-            //（见上方占位注释，下载页同款），不再使用 contentStartOffset。
+            // 顶部 HDS 标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem
+            // 负责（见上方占位注释，下载页同款）。
             .onReachEnd((): void => {
               this.loadMore();
             })
-            // [任务③·推广二级页] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
+            // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
             // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
             .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
               this.syncTopBlurProgress();
             })
             .onScrollStop((): void => {
-              // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+              // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
               this.syncTopBlurProgress();
             })
           }
@@ -690,12 +689,12 @@ export struct FollowsPage {
         .height('100%')
         .backgroundColor($r('app.color.bg_page'))
         // ⚠️ 不整体 padding top / safeAreaPadding bottom：列表视口铺满全屏并直接
-        // 扩展进底部安全区（2026-10-09：不做底部避让，沉浸到底）
+        // 扩展进底部安全区（不做底部避让，沉浸到底）
         // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）；
         // 横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL），竖屏维持原值
         .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-        // [任务③·推广二级页] 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
+        // 顶栏渐变模糊层：盖内容列之上（z 序低于 HDS
         // titleBar，计数行属标题栏 bottomBuilder、随整栏一起盖），进度由列表
         // onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
         TopGradientBlurOverlay({
@@ -704,9 +703,9 @@ export struct FollowsPage {
         })
       }
     }
-    // HDS 沉浸光感标题栏（批 1 样板同款，真机结论见 AboutPage 注释）：
+    // HDS 沉浸光感标题栏（真机结论见 AboutPage 注释）：
     // avoidLayoutSafeArea 挡状态栏重叠；enableComponentSafeArea 会杀材质，禁用。
-    // 2026-10-23 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
+    // 平板模式宽度适配：stackBuilder / bottomBuilder 均走收窄容器
     //（followsBarNarrow / followsCountRowNarrow），标题行与计数行和条目列同宽对齐。
     .titleBar({
       avoidLayoutSafeArea: true,
@@ -728,8 +727,7 @@ export struct FollowsPage {
         } : undefined
       }
     })
-    // 返回键（2026-10-24 返回键避开状态栏整改）：自绘键已从 NavTitleRow 移除，
-    // 改用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
+    // 返回键：使用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
     // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
     .bindToScrollable([this.listScroller])
     // 子页转场：横移量由转场代理驱动（translate 是视觉变换，不改布局）
@@ -737,10 +735,10 @@ export struct FollowsPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（2026-10-24 二级页播放页返回修复）：播放页 overlay 打开时
+    // 系统返回拦截：播放页 overlay 打开时
     // 吞掉返回并发收起请求（留在本页），否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => handleSubPageBackPress())
-    // 内容避让（2026-10-14）：目的地级声明布局扩展进系统安全区（官方组件级沉浸
+    // 内容避让：目的地级声明布局扩展进系统安全区（官方组件级沉浸
     // 口径，faqs-arkui-1095 场景三同款）；窗口全屏下页面级为既成事实，此处显式化
     // 并接管组件级 safeAreaPadding。内容层避让由顶部占位条目 / plain padding 自理。
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -748,8 +746,8 @@ export struct FollowsPage {
 }
 
 /**
- * 懒加载注册表入口（见 service/LazyPageRegistry.ets，2026-10-17 启动优化）：
- * Index 已不再静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
+ * 懒加载注册表入口（见 service/LazyPageRegistry.ets）：
+ * Index 不静态 import 本页；动态 import 后经 wrapBuilder 调用本 Builder 渲染。
  */
 @Builder
 export function FollowsPageBuilder(): void {
@@ -757,7 +755,7 @@ export function FollowsPageBuilder(): void {
 }
 
 
-/** 懒加载注册表预包装（2026-10-17）：wrapBuilder 只接受本文件内的直接
+/** 懒加载注册表预包装：wrapBuilder 只接受本文件内的直接
  * @Builder 引用（编译期校验），注册表经动态 import 取本导出。 */
 export const FollowsPageWrapped: WrappedBuilder<[]> = wrapBuilder(FollowsPageBuilder);
 

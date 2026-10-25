@@ -1,27 +1,27 @@
 /**
  * 全局底部播放栏（PlayBar）—— HDS 悬浮底栏 miniBar 槽位内容（与页签胶囊融合）。
  *
- * 架构（2026-10-14 重构：内容侧全面动画驱动）：
+ * 架构（内容侧全面动画驱动）：
  *   本组件**不再自带定位与背景**，作为 Index.ets 里 barFloatingStyle.miniBar 的
  *   builder 内容渲染 —— HDS 把它和页签项排进**同一个悬浮胶囊**
  *   （barLayoutMode: HdsBarLayoutMode.HORIZONTAL：播放栏在左、页签在右，一行融合），
  *   液态玻璃材质、悬浮离底、底部安全区避让全部由 HDS 统一处理，无需重复实现。
  *
  *   build() = **恒驻唱片（Disc）+ 内容体（Body）交叉淡入淡出**：
- *     · Disc —— 唱片圆盘**永不重挂载**：旋转连续（AnimatorResult 每帧回写角度）、
+ *     · Disc —— 唱片圆盘**永不重挂载**：静止封面（不旋转）、
  *       geometryTransition 全程单节点、位置恒为行首（padding 8 后）——
  *       任何收起/展开动画期间唱片零位移零跳动。尺寸 discSizeVp 由
  *       onMiniBarAnimPhaseChanged / onExpandedChanged 两个 @Watch 用 animateTo
  *       过渡（垂直两层收起/展开 28↔40 平滑跟随槽位高度）。
  *     · Body —— 歌名/歌手 + 播放/暂停键，在隔离 Stack 里按 bodyVisible() 挂载/卸载，
  *       根节点挂 TransitionEffect.OPACITY（CONTENT_FADE_MS=400，EaseInOut）——
- *       收起/展开时与圆环进度交叉淡入淡出，全程无瞬切（替代旧的两套内容体
- *       if/else 硬切 —— 那正是「收起/展开跳动错位」的根源）。
+ *     收起/展开时与圆环进度交叉淡入淡出，全程无瞬切（两套内容体 if/else 硬切
+ *     正是「收起/展开跳动错位」的根源，不可取）。
  *     · 直线进度（整行底边 2vp）与圆环进度（水平收起态圆盘边缘）同样挂 OPACITY
  *       transition，随 bodyVisible() 淡入淡出。
  *
  *   bodyVisible()（相位鲁棒 —— onBarStyleChange 相对动画起止的翻转时序不保证）：
- *     · 垂直两层 / 宽屏 → 恒 true（2026-10-13 用户要求：垂直两层收起与展开内容一致）；
+ *     · 垂直两层 / 宽屏 → 恒 true（垂直两层收起与展开内容一致）；
  *     · 槽位动画中 → TO_EXPAND 淡入 / TO_COLLAPSE 淡出（相位来自 Index 发布的
  *       STORE_MINI_BAR_ANIM_PHASE，HDS onMiniBarAnimationStart/End 回调写入）；
  *     · 空闲 → 按展开态（STORE_MINI_BAR_EXPANDED）。
@@ -37,32 +37,24 @@
  *   展开态点按 → 打开播放页（openPlayer：挂载 Index 根 Stack 的播放页 overlay，
  *   背景面经槽位内**透明锚点**与播放页全屏面 geometryTransition 配对（起点 =
  *   迷你栏真实视觉包围盒，系统跨 HDS 窗口换算），封面另走 geometryTransition
- *   页内配对一镜到底，连点防护复用 STORE_PLAYER_TRANSITIONING；2026-10-21 起
- *   不再 pushPath 路由跳转）。
+ *   页内配对一镜到底，连点防护复用 STORE_PLAYER_TRANSITIONING；组件状态
+ *   切换动画，不走 pushPath 路由跳转）。
  *
  * 封面圆盘尺寸（coverSize → discSizeVp 初值）：**纯常量选择，不做任何测量**。
  *   · 展开态 / 宽屏 / 水平融合 → COVER_SIZE(40)；
  *   · 垂直两层 + 收起 → MINI_DISC_COLLAPSED_VERTICAL(28)（收起行更矮，40 会被裁）。
- *   ⚠️ 曾经用根节点 onAreaChange 实测槽位高来自适应 —— **真机回归：垂直两层下
- *   展开迷你栏直接消失**。教训：别在 HDS 托管的内容里「由布局回调回写 @State」，
- *   状态写入落在 HDS 自己的形变动画过程中，内容会中途重建、槽位挂掉。
- *   恒驻唱片架构下更不能挂 —— 唱片是唯一恒驻节点，重建即旋转/转场断裂。
+ *   ⚠️ 别用根节点 onAreaChange 实测槽位高来自适应 —— 真机上垂直两层下展开
+ *   迷你栏会直接消失：HDS 托管的内容里「由布局回调回写 @State」，状态写入
+ *   落在 HDS 自己的形变动画过程中，内容会中途重建、槽位挂掉。
+ *   恒驻唱片架构下更不能挂 —— 唱片是唯一恒驻节点，重建即转场断裂。
  *   ⚠️ 常量也不能取太大：enableMiniBarClip 默认 true，超出槽位的部分会被硬裁。
  *
- * 唱片旋转（AnimatorResult 驱动，非 .animation() 属性动画）：
- *   当前 SDK 没有 AnimationState / playControls，属性动画无法暂停保持角度；
- *   用 UIContext.createAnimator（begin 0°→end 360°，linear，iterations -1 无限循环）
- *   每帧回写 @State rotateAngle → Image.rotate({ z: 1, angle }) 跟转：
- *     · isPlaying=true  → play()    —— 等价 Playing，从暂停帧继续；
- *     · isPlaying=false → pause()   —— 等价 Paused，冻结当前角度**不复位**；
- *     · 切歌（track 变化）→ reset() —— 等价 Stopped，角度重置 0°，再按播放态决定是否续转。
- *   性能（2026-10-23 转动卡顿修复）：onFrame → @State → build() 的逐帧重执行是
- *   JS 层真实开销，两道削减 —— ① playerOpen=true（迷你唱片已摘除）一律 pause，
- *   杜绝播放页打开期间本组件大树以 120Hz 空转重建；② onFrame 隔帧回写（≈60fps）。
+ * 封面不旋转（用户指定）：迷你唱片与播放页大封面一并静止，不做转盘动效
+ * （createAnimator 无限循环 + onFrame 回写 rotateAngle 会带来每帧 @State 重建开销）。
  *
  * 播放进度指示（主题色）：
  *   · 圆环 —— 水平融合收起态：与圆盘同尺寸的兄弟节点叠在封面边缘（描边画在
- *     组件边界内侧、不触发 clip；不随唱片旋转、不参与 geometryTransition）；
+ *     组件边界内侧、不触发 clip；不参与 geometryTransition）；
  *   · 直线 —— 整行内容（展开 / 垂直两层 / 宽屏）：槽位底边 2vp（Stack Bottom
  *     叠加 + 淡主题色底轨 + 左右内缩避开胶囊圆角；只铺播放栏槽位，HDS clip
  *     会把内容裁在槽位内，延伸不到页签段）。
@@ -79,7 +71,6 @@
 
 import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL, PLAYER_CLOSE_STYLE_SLIDE } from '../model/MusicModels';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { toThumbUrl } from '../utils/TextUtil';
 import { CoverImage } from './CoverImage';
 import {
@@ -104,8 +95,6 @@ import {
   STORE_MINI_BAR_PROGRESS,
   STORE_PROGRESS,
   STORE_DURATION,
-  STORE_APP_FOREGROUND,
-  STORE_FLING_ACTIVE,
   STORE_THEME_PRIMARY,
   GEOMETRY_ID_PLAYER_DISC,
   GEOMETRY_ID_PLAYER_SURFACE,
@@ -125,7 +114,7 @@ const COVER_SIZE: number = 40;
  *
  * ⚠️ 为什么是常量、而不是按槽位实测自适应：HDS 不暴露 miniBar 高度（`barWidth`/
  * `barHeight` 是整条页签栏的），唯一能「自适应」的办法是在内容里挂 `onAreaChange`
- * 回写 @State —— **真机回归：垂直两层下展开迷你栏直接消失**。**别再用测量换自适应**：
+ * 回写 @State —— 真机上垂直两层下展开迷你栏会直接消失。**别用测量换自适应**：
  * 宁可尺寸是估的，也不能让 HDS 的槽位挂载失败。
  * 取 28：明显小于展开态 40（收起行确实更矮），又不至于小到突兀；真机观感偏差直接改这里。
  */
@@ -134,10 +123,6 @@ const MINI_DISC_COLLAPSED_VERTICAL: number = 28;
 const PLAY_ICON_SIZE: number = 32;
 /** 控制键之间间距（收窄，为文字区让宽） */
 const CTRL_SPACING: number = 8;
-const DISC_ROTATE_DEGREE: number = 360;
-const DISC_ROTATE_MS: number = 4000;
-/** onFrame 回写节流（ms）：120Hz 屏隔帧回写（≈60fps），逐帧重建开销减半 */
-const FRAME_WRITE_MIN_MS: number = 16;
 /** 收起态圆环进度描边宽（vp）：同尺寸叠在圆盘边缘、盖在封面上 */
 const RING_STROKE_VP: number = 2.5;
 /** 整行内容底边直线进度条厚度（vp） */
@@ -163,24 +148,10 @@ const CONTENT_FADE_MS: number = 400;
 export struct PlayBar {
   /** 播放队列（歌单列表）：为空时内容不渲染 */
   @StorageLink(STORE_QUEUE) queue: Track[] = [];
-  /** 在播曲目（currentSong）：封面 / 歌名 / 歌手的数据源；@Watch 切歌时重置唱片角度 */
-  @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
-  /** 播放中标志（isPlaying）：切换播放 / 暂停图标；@Watch 驱动唱片 play / pause */
-  @StorageLink(STORE_IS_PLAYING) @Watch('onPlayingChanged') isPlaying: boolean = false;
-
-  /**
-   * 前后台标志（2026-10-21 后台耗电优化）：退后台冻结唱片动画，避免
-   * animator 帧回调 / @State 回写在 UI 冻结后空转；回前台在播时续转。
-   */
-  @StorageProp(STORE_APP_FOREGROUND) @Watch('onForegroundChanged') appForeground: boolean = true;
-  /**
-   * Fling（惯性/回弹）进行中（SearchPage 首页签 List 边界写入，F2 见
-   * design/Fling状态触发-两工程对照与AI实施规格.md）：Fling 期冻结唱片旋转、
-   * 把帧预算让给顶栏渐变模糊合成。@StorageLink 双向：aboutToDisappear
-   * 写回 false 兜底（抛行中离开首页防「永久停转」）。只并入 syncDiscAnim
-   * 的 spin 条件（自动尊重在播/前台/展开/overlay 门控），绝不复位角度。
-   */
-  @StorageLink(STORE_FLING_ACTIVE) @Watch('onFlingActiveChanged') flingActive: boolean = false;
+  /** 在播曲目（currentSong）：封面 / 歌名 / 歌手的数据源 */
+  @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
+  /** 播放中标志（isPlaying）：切换播放 / 暂停图标 / 歌名跑马灯开关 */
+  @StorageLink(STORE_IS_PLAYING) isPlaying: boolean = false;
   /**
    * miniBar 展开 / 收起态（Index 的 onBarStyleChange 写入，这里只读；默认折叠）。
    * 空闲时决定 Body 挂载与否（bodyVisible 的兜底分支）；动画进行中不介入
@@ -233,40 +204,27 @@ export struct PlayBar {
   /**
    * 播放页展开态（Index overlay 挂载后由 PlayerInfoComponent 主动画写 true）：
    * true 期间迷你唱片摘除（大唱片端 geometryTransition 配对飞行，圆→圆 morph）、
-   * 槽位保留恒定占位（外包 Stack 定宽高，Body 布局零跳动）。
-   * @Watch（2026-10-23 转动卡顿修复）：true 期间唱片节点已摘除，animator 同步
-   * pause —— 否则本组件大树以 120Hz 逐帧空转重建，与播放页大封面的逐帧回写
-   * 同帧抢 JS 线程，是转动卡顿主因。
+   * 槽位保留恒定占位（外包 Stack 定宽高，Body 布局零跳动）。本字段只作挂载判定。
    */
-  @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
+  @StorageProp(STORE_PLAYER_OPEN) playerOpen: boolean = false;
 
   /**
-   * 播放页 overlay 挂载标志（2026-10-24 收起漂移修复）：旋转门控第二条件 ——
-   * 收起飞行窗口（playerOpen 已 false 但 overlay 仍挂载的 700ms）内迷你唱片
-   * 冻结在当前角度，杜绝配对交叉淡化端「边转边飞」的拖尾摆动；overlay 卸载
-   * （closePlayer 的 animateTo onFinish）时 @Watch 触发续转，角度延续不归零。
-   */
-  @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) @Watch('onPlayerOpenChanged') overlayMounted: boolean = false;
-
-  /**
-   * geometryTransition 摘除开关（2026-10-24 下滑收起，Index.slideOutClose 置位）：
+   * geometryTransition 摘除开关（Index.slideOutClose 置位）：
    * true 时迷你唱片 / 透明锚点的 GT id 换空串（无转场）—— 下滑路径 playerOpen
-   * 翻转不触发迷你唱片反向配对飞行（封面斜飞回栏的根治项）。
+   * 翻转不触发迷你唱片反向配对飞行（防封面斜飞回栏）。
    */
   @StorageProp(STORE_PLAYER_GT_OFF) gtOff: boolean = false;
 
   /**
-   * 上滑展开进行中（2026-10-24 展开动画三风格区分，openPlayer slide 分支预置）：
+   * 上滑展开进行中（openPlayer slide 分支预置）：
    * 迷你唱片挂载守卫据此「盖住再隐藏」—— 上滑期间 playerOpen 已翻 true，但
-   * 页面尚未盖住迷你栏，唱片保持可见（旋转仍冻结：overlayMounted 门控）；
+   * 页面尚未盖住迷你栏，唱片保持可见；
    * slideInTransition 的 onFinish 复位本标志时页面已全屏盖住栏，唱片同帧摘除
    * （其最后一次构建的 GT id 为空串 —— GT_OFF 期间构建，不与封面配对）。
    */
   @StorageProp(STORE_PLAYER_SLIDE_IN) slideIn: boolean = false;
 
-  /** 唱片当前旋转角度（°）：animator 每帧回写，暂停时冻结在当前值 */
-  @State rotateAngle: number = 0;
-  /** 迷你播放/暂停键的点击回弹缩放（独立状态，与唱片旋转互不相干） */
+  /** 迷你播放/暂停键的点击回弹缩放 */
   @State miniPlayScale: number = 1;
   /**
    * 封面圆盘边长的运行时值（vp）：挂载时按 coverSize() 初始化，之后只在
@@ -275,16 +233,11 @@ export struct PlayBar {
    */
   @State discSizeVp: number = COVER_SIZE;
 
-  /** 唱片旋转 animator：play=续转 / pause=冻结 / reset=归零（aboutToAppear 里创建） */
-  private coverAnim: AnimatorResult | null = null;
-  /** onFrame 节流基准（ms）：与 FRAME_WRITE_MIN_MS 配合做隔帧回写 */
-  private lastFrameMs: number = 0;
-
   /** 收起态点击请求重新展开（宿主回调 HdsTabsController.applyMiniBarStyle） */
   onExpandRequest?: () => void = undefined;
 
   /**
-   * 独立挂载模式（2026-10-23 二级页悬浮播放栏，SubPagePlayBar 内嵌用）：
+   * 独立挂载模式（二级页悬浮播放栏，SubPagePlayBar 内嵌用）：
    * true 时本组件**脱离 HDS miniBar 槽位语义**，恒显整行内容（Body + 直线进度，
    * 不显圆环）、封面恒 40vp、点按直达播放页 —— 与 tabletPlayBar 的「非 SM 下
    * 天然成立」不同，SM 手机宽度下 bodyVisible / onEntryTap 的收起分支本会走到，
@@ -295,116 +248,11 @@ export struct PlayBar {
   /** 播放内核单例：控制键只调它的现成方法，绝不另写播放器 */
   private player: MusicPlayer = MusicPlayer.getInstance();
 
-  /** 唱片旋转动画参数（创建与 reset 复用同一份配置） */
-  private discOptions(): AnimatorOptions {
-    return {
-      duration: DISC_ROTATE_MS,
-      easing: 'linear',
-      delay: 0,
-      fill: 'forwards',
-      direction: 'normal',
-      iterations: -1,
-      begin: 0,
-      end: DISC_ROTATE_DEGREE
-    };
-  }
-
   aboutToAppear(): void {
     // 诊断日志（折叠屏「点 miniBar 不跳转」排查）：确认挂载时的断点 / 展开态初值
     console.info(`[PlayBar] appear: bp=${this.currentBreakpoint}, expanded=${this.expanded}, playing=${this.isPlaying}`);
     // 圆盘尺寸初值按当前布局 / 展开态取（垂直两层收起 = 28，其余 = 40）
     this.discSizeVp = this.coverSize();
-    // UIContext 在属性初始化时未就绪，animator 延迟到 here 创建（同 LrcView）
-    try {
-      this.coverAnim = this.getUIContext().createAnimator(this.discOptions());
-      this.coverAnim.onFrame = (value: number): void => {
-        // 隔帧回写（≈60fps）：4s/圈每步 0.3°，视觉零差，逐帧重建开销减半
-        const now: number = Date.now();
-        if (now - this.lastFrameMs < FRAME_WRITE_MIN_MS) {
-          return;
-        }
-        this.lastFrameMs = now;
-        this.rotateAngle = value;
-      };
-      // 挂载时可能已在播放中（isPlaying 初值即 true，@Watch 不会触发，需手动起转）
-      this.syncDiscAnim();
-    } catch (e) {
-      // animator 创建失败只影响唱片旋转，不影响播放控制
-      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
-      console.error(`[PlayBar] createAnimator failed: ${msg}`);
-    }
-  }
-
-  aboutToDisappear(): void {
-    // F2 兜底（规格 §F2）：抛行中离开首页（收起 miniBar / 进子页 / 关播放页）
-    // 会错过 onScrollStop，flingActive 若残留 true 圆盘永不复转 —— 摘除时写回 false。
-    AppStorage.setOrCreate(STORE_FLING_ACTIVE, false);
-    if (this.coverAnim !== null) {
-      this.coverAnim.finish();
-      this.coverAnim = null;
-    }
-  }
-
-  /** 播放/暂停 → 唱片续转/冻结。pause 冻结在当前帧角度，绝不复位到 0 */
-  private onPlayingChanged(): void {
-    this.syncDiscAnim();
-  }
-
-  /** 退后台冻结 / 回前台续转（在播时），统一走 syncDiscAnim */
-  private onForegroundChanged(): void {
-    this.syncDiscAnim();
-  }
-
-  /** 一级页 Fling 起止（F2）：只走统一入口 syncDiscAnim（绝不复位角度） */
-  private onFlingActiveChanged(): void {
-    this.syncDiscAnim();
-  }
-
-  /** 播放页展开 → 迷你唱片已摘除，animator 冻结（@Watch playerOpen 统一走这里） */
-  private onPlayerOpenChanged(): void {
-    this.syncDiscAnim();
-  }
-
-  /**
-   * 唱片旋转统一入口：前台、在播、播放页未展开、且 overlay 未挂载（收起飞行
-   * 窗口，2026-10-24 漂移修复）才续转，否则冻结在当前帧角度（绝不复位到 0）
-   * —— playerOpen=true 期间节点已摘除，转 animator 只会让本组件大树以 120Hz
-   * 空转重建（2026-10-23 卡顿修复）；收起飞行期间冻结，配对交叉淡化两端均静止。
-   */
-  private syncDiscAnim(): void {
-    const anim: AnimatorResult | null = this.coverAnim;
-    if (anim === null) {
-      return;
-    }
-    const spin: boolean = this.isPlaying && this.appForeground && !this.playerOpen && !this.overlayMounted
-      && !this.flingActive;
-    // 低频门控日志（仅状态翻转时打，绝不逐帧）
-    console.info(`[PlayBar] spin=${spin} open=${this.playerOpen} play=${this.isPlaying} fg=${this.appForeground} fling=${this.flingActive}`);
-    if (spin) {
-      anim.play();
-    } else {
-      anim.pause();
-    }
-  }
-
-  /** 切歌 → reset 归零角度（等价 Stopped），再按当前播放态决定是否重新起转 */
-  private onTrackChanged(): void {
-    const anim: AnimatorResult | null = this.coverAnim;
-    if (anim === null) {
-      return;
-    }
-    this.rotateAngle = 0;
-    try {
-      anim.reset(this.discOptions());
-    } catch (e) {
-      // reset 失败只影响切歌归零，不影响播放控制
-      const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
-      console.error(`[PlayBar] animator reset failed: ${msg}`);
-      return;
-    }
-    // 后台切歌不起转：回前台时 onForegroundChanged 会按播放态补起转；
-    // 播放页展开时迷你唱片已摘除，同样不起转（onPlayerOpenChanged 收起时补）
-    this.syncDiscAnim();
   }
 
   /**
@@ -466,9 +314,9 @@ export struct PlayBar {
   }
 
   /**
-   * 内容体（Body / 直线进度）是否挂载 —— 替代旧的两套内容体 if/else 硬切网关，
-   * 保留相位鲁棒性（onBarStyleChange 相对动画起止的翻转时序不保证）：
-   *   · 垂直两层 / 宽屏 → 恒 true（2026-10-13 用户要求：收起与展开内容一致）；
+   * 内容体（Body / 直线进度）是否挂载 —— 相位鲁棒（onBarStyleChange 相对动画
+   * 起止的翻转时序不保证）：
+   *   · 垂直两层 / 宽屏 → 恒 true（收起与展开内容一致）；
    *   · TO_EXPAND → true（Body 随槽位展开淡入）；
    *   · TO_COLLAPSE → false（Body 随槽位收缩淡出）；
    *   · 空闲 → 按展开态。
@@ -528,8 +376,7 @@ export struct PlayBar {
   }
 
   /**
-   * 打开全屏播放页（2026-10-21 改版：**组件状态切换动画，不再 pushPath 路由**；
-   * 2026-10-24 展开动画三风格区分）。
+   * 打开全屏播放页（**组件状态切换动画，不走 pushPath 路由**）。
    *
    * 按收起风格分流：
    *   · morph / morph_swipe → 现状 morph 打开：只做连点防护 + 挂载 overlay，
@@ -573,14 +420,14 @@ export struct PlayBar {
   }
 
   /**
-   * 整条 miniBar 的统一点击语义（2026-10-14 与内容侧动画驱动重构同步统一）：
+   * 整条 miniBar 的统一点击语义：
    *   水平融合收起态（SM 圆盘）→ 先经 onExpandRequest 展开；
    *   其余（展开态 / 垂直两层任意态 / 宽屏）→ 进播放页。
    *
-   * 垂直两层收起态直接跳播放页（2026-10-19 用户要求）：该布局下收起与展开
-   * 内容一致（同为整行，见 bodyVisible），点按无「看全内容」诉求；主动展开
-   * 走全屏上滑手势（Index 的 parallelGesture），不依赖点按。水平融合保持
-   * 「先展开」旧语义 —— HDS 收起时槽位缩成圆盘，点按是唯一主动展开入口。
+   * 垂直两层收起态直接跳播放页：该布局下收起与展开内容一致（同为整行，
+   * 见 bodyVisible），点按无「看全内容」诉求；主动展开走全屏上滑手势
+   * （Index 的 parallelGesture），不依赖点按。水平融合保持「先展开」语义 ——
+   * HDS 收起时槽位缩成圆盘，点按是唯一主动展开入口。
    * 宽屏（非 SM）HDS 强制展开、全局展开态已被 Index 同步为 true → 收起分支
    * 走不到，直接进播放页（无「点了没反应」死胡同）。
    */
@@ -624,7 +471,7 @@ export struct PlayBar {
    * 恒驻唱片：封面圆盘 + 收起态圆环进度。
    *
    * **永不重挂载**（两态切换只动 Body / 圆环的挂载，Disc 本体常在）：
-   *   · 旋转连续（rotate 挂 CoverImage，animator 每帧回写）；
+   *   · 静止封面（不旋转，仅渲染）；
    *   · geometryTransition 全程单节点（与播放页大圆盘同 id 配对，一镜到底）；
    *   · 位置恒为行首（外层 Row padding 8 后）—— 收起/展开动画期间零位移。
    * 尺寸 = discSizeVp（运行时值，相位 / 展开态 @Watch 驱动 animateTo 过渡）。
@@ -636,13 +483,12 @@ export struct PlayBar {
   Disc(): void {
     Stack() {
       CoverImage({ url: toThumbUrl(this.coverUrl(), 96), imgWidth: this.discSizeVp, imgHeight: this.discSizeVp, imgRadius: this.discSizeVp / 2 })
-        .rotate({ z: 1, angle: this.rotateAngle })
-        // GT 门控（2026-10-24 下滑收起）：gtOff=true 时 id 换空串，下滑路径不配对
+        // GT 门控：gtOff=true 时 id 换空串，下滑路径不配对
         .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_DISC)
 
       // 圆环进度：只在水平融合收起态显示（ringVisible），与圆盘同尺寸的兄弟节点
       // → 描边画在组件边界内侧、贴圆盘边缘，不触发 enableMiniBarClip 裁剪；
-      // 不随唱片旋转（rotate 只挂在 CoverImage 上），也不参与 geometryTransition
+      // 不参与 geometryTransition
       // （转场时环留在槽位内，无跳变）。挂 OPACITY transition 与 Body 交叉淡入淡出。
       // 底轨透明：封面不被灰圈压住，只显示主题色弧线。duration<=0（加载中）不渲染；
       // 迷你栏进度条开关（miniBarProgress）关闭时同样不渲染。
@@ -662,7 +508,7 @@ export struct PlayBar {
   /**
    * 内容体：歌名/歌手 + 播放/暂停键（按钮点击不会冒泡成跳转）。
    *
-   * 水平融合展开态与垂直两层两态共用（内容一致，2026-10-13 用户要求）；
+   * 水平融合展开态与垂直两层两态共用（内容一致）；
    * 在隔离 Stack 里按 bodyVisible() 挂载/卸载，根节点挂 OPACITY transition ——
    * 收起/展开时与圆环进度交叉淡入淡出（CONTENT_FADE_MS），无瞬切。
    */
@@ -713,7 +559,7 @@ export struct PlayBar {
       // Stack Bottom 叠加：主行（恒驻唱片 + 隔离的内容体）铺满，
       // 底边多出一条 2vp 直线进度（随 bodyVisible 淡入淡出，见下）。
       Stack({ alignContent: Alignment.Bottom }) {
-        // 透明锚点（2026-10-21 起点偏左下根治）：播放页背景面 geometryTransition
+        // 透明锚点：播放页背景面 geometryTransition
         // 的迷你栏侧配对极。不渲染任何像素、只提供几何 —— 系统在配对插值时用
         // 它被 HDS 合成变换后的**真实视觉包围盒**做起点（跨窗口坐标换算由系统
         // 完成，唱片配对同机制已验证）。刻意做成兄弟替身而不是把本 Stack 整树
@@ -725,18 +571,18 @@ export struct PlayBar {
             .width('100%')
             .height('100%')
             .hitTestBehavior(HitTestMode.None)
-            // 起点圆角（2026-10-21 展开过程四角圆角）：geometryTransition 在绑定处
+            // 起点圆角（展开过程四角圆角）：geometryTransition 在绑定处
             // 同步圆角 —— 透明节点不渲染像素，borderRadius + clip 只向配对提供
             // 「胶囊同款圆角」的几何，展开/收起飞行途中背景面四角即呈 28vp 圆角。
             .borderRadius(PLAYER_SURFACE_RADIUS_START_VP)
             .clip(true)
-            // GT 门控（2026-10-24 下滑收起）：gtOff=true 时 id 换空串，下滑路径
+            // GT 门控：gtOff=true 时 id 换空串，下滑路径
             // 背景面不配对收回（背景面由 slideOut 守卫保持挂载、随整页滑走）
             .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_SURFACE)
         }
 
         Row({ space: 8 }) {
-          // 恒驻唱片槽位（2026-10-21 组件状态切换动画改版）：外包 Stack 定宽高
+          // 恒驻唱片槽位：外包 Stack 定宽高
           // （discSizeVp）—— 播放页打开（playerOpen=true）时唱片摘除参与
           // geometryTransition 页内配对（飞向播放页大圆盘），槽位占位恒定，
           // Body 布局零跳动；收起时唱片随 Index.closePlayer 的 animateTo 回飞归位。
@@ -792,14 +638,14 @@ export struct PlayBar {
       }
       .width('100%')
       .height('100%')
-      // 按压反馈（原收起态专属，升级为两态通用）：整条按下轻微降透明度
+      // 按压反馈（两态通用）：整条按下轻微降透明度
       .stateStyles({
         pressed: { .opacity(0.85) },
         normal: { .opacity(1) }
       })
-      // ⚠️ 这里**不要**挂 `onAreaChange`（曾用它实测槽位高来自适应圆盘尺寸）：
+      // ⚠️ 这里**不要**挂 `onAreaChange` 实测槽位高来自适应圆盘尺寸：
       // 在 HDS 托管的内容里由布局回调回写 @State，会让内容在 HDS 的形变动画中途重建，
-      // 真机症状 = 垂直两层下展开迷你栏直接消失。圆盘尺寸改用常量（见 coverSize）。
+      // 真机症状 = 垂直两层下展开迷你栏直接消失。圆盘尺寸用常量（见 coverSize）。
     }
   }
 }

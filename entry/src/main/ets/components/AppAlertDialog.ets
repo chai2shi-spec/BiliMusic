@@ -1,37 +1,35 @@
 /**
  * 全局确认弹窗（替代系统 `showAlertDialog`）。
  *
- * （阶段 4 迁移，2026-10-23：自绘弹窗体 → 官方 `CustomContentDialog` 标准弹窗。
- * 弹窗框架（标题排版 / 按钮分区 / 遮罩圆角）交给官方组件，本文件只保留三件事：
- * 模块级单槽传参、宿主组件持有 controller、「先关弹窗再执行回调」的顺序保证。
- * 以下崩溃史注释是重要背景，保留勿删。）
+ * 弹窗框架（标题排版 / 按钮分区 / 遮罩圆角）交给官方 `CustomContentDialog`
+ * 标准弹窗，本文件只保留三件事：模块级单槽传参、宿主组件持有 controller、
+ * 「先关弹窗再执行回调」的顺序保证。
  *
- * ⚠️⚠️ 为什么用 `CustomDialogController` 而不是 `openCustomDialog`（**踩过的闪退坑**）
+ * ⚠️⚠️ 为什么用 `CustomDialogController` 而不是 `openCustomDialog`（**闪退坑**）
  *
- * 最初实现是 `promptAction.openCustomDialog({ builder: 全局 @Builder })`，
- * 结果**点任意条目「⋯」必闪退**，日志：
+ * `promptAction.openCustomDialog({ builder: 全局 @Builder })` 会直接闪退：
  *     TypeError: Cannot read property observeComponentCreation2 of undefined
  *
  * 根因（华为官方 FAQ faqs-arkui-1159）：`@Builder` 自定义构建函数**只能在所属组件的
- * build 方法和其他自定义构建函数内调用，不允许在组件外调用**。当初交给
- * `openCustomDialog` 的 `@Builder` 是**模块级全局函数**，弹窗渲染时找不到父组件
- * 的 `observeComponentCreation2` 上下文 → 直接抛 TypeError 崩掉。
+ * build 方法和其他自定义构建函数内调用，不允许在组件外调用**。模块级全局
+ * `@Builder` 交给 `openCustomDialog`，弹窗渲染时找不到父组件的
+ * `observeComponentCreation2` 上下文 → 直接抛 TypeError 崩掉。
  *
  * 改用 `@CustomDialog` + `CustomDialogController`（官方推荐的自定义弹窗方案）：
  * 弹窗的 build 由 controller.open() 触发执行，不存在「组件外调用 @Builder」
  * 的问题，因此可以安全地被任意页面复用。
  *
  * ⚠️ 还有**第二个坑**（比闪退更隐蔽）：官方明确「CustomDialogController 仅在作为
- * @Component struct 的**成员变量**、且**在组件内部定义时赋值才有效**」。若图省事
- * 把 controller 写成模块级 `const c = new CustomDialogController({...})`，
- * **编译会过、`open()` 也不抛异常，但弹窗永远不显示** —— 静默失效，连日志都没有。
+ * @Component struct 的**成员变量**、且**在组件内部定义时赋值才有效**」。模块级
+ * `const c = new CustomDialogController({...})` **编译会过、`open()` 也不抛异常，
+ * 但弹窗永远不显示** —— 静默失效，连日志都没有。
  * 所以 controller 必须放在 `AppDialogHost` 组件内，模块级 show* 函数经静态引用
  * `dialogHost` 驱动它。
  *
  * 好处：`showAppAlertDialog(uiContext, options)` **导出签名完全不变** → 20+ 处
  * 调用点零改动。
  *
- * ⚠️ controller **每次打开前重建**（2026-10-23）：CustomDialog 的构造参数在创建时
+ * ⚠️ controller **每次打开前重建**：CustomDialog 的构造参数在创建时
  * 定格、不支持动态刷新（faqs-arkui-555），而 `CustomContentDialog` 的
  * primaryTitle / buttons 都是构造参数 → 复用同一个 controller 会一直显示第一次
  * 的标题和按钮。所以 `openAlert()` 每次按模块级 `alertOptions` 单槽的当次值重建

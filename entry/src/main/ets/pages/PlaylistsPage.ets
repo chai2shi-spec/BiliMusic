@@ -1,12 +1,12 @@
 /**
  * 歌单列表页：展示本地歌单，支持新建 / 重命名 / 删除歌单、长按拖动排序
- * （2026-10-22，所有类型歌单可拖：列表顺序是纯本地展示态）、进入详情
+ * （所有类型歌单可拖：列表顺序是纯本地展示态）、进入详情
  * （订阅歌单除外：行点击进 UP 主页，订阅流以 UP 为核心）。
  * 数据来自 LibraryStore（内部有内存快照 + 异步落盘）。
  *
  * 简约 iOS 风格：顶栏在根 HdsNavigation titleBar（沉浸材质 + 滚动模糊由 HDS
- * 承担，内容见 components/PlaylistsTabBar.ets）——根栏移植（2026-10-10）
- * 起根栏 stackBuilder 承载标题行 + 多选工具条（行 1 / 行 2 溢出渲染，
+ * 承担，内容见 components/PlaylistsTabBar.ets）——根栏 stackBuilder 承载
+ * 标题行 + 多选工具条（行 1 / 行 2 溢出渲染，
  * Index.immersiveTitleBarContent 歌单页分支）；最近播放入口在设置页「播放」组。
  */
 
@@ -14,8 +14,10 @@ import {
   LibraryStore,
   PLAYLIST_MAX_ITEMS
 } from '../service/LibraryStore';
+import { isFolderTwoway } from '../service/FavTwowayStore';
 import { UpSpaceCacheEntry, getUpSpaceCache } from '../service/UpSpaceCacheStore';
-import { Playlist, Track } from '../model/MusicModels';
+import { HomeCardStore, HOME_PLAYLIST_CARDS_MAX } from '../service/HomeCardStore';
+import { Playlist, Track, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { toThumbUrl } from '../utils/TextUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam, PlaylistDetailRouteParam } from '../service/NavRouteParams';
@@ -23,6 +25,7 @@ import {
   CONTENT_END_OFFSET,
   STORE_ACTIVE_TAB,
   STORE_CURRENT_TRACK,
+  STORE_ITEM_DISPLAY_STYLE,
   STORE_LIBRARY_REV,
   STORE_PICK_PLAYLIST_ADD,
   STORE_PL_BAR_ALL_SELECTED,
@@ -42,6 +45,7 @@ import {
   PairOf,
   makePairs,
   TWO_COL_GAP_VP,
+  GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
@@ -80,6 +84,8 @@ const MAX_MERGE_NAME_CHARS: number = 18;
 const PICK_HINT_HEIGHT_VP: number = 60;
 /** 歌单页签下标（与 Index 的 TAB_PLAYLISTS 同值；模块私有常量跨文件不可引用） */
 const TAB_INDEX_PLAYLISTS: number = 1;
+/** 歌单网格卡（大封面模式）按压缩放：比行内 0.9 收敛（大卡面缩 0.9 视觉过猛） */
+const PL_CARD_PRESS_SCALE: number = 0.96;
 
 /** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise */
 function delay(ms: number): Promise<void> {
@@ -96,9 +102,9 @@ function delay(ms: number): Promise<void> {
  * 刻意用「数字常量」而不是 `enum`：在 .ets 里声明 enum 会让静态检查连带报
  * SDK 声明文件的解析错误，用常量最稳。
  *
- * 阶段 3 迁移（2026-10-11）：自绘 scrim+card 弹层 → CustomContentDialog 标准
- * 对话框（仍走 CustomDialogController，**绝不走 promptAction** —— 崩溃史见
- * AppAlertDialog.ets 头注释）。标题用组件 primaryTitle，三种模式各持一个
+ * 走 CustomContentDialog 标准对话框（仍走 CustomDialogController，**绝不走
+ * promptAction** —— 崩溃史见 AppAlertDialog.ets 头注释）。标题用组件
+ * primaryTitle，三种模式各持一个
  * controller（CustomDialog 构造参数不支持动态刷新，faqs-arkui-555，标题与
  * 确认文案又是模式固定的，按模式各建一个最直接）；确认按钮留在 contentBuilder
  * 自绘而不用 buttons 槽：空名校验失败要保持弹窗打开，buttons 槽点击即自动
@@ -120,8 +126,8 @@ export struct PlaylistsPage {
   /** 编辑弹窗用途（新建 / 重命名 / 合并） */
   @State editorMode: number = EDITOR_MODE_CREATE;
   /**
-   * 多选模式开关（批 4 状态迁移）：顶栏迁根容器后，栏内「选择/完成」按钮
-   * （components/PlaylistsTabBar.ets）要读它 —— 直接挂 AppStorage 单向镜像给根栏。
+   * 多选模式开关：根栏内「选择/完成」按钮（components/PlaylistsTabBar.ets）
+   * 要读它 —— 直接挂 AppStorage 单向镜像给根栏。
    */
   @StorageLink(STORE_PL_BAR_SELECTING) selecting: boolean = false;
   /**
@@ -131,8 +137,7 @@ export struct PlaylistsPage {
   /**
    * 「去歌单页选」点选加入请求（seq 递增，STORE_PICK_PLAYLIST_ADD）：播放页
    * ControlArea 菜单项在收起播放页 + 切页签的同时递增本键，本页 @Watch 消费 ——
-   * 快照当前曲目进入点选模式（2026-10-22 修「跳过去就停了」：旧实现只切页签，
-   * 歌单页没有任何承接动作，用户无从下手）。
+   * 快照当前曲目进入点选模式（点选模式必须由本页承接，否则用户跳过来无从下手）。
    */
   @StorageProp(STORE_PICK_PLAYLIST_ADD) @Watch('onPickAddRequest') pickAddRequest: number = 0;
   /** 点选加入模式中：整行点击 = 把快照曲目加入该歌单（单次点选即退出），顶部占位条目内嵌提示条 */
@@ -166,8 +171,8 @@ export struct PlaylistsPage {
   /**
    * UP 订阅歌单行副行的投稿总数（upMid → card 的 archive_count，读自 UpSpaceCacheStore）。
    * 值 0 / mid 缺失 = 未知（无缓存 / 旧缓存 / 被淘汰），副行回退显示已落库曲目数。
-   * 2026-10-23 用户需求：订阅条目副行显示 UP 投稿总数而非「N 首」——订阅只落库第一页
-   * 投稿（登录态 ≤50 条），后者会把几百个投稿的 UP 永远显示成「50 首」。
+   * 订阅条目副行显示 UP 投稿总数而非「N 首」——订阅只落库第一页投稿（登录态
+   * ≤50 条），后者会把几百个投稿的 UP 永远显示成「50 首」。
    */
   @State archiveCounts: Map<string, number> = new Map();
   /** 按压状态回写（与搜索页 TrackItem / 下载页同款）：Down 记录、Up/Cancel 只清自己 */
@@ -196,7 +201,7 @@ export struct PlaylistsPage {
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
 
   /**
-   * 横屏宽屏（窗口 ≥600vp 的横屏）时歌单行两列显示（2026-10-23 两列改造）。
+   * 横屏宽屏（窗口 ≥600vp 的横屏）时歌单行两列显示。
    * ⚠️ 两列分支**不注册 onMove**：长按拖动排序以 ListItem 为单位，配对后拖动
    * 会以「一对」为单位错乱 —— 拖动排序是竖屏专属（有意取舍，同 PlaylistDetail
    * 可排序歌单的门控口径）；横屏浏览 / 多选 / 点选加入不受影响。
@@ -204,15 +209,22 @@ export struct PlaylistsPage {
   private isTwoCol(): boolean {
     return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
   }
+
+  /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
+  @StorageProp(STORE_ITEM_DISPLAY_STYLE) itemDisplay: string = ITEM_DISPLAY_LIST;
+
+  /** 大封面模式：歌单以双列网格卡渲染（PlaylistCard），交互契约与行内版一致 */
+  private isGrid(): boolean {
+    return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
   /**
-   * 列表滚动控制器：List 直接挂 TabScrollerHolder.playlists（唯一真源，身份恒定），
-   * 由根 HdsNavigation bindToScrollable 绑定驱动顶栏滚动模糊（批 4 起模糊由 HDS 承担；
-   * 2026-10-11 起不再 new 私有实例后注册替换——首开无模糊修复）。
+   * 列表滚动控制器：List 直接挂 TabScrollerHolder.playlists（唯一真源，身份恒定，
+   * 不可 new 私有实例后注册替换），由根 HdsNavigation bindToScrollable 绑定驱动
+   * 顶栏滚动模糊。
    */
 
   aboutToAppear(): void {
-    // 批 4：顶栏迁根容器 —— 栏内按钮动作注册进持有器
-    // （scroller 不再注册替换——List 直挂 Holder.playlists 唯一真源，2026-10-11）
+    // 根栏内按钮动作注册进持有器（List 直挂 Holder.playlists 唯一真源）
     TabScrollerHolder.plToggleSelecting = (): void => {
       this.toggleSelecting();
     };
@@ -228,10 +240,10 @@ export struct PlaylistsPage {
     TabScrollerHolder.plDeleteSelected = (): void => {
       this.confirmDeleteSelected();
     };
-    // [任务③·推广] 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
     // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
     this.syncTopBlurProgress();
-    // 歌单编辑弹窗（阶段 3）：三模式各建一个 CustomContentDialog controller
+    // 歌单编辑弹窗：三模式各建一个 CustomContentDialog controller
     this.editorCreateController = this.buildEditorDialog('新建歌单');
     this.editorRenameController = this.buildEditorDialog('重命名歌单');
     this.editorMergeController = this.buildEditorDialog('合并歌单');
@@ -338,7 +350,7 @@ export struct PlaylistsPage {
   /**
    * 行副行文案：UP 订阅歌单显示「N 个投稿」（N 优先取 UP 投稿总数 archive_count，
    * 不受订阅首页 50 条上限；未知时回退已落库曲目数），其余歌单维持「N 首」。
-   * 口径与 UpSpacePage 头部元信息行（2026-10-23）一致。
+   * 口径与 UpSpacePage 头部元信息行一致。
    */
   private subLineOf(p: Playlist): string {
     if (LibraryStore.isUpSubscription(p)) {
@@ -350,7 +362,7 @@ export struct PlaylistsPage {
   }
 
   /**
-   * 歌单列表「长按拖动排序」（2026-10-22，与详情页曲目拖动同期）。
+   * 歌单列表「长按拖动排序」。
    *
    * ForEach.onMove 官方拖拽路线（系统浮起/让位动画 + 拖到边缘自动滚动），下标
    * 限定在 ForEach 数据内 —— 自动避开顶部空白占位条目。本地切片先对齐（与系统
@@ -373,7 +385,7 @@ export struct PlaylistsPage {
   }
 
   /**
-   * 顶栏派生镜像唯一写入口（批 4 状态迁移）：把栏内组件渲染所需的派生状态
+   * 顶栏派生镜像唯一写入口：把栏内组件渲染所需的派生状态
    * （可否多选 / 选中数 / 全选态）推到 AppStorage，PlTitleActions / PlSelectToolbar
    * （components/PlaylistsTabBar.ets）@StorageProp 订阅。
    * 触发点：refresh（歌单变化）+ selectedIds @Watch。
@@ -385,19 +397,18 @@ export struct PlaylistsPage {
   }
 
   /**
-   * 根栏整栏让位量（vp）：safeTop + 标题行 56（2026-10-10 歌单页 HDS 适配）。
-   * bottomBuilder 第二行退役后为常量公式，首帧即正确，无需挂载门控
-   * （SettingsPage 先例）；多选工具条为页面层覆盖层，不占让位量。
+   * 根栏整栏让位量（vp）：safeTop + 标题行 56。常量公式首帧即正确，
+   * 无需挂载门控（SettingsPage 先例）；多选工具条为页面层覆盖层，不占让位量。
    */
   private barTotalHeight(): number {
     return this.safeTop + NAV_TITLE_BAR_HEIGHT;
   }
 
   /**
-   * [任务③·推广] 自绘顶栏渐变模糊层进度更新器 + 校准（SearchPage 原型推广）：
-   * onDidScroll / onScrollStop 命令式驱动 opacity（不标 @State，滚动高频
-   * 回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater
-   * 内截断，边缘回弹负偏移归零 = 用户方案 ③ 死区）。
+   * 自绘顶栏渐变模糊层进度更新器 + 校准：onDidScroll / onScrollStop 命令式
+   * 驱动 opacity（不标 @State，滚动高频回调零重建）；yOffset 0 →
+   * TITLE_BLUR_END_VP 线性映射 0 → 1（updater 内截断，边缘回弹负偏移归零
+   * 为死区）。
    */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
@@ -504,7 +515,7 @@ export struct PlaylistsPage {
   // ===== 多选与合并 =====
 
   /**
-   * 批量删除选中的歌单（多选工具条「删除选中」，2026-10-16）。
+   * 批量删除选中的歌单（多选工具条「删除选中」）。
    *
    * 与单删（confirmDelete）的关键差别：**一律只删本地**。
    * 收藏夹镜像的「同时清空 B 站」是逐夹两步确认 + 服务端全集拉取的重流程，
@@ -676,12 +687,39 @@ export struct PlaylistsPage {
         }
       },
       {
+        // 首页快捷卡行：把歌单加入 / 移出首页卡片行；
+        // 文案随在架状态切换（libraryRev bump → 本页重渲染时 bindMenu 数组
+        // 随之重建）
+        value: HomeCardStore.isHomePlaylist(p.id) ? '移出首页' : '加入首页',
+        action: (): void => {
+          this.toggleHomeCard(p);
+        }
+      },
+      {
         value: '删除歌单',
         action: (): void => {
           this.confirmDelete(p);
         }
       }
     ];
+  }
+
+  /**
+   * 歌单 ⋯ 菜单「加入首页 / 移出首页」：切换该歌单在首页快捷卡行的在架状态。
+   * HomeCardStore 内部 bump STORE_LIBRARY_REV → 本页（菜单文案）与 HomePage
+   *（卡片行）即时刷新；上限 9 个（快捷卡行共 10 卡 = 最近播放 1 + 歌单 9）。
+   */
+  private toggleHomeCard(p: Playlist): void {
+    if (HomeCardStore.isHomePlaylist(p.id)) {
+      HomeCardStore.removeHomePlaylist(p.id);
+      this.toast('已从首页移出', 1500);
+      return;
+    }
+    if (HomeCardStore.addHomePlaylist(p.id)) {
+      this.toast('已加入首页', 1500);
+    } else {
+      this.toast(`首页歌单卡已满（最多 ${HOME_PLAYLIST_CARDS_MAX} 个）`, 1800);
+    }
   }
 
   /**
@@ -831,12 +869,14 @@ export struct PlaylistsPage {
   }
 
   private confirmDelete(p: Playlist): void {
-    // 收藏夹镜像：同步为单向（B 站 → 本地），删除只动本地镜像歌单，
-    // B 站收藏夹原样保留，下次同步会重新拉回 —— 提示里讲清楚。
+    // 收藏夹镜像：删除只动本地镜像歌单，B 站收藏夹原样保留，下次同步会重新
+    // 拉回 —— 提示里讲清楚；双向镜像还要说明未同步的本地改动不再写回 B 站
+    //（store 挂钩会顺带清空该夹的待推送意图）。
     if (LibraryStore.isFavMirror(p)) {
+      const twoway: boolean = isFolderTwoway(LibraryStore.favMediaIdOf(p));
       showAppAlertDialog(this.getUIContext(), {
         title: '删除收藏夹歌单',
-        message: `「${p.name}」是 B 站收藏夹的镜像。删除不会影响 B 站收藏夹，下次收藏夹同步会把它重新拉回来。`,
+        message: `「${p.name}」是 B 站收藏夹的镜像。删除不会影响 B 站收藏夹，下次收藏夹同步会把它重新拉回来。${twoway ? '该收藏夹开启了双向同步：删除后尚未写回 B 站的本地改动将不再同步。' : ''}`,
         primaryButton: {
           value: '取消',
           action: (): void => {
@@ -963,7 +1003,39 @@ export struct PlaylistsPage {
   }
 
   /**
-   * 单条歌单行（2026-10-23 两列改造从 ForEach 内抽出，内容逐行保持原样）：
+   * 行 / 网格卡点击的统一分流：
+   * 订阅歌单进 UP 主页 → 点选加入 → 多选勾选 → 默认进详情。
+   */
+  private openPlaylist(p: Playlist): void {
+    // 订阅歌单（helper 判定，收藏夹镜像走默认分支）→ 恒进 UP 主页：
+    // 订阅歌单内容随 UP 投稿自动更新，不支持手动加歌，
+    // 行语义不被「点选加入」模式接管（拉新投稿 / 播放全部在 UpSpacePage 都有）
+    // ⚠️ 用 helper 判定而非 upMid 非空：收藏夹镜像也有 upMid（fav_x），
+    // 但它没有「UP 主页」可去，必须走默认分支进 PlaylistDetail
+    if (LibraryStore.isUpSubscription(p)) {
+      // getUserCard 失败时的兜底名；头像传空串：歌单行只有
+      // 视频封面（非 UP 头像）不能当占位，空串由 CoverImage 兜占位图
+      NavStackHolder.stack.pushPathByName('UpSpace',
+        new UpSpaceRouteParam(p.upMid, p.upName, ''));
+      return;
+    }
+    // 「去歌单页选」点选模式：整行 = 把快照曲目加入
+    // 该歌单，单次点选即退出
+    if (this.picking) {
+      this.addPickedTrack(p);
+      return;
+    }
+    // 多选模式下整行 = 勾选/取消，而不是进详情
+    if (this.selecting) {
+      this.toggleSelected(p.id);
+      return;
+    }
+    NavStackHolder.stack.pushPathByName('PlaylistDetail',
+      new PlaylistDetailRouteParam(p.id));
+  }
+
+  /**
+   * 单条歌单行：
    * 常驻勾选槽位 + 封面 + 歌单名/副行 + 更多操作；整行点击 = 点选加入 /
    * 多选勾选 / 订阅歌单进 UP 主页 / 默认进详情。单列分支 ListItem 直下渲染；
    * 两列分支由配对 Row 的左右槽各调一次（勾选 / 点选 / 按压状态互不影响，
@@ -974,7 +1046,6 @@ export struct PlaylistsPage {
     Row() {
       // 常驻勾选槽位：进出多选用「槽位宽度 0↔SELECT_SLOT_VP + 勾选圈位移动画」表达，
       // 绝不能用 if(selecting) 条件挂载 —— 节点增删没有过渡，行内容会跳变。
-      // 阶段 5（2026-10-11）：自绘「✓ 圆圈」换成系统标准 Checkbox（圆形选中圈）。
       Row() {
         Checkbox({ name: p.id, group: 'plSelect' })
           .select(this.isSelected(p.id))
@@ -995,8 +1066,7 @@ export struct PlaylistsPage {
       .justifyContent(FlexAlign.Center)
       .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
 
-      // 64vp 显示位按 2x 请求图床缩略图（双行标题改版 2026-10-21 与
-      // TrackItem 同步：封面 56→64，高度预算 = 歌单名两行
+      // 64vp 显示位按 2x 请求图床缩略图（高度预算 = 歌单名两行
       // lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17) = 63 ≤ 64）；
       // 加载中 / 失败由 CoverImage 兜浅粉占位
       CoverImage({
@@ -1007,7 +1077,7 @@ export struct PlaylistsPage {
         altText: p.name
       })
       Column() {
-        // 歌单名双行显示（2026-10-21 与 TrackItem 同步）：maxLines(2) +
+        // 歌单名双行显示：maxLines(2) +
         // 第二行省略号；显式 lineHeight(21) 锁行高（默认行高随字体浮动，
         // 会破坏「信息高度 ≤ 封面高度」的硬预算，见封面注释）。
         Text(p.name)
@@ -1066,30 +1136,109 @@ export struct PlaylistsPage {
       this.setPressed(event.type, p.id);
     })
     .onClick((): void => {
-      // 「去歌单页选」点选模式（2026-10-22）：整行 = 把快照曲目加入
-      // 该歌单，单次点选即退出；判定放在最前（多选 / 订阅 / 详情都被它接管）
-      if (this.picking) {
-        this.addPickedTrack(p);
-        return;
+      this.openPlaylist(p);
+    })
+  }
+
+  /**
+   * 单条歌单网格卡（「条目展示 = 大封面」模式）：方形大封面 +
+   * 歌单名 + 副行。交互契约与 PlaylistRow 完全一致 —— 多选勾选圈（整卡点击
+   * 勾选/取消）、点选加入、「⋮」菜单（重命名 / 下载整个歌单 / 删除）、按压
+   * 缩放；仅拖动排序在网格分支不注册（配对后拖动会以「一对」为单位错乱，
+   * 与横屏两列同口径）。封面按 360 请求高清缩略图（约 134vp 卡宽 ——
+   * 含 24vp 行页边距，仍近 3x 余量）。
+   */
+  @Builder
+  PlaylistCard(p: Playlist): void {
+    Column() {
+      // 封面层：方形大封面 + 多选勾选圈（左上）+ 「⋮」菜单钮（右上）
+      Stack({ alignContent: Alignment.TopEnd }) {
+        CoverImage({
+          url: toThumbUrl(p.coverUrl, 360),
+          imgRadius: 10,
+          fillParent: true,
+          altText: p.name
+        })
+
+        // 多选勾选圈：装饰性（切换入口是整卡点击），与行内版同款系统圆形 Checkbox
+        if (this.selecting) {
+          Checkbox({ name: p.id, group: 'plSelect' })
+            .select(this.isSelected(p.id))
+            .selectedColor(this.themePrimary)
+            .unselectedColor($r('app.color.text_disabled'))
+            .shape(CheckBoxShape.CIRCLE)
+            .width(20)
+            .height(20)
+            .position({ x: 10, y: 10 })
+            .hitTestBehavior(HitTestMode.None)
+            .accessibilityLevel('no')
+        }
+
+        // 「⋮」菜单：视觉 16px 白色图形 + 半透明深色圆底（叠封面上需保证对比度），
+        // 命中区 36×36（对 44vp 触达下限的折衷，见 TrackCard 同款注释）；
+        // 多选时隐藏（与行内版口径一致）
+        Row() {
+          SymbolGlyph($r('sys.symbol.more'))
+            .fontSize(16)
+            .fontColor([Color.White])
+        }
+        .width(36)
+        .height(36)
+        .borderRadius(18)
+        .backgroundColor('rgba(0, 0, 0, 0.35)')
+        .justifyContent(FlexAlign.Center)
+        .margin({ top: 6, right: 6 })
+        .visibility(this.selecting ? Visibility.None : Visibility.Visible)
+        .accessibilityText('更多操作')
+        .accessibilityLevel('yes')
+        .bindMenu(this.playlistMenuItems(p))
       }
-      // 多选模式下整行 = 勾选/取消，而不是进详情 / UP 主页
-      if (this.selecting) {
-        this.toggleSelected(p.id);
-        return;
+      .width('100%')
+      .aspectRatio(1)
+
+      // 歌单名：13sp 两行（大封面模式的小字标题）。外层定高 Column 锁两行区
+      // （34 = 17×2）：一行歌单名也占满两行区，同排卡高一致（配合配对行
+      // Top 对齐，封面严格同高起步）；Column 子项默认从顶起排（Text 定高会
+      // 垂直居中，故不能直接给 Text 设 height）。行高显式锁定保证网格行距一致。
+      Column() {
+        Text(p.name)
+          .fontSize(13)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .lineHeight(17)
+          .width('100%')
       }
-      // 订阅歌单（upMid 非空）→ 进 UP 主页：订阅流的核心对象是 UP 本身，
-      // 拉新投稿 / 播放全部在 UpSpacePage 都有；详情页不再对订阅歌单开放
-      // ⚠️ 用 helper 判定而非 upMid 非空：收藏夹镜像也有 upMid（fav_x），
-      // 但它没有「UP 主页」可去，必须走默认分支进 PlaylistDetail
-      if (LibraryStore.isUpSubscription(p)) {
-        // getUserCard 失败时的兜底名；头像传空串：歌单行只有
-        // 视频封面（非 UP 头像）不能当占位，空串由 CoverImage 兜占位图
-        NavStackHolder.stack.pushPathByName('UpSpace',
-          new UpSpaceRouteParam(p.upMid, p.upName, ''));
-        return;
-      }
-      NavStackHolder.stack.pushPathByName('PlaylistDetail',
-        new PlaylistDetailRouteParam(p.id));
+      .height(34)
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ top: 6 })
+
+      // 副行：N 首 / N 个投稿（与行内版同一口径，见 subLineOf）
+      Text(this.subLineOf(p))
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .maxLines(1)
+        .width('100%')
+        .margin({ top: 2 })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    // 网格行距：卡底统一 12vp（与 TWO_COL_GAP_VP
+    // 同节奏），行与行分隔；margin 是布局量、不参与下方 scale 按压变换。
+    .margin({ bottom: 12 })
+    // 按压反馈＝纯缩放形变（与行内版同一 pressedKey 机制，网格卡缩放幅度收敛）：
+    // .animation() 紧跟 .scale()，只接管 scale 这一个可变属性。
+    .scale({
+      x: this.pressedKey === p.id ? PL_CARD_PRESS_SCALE : 1,
+      y: this.pressedKey === p.id ? PL_CARD_PRESS_SCALE : 1
+    })
+    .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
+    .onTouch((event: TouchEvent): void => {
+      this.setPressed(event.type, p.id);
+    })
+    .onClick((): void => {
+      this.openPlaylist(p);
     })
   }
 
@@ -1121,11 +1270,11 @@ export struct PlaylistsPage {
               // 顶部空白占位条目：列表视口铺满全屏，条目起始位置在屏幕顶端（y=0）。
               // 占位高度 = 根标题栏（barTotalHeight：safeTop + 56），首个真实条目恰
               // 从栏底起排（静置位与旧 contentStartOffset 等值），滚动时占位与条目
-              // 一起从模糊板下方穿过（与下载页同款改造）。
+               // 一起从模糊板下方穿过（与下载页同款）。
               ListItem() {
                 // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高容器。
                 Column() {
-                  // 「去歌单页选」点选提示条（2026-10-22）：放在顶部占位条目内部而
+                   // 「去歌单页选」点选提示条：放在顶部占位条目内部而
                   // 不是悬浮覆盖层 —— 占位高度随提示条 +PICK_HINT_HEIGHT_VP，列表
                   // 内容整体下移，不会被遮住（悬浮方案会盖住第一行歌单）。
                   if (this.picking) {
@@ -1163,11 +1312,57 @@ export struct PlaylistsPage {
                 .padding({ left: 12, right: 12, bottom: 4 })
                 .animation({ duration: SELECT_TOGGLE_MS, curve: Curve.EaseOut })
               }
-              // 横屏宽屏（2026-10-23 两列改造）：歌单行配对两列（PlaylistRow 同一份
+              // 大封面模式（外观设置「条目展示」）：歌单配对成
+              // 双列网格卡（PlaylistCard），竖屏 / 横屏均双列；交互契约与行内
+              // 版一致（多选 / 点选 / 菜单），仅不注册 onMove（配对后拖动会以
+              // 「一对」为单位错乱，与横屏两列同口径）。
+              // 首个「占位+点选提示」条目保持整行（在下方分支之外）。
+              if (this.isGrid()) {
+                ForEach(
+                  makePairs<Playlist>(this.playlists),
+                  (pair: PairOf<Playlist>): void => {
+                    ListItem() {
+                      Row() {
+                        Column() {
+                          this.PlaylistCard(pair.first)
+                        }
+                        .layoutWeight(1)
+                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+                        // 间隔条，末卡与满行卡等宽。
+                        Blank().width(TWO_COL_GAP_VP)
+                        if (pair.second !== null) {
+                          Column() {
+                            this.PlaylistCard(pair.second)
+                          }
+                          .layoutWeight(1)
+                        } else {
+                          // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
+                          Blank().layoutWeight(1)
+                        }
+                      }
+                      .width('100%')
+                       // 网格行页边距：两边留白 + 封面整体
+                      // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+                      .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+                       // Top 对齐：卡高随歌单名行数浮动，
+                      // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
+                      // Top 让左右封面严格同高起步。
+                      .alignItems(VerticalAlign.Top)
+                    }
+                  },
+                  (pair: PairOf<Playlist>): string =>
+                    `${pair.first.id}_${pair.first.name}_${pair.first.tracks.length}` +
+                    `|${pair.second !== null
+                      ? `${pair.second.id}_${pair.second.name}_${pair.second.tracks.length}`
+                      : 'x'}`
+                )
+              } else if (this.isTwoCol()) {
+               // 横屏宽屏：歌单行配对两列（PlaylistRow 同一份
               // 行内容，左右槽各渲染一次）；拖动排序（onMove）只挂在单列分支 ——
               // 配对后拖动会以「一对」为单位错乱，有意做成竖屏专属（与
               // PlaylistDetail 可排序歌单同口径）。首个「占位+点选提示」条目保持整行。
-              if (this.isTwoCol()) {
                 ForEach(
                   makePairs<Playlist>(this.playlists),
                   (pair: PairOf<Playlist>): void => {
@@ -1207,7 +1402,7 @@ export struct PlaylistsPage {
                   },
                   (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
                 )
-                  // 长按拖动排序（2026-10-22）：多选 / 点选加入模式下禁用（整行是
+                   // 长按拖动排序：多选 / 点选加入模式下禁用（整行是
                   // 点选热区，长按拖动与点选手势打架），传 undefined = 不注册。
                   .onMove(this.selecting || this.picking
                     ? undefined
@@ -1217,21 +1412,21 @@ export struct PlaylistsPage {
               }
           }
           .layoutWeight(1)
-          // 边界回弹（2026-10-08）：到顶/到底的反馈动效
-          .edgeEffect(EdgeEffect.Spring)
+           // 边界回弹：到顶/到底的反馈动效
+           .edgeEffect(EdgeEffect.Spring)
           .cachedCount(8)
           // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-          //（见上方占位注释），不再使用 contentStartOffset。
+           //（见上方占位注释），不用 contentStartOffset。
           // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
           // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
           .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-          // [任务③·推广] 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
+           // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
           // onWillScroll 是应用前，快滑时差一整帧会让模糊层滞后一跳）。
           .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
             this.syncTopBlurProgress();
           })
           .onScrollStop((): void => {
-            // Idle 校准终态（用户方案 ②）：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+            // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
             this.syncTopBlurProgress();
           })
         }
@@ -1245,7 +1440,7 @@ export struct PlaylistsPage {
       // 横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL），竖屏维持原值
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-      // [任务③·推广] 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar），
+       // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar），
       // 进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。
       TopGradientBlurOverlay({
         barHeightVp: this.barTotalHeight(),

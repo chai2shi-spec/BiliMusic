@@ -1,6 +1,5 @@
 /**
- * RDB 帮助类（替代原 Room）。
- * 使用 @ohos.data.relationalStore 存储下载任务等关系型数据。
+ * RDB 帮助类：使用 @ohos.data.relationalStore 存储下载任务等关系型数据。
  */
 
 import relationalStore from '@ohos.data.relationalStore';
@@ -16,7 +15,7 @@ const CREATE_DOWNLOAD_SQL: string =
   `totalBytes INTEGER, downloadedBytes INTEGER, status TEXT, errorMessage TEXT, ` +
   `createdAt INTEGER, completedAt INTEGER, localFilePath TEXT, ` +
   `playlistId TEXT, playlistName TEXT, ` +
-  // 合集归属三件套（2026-10-08）：新库直接建全列；老库走下方 ensureColumns 幂等补列
+  // 合集归属三件套：新库直接建全列；老库走下方 ensureColumns 幂等补列
   `collectionTitle TEXT, partNo INTEGER, partTotal INTEGER)`;
 
 /**
@@ -59,13 +58,13 @@ export async function initRdb(context: common.Context): Promise<void> {
   await ensureColumns(store, TABLE_DOWNLOAD, [
     { name: 'playlistId', ddl: 'playlistId TEXT' },
     { name: 'playlistName', ddl: 'playlistName TEXT' },
-    // 合集归属三件套（2026-10-08）：老任务缺列时补默认值，
+    // 合集归属三件套：老任务缺列时补默认值，
     // TEXT 补 NULL / INTEGER 补 NULL，读取侧（MusicDao.fromRow）会兜成 ''/0
     { name: 'collectionTitle', ddl: 'collectionTitle TEXT' },
     { name: 'partNo', ddl: 'partNo INTEGER' },
     { name: 'partTotal', ddl: 'partTotal INTEGER' }
   ]);
-  // musicId 二级索引（2026-10-23 性能审查）：getDownloadByMusicId 是合集/歌单
+  // musicId 二级索引：getDownloadByMusicId 是合集/歌单
   // 入队查重的热路径（N 分 P 合集 = N 次查询），无索引时全表扫；
   // IF NOT EXISTS 幂等，老库新库都安全。
   await store.executeSql(

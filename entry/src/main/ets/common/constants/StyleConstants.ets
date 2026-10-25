@@ -1,5 +1,5 @@
 /**
- * 通用样式常量（移植自 audio-interaction-master）。
+ * 通用样式常量。
  */
 
 export class StyleConstants {

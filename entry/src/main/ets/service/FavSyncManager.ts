@@ -1,22 +1,25 @@
 /**
- * 收藏夹同步管理器（B 站收藏夹 → 本地歌单镜像）。
+ * 收藏夹同步管理器（B 站收藏夹 ↔ 本地歌单镜像）。
  *
- * （2026-10-23 单向同步改造：删除「本地 → B 站」推送阶段 —— 同步只有
- * B 站 → 本地一个方向。本地对镜像歌单的改动**不会写回 B 站**，并会在下一轮
- * 同步时被服务端状态覆盖；原 FavPushStore 待推送队列、写意图重放与
- * 「N 条待同步」重试整体下线，相关提示已改为「单向同步」说明。）
+ * 开启「双向」的收藏夹：本地增删经 FavPushRunner 实时写回 B 站
+ * （fav/resource/deal），失败自动入队；每轮同步**先补推再拉取**（先推后拉，
+ * 防止服务端旧状态覆盖本地新改动）。未开启双向的收藏夹：同步只有
+ * B 站 → 本地一个方向，本地对镜像歌单的改动**不会写回 B 站**，并会在
+ * 下一轮同步时被服务端状态覆盖。
  *
- * 职责：串行编排一轮同步 —— 拉收藏夹列表 → 逐夹拉全内容 → 应用镜像
- * （建/合并/双向删）→ 清理 B 站已删除的收藏夹镜像 → 落状态 + 广播。
+ * 职责：串行编排一轮同步 —— 补推积压 → 拉收藏夹列表 → 逐夹拉全内容 →
+ * 应用镜像（建/合并/双向删）→ 清理 B 站已删除的收藏夹镜像 → 落状态 + 广播。
  *
  * 串行队列照抄 service/DownloadManager.ts 的 running/pending/pump 思路：
  * 并发触发会被合并为「跑完再补一轮」，避免同一次登录的多个信号重复处理。
  *
  * ⚠️⚠️ 核心安全不变量（改本文件前必读）：
  *   1. 「删除本地曲目」只在**本轮确认服务端数据完整**时才允许（allowDelete），
- *      判据三者全真：
+ *      判据四者全真：
  *        foldersOk（收藏夹列表拉到） && res.complete（该夹分页全部成功走完）
  *        && folder.mediaCount <= PLAYLIST_MAX_ITEMS
+ *        && !hasPendingForFolder（该夹无未冲刷的双向写回意图 —— 有积压时
+ *           服务端还没收到本地新增，按服务端状态删会把它们误判成「已取消收藏」）
  *      任一条不满足 → 只增不减。**绝不能因为「返回 0 条」就删**：
  *      0 条 ≠ 用户清空了收藏夹，也可能只是风控把响应拦成空。判据必须是 complete 标志。
  *   2. 收藏夹**列表**都拉不到时（foldersOk=false）→ 整轮不碰本地，一条都不动，
@@ -37,6 +40,8 @@ import {
 import { LibraryStore, PLAYLIST_MAX_ITEMS } from './LibraryStore';
 import { getLoginUser, LoginUser } from './LoginStore';
 import { deselectedFolderIds } from './FavSelectionStore';
+import { hasPendingForFolder } from './FavPushStore';
+import { FavFlushSummary, flushFavPushes } from './FavPushRunner';
 import {
   FAV_SYNC_FAILED,
   FAV_SYNC_OK,
@@ -53,7 +58,7 @@ import { Playlist, Track } from '../model/MusicModels';
  * 双向删除总开关（拉取侧：B 站取消收藏 → 本地移除，`applyFavMirror` 的
  * allowDelete 分支）。置回 `false` 即**一键回滚到「只增不减」**。
  *
- * 前置验收（方案批次 3）：B 站取消收藏一首 → 本地移除；断网/风控那一轮 → 本地一条不删；
+ * 预期行为：B 站取消收藏一首 → 本地移除；断网/风控那一轮 → 本地一条不删；
  * 已下载曲目的 localFilePath 不脱链。
  */
 const FAV_SYNC_DELETE_ENABLED: boolean = true;
@@ -84,6 +89,12 @@ export interface FavSyncSummary {
   added: number;
   /** 累计移除条目（只增模式下恒 0） */
   removed: number;
+  /** 双向写回：本轮成功推送到 B 站的意图条数（含开头补推 + 实时推送） */
+  pushed: number;
+  /** 双向写回：永久失败被丢弃的意图条数（如视频失效 / 收藏数超限） */
+  pushDropped: number;
+  /** 双向写回：仍积压待补推的意图条数（瞬态失败保留，下轮再试） */
+  pushPending: number;
   /** 因 B 站已删除而被清掉的本地镜像数 */
   deletedFolders: number;
   /** 整体失败/中止的人话原因；正常为空串 */
@@ -107,6 +118,9 @@ function emptySummary(): FavSyncSummary {
     failedCount: 0,
     added: 0,
     removed: 0,
+    pushed: 0,
+    pushDropped: 0,
+    pushPending: 0,
     deletedFolders: 0,
     reason: ''
   };
@@ -201,6 +215,21 @@ export class FavSyncManager {
       return summary;
     }
 
+    // ⓪ 双向补推（先推后拉）：实时推送失败的意图在拉服务端状态**之前**补上，
+    //    否则拉到的旧状态会把「已加未推」的本地新增当成「B 站已取消」处理。
+    //    失败不阻断拉取（瞬态失败意图保留队列，下轮再补）。
+    try {
+      const flushS: FavFlushSummary = await flushFavPushes();
+      summary.pushed = summary.pushed + flushS.pushed;
+      summary.pushDropped = summary.pushDropped + flushS.pushDropped;
+      summary.pushPending = summary.pushPending + flushS.pushPending;
+      if (flushS.needLogin) {
+        console.warn('fav sync: push flush reports needLogin, intents kept pending, continue pull');
+      }
+    } catch (e) {
+      console.warn(`fav sync: push flush crashed: ${humanError(e)}`);
+    }
+
     // ① 拉收藏夹列表。失败 → 整轮不碰本地（含不做「清理已删除收藏夹」）
     let folders: FavoriteFolder[] = [];
     try {
@@ -214,7 +243,7 @@ export class FavSyncManager {
     }
 
     /**
-     * ①-b 按勾选过滤（2026-10-23 手动选择性同步）：未勾选的收藏夹不参与本轮同步。
+     * ①-b 按勾选过滤：未勾选的收藏夹不参与本轮同步。
      *
      * ⚠️ 过滤只影响「逐夹同步」；下方 pruneDeletedFolders 仍传**全量** folders ——
      *    「未勾选」≠「B 站已删除」，未勾选夹的本地镜像必须原样保留
@@ -235,7 +264,7 @@ export class FavSyncManager {
     // ② 逐夹串行处理
     let loginLost: boolean = false;
     /**
-     * 连续「没能完整同步」的夹数 —— 达上限即**主动中止本轮**（2026-10-22）。
+     * 连续「没能完整同步」的夹数 —— 达上限即**主动中止本轮**。
      *
      * 场景：账号收藏夹很多（20+）且每个夹多页时，一轮下来请求数可达上百，
      * 很容易在中间某个夹开始被风控（空壳 / 412）。若继续硬推，后面的夹会**全部**失败，
@@ -380,19 +409,25 @@ export class FavSyncManager {
     /** 本地已有条数（镜像实际条数优先，原因见 existingItemCount 注释） */
     const localCount: number = this.existingItemCount(mediaId);
     /**
-     * 「上游 0 条」永不作为删除依据（2026-10-22 再放宽）。
+     * 「上游 0 条」永不作为删除依据。
      * 只要**本地还有内容**，服务端回 0 条就一律可疑（风控空壳 / 解析失效 / media_count 缺失）。
-     * 旧判据只认 `folder.mediaCount > 0`：一旦 list-all 把 `media_count` 给成 0 或缺失，
-     * 这道门控就整体失效 —— 这是「收藏夹镜像突然变空」的另一条路径。
      */
     const emptySuspect: boolean = tracks.length === 0 && (folder.mediaCount > 0 || localCount > 0);
+    /**
+     * 第四重门控（双向同步）：该夹仍有未冲刷的双向写回意图时只增不减 ——
+     * 服务端还没收到这些本地改动，按服务端状态删会把「已加未推」的新增
+     * 误判成「B 站已取消收藏」而删掉。补推成功后队列清空，下轮恢复正常双向删。
+     */
+    const pushPendingForFolder: boolean = hasPendingForFolder(mediaId);
     const allowDelete: boolean =
-      FAV_SYNC_DELETE_ENABLED && foldersOk && res.complete && sizeOk && !emptySuspect;
+      FAV_SYNC_DELETE_ENABLED && foldersOk && res.complete && sizeOk && !emptySuspect
+      && !pushPendingForFolder;
     console.info(`fav sync: folder ${mediaId}(${folder.title}) mediaCount=${folder.mediaCount}`
       + ` channel=${res.usedIdsChannel ? 'ids' : 'pages'} pages=${res.pages} reported=${res.reportedTotal}`
       + ` ordered=${res.orderedBvids.length} hidden=${res.hiddenBvids.length} raw=${res.items.length}`
       + ` invalid=${invalidCount} tracks=${tracks.length} local=${localCount}`
-      + ` complete=${res.complete} sizeOk=${sizeOk} emptySuspect=${emptySuspect} allowDelete=${allowDelete}`);
+      + ` complete=${res.complete} sizeOk=${sizeOk} emptySuspect=${emptySuspect}`
+      + ` pushPending=${pushPendingForFolder} allowDelete=${allowDelete}`);
 
     // 空收藏夹且本地还没有镜像 → 跳过建单（不建永远空着的壳），只记状态
     const hasMirror: boolean = mirror !== null;
@@ -443,7 +478,7 @@ export class FavSyncManager {
     const mirrors: Playlist[] = LibraryStore.getPlaylists()
       .filter((p: Playlist): boolean => LibraryStore.isFavMirror(p));
     /**
-     * ⚠️ 列表完整性自检（2026-10-22）：服务端返回的收藏夹数**少于本地镜像数**时，
+     * ⚠️ 列表完整性自检：服务端返回的收藏夹数**少于本地镜像数**时，
      * 更可能是「列表被截断 / 只回了公开夹」而不是「用户把夹子都删了」。
      * 此时若照常清理，会把没出现在列表里的镜像歌单**连同其中的歌一起删掉** ——
      * 用户看到的现象就是「收藏夹突然空了」。宁可这轮不清理（下次同步再对齐）。
@@ -474,9 +509,8 @@ export class FavSyncManager {
   /**
    * 「本地已有多少首」——用于「没拉全时不覆盖计数」。
    *
-   * ⚠️ 必须同时看**镜像歌单的实际条数**（2026-10-22 修「同步页显示 0 首」）：
-   * 旧实现只读 `FavFolderSyncState.lastItemCount`，而首次同步时该状态还不存在 → 恒 0。
-   * 于是一旦首轮没拉全（多页收藏夹 + 风控 / 网络抖动，`complete=false`），
+   * ⚠️ 必须同时看**镜像歌单的实际条数**：首次同步时 `FavFolderSyncState`
+   * 还不存在（只读状态会恒 0），一旦首轮没拉全（`complete=false`），
    * 就会把「已经建好、里面有 20 首」的镜像状态写成 `lastItemCount=0`，
    * 同步页显示「0 首」——用户以为收藏夹空了，其实歌全在。
    */

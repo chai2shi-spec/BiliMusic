@@ -1,7 +1,7 @@
 /**
- * 两列列表共享模块（2026-10-23 横屏宽屏改造）。
+ * 两列列表共享模块。
  *
- * 触发条件（2026-10-23 平板竖屏扩展）：
+ * 触发条件：
  *   · 平板（deviceType 'tablet'）：横竖屏皆两列 —— 竖屏窗口约 800vp，每列约
  *     394vp 仍保持阅读密度；只保留 sm 门控（自由窗口窄态单列）；
  *   · 折叠屏 / 手机：横屏 且 宽度断点非 sm（窗口 ≥600vp 才算「宽屏」）—— 覆盖
@@ -47,7 +47,17 @@ export function makePairs<T>(items: Array<T>): Array<PairOf<T>> {
 export const TWO_COL_GAP_VP: number = 12;
 
 /**
- * 平板设备判定（2026-10-23 平板竖屏两列）：deviceType 静态只读，进程生命周期
+ * 大封面网格行页边距（vp）：网格配对 Row 的
+ * 左右 padding，封面宽 = (行宽 − 2×24 − 12) / 2 ≈ 134vp（用户选定档位）。
+ * 挂 Row padding 而非卡内 padding：配对 Row 才知道
+ * 「这一行是网格行」，且奇数末行能与满行卡严格等宽。
+ * ⚠️ 只用于 isGrid() 网格分支；横屏两列长条分支不加（TrackItem 自带 16/4 内边距，
+ * 长条模式回归零容忍）。
+ */
+export const GRID_EDGE_PADDING_VP: number = 24;
+
+/**
+ * 平板设备判定：deviceType 静态只读，进程生命周期
  * 内不变，模块加载时读一次即可。平板返回 'tablet'；折叠屏 / 手机返回 'phone'
  * 且不受折叠形态影响 —— 正是用它把「平板竖屏两列」与「折叠屏竖屏单列」区分开。
  */
@@ -81,7 +91,7 @@ export class TwoColumnLayout {
 }
 
 /**
- * LazyForEach 的两列视图数据源（无状态视图，2026-10-23）：
+ * LazyForEach 的两列视图数据源（无状态视图）：
  * totalCount / getData 直接读 base（每次 getData(i) 现场构造 PairOf），
  * 不缓存、不在 base 上注册 listener（ArrayDataSource 是单 listener 槽位，
  * 双向注册会在横竖屏切换 LazyForEach 换绑数据源时互相覆盖）。

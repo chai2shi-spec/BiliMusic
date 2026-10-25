@@ -1,12 +1,11 @@
 /**
- * 断点系统（移植自 audio-interaction-master，按本项目规范去掉 as 断言）。
+ * 断点系统。
  *
  * BreakpointSystem：注册三条媒体查询监听，把当前断点（sm/md/lg）写入
  * AppStorage（BreakpointConstants.CURRENT_BREAKPOINT），各组件 @StorageProp 订阅。
  * BreakpointType：按断点取值的三态工具（sm 必填，md/lg 缺省回落 sm）。
  *
- * 注意：register 需要页面侧传入 UIContext（参考工程从 AppStorage 取，
- * 本项目改为显式传参，避免 as 断言与初始化时序问题）。
+ * 注意：register 需要页面侧显式传入 UIContext（避免 as 断言与初始化时序问题）。
  */
 
 import { mediaquery } from '@kit.ArkUI';
@@ -43,7 +42,7 @@ export class BreakpointSystem {
   private smListener: mediaquery.MediaQueryListener | null = null;
   private mdListener: mediaquery.MediaQueryListener | null = null;
   private lgListener: mediaquery.MediaQueryListener | null = null;
-  /** 横竖屏监听（2026-10-23 两列列表改造）：横屏宽屏时列表条目两列显示 */
+  /** 横竖屏监听：横屏宽屏时列表条目两列显示 */
   private landscapeListener: mediaquery.MediaQueryListener | null = null;
 
   private isBreakpointSM = (mediaQueryResult: mediaquery.MediaQueryResult): void => {

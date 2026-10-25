@@ -1,14 +1,11 @@
 /**
- * 播放设置页（2026-10-24 设置页二级菜单化改造）：
- * 原设置页「播放」卡整体迁入本二级页，行序与逻辑原样保留。
- *
+ * 播放设置页：
  * 内容：自动播放下一首 / 启动时自动播放 / 仅 WiFi 播放 / 与其他应用同时播放 /
  * 倍速播放 / 在 B 站打开原视频 / 累计听歌 / 最近播放 / 播放音质（SelectDialog 弹窗）/
  * 定时停止播放（bindSheet 半屏面板）。
  *
- * 定时停止的轮询门控（原设置页靠 activeTab === SETTINGS_TAB_INDEX）已随拆分简化：
- * 本页是 NavDestination 子页，aboutToAppear / aboutToDisappear 天然括起可见性 ——
- * 进页起 ticker（定时活跃时）、离页必停，不再需要页签下标判断。
+ * 定时停止的轮询门控：本页是 NavDestination 子页，aboutToAppear /
+ * aboutToDisappear 天然括起可见性 —— 进页起 ticker（定时活跃时）、离页必停。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）：
  * 材质与滚动模糊由 HDS 统一渲染，内容用 stackBuilder 承载标题；侧滑返回是
@@ -24,6 +21,7 @@ import {
   STORE_PLAYBACK_SPEED_ENABLED,
   STORE_PLAYBACK_SPEED,
   STORE_AUDIO_MIX_ENABLED,
+  STORE_LOUDNESS_NORM_ENABLED,
   STORE_OPEN_IN_BILI_ENABLED,
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP
@@ -112,7 +110,7 @@ export struct PlaybackSettingsPage {
   aboutToAppear(): void {
     this.refreshSleepText();
     // 偏好读取（getSettings / getTotalListenSeconds 都是 getSync 同步 IO）延后一拍，
-    // 首帧 build 全程零磁盘读（与原设置页同款模式）。
+    // 首帧 build 全程零磁盘读。
     setTimeout((): void => {
       this.settings = AppPreferences.getSettings();
       this.listenText = formatListenDuration(AppPreferences.getTotalListenSeconds());
@@ -228,7 +226,7 @@ export struct PlaybackSettingsPage {
         selectedIndex: selectedIndex,
         confirm: {
           value: '取消',
-          // ⚠️ 显式 close，不依赖组件内部关闭：真机实测（2026-10-11 阶段 3 验收）
+          // ⚠️ 显式 close，不依赖组件内部关闭：真机实测
           // confirm 提供空 action 时点击无效果（弹窗不关）——SelectDialog 的
           // confirm.action 会替换而非追加默认关闭行为。
           action: (): void => {
@@ -399,7 +397,7 @@ export struct PlaybackSettingsPage {
                 isCheck: this.settings.autoPlayOnStart,
                 selectColor: this.themePrimary,
                 onChange: (v: boolean): void => {
-                  // 进页不再弹提示（2026-10-24）：settings 延后一拍读真值时
+                  // 进页不弹提示：settings 延后一拍读真值时
                   // isCheck 翻转会让 SuffixSwitch 误触发 onChange —— 用翻转前值
                   // 守卫，只有值真的从关翻到开才提醒；误触发时 v 与持久值一致被拦下。
                   const turningOn: boolean = v && !this.settings.autoPlayOnStart;
@@ -463,6 +461,39 @@ export struct PlaybackSettingsPage {
                   MusicPlayer.getInstance().setAudioMixEnabled(v);
                   if (turningOn) {
                     this.toast('已开启：与其他应用音频共存播放', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 响度均衡（实验性）：开启后播放偏响的歌自动衰减到 B 站目标响度
+            // （playurl 的 volume 数据，只衰减不放大，偏小的歌保持原样）。
+            // 记录随在线解析 / 下载累积（LoudnessStore 按 musicId 存），未记录
+            // 的曲目不受影响。切换立即作用于当前曲目（setLoudnessNormalization-
+            // Enabled），换源重建后由 prepared 挂点重补。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '响度均衡（实验性）' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.loudnessNormalizationEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 翻转前值守卫：isCheck 翻转会让 SuffixSwitch 误触发 onChange
+                  // （见「启动时自动播放」注释），真切换才镜像 + 即时生效。
+                  const turningOn: boolean = v && !this.settings.loudnessNormalizationEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.loudnessNormalizationEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_LOUDNESS_NORM_ENABLED, v);
+                  MusicPlayer.getInstance().setLoudnessNormalizationEnabled(v);
+                  if (turningOn) {
+                    this.toast('已开启：偏响的歌曲将自动衰减到统一响度', 1800);
                   }
                 }
               }),
@@ -606,7 +637,7 @@ export struct PlaybackSettingsPage {
       .cachedCount(10)
       // 底部让位：列表末尾可滚动至手势区上方，不被遮挡
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-      // 大屏适配：内容列收窄居中（与原设置页同口径走 TwoColumnLayout.contentMaxWidth）
+      // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
