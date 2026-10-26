@@ -12,6 +12,7 @@ import { toHttpsUrl, stripHtmlTags, decodeHtmlEntities } from '../utils/TextUtil
 import { encodeWbi } from './WbiSign';
 import { gaiaWebParams } from '../utils/RiskShield';
 import { appSignQuery } from '../utils/AppSign';
+import { sleep } from '../utils/AsyncUtil';
 import http from '@ohos.net.http';
 import {
   AUDIO_Q_64K,
@@ -137,12 +138,6 @@ async function biliPost<T>(path: string, form: Record<string, string | number>):
 const SOURCE_RETRY_DELAYS_MS: number[] = [250, 700, 1500];
 /** 值得重试的业务码：B 站瞬时风控 / 限流，隔一会儿往往自行恢复 */
 const RETRYABLE_BIZ_CODES: number[] = [-352, -412, -509, -799];
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
-}
 
 /**
  * 判定错误是否值得重试。
@@ -1248,6 +1243,236 @@ export async function collectUpVideosAll(
   return { list: out, via: UP_VIA_SPACE, reason: '', partial: partial };
 }
 
+// ===== UP 主合集与系列（web-space 聚合物接口） =====
+//
+// 「合集」（ugc_season）与「系列」（series）都是 UP 主把多个独立投稿组织起来的
+// 形态（B 站空间页「合集」Tab 的两个分组）：合集是官方结构性组织（season_id），
+// 系列是 UP 主手动维护的列表（series_id）。view 接口的 ugc_season 只覆盖
+// 「视频 → 它所属的合集」，本节补「UP → 全部合集/系列」的列表与条目分页。
+//
+// ⚠️ 风控口径（与 x/space/wbi/arc/search 同域同结论）：web-space 聚合物接口
+// 匿名访问风控强（-352/-412/HTTP 412），登录态（SESSDATA 自动附上）大幅缓解；
+// 全部走 wbi 签名（encodeWbi），且**签名后不得再拼任何参数**（-403 先例见 getUserVideos）。
+// 响应壳只声明用到的字段、全部可选，字段名与真实结构有出入时只改解析层。
+
+/** UP 主「合集」摘要（seasons_list[].meta 摊平） */
+export interface UpSeasonSummary {
+  seasonId: number;
+  title: string;
+  cover: string;
+}
+
+/** UP 主「系列」摘要（series_list[].meta 摊平） */
+export interface UpSeriesSummary {
+  seriesId: number;
+  title: string;
+  cover: string;
+}
+
+/** 合集 + 系列一次请求的双列表结果 */
+export interface UpSeasonsSeriesResult {
+  seasons: UpSeasonSummary[];
+  series: UpSeriesSummary[];
+}
+
+/** 合集 / 系列条目分页结果：已转 Track（bvid 为 id，cid 空串由播放内核解析） */
+export interface SeasonSeriesPage {
+  tracks: Track[];
+  /** 服务端条目总数（page.total），缺省按已取条数兜底 */
+  total: number;
+  hasMore: boolean;
+}
+
+/** seasons_series_list 响应（只声明用到的字段，逐层可选防御） */
+interface SeasonsSeriesListRaw {
+  items_lists?: {
+    seasons_list?: SeasonsListItemRaw[];
+    series_list?: SeriesListItemRaw[];
+  };
+  page?: { page_num?: number; page_size?: number; total?: number };
+}
+
+interface SeasonsListItemRaw {
+  meta?: { season_id?: number; title?: string; cover?: string };
+}
+
+interface SeriesListItemRaw {
+  meta?: { series_id?: number; title?: string; cover?: string };
+}
+
+/** seasons/series_archives_list 响应（两者结构同源） */
+interface SeasonArchivesRaw {
+  archives?: ArchiveRawItem[];
+  page?: { page_num?: number; page_size?: number; total?: number };
+}
+
+interface ArchiveRawItem {
+  aid?: number;
+  bvid?: string;
+  title?: string;
+  pic?: string;
+  /** 时长（秒） */
+  duration?: number;
+  pubdate?: number;
+}
+
+/** 条目归一化：bvid 无效（空 / 非 BV 开头，下架 / 付费形态）返回 null 由调用方跳过 */
+function archiveToTrack(it: ArchiveRawItem, upName: string, upMid: string): Track | null {
+  const bvid: string = it.bvid ?? '';
+  if (bvid.indexOf('BV') !== 0) {
+    return null;
+  }
+  return buildTrack({
+    id: bvid,
+    bvid: bvid,
+    aid: String(it.aid ?? 0),
+    cid: '',
+    title: stripHtmlTags(it.title ?? ''),
+    artist: upName,
+    coverUrl: toHttpsUrl(it.pic ?? ''),
+    duration: it.duration ?? 0,
+    upMid: upMid,
+    pubdate: 0
+  });
+}
+
+/**
+ * UP 主的合集 + 系列列表（一次请求双列表）。
+ * 多数 UP 合集/系列 < 20 个，默认一页 20 足够；更极端的由调用方翻页（page_num）。
+ */
+export async function getUpSeasonsSeriesList(
+  mid: number,
+  pageNum: number = 1,
+  pageSize: number = 20
+): Promise<UpSeasonsSeriesResult> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonsSeriesListRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonsSeriesListRaw>>(
+      `${BILI_API}/x/polymer/web-space/seasons_series_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/seasons_series_list');
+  }
+  const raw: SeasonsSeriesListRaw = data.data;
+  const seasons: UpSeasonSummary[] = [];
+  const seasonsRaw: SeasonsListItemRaw[] = raw.items_lists?.seasons_list ?? [];
+  for (let i = 0; i < seasonsRaw.length; i++) {
+    const meta = seasonsRaw[i].meta;
+    if (!meta || !meta.season_id || !meta.title) {
+      continue;
+    }
+    seasons.push({
+      seasonId: meta.season_id,
+      title: stripHtmlTags(meta.title),
+      cover: toHttpsUrl(meta.cover ?? '')
+    });
+  }
+  const series: UpSeriesSummary[] = [];
+  const seriesRaw: SeriesListItemRaw[] = raw.items_lists?.series_list ?? [];
+  for (let i = 0; i < seriesRaw.length; i++) {
+    const meta = seriesRaw[i].meta;
+    if (!meta || !meta.series_id || !meta.title) {
+      continue;
+    }
+    series.push({
+      seriesId: meta.series_id,
+      title: stripHtmlTags(meta.title),
+      cover: toHttpsUrl(meta.cover ?? '')
+    });
+  }
+  console.info(`[SeasonsSeries] mid=${mid} page=${pageNum} seasons=${seasons.length} series=${series.length}`);
+  return { seasons: seasons, series: series };
+}
+
+/** 合集条目分页（`seasons_archives_list`，30 条/页，sort_reverse=false 即合集编排正序） */
+export async function getSeasonArchives(
+  mid: number,
+  seasonId: number,
+  upName: string,
+  upMid: string,
+  pageNum: number = 1,
+  pageSize: number = 30
+): Promise<SeasonSeriesPage> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    season_id: seasonId,
+    sort_reverse: 'false',
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonArchivesRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonArchivesRaw>>(
+      `${BILI_API}/x/polymer/web-space/seasons_archives_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/seasons_archives_list');
+  }
+  return parseSeasonArchivesRaw(data.data, `season=${seasonId}`, upName, upMid, pageNum, pageSize);
+}
+
+/** 系列条目分页（`series_archives_list`，only_normal 只取普通投稿，sort=desc 最新在前） */
+export async function getSeriesArchives(
+  mid: number,
+  seriesId: number,
+  upName: string,
+  upMid: string,
+  pageNum: number = 1,
+  pageSize: number = 30
+): Promise<SeasonSeriesPage> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    series_id: seriesId,
+    only_normal: 'true',
+    sort: 'desc',
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonArchivesRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonArchivesRaw>>(
+      `${BILI_API}/x/polymer/web-space/series_archives_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/series_archives_list');
+  }
+  return parseSeasonArchivesRaw(data.data, `series=${seriesId}`, upName, upMid, pageNum, pageSize);
+}
+
+/** archives 响应 → SeasonSeriesPage（合集/系列共用） */
+function parseSeasonArchivesRaw(
+  raw: SeasonArchivesRaw,
+  tag: string,
+  upName: string,
+  upMid: string,
+  pageNum: number,
+  pageSize: number
+): SeasonSeriesPage {
+  const items: ArchiveRawItem[] = raw.archives ?? [];
+  const tracks: Track[] = [];
+  let skipped: number = 0;
+  for (let i = 0; i < items.length; i++) {
+    const t: Track | null = archiveToTrack(items[i], upName, upMid);
+    if (t === null) {
+      skipped++;
+      continue;
+    }
+    tracks.push(t);
+  }
+  if (skipped > 0) {
+    console.warn(`[SeasonsSeries] ${tag} ${skipped} 个条目 bvid 无效（下架/付费），已跳过`);
+  }
+  const total: number = raw.page?.total ?? tracks.length;
+  // page.total 缺省时退化为「满页即还有下一页」的保守判断
+  const hasMore: boolean = raw.page?.total !== undefined
+    ? pageNum * pageSize < total
+    : items.length >= pageSize;
+  console.info(`[SeasonsSeries] ${tag} page=${pageNum} got=${items.length} built=${tracks.length} total=${total} hasMore=${hasMore}`);
+  return { tracks: tracks, total: total, hasMore: hasMore };
+}
+
 // ===== 音源解析缓存 =====
 //
 // 「点歌到出声」的链路 = view + playurl 两次串行请求 + 播放器缓冲，全串在一起
@@ -1372,9 +1597,15 @@ export function splitPartTitle(part: string): PartTitle {
  * 把多 P 视频（B 站音乐的「50 首精选合集」这类）或 B 站「合集」（ugc_season，
  * 多个独立视频的集合）展开成曲目列表；两者皆无的单视频返回空数组。
  *
- * 首个分 P 刻意复用 base.id：播放首个分 P 时用的就是原 track，
- * 这样展开后当前曲目在队列里的位置不变，currentIndex 不会错位、播放在展开瞬间不会打断。
- * 其余分 P 用 `bvid#cid` 作 id——cid 唯一，切歌时能正确取到对应分 P 的音频流。
+ * 首个分 P 复用 base.id 的**前提**：base.id 不含 '#'（base 是合集入口条目 = P1 本身，
+ * 来自搜索 / 榜单 / UP 主页）。此时播放首个分 P 用的就是原 track，展开后当前曲目
+ * 在队列里的位置不变，currentIndex 不会错位、播放在展开瞬间不会打断。
+ *
+ * base 本身是具体分 P（id 形如 `BV…#cid`，来自歌单 / 队列 / 最近播放）时，
+ * 首 P 与其余分 P **一律**用 `bvid#cid` 作 id——cid 唯一，切歌 / 下载时能正确
+ * 取到对应分 P 的音频流。若此时仍复用 base.id：P1 的数据（cid 是 P1 的）会顶掉
+ * base 的 id，下载任务按 cid 取流把 P1 的音频存进 base 那个分 P 的文件
+ * （musicId 撞车 + getDownloadByMusicId 去重把真分 P 的任务跳过），播放时串音。
  *
  * ⚠️ expandSeason 默认 false：合集里每个条目的 view 响应**同样**带 ugc_season，
  * 播放（MusicPlayer）/ 下载（DownloadManager）链路若也展开，下载合集里任意一集
@@ -1414,6 +1645,8 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
   const aid: string = base && base.aid ? base.aid : String(detail.aid);
   const out: Track[] = [];
   const badPages: number[] = [];
+  // 同批 id 去重现场：id 冲突即下载 / 队列串音的源头（见函数头注释），必须留 warn 可见
+  const seenIds: Set<string> = new Set<string>();
   for (let i = 0; i < pages.length; i++) {
     const p: VideoPageInfo = pages[i];
     if (p.cid <= 0 || p.duration <= 0) {
@@ -1431,8 +1664,24 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
     if (i === 0 && base && base.title.length > 0 && base.id.indexOf('#') < 0) {
       title = base.title;
     }
+    // 首 P id 复用条件（见函数头注释）：仅 base 是合集入口条目（id 不含 #，
+    // 即 base 本身就是 P1）时复用 base.id（base 缺省时退回纯 bvid，保持旧行为）；
+    // base 是具体分 P 时首 P 也用 bvid#cid，否则 P1 的数据顶掉 base 的 id →
+    // 下载任务 musicId 撞车 → 分 P 音频串音。
+    let partId: string = `${bvid}#${p.cid}`;
+    if (i === 0) {
+      if (base === undefined) {
+        partId = bvid;
+      } else if (base.id.indexOf('#') < 0) {
+        partId = base.id;
+      }
+    }
+    if (seenIds.has(partId)) {
+      console.warn(`[Collection] 展开出现重复 id：${partId}（page ${i + 1}/${pages.length}，bvid=${bvid}）`);
+    }
+    seenIds.add(partId);
     out.push(buildTrack({
-      id: i === 0 ? (base ? base.id : bvid) : `${bvid}#${p.cid}`,
+      id: partId,
       bvid: bvid,
       aid: aid,
       cid: String(p.cid),
@@ -1851,24 +2100,6 @@ function pushIfPlayable(out: AudioStream[], raw: AudioStream): void {
     return;
   }
   out.push(normalized);
-}
-
-/**
- * 按偏好挑一条 dash 音轨。
- *
- * ⚠️ **不要用它来组装可播地址**：它只认 dash，遇到 durl 老视频必抛
- * `No audio stream available`。组装音源请走 `resolveAudioSelection`
- * （内部会先 dash、再 durl 兜底）。本函数保留给「只想知道 dash 里挑了哪一档」的场景。
- */
-export function getBestAudioStream(playData: PlayUrlData, preferredQuality: number = 0): AudioStream {
-  // 不能直接写 playData.dash.audio：dash 缺失时（服务端偶发把 fnval 降级成 durl 老格式）
-  // 会抛 TypeError「Cannot read property 'audio' of undefined」，
-  // 被上层当成「这首歌播不了」而不是「响应格式异常」。显式判空，给出可识别的错误。
-  const audioStreams: AudioStream[] = collectAudioStreams(playData);
-  if (audioStreams.length === 0) {
-    throw new Error('No audio stream available');
-  }
-  return pickAudioStream(audioStreams, preferredQuality);
 }
 
 /**
@@ -2815,40 +3046,78 @@ export function mapFavItem(item: FavResourceItem, favName: string): Track {
 // 本地 → B 站的回推走 `POST /x/v3/fav/resource/deal`（批量加 / 取消收藏，一次调用
 // 可同时带 add / del 列表）。收藏夹双向同步仅此一个写接口。
 
-/** bv2av 解码表（B 站 2020 新版 bvid 编码，社区公认对照表） */
-const BV2AV_TABLE: string = 'fZodR9XQDSUm21yCkr6lBcJpq4e3YOaW7vNzLs5GxhTtMniKwA';
-/** bvid 中参与编码的 6 个字符下标（高位在前） */
-const BV2AV_POS: number[] = [11, 10, 3, 8, 4, 6];
-const BV2AV_XOR: number = 177451812;
-const BV2AV_ADD: number = 8728348608;
+/** bv2av 解码码表（B 站现行 bvid 编码，bvid_desc.md / issue #740 实测校准，58 字符） */
+const BV_ALPHABET: string = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf';
+/** 现行算法固定参数：去掩码阈值 2^51、异或盐值 */
+const BV_MASK_CODE: number = 2251799813685248;
+const BV_XOR_CODE: number = 23442827791579;
+const BV_BASE: number = 58;
 
 /**
- * bvid → avid（纯本地解码，无需请求）。
- * 例：`BV17x411W7KC` → `170001`（可用 `selfTestBv2av` 自检）。
- * 仅支持 2020 后的新版 BV 号（本工程镜像 / 搜索曲目的 id 全部是新版）。
+ * 51 位整数异或（JS 位运算 32 位截断，按 2^26 拆高低半分别异或再合成，
+ * Node 与 BigInt 参考实现对 4 组标准对验证一致）。
+ */
+function xor51(a: number, b: number): number {
+  const loA: number = a % 67108864;
+  const loB: number = b % 67108864;
+  const hiA: number = (a - loA) / 67108864;
+  const hiB: number = (b - loB) / 67108864;
+  return (hiA ^ hiB) * 67108864 + (loA ^ loB);
+}
+
+/**
+ * bvid → avid（纯本地解码，无需请求，现行算法）。
+ * 步骤：BV1 前缀 + 12 位长度校验 → 交换 3↔9、4↔7 → 下标 3..11 折 9 位 base58
+ * → 去掩码 → 异或盐值。4 组标准对见 `selfTestBv2av`。
+ * 注意：2020 年初的老 BV 号是旧版编码，本算法解不出（返回 -1）——
+ * 调用方（FavPushRunner）以意图携带的 aid 为主来源，此处仅兜底。
  */
 export function bv2av(bvid: string): number {
-  if (!bvid || bvid.length < 12 || bvid.indexOf('BV') !== 0) {
+  if (!bvid || bvid.length !== 12 || bvid.indexOf('BV1') !== 0) {
     return -1;
   }
-  let r: number = 0;
-  for (let i = 0; i < 6; i++) {
-    const idx: number = BV2AV_TABLE.indexOf(bvid.charAt(BV2AV_POS[i]));
+  const chars: string[] = [];
+  for (let i = 0; i < bvid.length; i++) {
+    chars.push(bvid.charAt(i));
+  }
+  const tmp3: string = chars[3];
+  chars[3] = chars[9];
+  chars[9] = tmp3;
+  const tmp4: string = chars[4];
+  chars[4] = chars[7];
+  chars[7] = tmp4;
+  let tmp: number = 0;
+  for (let i = 3; i <= 11; i++) {
+    const idx: number = BV_ALPHABET.indexOf(chars[i]);
     if (idx < 0) {
       return -1;
     }
-    r += idx * Math.pow(58, i);
+    tmp = tmp * BV_BASE + idx;
   }
-  return (r - BV2AV_ADD) ^ BV2AV_XOR;
+  if (tmp >= BV_MASK_CODE) {
+    tmp = tmp - BV_MASK_CODE;
+  }
+  return xor51(tmp, BV_XOR_CODE);
 }
 
-/** bv2av 自检（已知对照 `BV17x411W7KC` → av170001），首冲刷时打一次日志 */
+/** bv2av 自检（现行算法 4 组标准对全过才算通过），首冲刷时打一次日志 */
 export function selfTestBv2av(): boolean {
-  const ok: boolean = bv2av('BV17x411W7KC') === 170001;
-  if (!ok) {
-    console.error('[BilibiliApi] bv2av self-test FAILED, expect 170001 got ' + bv2av('BV17x411W7KC'));
+  const cases: string[][] = [
+    ['BV1L9Uoa9EUx', '111298867365120'],
+    ['BV1bY4y1j7RA', '643755790'],
+    ['BV1aP411K7it', '305988942'],
+    ['BV16x4y1H7M1', '1004871019']
+  ];
+  for (let i = 0; i < cases.length; i++) {
+    const bvid: string = cases[i][0];
+    const expect: number = Number(cases[i][1]);
+    const got: number = bv2av(bvid);
+    if (got !== expect) {
+      console.error(`[BilibiliApi] bv2av self-test FAILED, ${bvid} expect ${expect} got ${got}`);
+      return false;
+    }
   }
-  return ok;
+  return true;
 }
 
 /**
@@ -2930,15 +3199,6 @@ export async function getUserCard(mid: number): Promise<UserCard | null> {
     sign: card.sign ?? '',
     archiveCount: data && typeof data.archive_count === 'number' ? data.archive_count : 0
   };
-}
-
-export async function extractAudioFromSearch(keyword: string, index: number = 0): Promise<TrackSource> {
-  const searchResult: SearchResponse = await searchVideo(keyword, 1, 10);
-  if (!searchResult.result || searchResult.result.length === 0) {
-    throw new Error(`未找到相关视频: ${keyword}`);
-  }
-  const video: SearchResultItem = searchResult.result[index];
-  return extractAudioFromVideo(video.bvid);
 }
 
 // ===== 我的关注（登录用户的关注列表，FollowsPage 用） =====
@@ -3291,7 +3551,34 @@ export async function extractAudioFromVideo(
     cachePut<TrackSource>(sourceCache, cacheKey, source, SOURCE_CACHE_MAX);
     return source;
   } catch (e) {
-    // ── ② 换通道重试：登录存在 + 风控类错误 → 翻转登录/匿名再解析一轮 ──
+    // ── ② -404 自愈（view 缓存过期 → UP 删稿重传，cid 全变）──
+    // playurl 答 -404「啥都木有」≠ 稿件一定失效：view 有 10 分钟缓存，
+    // 缓存期内 UP 重传稿件（cid 全部更换）时，按旧 cid 问询必然 -404。
+    // 强刷 view 重解析一轮即愈：刷新后 belongs 校验基于最新 pages，
+    // track 旧 cid 不在 pages 里就自动落到新 detail.cid，重传稿一次就好；
+    // 真被删的稿件刷新后 view 自己就会 -404，错误口径更准（「稿件不存在」）。
+    // 仅未显式 refresh 的调用自愈（refresh=true 的调用 view 本就是新的，
+    // 重试只是原地复读，reloadCurrentSource 降级链不会重复触发）。
+    if (!refresh && e instanceof BiliApiError && e.code === -404) {
+      try {
+        const healed: TrackSource =
+          await resolveTrackSource(bvid, fallback, preferredQuality, true, preferAnonymous);
+        cachePut<TrackSource>(sourceCache, cacheKey, healed, SOURCE_CACHE_MAX);
+        console.warn(`-404 healed by view refresh: ${bvid} cid=${fallback && fallback.cid ? fallback.cid : 0}`);
+        return healed;
+      } catch (healErr) {
+        if (healErr instanceof BiliApiError && healErr.code === -404) {
+          // 刷新后仍 -404：稿件真失效（删除 / 仅特定用户可见）。avid+cid 兜底
+          // 用的还是那个已不存在的 cid，再问一次也是 -404 —— 直接抛出，
+          // 让播放层给出「已失效」提示而不是误导性的「请稍后重试」。
+          throw healErr;
+        }
+        // 自愈路径撞上瞬态错误（网络抖动 / 风控）：落回原兜底链继续尝试
+        console.warn(`-404 heal retry hit transient error, fall back to original chain: ${
+          healErr instanceof Error ? healErr.message : JSON.stringify(healErr)}`);
+      }
+    }
+    // ── ③ 换通道重试：登录存在 + 风控类错误 → 翻转登录/匿名再解析一轮 ──
     // 通道翻转是**双向**的：匿名被拒（例如该 IP 的匿名配额用尽）
     // 也要能带着登录态试一次。两个方向都只试一次，不来回震荡。
     if (loggedIn && isChannelSwitchWorthy(e)) {

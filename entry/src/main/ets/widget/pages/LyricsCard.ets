@@ -16,7 +16,6 @@ struct LyricsCard {
   @LocalStorageProp('imageColor') imageColor: string = 'rgba(251, 114, 153, 1)';
   @LocalStorageProp('lrcArray') lrcArray: Array<string> =
     ['纯音乐，请欣赏'];
-  @LocalStorageProp('formId') formId: string = '';
   @LocalStorageProp('title') title: string = 'Song Name';
   @LocalStorageProp('singer') singer: string = 'Singer';
   @LocalStorageProp('songId') songId: string = '1';

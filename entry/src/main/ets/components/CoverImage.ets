@@ -61,49 +61,33 @@ export struct CoverImage {
     this.loadFailed = false;
   }
 
+  /** 显示宽：填充模式交给父容器（100%），否则按传入宽（vp） */
+  private sizeW(): Length {
+    return this.fillParent ? '100%' : this.imgWidth;
+  }
+
+  /** 显示高：填充模式交给父容器（100%），否则按传入高（vp） */
+  private sizeH(): Length {
+    return this.fillParent ? '100%' : this.imgHeight;
+  }
+
+  /** 占位音符字号（vp）：大卡固定 40（填充模式下 imgWidth/imgHeight 不代表实际尺寸），行内按短边 0.4 */
+  private glyphSize(): number {
+    return this.fillParent ? 40 : Math.min(this.imgWidth, this.imgHeight) * 0.4;
+  }
+
   build() {
-    if (this.fillParent) {
-      // 填充模式（网格大封面卡）：尺寸交给父容器，本组件只负责三态与圆角。
-      if (this.url.length === 0 || this.loadFailed) {
-        Stack() {
-          SymbolGlyph($r('sys.symbol.waveform'))
-            // 大卡占位图标按固定 40vp（imgWidth/imgHeight 在填充模式下不代表实际尺寸）
-            .fontSize(40)
-            .fontColor([this.themePrimary])
-            .opacity(0.45)
-            .accessibilityLevel('no')
-        }
-        .width('100%')
-        .height('100%')
-        .borderRadius(this.imgRadius)
-        .backgroundColor(this.themeSurface)
-        .accessibilityText(this.altText)
-        .accessibilityLevel(this.altText.length > 0 ? 'yes' : 'no')
-      } else {
-        Image(this.url)
-          .width('100%')
-          .height('100%')
-          .borderRadius(this.imgRadius)
-          .objectFit(ImageFit.Cover)
-          .backgroundColor(this.themeSurface)
-          .onError((): void => {
-            this.loadFailed = true;
-          })
-          .accessibilityText(this.altText)
-          .accessibilityLevel(this.altText.length > 0 ? 'yes' : 'no')
-      }
-    } else {
-      if (this.url.length === 0 || this.loadFailed) {
+    if (this.url.length === 0 || this.loadFailed) {
       Stack() {
         SymbolGlyph($r('sys.symbol.waveform'))
-          .fontSize(Math.min(this.imgWidth, this.imgHeight) * 0.4)
+          .fontSize(this.glyphSize())
           .fontColor([this.themePrimary])
           .opacity(0.45)
           // 占位音符是纯装饰图形：读屏聚焦它只会念「波形」，无信息量
           .accessibilityLevel('no')
       }
-      .width(this.imgWidth)
-      .height(this.imgHeight)
+      .width(this.sizeW())
+      .height(this.sizeH())
       .borderRadius(this.imgRadius)
       .backgroundColor(this.themeSurface)
       // 占位态仍念歌名：失败/无图不代表这行内容变没了
@@ -113,8 +97,8 @@ export struct CoverImage {
       // 网络图：**永远渲染**（可见性不依赖任何回调）。加载中的提示就是它
       // 自带的 brand_surface 底色 —— 像素到达前透出浅粉，不留白也不叠覆盖层。
       Image(this.url)
-        .width(this.imgWidth)
-        .height(this.imgHeight)
+        .width(this.sizeW())
+        .height(this.sizeH())
         .borderRadius(this.imgRadius)
         .objectFit(ImageFit.Cover)
         .backgroundColor(this.themeSurface)
@@ -123,7 +107,6 @@ export struct CoverImage {
         })
         .accessibilityText(this.altText)
         .accessibilityLevel(this.altText.length > 0 ? 'yes' : 'no')
-      }
     }
   }
 }

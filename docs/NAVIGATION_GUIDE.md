@@ -9,7 +9,7 @@
 
 | 层 | 载体 | 说明 |
 |---|---|---|
-| 栈实例 | `service/NavStackHolder.ets` | 静态单例 `NavPathStack`，phoneShell / tabletShell 两壳互斥挂载共享（折叠开合保返回栈） |
+| 栈实例 | `service/NavStackHolder.ets` | 静态单例 `NavPathStack`，phoneShell 全形态挂载共享（折叠开合保返回栈） |
 | 页面注册 | `service/LazyPageRegistry.ets` | 路由名 → 动态 import 映射（首帧后 1.5s 预热）；Index `pageMap` @Builder 渲染 `LazyDest` |
 | 路由参数 | `service/NavRouteParams.ets` | 显式参数类（`UpSpaceRouteParam` / `PlaylistDetailRouteParam` / `LoginRouteParam`）+ `LOGIN_GATED_ROUTES` 拦截清单 |
 | 拦截器 | `NavStackHolder.setupInterception()` | Index `aboutToAppear` 挂载一次：willShow 阶段登录拦截（清单当前为空）+ 同名 push 300ms 防抖 |

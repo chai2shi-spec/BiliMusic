@@ -56,7 +56,7 @@ import {
 } from '../common/utils/TwoColumnList';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -279,22 +279,14 @@ export struct RecentPage {
   }
 
   private clearAll(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '清空播放记录',
       message: '确定清空全部播放记录？此操作不可恢复。',
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-          // 取消：不做任何事
-        }
-      },
-      secondaryButton: {
-        value: '清空',
-        action: (): void => {
-          LibraryStore.clearRecentTracks();
-          this.refresh();
-          this.toast('已清空播放记录', 1500);
-        }
+      confirmText: '清空',
+      onConfirm: (): void => {
+        LibraryStore.clearRecentTracks();
+        this.refresh();
+        this.toast('已清空播放记录', 1500);
       }
     });
   }

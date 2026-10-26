@@ -26,6 +26,8 @@ import { HttpUtil } from '../utils/HttpUtil';
 import { decodeHtmlEntities, parseDurationText, stripHtmlTags, toHttpsUrl } from '../utils/TextUtil';
 import { BiliApiError, SearchResponse, SearchResultItem, searchVideo, searchVideoByHtml } from '../api/BilibiliApi';
 import { buildTrack, slimTrack, Track, Playlist } from '../model/MusicModels';
+import { sleep } from '../utils/AsyncUtil';
+import { normalizeForMatch } from '../utils/TrackDedup';
 import {
   createPlaylist,
   getPlaylists,
@@ -566,24 +568,10 @@ const RISK_CODES: number[] = [-352, -412, -509, -799];
  */
 
 /**
- * 标点统一剔除。两侧（歌名 / 视频标题）必须用同一套规则，
- * 才能让 `Butter-Fly` 对上 `Butter Fly`、`secret base ~君がくれたもの~`
- * 对上 `secret base ～君がくれたもの～`。
+ * 匹配用归一化（normalizeForMatch）已迁至 `utils/TrackDedup.ts`：
+ * 歌单导入打分与歌单智能去重必须共用同一套归一化口径，
+ * 保证「导入时能对上的两首歌」在去重时也能对上。
  */
-const MATCH_PUNCT_RE: RegExp =
-  /[!！?？.。,，、;；:：'"“”‘’`´~～\-–—_|\\\/·•&+*=×()（）\[\]{}【】《》「」『』<>〈〉#@$%^]/g;
-
-/** 匹配用归一化：实体解码 → 全角转半角 → 小写 → 去标点 → 去空白 */
-function normalizeForMatch(raw: string): string {
-  let s: string = decodeHtmlEntities(raw);
-  s = s.replace(/[\uFF01-\uFF5E]/g, (ch: string): string => {
-    return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
-  });
-  s = s.replace(/\u3000/g, ' ');
-  s = s.toLowerCase();
-  s = s.replace(MATCH_PUNCT_RE, '');
-  return s.replace(/\s+/g, '');
-}
 
 /**
  * 主标题：截到第一个左括号。
@@ -893,12 +881,6 @@ const MATCH_PAGE_SIZE: number = 30;
  * 而 start / stop / resume / 用户操作走 notify 立即推，状态切换不掉帧。
  */
 const IMPORT_NOTIFY_MS: number = 120;
-
-function importSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
-}
 
 export function emptyImportState(): ImportState {
   return {
@@ -1290,7 +1272,7 @@ export class ImportTaskManager {
       const clock: string = mm > 0 ? `${mm} 分 ${sec % 60} 秒` : `${sec} 秒`;
       this.state.currentTitle = `${prefix}，${clock}后继续（已完成 ${this.done}/${this.state.items.length} 首）`;
       this.notify();
-      await importSleep(step);
+      await sleep(step);
       leftMs -= step;
     }
   }
@@ -1415,7 +1397,7 @@ export class ImportTaskManager {
     this.lastRequestAt = now > earliest ? now : earliest;
     const wait: number = earliest - now;
     if (wait > 0) {
-      await importSleep(wait);
+      await sleep(wait);
     }
   }
 

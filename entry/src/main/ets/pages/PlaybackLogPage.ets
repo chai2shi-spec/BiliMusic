@@ -1,9 +1,9 @@
 /**
  * 播放日志页（设置页「日志记录」进入）。
  *
- * 背景：三方应用读不到系统 hilog，用户遇到「无法播放」时没有可提交的现场。
- * player/MusicPlayer.ts 在 plogError / plogWarn / notifyHint 三个汇聚点把
- * 播放日志写入 service/PlaybackLogStore（内存环形缓冲，最近 200 条，重启清空），
+ * 背景：三方应用读不到系统 hilog，用户遇到「无法播放」等故障时没有可提交的现场。
+ * service/PlaybackLogStore 收割全应用错误（console.error 全局 hook +
+ * MusicPlayer plogError / plogWarn / notifyHint 埋点），落盘持久化、跨重启保留，
  * 本页渲染 + 复制：
  *   · 按时间倒序（最新在最上），级别着色：错误 state_error / 警告 state_warning
  *     / 提示 text_secondary；
@@ -21,11 +21,17 @@ import { STORE_SAFE_BOTTOM, STORE_SAFE_TOP } from '../common/Constants';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { InsetCard, CardDivider, SectionFooter } from '../components/InsetCardGroup';
 import { copyText } from '../utils/ClipboardUtil';
 import { showAppToast } from '../components/AppToast';
+import { showConfirm } from '../components/AppAlertDialog';
+import picker from '@ohos.file.picker';
+import fileUri from '@ohos.file.fileuri';
+import fs from '@ohos.file.fs';
+import common from '@ohos.app.ability.common';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -78,11 +84,67 @@ export struct PlaybackLogPage {
     });
   }
 
-  /** 「清空」：清 store + 清本地快照，toast 回执 */
+  /**
+   * 「导出日志」：系统保存对话框（DocumentViewPicker.save，标准文件保存通路）
+   * 选位置，导出为带时间戳的 .txt（内容与「复制全部」同源同格式）。
+   * 空日志直接拦下（导出占位文本没有意义）；写文件走异步 fs，不阻塞主线程。
+   */
+  private exportLogs(): void {
+    if (this.logs.length === 0) {
+      showAppToast('暂无可导出的日志', 1600);
+      return;
+    }
+    const d: Date = new Date();
+    const two = (v: number): string => v < 10 ? `0${v}` : `${v}`;
+    const fileName: string =
+      `BiliMusic日志_${two(d.getMonth() + 1)}${two(d.getDate())}_${two(d.getHours())}${two(d.getMinutes())}.txt`;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const saveOptions: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+      saveOptions.newFileNames = [fileName];
+      new picker.DocumentViewPicker(ctx).save(saveOptions)
+        .then((uris: Array<string>): Promise<void> => this.writeExportFile(uris, fileName))
+        .catch((e: Error): void => {
+          console.error(`export logs picker failed: ${e.message}`);
+          showAppToast('导出失败，请重试', 1600);
+        });
+    } catch (e) {
+      console.error(`export logs failed: ${JSON.stringify(e)}`);
+      showAppToast('导出失败，请重试', 1600);
+    }
+  }
+
+  /** 保存对话框返回后写文件：URI → 绝对路径（fileUri 转换，PublicDownloadsSaver 同款）→ 异步写入 */
+  private async writeExportFile(uris: Array<string>, fileName: string): Promise<void> {
+    if (uris.length === 0) {
+      return; // 用户在保存对话框点了取消
+    }
+    const path: string = new fileUri.FileUri(uris[0]).path ?? '';
+    if (path.length === 0) {
+      showAppToast('导出失败，请重试', 1600);
+      return;
+    }
+    const file: fs.File = await fs.open(path, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      await fs.write(file.fd, formatPlaybackLogsAsText());
+    } finally {
+      await fs.close(file);
+    }
+    showAppToast(`已导出「${fileName}」`, 2400);
+  }
+
+  /** 「清空」：二次确认防误删（日志跨重启保留、删后不可恢复），确认后清 store + 清本地快照 */
   private clearAllLogs(): void {
-    clearPlaybackLogs();
-    this.logs = [];
-    showAppToast('已清空', 1500);
+    showConfirm(this.getUIContext(), {
+      title: '清空日志',
+      message: `将删除全部 ${this.logs.length} 条日志记录，删除后不可恢复。`,
+      confirmText: '清空',
+      onConfirm: (): void => {
+        clearPlaybackLogs();
+        this.logs = [];
+        showAppToast('已清空', 1500);
+      }
+    });
   }
 
   /** 长按单条：复制该条格式化行 */
@@ -141,25 +203,12 @@ export struct PlaybackLogPage {
     NavTitleRow({ title: '日志记录' })
   }
 
-  /**
-   * 标题行收窄容器（AboutPage aboutBarNarrow 同款）：HDS titleBar 的 stackBuilder
-   * 横跨目的地整列全宽，大屏上外层 Row 居中 + 内层 Column constraintSize 让标题行
-   * 与收窄的内容列同宽对齐；两侧空白区 Transparent 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   logBarNarrow() {
-    Row() {
-      Column() {
-        this.logBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.logBar()
+    } })
   }
 
   /** 操作行（「复制全部」/「清空」共用版式：左侧图标 + 标题 + press_overlay 按压反馈） */
@@ -200,12 +249,12 @@ export struct PlaybackLogPage {
         .fontSize(44)
         .fontColor([$r('app.color.text_tertiary')])
 
-      Text('暂无播放失败日志')
+      Text('暂无错误日志')
         .fontSize(15)
         .fontColor($r('app.color.text_secondary'))
         .margin({ top: 12 })
 
-      Text('播放出错时会自动记录在这里，重启应用后清空')
+      Text('使用过程中的错误会自动记录在这里，重启应用后仍保留')
         .fontSize(12)
         .fontColor($r('app.color.text_tertiary'))
         .margin({ top: 6 })
@@ -258,6 +307,12 @@ export struct PlaybackLogPage {
 
               CardDivider()
 
+              this.actionRow('导出日志', $r('sys.symbol.arrow_down_to_line'), (): void => {
+                this.exportLogs();
+              })
+
+              CardDivider()
+
               this.actionRow('清空', $r('sys.symbol.xmark'), (): void => {
                 this.clearAllLogs();
               })
@@ -265,7 +320,7 @@ export struct PlaybackLogPage {
           }
 
           ListItem() {
-            SectionFooter({ noteText: '播放出错时会自动记录（错误 / 警告 / 提示），重启应用后清空。长按单条可复制。' })
+            SectionFooter({ noteText: '使用过程中的错误 / 警告 / 提示都会自动记录，跨应用重启保留。长按单条可复制。' })
           }
 
           // ── 日志列表（空态 / 条目二选一）──

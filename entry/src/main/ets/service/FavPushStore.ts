@@ -4,8 +4,8 @@
  * 职责单一：双向夹的本地增删（add / del 意图）实时写回失败后进入此队列，
  * 由 FavPushRunner 去抖冲刷；FavSyncManager 每轮同步开头先补推（先推后拉）。
  *
- * 意图只存 { mediaId, bvid, op }，avid 由冲刷时 bv2av(bvid) 现算 ——
- * bvid→avid 是确定性映射，无需缓存，单条意图约 55 字节。
+ * 意图存 { mediaId, bvid, aid, op }：aid 为主来源（收藏 API 直接返回的 avid
+ * 字符串，零解码风险、覆盖老 BV 号），缺失时冲刷以现行 bv2av 算法解码 bvid 兜底。
  *
  * 容量上限 FAV_PUSH_QUEUE_CAP = 120 条：Preferences 单值 8192 字节预算内
  * （120 × ~55B ≈ 6.6KB），超限 FIFO 丢最旧并告警（正常用户远达不到）。
@@ -27,6 +27,8 @@ export interface FavPushIntent {
   mediaId: number;
   /** 视频 bvid（== 镜像曲目 track.id） */
   bvid: string;
+  /** avid 字符串（收藏 API 返回，rid 主来源）；空串 = 冲刷时 bv2av(bvid) 兜底解码 */
+  aid: string;
   /** 'add' | 'del' */
   op: string;
 }
@@ -46,7 +48,12 @@ function loadQueue(): FavPushIntent[] {
     if (it && typeof it.mediaId === 'number' && it.mediaId > 0
       && typeof it.bvid === 'string' && it.bvid.length > 0
       && (it.op === 'add' || it.op === 'del')) {
-      out.push({ mediaId: it.mediaId, bvid: it.bvid, op: it.op });
+      out.push({
+        mediaId: it.mediaId,
+        bvid: it.bvid,
+        aid: typeof it.aid === 'string' ? it.aid : '',
+        op: it.op
+      });
     }
   }
   return out;
@@ -98,7 +105,12 @@ export function enqueueFavPushes(intents: FavPushIntent[]): number {
       dirty = true;
       continue;
     }
-    queue.push({ mediaId: next.mediaId, bvid: next.bvid, op: next.op });
+    queue.push({
+      mediaId: next.mediaId,
+      bvid: next.bvid,
+      aid: typeof next.aid === 'string' ? next.aid : '',
+      op: next.op
+    });
     enqueued++;
     dirty = true;
   }

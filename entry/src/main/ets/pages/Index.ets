@@ -99,9 +99,8 @@ import { HomePage } from './HomePage';
 import { PlaylistsPage } from './PlaylistsPage';
 import { DownloadsPage } from './DownloadsPage';
 import { SettingsPage } from './SettingsPage';
-// 以下 10 个导航子页面（PlayerPage / PlaylistDetail / RecentPage /
-// FollowsPage / UpSpacePage / WatchHistoryPage / FavSyncPage / PlaylistImportPage /
-// AboutPage / LoginPage，短信登录已并入 LoginPage）为懒加载 ——
+// 导航子页面（PlayerPage / PlaylistDetail / RecentPage / FollowsPage /
+// UpSpacePage / WatchHistoryPage / FavSyncPage 等）统一为懒加载 ——
 // 它们只在 pageMap 被路由触达时才需要，静态引用会拖整棵子树（含 lyric/*、
 // components/player/*）在冷启动首帧前解析，直接拉长「应用启动加载完成」。
 // 现统一走 service/LazyPageRegistry 动态 import，首帧后 1.5s 低优先级预热。
@@ -110,7 +109,8 @@ import { NavStackHolder } from '../service/NavStackHolder';
 import { PlayBar } from '../components/PlayBar';
 import { SubPagePlayBar } from '../components/SubPagePlayBar';
 import { AppToast, showAppToast } from '../components/AppToast';
-import { AppDialogHost } from '../components/AppAlertDialog';
+import { AppDialogHost, showAppAlertDialog } from '../components/AppAlertDialog';
+import { abilityAccessCtrl, bundleManager, Permissions } from '@kit.AbilityKit';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { watchNetwork } from '../utils/NetworkUtil';
@@ -133,7 +133,6 @@ import {
   STORE_BAR_LAYOUT,
   STORE_DL_BAR_HAS_TASKS,
   STORE_DL_BAR_SELECTING,
-  STORE_PL_BAR_SELECTING,
   GLOW_ALPHA,
   STORE_THEME_PRIMARY,
   STORE_MINI_BAR_ANIM_PHASE,
@@ -166,6 +165,7 @@ import {
   STORE_SEARCH_TAB,
   STORE_STARTUP_HINT_MSG,
   STORE_STARTUP_HINT_SEQ,
+  STORE_BT_PERM_REQ_SEQ,
   STORE_CARD_OPEN_PLAYER_SEQ
 } from '../common/Constants';
 import { PLAYER_MAIN_CURVE, PLAYER_SLIDE_CURVE, SLIDE_CLOSE_MS } from '../common/constants/InteractionConstants';
@@ -173,8 +173,8 @@ import { PLAYER_CLOSE_STYLE_SLIDE } from '../model/MusicModels';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
-import { DlSelectToggle, DlQueueActions, DlControlBar } from '../components/DownloadsTabBar';
-import { PlTitleActions, PlSelectToolbar } from '../components/PlaylistsTabBar';
+import { DlSelectToggle, DlQueueActions } from '../components/DownloadsTabBar';
+import { PlTitleActions } from '../components/PlaylistsTabBar';
 import { HOME_CATEGORY_CHIPS, CategoryChipUi } from '../components/HomeCategoryChips';
 
 /**
@@ -211,7 +211,6 @@ const BAR_FLOATING_BAR_WIDTH: number = 304;
 const TAB_SEARCH: number = 0;
 const TAB_PLAYLISTS: number = 1;
 const TAB_DOWNLOADS: number = 2;
-const TAB_SETTINGS: number = 3;
 /**
  * 屏幕竖向滑动（parallelGesture）判定收/放意图的触发阈值（vp）：
  * 上滑超过 → 展开、下滑超过 → 收起；一次手势只触发一次。
@@ -369,8 +368,9 @@ struct Index {
   /**
    * 播放页 overlay 是否挂载（根 Stack 条件渲染，打开置 true / 收起动画结束回 false）。
    * @Watch 挂/卸载双时机驱动播放页横竖屏自动旋转：
-   *   · 挂载 → 窗口切 AUTO_ROTATION（跟随传感器四向自动旋转，不受控制中心
-   *     旋转开关限制）—— 播放页已备横竖两套版式，随设备姿态随转随切；
+   *   · 挂载 → 窗口切 AUTO_ROTATION_RESTRICTED（跟随传感器四向自动旋转，
+   *     受控制中心旋转开关限制：锁定时保持当前方向）—— 播放页已备横竖两套
+   *     版式，随设备姿态随转随切；
    *   · 卸载（收起动画落定后）→ 复原 UNSPECIFIED（跟随系统默认方向），
    *     壳层与各 Tab 页回归系统横竖屏状态。
    */
@@ -387,14 +387,14 @@ struct Index {
       return;
     }
     const target: window.Orientation = this.playerOverlayMounted
-      ? window.Orientation.AUTO_ROTATION
+      ? window.Orientation.AUTO_ROTATION_RESTRICTED
       : window.Orientation.UNSPECIFIED;
     window.getLastWindow(ctx)
       .then((win: window.Window): Promise<void> => {
         return win.setPreferredOrientation(target);
       })
       .then((): void => {
-        console.info(`player window orientation -> ${this.playerOverlayMounted ? 'AUTO_ROTATION' : 'UNSPECIFIED'}`);
+        console.info(`player window orientation -> ${this.playerOverlayMounted ? 'AUTO_ROTATION_RESTRICTED' : 'UNSPECIFIED'}`);
       })
       .catch((err: BusinessError): void => {
         console.error(`setPreferredOrientation failed: ${err.code} ${err.message}`);
@@ -626,6 +626,83 @@ struct Index {
     AppStorage.setOrCreate(STORE_PLAYER_OVERLAY_MOUNTED, true);
   }
 
+  /**
+   * 蓝牙权限申请信号（MusicPlayer 首次真实播放时 seq 递增写入，见
+   * Constants.STORE_BT_PERM_REQ_SEQ 注释）。
+   *
+   * 应用市场合规（「申请权限须告知使用目的，禁止诱导欺骗用户授权」）：
+   * 播放内核不直接弹系统授权框，先经本页弹**应用内用途说明弹窗**，用户
+   * 知情点「去授权」后才调 requestPermissionsFromUser。文案如实陈述用途
+   * 与拒绝后果（拒绝不影响正常播放），不含「拒绝将无法使用」类诱导表述；
+   * 点「暂不」不弹系统框，下次启动首次播放才会再问（进程内只问一次）。
+   */
+  @StorageProp(STORE_BT_PERM_REQ_SEQ) @Watch('onBtPermRequest') btPermReqSeq: number = 0;
+  /** 已消费的蓝牙权限申请 seq（防重放；冷启动补刀比对用，同 lastCardOpenSeq） */
+  private lastBtPermSeq: number = 0;
+
+  /** @Watch 消费入口：组件先挂、信号后写 */
+  private onBtPermRequest(): void {
+    this.consumeBtPermRequest();
+  }
+
+  /**
+   * 消费蓝牙权限申请 seq：@Watch 与 aboutToAppear 补刀（信号先写、组件后挂，
+   * @StorageProp 初值同步不触发 @Watch）双时序覆盖。已授权（此前允许过）时
+   * 静默跳过，不再打扰用户。
+   */
+  private consumeBtPermRequest(): void {
+    if (this.btPermReqSeq <= 0 || this.btPermReqSeq === this.lastBtPermSeq) {
+      return;
+    }
+    this.lastBtPermSeq = this.btPermReqSeq;
+    const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+    bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION)
+      .then((info: bundleManager.BundleInfo): Promise<abilityAccessCtrl.GrantStatus> => {
+        return atManager.checkAccessToken(info.appInfo.accessTokenId, 'ohos.permission.ACCESS_BLUETOOTH');
+      })
+      .then((status: abilityAccessCtrl.GrantStatus): void => {
+        if (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
+          return;
+        }
+        this.showBtPermPurposeDialog(ctx);
+      })
+      .catch((err: BusinessError): void => {
+        // 授权态查询失败不拦申请链：降级直接走用途说明弹窗
+        console.error(`[Index] checkAccessToken failed: ${err.code} ${err.message}`);
+        this.showBtPermPurposeDialog(ctx);
+      });
+  }
+
+  /** 应用内用途说明弹窗：左「暂不」仅关窗，右「去授权」才弹系统授权框 */
+  private showBtPermPurposeDialog(ctx: common.Context): void {
+    showAppAlertDialog(this.getUIContext(), {
+      title: '申请蓝牙权限',
+      message: '用于读取已连接蓝牙设备的名称，识别耳机、音箱等音频设备，'
+        + '避免连接手表、手环时误暂停播放。拒绝后不影响正常播放音乐。',
+      primaryButton: { value: '暂不' },
+      secondaryButton: {
+        value: '去授权',
+        action: (): void => {
+          this.requestBtPermission(ctx);
+        }
+      }
+    });
+  }
+
+  /** 用户知情点「去授权」后弹系统授权框（结果由系统窗呈现，不再追问） */
+  private requestBtPermission(ctx: common.Context): void {
+    const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+    const permissions: Array<Permissions> = ['ohos.permission.ACCESS_BLUETOOTH'];
+    atManager.requestPermissionsFromUser(ctx, permissions)
+      .catch((err: BusinessError): void => {
+        console.error(`[Index] requestPermissionsFromUser failed: ${err.code} ${err.message}`);
+      });
+  }
+
   /** PlayerPage 手势下拉松手过阈值的跨层信号（seq 递增 → 统一下滑收起） */
   private onSlideCloseRequest(): void {
     this.slideOutClose();
@@ -688,15 +765,8 @@ struct Index {
   @State tabSwitchDuration: number = TAB_SWITCH_BASE_MS;
 
   /**
-   * 歌单页多选态镜像：驱动根栏 stackBuilder 第二行（PlSelectToolbar）的
-   * 条件渲染。写入口在 PlaylistsPage.syncBarState，本组件只读。
-   */
-  @StorageProp(STORE_PL_BAR_SELECTING) plSelecting: boolean = false;
-
-  /**
-   * 下载页多选态镜像（留白整改）：常规态标题行右侧多一组队列控制
-   * （DlQueueActions），多选态行 2 渲染多选工具条（DlControlBar）。
-   * 写入口在 DownloadsPage，本组件只读。
+   * 下载页多选态镜像：多选态 DlQueueActions 让位、DlSelectToggle 变身
+   * 标题行内多选动作组。写入口在 DownloadsPage，本组件只读。
    */
   @StorageProp(STORE_DL_BAR_SELECTING) dlSelecting: boolean = false;
 
@@ -730,8 +800,8 @@ struct Index {
   @StorageLink(STORE_SEARCH_TAB) homeTab: string = 'recommend';
 
   /**
-   * 路由栈注入：@Consume('navPathStack') 的子组件可拿到与两壳
-   * HdsNavigation 同一份栈实例；当前子页面经 NavStackHolder 静态单例访问
+    * 路由栈注入：@Consume('navPathStack') 的子组件可拿到与
+    * HdsNavigation 同一份栈实例；当前子页面经 NavStackHolder 静态单例访问
    * （等价同一份），此 @Provide 为标准注入通道预留，避免子组件再依赖
    * service 层单例。
    */
@@ -766,13 +836,14 @@ struct Index {
   private unregisterNetWatch: (() => void) | null = null;
   /**
    * 断网提示是否已弹过。netLost 事件可能连发（Wi-Fi/蜂窝交替），
-   * 全局 Toast 只弹一次；netAvailable 恢复时复位。也用它区分
-   * 「真恢复」与「注册瞬间的 available」——只有断过才发重试信号。
+   * 全局 Toast 只弹一次；netAvailable 恢复时复位。
+   * （恢复重试信号不再依赖它 —— onAvailable 无论是否「断过」都会发，
+   * 见 watchNetwork 里 onAvailable 的注释。）
    */
   private netLostToastShown: boolean = false;
 
   aboutToAppear(): void {
-    // 路由拦截器（登录拦截基础设施 + 同名 push 防抖）：两壳共享同一栈，
+    // 路由拦截器（登录拦截基础设施 + 同名 push 防抖）：全形态共享同一栈，
     // 只挂一次；先于任何子页 push 挂载，冷启动即生效。
     NavStackHolder.setupInterception();
     // 桌面卡片拉起播放页补刀：卡片 router 冷启动时 want 解析（onCreate）先于
@@ -780,6 +851,10 @@ struct Index {
     // @StorageProp 从 AppStorage 的同步可能晚于 aboutToAppear，直接读存储更稳。
     this.cardOpenPlayerSeq = AppStorage.get<number>(STORE_CARD_OPEN_PLAYER_SEQ) ?? 0;
     this.consumeCardOpenSeq();
+    // 蓝牙权限申请信号补刀（同上一条的双时序问题）：卡片冷启动自动续播等
+    // 「信号先写、本页后挂」场景，@StorageProp 初值同步不触发 @Watch。
+    this.btPermReqSeq = AppStorage.get<number>(STORE_BT_PERM_REQ_SEQ) ?? 0;
+    this.consumeBtPermRequest();
     // 先探测材质能力：barFloatingStyle() 在首帧 build 时就要用到它
     this.useExquisiteMaterial = MaterialCompat.supportsImmersiveMaterial();
     // 断点要先于子页注册：register 会同步把当前断点写进 AppStorage，
@@ -796,12 +871,16 @@ struct Index {
         showAppToast('网络连接已断开，请检查网络设置', 2000);
       },
       onAvailable: (): void => {
-        if (!this.netLostToastShown) {
-          return;
+        if (this.netLostToastShown) {
+          this.netLostToastShown = false;
         }
-        this.netLostToastShown = false;
-        // 网络恢复重试信号：读-改-写递增（与 Toast seq 同一套写法），搜索页订阅后
-        // 在失败/空态下自动重试一次
+        // 网络恢复重试信号：读-改-写递增（与 Toast seq 同一套写法），HomePage
+        // 订阅后在失败 / 空态 / 缓存兜底场景自动重试。
+        // ⚠️ 无论是否「断过」都发信号：「启动即离线」场景 netLost 不会触发
+        // （注册不重放状态），netLostToastShown 恒 false，沿用旧守卫的话恢复时
+        // 永远收不到信号。唯一消费方 HomePage.onNetRetry 自带守卫
+        // （initHomeFeed 未收尾 / 加载中 / 无缓存兜底时全部 no-op），
+        // 多余的 bump 无副作用。
         const rev: number | undefined = AppStorage.get<number>(STORE_NET_RETRY_REV);
         AppStorage.setOrCreate(STORE_NET_RETRY_REV, (rev ?? 0) + 1);
       }
@@ -981,18 +1060,22 @@ struct Index {
     try {
       const ui: UIContext = this.getUIContext();
       const sys: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      // 挖孔避让区合并（与 EntryAbility.writeSafeArea 同口径）：全屏布局下
+      // 横屏状态栏不上报侧边条带，挖孔只在 TYPE_CUTOUT 上报 —— 不合并则
+      // 横屏 STORE_SAFE_LEFT/RIGHT=0，紧凑横屏播放页左列文字压进挖孔区。
+      const cutout: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-      const topVp: number = ui.px2vp(sys.topRect.height);
+      const topVp: number = ui.px2vp(Math.max(sys.topRect.height, cutout.topRect.height));
       // 两个来源分开发布：悬浮胶囊的避让策略按「来源」选，
       // 不用 max 后的单一值 + 高度阈值猜模式。
       const navBarBottomVp: number = ui.px2vp(sys.bottomRect.height);
       const indicatorBottomVp: number = ui.px2vp(indicator.bottomRect.height);
       const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);
-      // 水平安全区：横屏下状态栏侧边条带避让，
+      // 水平安全区：横屏下状态栏侧边条带避让；挖孔条带同侧合并（max），
       // 与 EntryAbility.writeSafeArea 同口径；竖屏两值通常为 0，纯增量发布。
-      const leftVp: number = ui.px2vp(sys.leftRect.width);
-      const rightVp: number = ui.px2vp(sys.rightRect.width);
+      const leftVp: number = ui.px2vp(Math.max(sys.leftRect.width, cutout.leftRect.width));
+      const rightVp: number = ui.px2vp(Math.max(sys.rightRect.width, cutout.rightRect.width));
       AppStorage.setOrCreate(STORE_SAFE_TOP, topVp);
       AppStorage.setOrCreate(STORE_SAFE_BOTTOM, bottomVp);
       AppStorage.setOrCreate(STORE_NAV_BAR_BOTTOM, navBarBottomVp);
@@ -1286,7 +1369,7 @@ struct Index {
 
   @Builder
   pageMap(name: string, param: Object): void {
-    // 11 个子页面统一经 LazyDest 按路由名动态 import 渲染
+    // 子页面统一经 LazyDest 按路由名动态 import 渲染
     //（注册表见 service/LazyPageRegistry；预热后基本无加载等待）。
     LazyDest({ name: name })
   }
@@ -1336,9 +1419,12 @@ struct Index {
   /**
    * 标题行（歌单 / 下载 / 设置三页签共用，行 1）：
    * 视觉与各页原自绘栏逐字一致（20fp Bold + padding left 20/right 16、
-   * 行高 NAV_TITLE_BAR_HEIGHT）。下载页右侧「选择 / 完成」（DlSelectToggle）、
+   * 行高 NAV_TITLE_BAR_HEIGHT）。下载页右侧按钮组（DlSelectToggle：
+   * 常规「选择」/ 多选动作组）、队列控制（DlQueueActions，常规态），
    * 歌单页右侧按钮组（PlTitleActions），均读页内状态镜像 + 经持有器回调页面。
-   */
+    * 歌单页多选态：「歌单」标题保留，标题 layoutWeight(1) 把 PlTitleActions
+    * 的多选动作组（完成 / 全选 / 删除选中 / 合并选中）挤到标题行右侧。
+    */
   @Builder
   tabTitleRow() {
     Row() {
@@ -1481,14 +1567,12 @@ struct Index {
 
   /**
    * 根栏 stackBuilder 全量内容：
-   * 首页 = homeTitleRow（「BiliMusic」+ 右上搜索按钮）；其余页签 = 标题行 /
-   * 多选工具条（position(y = NAV_TITLE_BAR_HEIGHT) 溢出渲染到标题栏下方）。
-   * ⚠️ stackBuilder 容器原点在状态栏下方（avoidLayoutSafeArea），行 2 的
-   * 容器内 y=56 = 屏幕绝对 safeTop + 56 —— 与各页 contentStartOffset 让位公式
-   * 逐像素一致（换容器不换几何）。
-   * 外层 Stack：clip(false) 让行 2 画出容器边界；hitTestBehavior(Transparent)
-   * 让行 2 未覆盖的空白区点击穿透到下方列表。
-   */
+    * 首页 = homeTitleRow（「BiliMusic」+ 右上搜索按钮）；歌单 / 下载 / 设置
+    * 页签 = 标题行 —— 歌单页多选动作组由 PlTitleActions 渲染在标题行内
+    * （「歌单」标题 layoutWeight(1) 把动作组挤到行右侧），下载页多选动作组
+    * 由 DlSelectToggle 同款承载，标题行下方不再有第二行工具条。
+    * 外层 Stack：hitTestBehavior(Transparent) 让未覆盖的空白区点击穿透到下方列表。
+    */
   @Builder
   immersiveTitleBarContent() {
     if (this.activeTab === TAB_SEARCH) {
@@ -1502,10 +1586,6 @@ struct Index {
     } else if (this.activeTab === TAB_PLAYLISTS) {
       Stack() {
         this.tabTitleRow()
-        if (this.plSelecting) {
-          PlSelectToolbar()
-            .position({ x: 0, y: NAV_TITLE_BAR_HEIGHT })
-        }
       }
       .width('100%')
       .height('100%')
@@ -1514,10 +1594,6 @@ struct Index {
     } else if (this.activeTab === TAB_DOWNLOADS) {
       Stack() {
         this.tabTitleRow()
-        if (this.dlBarHasTasks && this.dlSelecting) {
-          DlControlBar()
-            .position({ x: 0, y: NAV_TITLE_BAR_HEIGHT })
-        }
       }
       .width('100%')
       .height('100%')
@@ -1542,8 +1618,8 @@ struct Index {
    * md（phoneShell）顶栏也经本包装（contentMaxWidth(md)=600 与内容列对齐）；
    * 仅 sm 直用 immersiveTitleBarContent（shell 的 stackBuilder 内按断点分流，
    * sm 行为零变化）。
-   * 上限走 TwoColumnLayout.contentMaxWidth —— 与各页内容列完全同口径
-   * （两列激活 840 / 否则 600/720），平板横屏顶栏与条目列对齐。
+   * 上限走 TwoColumnLayout.fillContentMaxWidth —— 与各页签页内容列完全同口径
+   * （两列激活 min(窗口宽,1660) 铺满 / 否则 600/720），平板横屏顶栏与条目列对齐。
    * sm 回退 600（窗口 <600vp，天然无操作）零变化。
    */
   @Builder
@@ -1554,7 +1630,7 @@ struct Index {
       }
       .width('100%')
       .height('100%')
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      .constraintSize({ maxWidth: TwoColumnLayout.fillContentMaxWidth(this.currentBreakpoint, this.isLandscape, this.windowWidthVp) })
     }
     .width('100%')
     .height('100%')

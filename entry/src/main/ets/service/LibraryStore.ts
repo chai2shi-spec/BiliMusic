@@ -14,9 +14,10 @@ import {
   utf8Length
 } from '../model/MusicModels';
 import { isFolderTwoway } from './FavTwowayStore';
-import { enqueueFavPushes, FavPushIntent, purgeFavPushesForFolder } from './FavPushStore';
+import { enqueueFavPushes, FavPushIntent, pendingFavPushes, purgeFavPushesForFolder } from './FavPushStore';
 import { scheduleFavPushFlush } from './FavPushRunner';
 import { HomeCardStore } from './HomeCardStore';
+import { TrackDedupKeeper } from '../utils/TrackDedup';
 
 function createId(): string {
   return `pl_${Date.now()}_${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -479,8 +480,11 @@ function chunkKeyOf(playlistId: string, index: number): string {
   return `${PL_TRACKS_PREFIX}${playlistId}_${index}`;
 }
 
-/** 元信息 + 分片曲目 → 内存里的 Playlist */
-function toPlaylist(stored: StoredPlaylist): Playlist {
+/**
+ * 同步读回单个歌单的全部分片曲目（冷启动同步路径用；分片间让出主线程的
+ * 预热版本见 runPrewarm —— 两者刻意不合并：同步版不能有 await）。
+ */
+function loadPlaylistChunks(stored: StoredPlaylist): Track[] {
   const chunkCount: number = stored.chunkCount ?? 0;
   let tracks: Track[] = [];
   if (chunkCount > 0) {
@@ -494,6 +498,11 @@ function toPlaylist(stored: StoredPlaylist): Playlist {
     // 旧格式：曲目就在元信息里
     tracks = stored.tracks;
   }
+  return tracks;
+}
+
+/** 元信息 + 已加载的曲目 → 内存里的 Playlist（字段映射唯一收敛点，同步 / 预热两路共用） */
+function playlistFrom(stored: StoredPlaylist, tracks: Track[]): Playlist {
   return {
     id: stored.id,
     name: stored.name ?? '',
@@ -504,12 +513,17 @@ function toPlaylist(stored: StoredPlaylist): Playlist {
     upMid: stored.upMid ?? '',
     upName: stored.upName ?? '',
     // 老数据没 sourceKind → 兜底：upMid 非空即视为 UP 订阅（引入该字段前唯一来源就是订阅）。
-    // 注意不能在 toPlaylist 之后再按 upMid 猜，那样收藏夹镜像（upMid='fav_x'）会被误判成订阅。
+    // 注意不能在映射之后再按 upMid 猜，那样收藏夹镜像（upMid='fav_x'）会被误判成订阅。
     sourceKind: stored.sourceKind ?? ((stored.upMid && stored.upMid.length > 0) ? 'up' : ''),
     // 老数据没这个字段 → undefined → 视为未排序（符合「存量数据不管」）
     titleSorted: stored.titleSorted === true,
     tracks: sanitizeTracks(tracks)
   };
+}
+
+/** 元信息 + 分片曲目 → 内存里的 Playlist */
+function toPlaylist(stored: StoredPlaylist): Playlist {
+  return playlistFrom(stored, loadPlaylistChunks(stored));
 }
 
 export function getPlaylists(): Playlist[] {
@@ -702,6 +716,88 @@ async function runPersist(): Promise<void> {
   }
 }
 
+// ===== 歌单冷启动预热（防 AppFreeze/THREAD_BLOCK_6S） =====
+//
+// getPlaylists() 冷启动是全量同步读：元信息 + 每个歌单逐片 getSync + JSON.parse，
+// 千首级库 = 数百分片整段压在主线程。而它恰恰由首页 / 歌单页 aboutToAppear 的
+// 延迟刷新触发 —— 主线程停摆时故障堆栈落在 libtimer.z.so（THREAD_BLOCK_6S 的
+// 3/6S 采样同源，即「libtimer 业务执行耗时操作」）。
+// 预热与落盘（runPersist）同款纪律：分片加载、每 N 片让出主线程一拍，
+// 输入 / 渲染事件得以插队；跑完写缓存 + bump REV，页面经 @Watch 自动重灌。
+// 同步 getPlaylists() 保留为兜底：预热期间任何写路径（必须看到全量数据）
+// 仍可同步全量加载；预热在每个让出点复查缓存，已被抢先即静默退出，
+// 末次检查与赋值同处同步段（与最后一个 await 间无并发窗口），不会覆盖已就绪的缓存。
+
+/** 预热连续加载多少个分片后让出主线程一拍（与 PERSIST_YIELD_EVERY_CHUNKS 同值同理由） */
+const PREWARM_YIELD_EVERY_CHUNKS: number = 16;
+
+let prewarmPromise: Promise<void> | null = null;
+
+/**
+ * 歌单冷启动预热（幂等：进行中重复调用共享同一轮，已热立即 resolve）。
+ * 页面侧 `.then` 后刷新；预热完成本身也会 bump STORE_LIBRARY_REV，
+ * 挂了 @Watch 的页面随之自动重灌 —— 双路刷新幂等（重灌只读内存快照）。
+ */
+export function prewarmPlaylists(): Promise<void> {
+  if (playlistCache !== null) {
+    return Promise.resolve();
+  }
+  if (prewarmPromise === null) {
+    prewarmPromise = runPrewarm();
+  }
+  return prewarmPromise;
+}
+
+async function runPrewarm(): Promise<void> {
+  try {
+    // 元信息是单 key 小 JSON（正常几百字节），同步读可忽略
+    const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+    const list: Playlist[] = [];
+    let chunksSinceYield: number = 0;
+    if (Array.isArray(stored)) {
+      for (let i = 0; i < stored.length; i++) {
+        const item: StoredPlaylist = stored[i];
+        if (!(item && typeof item.id === 'string' && item.id.length > 0)) {
+          continue;
+        }
+        const chunkCount: number = item.chunkCount ?? 0;
+        let tracks: Track[] = [];
+        if (chunkCount > 0) {
+          for (let c = 0; c < chunkCount; c++) {
+            const part: Track[] | null = AppPreferences.getObject<Track[]>(chunkKeyOf(item.id, c));
+            if (part && Array.isArray(part)) {
+              tracks = tracks.concat(part);
+            }
+            chunksSinceYield++;
+            if (chunksSinceYield >= PREWARM_YIELD_EVERY_CHUNKS) {
+              chunksSinceYield = 0;
+              await yieldMainThread();
+              // 让出点复查：同步 getPlaylists()（写路径兜底）可能已完成全量加载，预热让位退出
+              if (playlistCache !== null) {
+                return;
+              }
+            }
+          }
+        } else if (item.tracks && Array.isArray(item.tracks)) {
+          // 旧格式：曲目就在元信息里
+          tracks = item.tracks;
+        }
+        list.push(playlistFrom(item, tracks));
+      }
+    }
+    if (playlistCache === null) {
+      playlistCache = list;
+      notifyLibraryChanged();
+    }
+  } catch (e) {
+    // 预热失败回落同步全量读（下一个 getPlaylists() 调用方触发），只是退回旧成本
+    const detail: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+    console.error(`prewarm playlists failed: ${detail}`);
+  } finally {
+    prewarmPromise = null;
+  }
+}
+
 let libraryRev: number = 0;
 
 /** 通知各页面媒体库已变更（歌单页常驻在 Tabs 里，不刷新会一直显示旧数据） */
@@ -870,98 +966,6 @@ function isTitleSorted(p: Playlist): boolean {
   return p.titleSorted === true;
 }
 
-/** 「一键排全部」的处理结果：页面据此生成回执文案。
- *  **必须是命名 interface**：ArkTS 禁止把对象字面量当类型用（`arkts-no-obj-literals-as-types`），
- *  写成内联 `{ playlists: number; tracks: number }` 在 .ets 里会编译报错。 */
-export interface SortAllResult {
-  /** 被打上排序规则的歌单数（含空歌单） */
-  playlists: number;
-  /** 被实际重排的条目总数 */
-  tracks: number;
-}
-
-/**
- * 把所有歌单的条目按歌名排序，并**打开持续规则**（此后新增自动按名插入）。
- *
- * ⚠️ **当前没有 UI 入口**。
- * 底层能力刻意保留：排序标记 `titleSorted` 已经落盘且被持续规则读取
- * （`addTrackToPlaylist` / `mergeUpTracks`），拆掉数据结构要动落盘格式与导入导出，
- * 代价远大于留着。想加回来只需在页面上接一个入口调这个函数。
- *
- * 语义是**一次性动作**：只有被调到的歌单才会排序 + 打标记，不碰没调过的歌单。
- */
-export function sortAllPlaylistsByTitle(): SortAllResult {
-  const list: Playlist[] = getPlaylists();
-  let touchedPlaylists: number = 0;
-  let touchedTracks: number = 0;
-  const next: Playlist[] = list.map((p: Playlist): Playlist => {
-    if (p.tracks.length === 0) {
-      // 空歌单也打开标记：以后加的第一首就该落在唯一的位置上，
-      // 否则用户建完空歌单、后来加歌，却发现还得再点一次「排全部」。
-      touchedPlaylists++;
-      return Object.assign({}, p, { titleSorted: true, updatedAt: new Date().toISOString() });
-    }
-    touchedPlaylists++;
-    touchedTracks += p.tracks.length;
-    return Object.assign({}, p, {
-      tracks: sortTracksByTitle(p.tracks),
-      titleSorted: true,
-      updatedAt: new Date().toISOString()
-    });
-  });
-  if (next.length > 0) {
-    persistPlaylists(next);
-  }
-  return { playlists: touchedPlaylists, tracks: touchedTracks };
-}
-
-/**
- * 把一个歌单按歌名排序（当前无 UI 入口，能力保留）。
- *
- * 与 `sortAllPlaylistsByTitle` 的区别只是范围；持续规则（此后新增自动按名插入）两者一致。
- * @returns 排序后的歌单；id 不存在返回 null
- */
-export function sortPlaylistByTitle(playlistId: string): Playlist | null {
-  const list: Playlist[] = getPlaylists();
-  let result: Playlist | null = null;
-  const next: Playlist[] = list.map((p: Playlist): Playlist => {
-    if (p.id !== playlistId) {
-      return p;
-    }
-    result = Object.assign({}, p, {
-      tracks: sortTracksByTitle(p.tracks),
-      titleSorted: true,
-      updatedAt: new Date().toISOString()
-    });
-    return result;
-  });
-  if (result !== null) {
-    persistPlaylists(next);
-  }
-  return result;
-}
-
-/**
- * 关掉某个歌单的「按名称排序」规则（当前无 UI 入口，能力保留）。
- *
- * **刻意不还原已有顺序** —— 原顺序在排序那一刻就丢了，没有任何地方备份过。
- * 重新排序随时能再排一次，谎称能「恢复原样」比不说更糟。
- */
-export function clearPlaylistTitleSort(playlistId: string): Playlist | null {
-  const list: Playlist[] = getPlaylists();
-  let result: Playlist | null = null;
-  const next: Playlist[] = list.map((p: Playlist): Playlist => {
-    if (p.id !== playlistId) {
-      return p;
-    }
-    result = Object.assign({}, p, { titleSorted: false, updatedAt: new Date().toISOString() });
-    return result;
-  });
-  if (result !== null) {
-    persistPlaylists(next);
-  }
-  return result;
-}
 
 /**
  * 清掉某个歌单的落盘数据：写删除墓碑 + 移除它的曲目分片 key。
@@ -1057,11 +1061,13 @@ function hookTwowayAdds(playlist: Playlist, fresh: Track[]): void {
   for (let i = 0; i < fresh.length; i++) {
     const bv: string = bvidOf(fresh[i]);
     if (bv.length > 0) {
-      intents.push({ mediaId: mediaId, bvid: bv, op: 'add' });
+      intents.push({ mediaId: mediaId, bvid: bv, aid: fresh[i].aid, op: 'add' });
     }
   }
   if (intents.length > 0) {
-    enqueueFavPushes(intents);
+    const enqueued: number = enqueueFavPushes(intents);
+    console.info(`[FavPush] add folder=${mediaId} requested=${intents.length} `
+      + `enqueued=${enqueued} pending=${pendingFavPushes().length}`);
     scheduleFavPushFlush();
   }
 }
@@ -1079,11 +1085,13 @@ function hookTwowayRemoves(playlist: Playlist, removed: Track[]): void {
   for (let i = 0; i < removed.length; i++) {
     const bv: string = bvidOf(removed[i]);
     if (bv.length > 0) {
-      intents.push({ mediaId: mediaId, bvid: bv, op: 'del' });
+      intents.push({ mediaId: mediaId, bvid: bv, aid: removed[i].aid, op: 'del' });
     }
   }
   if (intents.length > 0) {
-    enqueueFavPushes(intents);
+    const enqueued: number = enqueueFavPushes(intents);
+    console.info(`[FavPush] remove folder=${mediaId} requested=${intents.length} `
+      + `enqueued=${enqueued} pending=${pendingFavPushes().length}`);
     scheduleFavPushFlush();
   }
 }
@@ -1291,14 +1299,21 @@ function collectMergeSources(ids: string[]): Playlist[] {
 }
 
 interface MergeTracksResult {
-  /** 去重后的曲目（同一 track.id 保留首次出现的那份） */
+  /** 去重后的曲目（精确层同 id 保留首次出现的那份；smart 再叠加智能层） */
   tracks: Track[];
   /** 有效曲目条数（去重前；null / 没有 id 的畸形条目直接跳过、不计入） */
   rawTotal: number;
 }
 
-function mergeTracksOf(sources: Playlist[]): MergeTracksResult {
-  const seen: Set<string> = new Set<string>();
+/**
+ * 拼接多个源歌单的曲目并去重。
+ *
+ * @param smart true = 精确层（同 id）之上叠加智能层
+ *             （归一化标题 + 歌手一致 + 时长差 ≤ 5 秒或时长未知），
+ *             抓「同一首歌、不同投稿」；每组重复保留最靠前的一首。
+ */
+function mergeTracksOf(sources: Playlist[], smart: boolean): MergeTracksResult {
+  const keeper: TrackDedupKeeper = new TrackDedupKeeper(smart);
   const tracks: Track[] = [];
   let rawTotal: number = 0;
   for (let i = 0; i < sources.length; i++) {
@@ -1309,11 +1324,9 @@ function mergeTracksOf(sources: Playlist[]): MergeTracksResult {
         continue;
       }
       rawTotal = rawTotal + 1;
-      if (seen.has(t.id)) {
-        continue;
+      if (keeper.tryKeep(t)) {
+        tracks.push(t);
       }
-      seen.add(t.id);
-      tracks.push(t);
     }
   }
   return { tracks: tracks, rawTotal: rawTotal };
@@ -1335,9 +1348,9 @@ export interface PlaylistMergePreview {
   subscriptionCount: number;
 }
 
-export function previewPlaylistMerge(ids: string[]): PlaylistMergePreview {
+export function previewPlaylistMerge(ids: string[], smart: boolean): PlaylistMergePreview {
   const sources: Playlist[] = collectMergeSources(ids);
-  const merged: MergeTracksResult = mergeTracksOf(sources);
+  const merged: MergeTracksResult = mergeTracksOf(sources, smart);
   let subscriptionCount: number = 0;
   for (let i = 0; i < sources.length; i++) {
     // 用 helper 而非 upMid 非空：收藏夹镜像也有 upMid（fav_x），但不算「订阅歌单」，
@@ -1392,14 +1405,16 @@ function uniqueMergeName(rawName: string, taken: Set<string>): string {
  * @param ids           参与合并的歌单 id（按列表顺序合并；失效 / 重复 id 自动忽略）
  * @param name          新歌单名（空串兜底「合并歌单」；重名自动加「合并」后缀）
  * @param deleteSources true = 合并后删掉源歌单（写墓碑 + 清分片）
+ * @param smart         true = 精确去重（同 id）之上叠加智能去重
+ *                      （归一化标题 + 歌手一致 + 时长差 ≤ 5 秒或时长未知）
  * @returns 少于 2 个有效源时返回 null（页面已先校验，这里兜底）
  */
-export function mergePlaylists(ids: string[], name: string, deleteSources: boolean): PlaylistMergeResult | null {
+export function mergePlaylists(ids: string[], name: string, deleteSources: boolean, smart: boolean): PlaylistMergeResult | null {
   const sources: Playlist[] = collectMergeSources(ids);
   if (sources.length < 2) {
     return null;
   }
-  const merged: MergeTracksResult = mergeTracksOf(sources);
+  const merged: MergeTracksResult = mergeTracksOf(sources, smart);
   const all: Track[] = merged.tracks;
   // 显式截断：persistPlaylists 也会截（丢尾部），这里先截能让**内存快照与磁盘一致** ——
   // 否则刚合完内存里 300 首、重启后只剩 200 首，看起来像丢歌。
@@ -1464,6 +1479,68 @@ export function mergePlaylists(ids: string[], name: string, deleteSources: boole
     deduped: merged.rawTotal - all.length,
     dropped: dropped
   };
+}
+
+/** 歌单内去重结果：页面据此生成回执文案 */
+export interface PlaylistDedupResult {
+  /** 移除的重复条数（精确 + 智能；0 = 本就没有重复） */
+  removed: number;
+  /** 去重后剩余条数 */
+  remaining: number;
+}
+
+/**
+ * 歌单内去重（一次性动作）：扫描重复（同 id 精确重复 + 同名同歌手、
+ * 时长差 ≤ 5 秒或时长未知的智能重复），每组保留最靠前的一首，
+ * 重建 tracks 一次落盘（不逐首改、单次 persist，保序）。
+ *
+ * 只面向自建歌单（页面按 sourceKind === '' 门控入口）：订阅歌单内容随
+ * 投稿自动重建、收藏夹镜像由 B 站服务端决定，去重成果都会被下次同步覆盖。
+ * 歌单不存在（打开菜单期间被删）返回 null。
+ */
+export function dedupPlaylistTracks(playlistId: string): PlaylistDedupResult | null {
+  const playlists: Playlist[] = getPlaylists();
+  for (let i = 0; i < playlists.length; i++) {
+    if (playlists[i].id !== playlistId) {
+      continue;
+    }
+    const playlist: Playlist = playlists[i];
+    const keeper: TrackDedupKeeper = new TrackDedupKeeper(true);
+    const kept: Track[] = [];
+    for (let k = 0; k < playlist.tracks.length; k++) {
+      const t: Track = playlist.tracks[k];
+      // 畸形条目（null / 无 id）与合并同一纪律：直接跳过、不保留
+      if (!t || typeof t.id !== 'string' || t.id.length === 0) {
+        continue;
+      }
+      if (keeper.tryKeep(t)) {
+        kept.push(t);
+      }
+    }
+    if (kept.length === playlist.tracks.length) {
+      return { removed: 0, remaining: kept.length };
+    }
+    const next: Playlist = {
+      id: playlist.id,
+      name: playlist.name,
+      description: playlist.description,
+      coverUrl: playlist.coverUrl,
+      tracks: kept,
+      createdAt: playlist.createdAt,
+      updatedAt: new Date().toISOString(),
+      upMid: playlist.upMid,
+      upName: playlist.upName,
+      // ⚠️ 对象字面量重建歌单，全部字段必须透传（漏 sourceKind / titleSorted
+      // 会把「按名称排序」规则悄悄关掉，同 removeTracksFromPlaylist 的教训）
+      sourceKind: playlist.sourceKind,
+      titleSorted: playlist.titleSorted
+    };
+    const nextList: Playlist[] = playlists.slice();
+    nextList[i] = next;
+    persistPlaylists(nextList);
+    return { removed: playlist.tracks.length - kept.length, remaining: kept.length };
+  }
+  return null;
 }
 
 // ===== UP 主订阅（把某个 UP 的投稿变成可持续更新的歌单） =====
@@ -2140,6 +2217,7 @@ export const LibraryStore = {
   getFavoriteTracks,
   toggleFavoriteTrack,
   getPlaylists,
+  prewarmPlaylists,
   getAddablePlaylists,
   createPlaylist,
   nextPlaylistNameForTrack,
@@ -2153,11 +2231,9 @@ export const LibraryStore = {
   removeTracksFromPlaylist,
   movePlaylistTrack,
   sortPlaylistTracks,
-  sortAllPlaylistsByTitle,
-  sortPlaylistByTitle,
-  clearPlaylistTitleSort,
   previewPlaylistMerge,
   mergePlaylists,
+  dedupPlaylistTracks,
   getPlaylistByUpMid,
   mergeUpTracks,
   subscribeUpPlaylist,

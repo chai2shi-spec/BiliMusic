@@ -1,6 +1,6 @@
 /**
  * 全局导航栈持有器：供非页面组件（如 MiniPlayer）与各页面共用同一份
- * NavPathStack（phoneShell / tabletShell 两壳互斥挂载，折叠开合时共享
+ * NavPathStack（phoneShell 全形态挂载，折叠开合共享
  * 返回栈）。栈操作统一走 NavPathStack 原生 API，本类只做持有 + 拦截。
  */
 
@@ -64,11 +64,6 @@ export class NavStackHolder {
     NavStackHolder.stack.pop(result);
   }
 
-  /** 出栈到栈内最近的指定路由名（不在栈内时行为同 pop） */
-  static popTo(name: string): void {
-    NavStackHolder.stack.popToName(name);
-  }
-
   /** 替换栈顶（当前页出栈、新页入栈，返回不经过被替换页） */
   static replace(name: string, param: Object): void {
     NavStackHolder.stack.replacePathByName(name, param);
@@ -80,7 +75,7 @@ export class NavStackHolder {
   }
 
   /**
-   * 挂载路由拦截器（Index aboutToAppear 调一次，两壳共享同一栈故只挂一次）：
+   * 挂载路由拦截器（Index aboutToAppear 调一次，全形态共享同一栈故只挂一次）：
    *
    * · willShow 阶段登录拦截：目标路由名在 LOGIN_GATED_ROUTES 内且未登录 →
    *   改推登录页。当前清单为空（校验留在各调用点），仅基础设施就位；

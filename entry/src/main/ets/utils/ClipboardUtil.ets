@@ -17,7 +17,7 @@ import { pasteboard } from '@kit.BasicServicesKit';
 export async function copyText(text: string): Promise<boolean> {
   try {
     const board: pasteboard.SystemPasteboard = pasteboard.getSystemPasteboard();
-    const data: pasteboard.PasteData = pasteboard.createPlainTextData(text);
+    const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
     await board.setData(data);
     return true;
   } catch (e) {

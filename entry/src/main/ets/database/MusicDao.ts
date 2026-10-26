@@ -137,23 +137,6 @@ export async function getAllDownloads(): Promise<DownloadTask[]> {
   }
 }
 
-export async function getDownloadById(id: string): Promise<DownloadTask | null> {
-  const pred: relationalStore.RdbPredicates = new relationalStore.RdbPredicates(TABLE_DOWNLOAD);
-  pred.equalTo('id', id);
-  try {
-    const rs: relationalStore.ResultSet = await getRdb().query(pred, COLUMNS);
-    let task: DownloadTask | null = null;
-    if (rs.goToNextRow()) {
-      task = fromRow(rs);
-    }
-    closeQuietly(rs);
-    return task;
-  } catch (e) {
-    console.error(`query download by id failed: ${JSON.stringify(e)}`);
-    throw e;
-  }
-}
-
 export async function getDownloadByMusicId(musicId: string): Promise<DownloadTask | null> {
   const pred: relationalStore.RdbPredicates = new relationalStore.RdbPredicates(TABLE_DOWNLOAD);
   pred.equalTo('musicId', musicId);

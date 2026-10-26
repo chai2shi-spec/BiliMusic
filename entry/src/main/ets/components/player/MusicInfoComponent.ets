@@ -214,11 +214,13 @@ export struct MusicInfoComponent {
    */
   private qualityText(): string {
     const t: Track | null = this.currentTrack;
-    if (t === null) {
+    // 类型保护：@StorageLink 的 Track | null 在运行时可能被写入 undefined，
+    // `=== null` 拦不住，必须一并判掉再读 localFilePath
+    if (t === null || t === undefined) {
       return '';
     }
     // 本地文件：没有经过 playurl 解析，码率字段是 0。只标来源，不假装有码率。
-    if (t.localFilePath !== undefined && t.localFilePath.length > 0) {
+    if ((t.localFilePath ?? '').length > 0) {
       return '本地文件';
     }
     const base: string = formatTrackQuality(t.audioQuality, t.audioBandwidth);

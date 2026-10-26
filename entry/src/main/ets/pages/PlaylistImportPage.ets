@@ -41,7 +41,7 @@ import { Track, Playlist } from '../model/MusicModels';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { PlaylistDetailRouteParam } from '../service/NavRouteParams';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { readText } from '../utils/ClipboardUtil';
 import { formatDurationText } from '../utils/TextUtil';
 import { InsetCard, CardDivider, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
@@ -66,6 +66,7 @@ import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 /**
  * 向导 5 态（方案 §5.2）。匹配中 / 报告的实际进度数据来自 importState，
@@ -358,19 +359,13 @@ export struct PlaylistImportPage {
 
   /** 中断匹配（二次确认，保留已完成部分，方案 §5.3(3)） */
   private confirmStop(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '中断匹配',
       message: '已完成的匹配会保留，之后可以从报告页重新继续。',
-      primaryButton: {
-        value: '继续匹配',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '中断',
-        action: (): void => {
-          ImportTaskManager.getInstance().stop();
-        }
+      cancelText: '继续匹配',
+      confirmText: '中断',
+      onConfirm: (): void => {
+        ImportTaskManager.getInstance().stop();
       }
     });
   }
@@ -440,19 +435,13 @@ export struct PlaylistImportPage {
 
   /** 放弃本次任务（二次确认：进度不可恢复） */
   private confirmDiscard(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '放弃本次导入',
       message: '已匹配的进度会被清空，确定放弃吗？',
-      primaryButton: {
-        value: '保留进度',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '放弃',
-        action: (): void => {
-          this.discardTask();
-        }
+      cancelText: '保留进度',
+      confirmText: '放弃',
+      onConfirm: (): void => {
+        this.discardTask();
       }
     });
   }
@@ -598,28 +587,12 @@ export struct PlaylistImportPage {
     NavTitleRow({ title: '从外部导入歌单' })
   }
 
-  /**
-   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
-   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
-   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
-   *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
-   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   * sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   pageBarNarrow() {
-    Row() {
-      Column() {
-        this.pageBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.pageBar()
+    } })
   }
 
   //

@@ -26,6 +26,7 @@
 import { BiliApiError, bv2av, dealFavResource, selfTestBv2av } from '../api/BilibiliApi';
 import { getLoginCsrf } from './LoginStore';
 import { FavPushIntent, pendingFavPushes, removeFavPushes } from './FavPushStore';
+import { sleep } from '../utils/AsyncUtil';
 
 /** 一次冲刷的汇总（字段与 FavSyncSummary 写回段同名，便于直接合并） */
 export interface FavFlushSummary {
@@ -40,7 +41,7 @@ export interface FavFlushSummary {
 }
 
 /** 实时推送去抖（ms）：连续加 / 删合并成一次冲刷 */
-const FLUSH_DEBOUNCE_MS: number = 1500;
+export const FLUSH_DEBOUNCE_MS: number = 1500;
 /** deal 调用之间的间隔（ms）：收藏写接口对高频敏感 */
 const DEAL_GAP_MS: number = 400;
 /** 单轮冲刷 deal 调用上限（防风控；余量留队列下轮） */
@@ -60,12 +61,6 @@ function emptyFlushSummary(): FavFlushSummary {
   return { pushed: 0, pushDropped: 0, pushPending: 0, needLogin: false };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
-}
-
 /**
  * 实时推送入口（LibraryStore 挂钩调用）：去抖后自动冲刷。
  * 多次连续调用会互相合并（重置计时器），只冲刷一次。
@@ -80,6 +75,18 @@ export function scheduleFavPushFlush(): void {
       console.error(`[FavPushRunner] debounced flush failed: ${e.message}`);
     });
   }, FLUSH_DEBOUNCE_MS);
+}
+
+/**
+ * 取消尚未触发的去抖冲刷（调用方将自行显式冲刷并回报结果）。
+ * 已在冲刷中则无操作。PlaylistDetail 删除回执用它接管去抖窗口，
+ * 避免与去抖冲刷竞态导致回执读到全零（冲刷已被去抖跑完）。
+ */
+export function cancelFavPushFlush(): void {
+  if (debounceTimer >= 0) {
+    clearTimeout(debounceTimer);
+    debounceTimer = -1;
+  }
 }
 
 /**
@@ -120,6 +127,8 @@ async function doFlush(queue: FavPushIntent[], summary: FavFlushSummary): Promis
 
   const csrf: string = getLoginCsrf();
   if (!csrf) {
+    console.warn('[FavPushRunner] no csrf (bili_jct missing), '
+      + `${queue.length} intents kept pending`);
     summary.needLogin = true;
     return;
   }
@@ -147,12 +156,18 @@ async function doFlush(queue: FavPushIntent[], summary: FavFlushSummary): Promis
     }
     const bvid: string = bvids[i];
     const group: FavPushIntent[] = groups.get(bvid) as FavPushIntent[];
-    const rid: number = bv2av(bvid);
+    // rid 主来源：意图携带的 aid（收藏 API 返回的 avid，零解码风险、覆盖老 BV 号）；
+    // 缺失（老持久化意图 / aid 未持久化的曲目）时现行 bv2av 算法解码兜底
+    const aidRaw: string = group[0].aid;
+    const aidNum: number = aidRaw.length > 0 ? Number(aidRaw) : 0;
+    const rid: number = aidNum > 0 ? aidNum : bv2av(bvid);
+    const ridFromAid: boolean = aidNum > 0;
     if (!(rid > 0)) {
-      // 非法 bvid 永远推不过去 → 丢弃，防止卡死队列
+      // aid 缺失且解码失败（老 BV 号 / 非法 bvid）→ 永远推不过去，丢弃防卡死
       removeFavPushes(group);
       summary.pushDropped = summary.pushDropped + group.length;
-      console.warn(`[FavPushRunner] invalid bvid ${bvid}, dropped ${group.length} intents`);
+      console.warn(`[FavPushRunner] invalid rid for ${bvid} (aid='${aidRaw}'), `
+        + `dropped ${group.length} intents`);
       continue;
     }
     const addIds: number[] = [];
@@ -174,6 +189,7 @@ async function doFlush(queue: FavPushIntent[], summary: FavFlushSummary): Promis
       summary.pushed = summary.pushed + group.length;
       consecutiveTransient = 0;
       console.info(`[FavPushRunner] deal ok: bvid=${bvid} rid=${rid} `
+        + `src=${ridFromAid ? 'aid' : 'decode'} `
         + `add=${addIds.length} del=${delIds.length}`);
     } catch (e) {
       const err: BiliApiError | null = e instanceof BiliApiError ? e : null;

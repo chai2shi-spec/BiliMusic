@@ -27,6 +27,7 @@ import {
   STORE_THEME_DEEP
 } from '../common/Constants';
 import { AppSettings, DEFAULT_APP_SETTINGS } from '../model/MusicModels';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { NavStackHolder } from '../service/NavStackHolder';
@@ -43,7 +44,6 @@ import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
-import { ThemePalette } from '../common/ThemeColors';
 import {
   QUALITY_OPTIONS,
   QualityOption,
@@ -281,27 +281,12 @@ export struct PlaybackSettingsPage {
     NavTitleRow({ title: '播放设置' })
   }
 
-  /**
-   * 标题行收窄容器（AboutPage 同款）：HDS titleBar 的 stackBuilder 横跨目的地
-   * 整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行会贴到整列
-   * 左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize（上限与本页
-   * 内容列同口径），标题行与内容列同宽对齐；两侧空白区 hitTestBehavior(Transparent)
-   * 穿透点击。sm 回退 600（窗口 <600vp）天然无操作，手机零变化。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   playBarNarrow() {
-    Row() {
-      Column() {
-        this.playBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.playBar()
+    } })
   }
 
   /** 定时停止半屏面板：档位列表 + 「关闭定时」行 */

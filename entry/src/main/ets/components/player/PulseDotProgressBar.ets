@@ -25,6 +25,7 @@
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../../common/constants/InteractionConstants';
 import { STORE_IS_PLAYING, STORE_THEME_PRIMARY } from '../../common/Constants';
+import { ProgressMath } from './ProgressMath';
 
 /** 命中区高度（vp） */
 const PULSE_HIT_VP: number = 32;
@@ -82,13 +83,7 @@ export struct PulseDotProgressBar {
 
   /** Area 尺寸（Length）→ vp 数值；资源型（理论上不会出现）按 0 兜底 */
   private toVp(v: Length): number {
-    if (typeof v === 'number') {
-      return v;
-    }
-    if (typeof v === 'string') {
-      return parseFloat(v);
-    }
-    return 0;
+    return ProgressMath.toVp(v);
   }
 
   /** 起播：环①相位 0→1 单段无限循环（线性外扩渐隐） */
@@ -187,16 +182,17 @@ export struct PulseDotProgressBar {
 
   /** 进度比例（0~1）：时长未知时恒 0（不显示已播段） */
   private pct(): number {
-    if (this.max <= 0) {
-      return 0;
-    }
-    const p: number = this.value / this.max;
-    return Math.min(1, Math.max(0, p));
+    return ProgressMath.pct(this.value, this.max);
+  }
+
+  /** 已播段宽度（百分比字符串）：拖拽/插值每帧重算 */
+  private filledWidthStr(): string {
+    return ProgressMath.filledWidthStr(this.value, this.max);
   }
 
   /** 进度头中心 x（vp）：钳制在轨道内，未测宽时贴左 */
   private headX(): number {
-    return Math.min(this.trackWidth, this.trackWidth * this.pct());
+    return ProgressMath.headX(this.trackWidth, this.value, this.max);
   }
 
   /** 外层圆点合成缩放：待机呼吸（播放中恒 1；拖拽放大在内层节点，互不打断） */
@@ -206,11 +202,7 @@ export struct PulseDotProgressBar {
 
   /** 触摸横坐标 → 秒（钳制 0~max） */
   private secAt(x: number): number {
-    if (this.trackWidth <= 0) {
-      return 0;
-    }
-    const ratio: number = Math.min(1, Math.max(0, x / this.trackWidth));
-    return ratio * this.max;
+    return ProgressMath.secAt(x, this.trackWidth, this.max);
   }
 
   /** 松手落位涟漪：0 落位起播 → 1 渐隐完成（完成后透明不可见） */
@@ -238,7 +230,7 @@ export struct PulseDotProgressBar {
       // 全宽 Row 主轴从起点排布，内层百分比细线才能从左向右生长。
       Row() {
         Row() {}
-          .width(`${(this.pct() * 100).toFixed(2)}%`)
+          .width(this.filledWidthStr())
           .height(PULSE_LINE_VP)
           .borderRadius(PULSE_LINE_VP / 2)
           .backgroundColor(this.themePrimary)

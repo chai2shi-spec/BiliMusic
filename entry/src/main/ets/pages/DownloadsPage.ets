@@ -36,11 +36,9 @@ import {
   STORE_ACTIVE_TAB,
   STORE_CURRENT_TRACK,
   STORE_DL_BAR_ALL_SELECTED,
-  STORE_DL_BAR_CAN_RETRY,
   STORE_DL_BAR_HAS_TASKS,
   STORE_DL_BAR_QUEUE_ACTIVE,
   STORE_DL_BAR_QUEUE_PAUSED,
-  STORE_DL_BAR_SELECTED_COUNT,
   STORE_DL_BAR_SELECTING,
   STORE_DOWNLOAD_PAUSED,
   STORE_DOWNLOAD_TASKS,
@@ -49,12 +47,13 @@ import {
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP,
   STORE_THEME_ON,
+  STORE_WINDOW_WIDTH_VP,
   formatTrackQuality
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
-  PairOf,
-  makePairs,
+  RowOf,
+  makeRows,
   TWO_COL_GAP_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
@@ -63,7 +62,7 @@ import { PRESS_SCALE, PRESS_ANIM_MS, SELECT_SLOT_VP, SELECT_TOGGLE_MS, DOWNLOAD_
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { showAppToast } from '../components/AppToast';
 import { CoverImage } from '../components/CoverImage';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { toThumbUrl } from '../utils/TextUtil';
 import fs from '@ohos.file.fs';
 import { Chip, ChipSize, CustomContentDialog } from '@kit.ArkUI';
@@ -152,9 +151,31 @@ export struct DownloadsPage {
   /** 横竖屏（Index 常驻注册写入）：横屏宽屏时下载组两列显示 */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
 
-  /** 横屏宽屏（窗口 ≥600vp 的横屏）时按「下载组」配对两列；竖屏 / 窄窗口单列不变 */
-  private isTwoCol(): boolean {
-    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  /**
+   * 窗口宽（vp，Index 常驻回写）：平板横屏按它反推下载组列数。
+   * ForEach 路径无需 @Watch——@StorageProp 变化直接触发 build 重跑。
+   */
+  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
+
+  /** 下载组行数：非两列态 1；两列激活 clamp(floor((w-32)/400), 2, 4) */
+  private listCols(): number {
+    return TwoColumnLayout.listColumns(this.currentBreakpoint, this.isLandscape, this.windowWidthVp);
+  }
+
+  /**
+   * 多列下载组行的 ForEach 键（组键 groupRowKey 的行级拼接）：
+   * 空槽记 'x'，键含全部槽 → 列数变化 / 组内容变化都会重排行。
+   */
+  private groupSlotRowKey(row: RowOf<DownloadGroup>): string {
+    let key: string = '';
+    for (let i: number = 0; i < row.slots.length; i++) {
+      const slot: DownloadGroup | null = row.slots[i];
+      if (i > 0) {
+        key += '|';
+      }
+      key += slot !== null ? this.groupRowKey(slot) : 'x';
+    }
+    return key;
   }
   /**
    * 列表滚动控制器：List 直接挂 TabScrollerHolder.downloads（唯一真源，身份恒定），
@@ -475,15 +496,13 @@ export struct DownloadsPage {
 
   /**
    * 顶栏派生镜像唯一写入口：把根栏渲染所需的派生状态
-   * （有无任务 / 选中数 / 全选态 / 可重试态）推到 AppStorage，根栏侧组件
-    * （components/DownloadsTabBar.ets + Index 的行 2 门控）@StorageProp 订阅。
+   * （有无任务 / 全选态）推到 AppStorage，根栏侧组件
+   * （components/DownloadsTabBar.ets）@StorageProp 订阅。
    * 触发点：selectedIds @Watch + applyTasksSnapshot（tasks 每份快照）+ aboutToAppear 初值。
    */
   private syncBarState(): void {
     AppStorage.setOrCreate(STORE_DL_BAR_HAS_TASKS, this.tasks.length > 0);
-    AppStorage.setOrCreate(STORE_DL_BAR_SELECTED_COUNT, this.selectedIds.length);
     AppStorage.setOrCreate(STORE_DL_BAR_ALL_SELECTED, this.allSelected());
-    AppStorage.setOrCreate(STORE_DL_BAR_CAN_RETRY, this.canRetrySelected());
   }
 
   /**
@@ -1115,20 +1134,14 @@ export struct DownloadsPage {
   /** 删除前二次确认（整组）：一次删掉合集下的全部分 P 任务 / 整张歌单的全部曲目与文件 */
   private confirmRemoveGroup(g: DownloadGroup): void {
     const isPlaylist: boolean = g.tasks[0].playlistId.length > 0;
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: isPlaylist ? '删除歌单下载' : '删除合集下载',
       message: isPlaylist
         ? `确定删除「${g.title}」下载的全部 ${g.tasks.length} 首吗？已下载的音频文件也会一并移除。`
         : `确定删除「${g.title}」下的 ${g.tasks.length} 个分 P 任务吗？已下载的音频文件也会一并移除。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {}
-      },
-      secondaryButton: {
-        value: '删除',
-        action: (): void => {
-          this.removeGroup(g);
-        }
+      confirmText: '删除',
+      onConfirm: (): void => {
+        this.removeGroup(g);
       }
     });
   }
@@ -1154,18 +1167,12 @@ export struct DownloadsPage {
 
   /** 删除前二次确认：避免误触把已下载的音频一并删掉。 */
   private confirmRemove(t: DownloadTask): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '删除下载',
       message: `确定删除「${t.title}」吗？已下载的音频文件也会一并移除。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {}
-      },
-      secondaryButton: {
-        value: '删除',
-        action: (): void => {
-          this.remove(t);
-        }
+      confirmText: '删除',
+      onConfirm: (): void => {
+        this.remove(t);
       }
     });
   }
@@ -1429,36 +1436,36 @@ export struct DownloadsPage {
       });
   }
 
+  /** 「仅 WiFi 下载」拦下的统一询问壳：正文与确认动作由调用方注入 */
+  private confirmOnCellular(message: string, confirmText: string, onConfirm: () => void): void {
+    showConfirm(this.getUIContext(), {
+      title: '仅 WiFi 下载',
+      message: message,
+      confirmText: confirmText,
+      onConfirm: onConfirm
+    });
+  }
+
   /** 「仅 WiFi 下载」拦下时的批量重试询问（整批放行，不逐条问） */
   private confirmRetryOnCellular(ids: string[]): void {
-    showAppAlertDialog(this.getUIContext(), {
-      title: '仅 WiFi 下载',
-      message: `${WIFI_ONLY_BLOCKED}\n继续会使用移动数据重试这 ${ids.length} 个失败任务。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-          // retrying 已在弹窗前释放，这里无需再动
-        }
-      },
-      secondaryButton: {
-        value: '继续重试',
-        action: (): void => {
-          // retrying 语义 = 「重试网络请求在途」：真正发请求前重新置起，
-          // 弹窗等待期不占用（见 retryFailed 里 blocked 分支的说明）
-          this.retrying = true;
-          DownloadManager.getInstance().retryTasks(ids, true)
-            .then((r: DownloadStartResult): void => {
-              this.retrying = false;
-              this.toast(this.retryResultText(r), 2000);
-            })
-            .catch((e: Error): void => {
-              this.retrying = false;
-              console.error(`retry(ignoreWifiLimit) failed: ${e.message}`);
-              this.toast('重试失败，请稍后再试', 1800);
-            });
-        }
-      }
-    });
+    this.confirmOnCellular(
+      `${WIFI_ONLY_BLOCKED}\n继续会使用移动数据重试这 ${ids.length} 个失败任务。`,
+      '继续重试',
+      (): void => {
+        // retrying 语义 = 「重试网络请求在途」：真正发请求前重新置起，
+        // 弹窗等待期不占用（见 retryFailed 里 blocked 分支的说明）
+        this.retrying = true;
+        DownloadManager.getInstance().retryTasks(ids, true)
+          .then((r: DownloadStartResult): void => {
+            this.retrying = false;
+            this.toast(this.retryResultText(r), 2000);
+          })
+          .catch((e: Error): void => {
+            this.retrying = false;
+            console.error(`retry(ignoreWifiLimit) failed: ${e.message}`);
+            this.toast('重试失败，请稍后再试', 1800);
+          });
+      });
   }
 
   private retryResultText(r: DownloadStartResult): string {
@@ -1526,30 +1533,22 @@ export struct DownloadsPage {
 
   /** 「仅 WiFi 下载」拦下时的重下询问（与 confirmRetryOnCellular 同一套做法） */
   private confirmRedownloadOnCellular(t: DownloadTask): void {
-    showAppAlertDialog(this.getUIContext(), {
-      title: '仅 WiFi 下载',
-      message: `${WIFI_ONLY_BLOCKED}\n继续会使用移动数据重新下载「${t.title}」。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {}
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.redownloading = true;
-          DownloadManager.getInstance().redownloadTask(t.id, true)
-            .then((r: DownloadStartResult): void => {
-              this.redownloading = false;
-              this.handleRedownloadResult(t, r);
-            })
-            .catch((e: Error): void => {
-              this.redownloading = false;
-              console.error(`redownload(ignoreWifiLimit) failed: ${e.message}`);
-              this.toast('重新下载失败，请稍后再试', 1800);
-            });
-        }
-      }
-    });
+    this.confirmOnCellular(
+      `${WIFI_ONLY_BLOCKED}\n继续会使用移动数据重新下载「${t.title}」。`,
+      '继续下载',
+      (): void => {
+        this.redownloading = true;
+        DownloadManager.getInstance().redownloadTask(t.id, true)
+          .then((r: DownloadStartResult): void => {
+            this.redownloading = false;
+            this.handleRedownloadResult(t, r);
+          })
+          .catch((e: Error): void => {
+            this.redownloading = false;
+            console.error(`redownload(ignoreWifiLimit) failed: ${e.message}`);
+            this.toast('重新下载失败，请稍后再试', 1800);
+          });
+      });
   }
 
   /** 组内失败项的 id 列表（组级「重试」传参）；计数走 g.counts.failed，这里只负责收集 id */
@@ -1568,31 +1567,17 @@ export struct DownloadsPage {
     return this.tasks.find((t: DownloadTask): boolean => t.id === id);
   }
 
-  /** 选区里是否有失败任务（决定「重试选中」是否可用；空选区为 false） */
-  private canRetrySelected(): boolean {
-    return this.selectedIds.some((id: string): boolean => {
-      const t: DownloadTask | undefined = this.taskById(id);
-      return t !== undefined && t.status === DownloadStatus.ERROR;
-    });
-  }
-
   private confirmRemoveSelected(): void {
     const count: number = this.selectedIds.length;
     if (count === 0) {
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '删除下载',
       message: `确定删除选中的 ${count} 个任务吗？已下载的音频文件也会一并移除。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {}
-      },
-      secondaryButton: {
-        value: '删除',
-        action: (): void => {
-          this.removeSelected();
-        }
+      confirmText: '删除',
+      onConfirm: (): void => {
+        this.removeSelected();
       }
     });
   }
@@ -2202,38 +2187,36 @@ export struct DownloadsPage {
                 .width('100%')
                 .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
             }
-            // 横屏宽屏：下载组配对，每个 ListItem 左右两列
+            // 多列（横屏宽屏/平板 2~4 列）：下载组按列排布，每个 ListItem 一行 N 列
             //（组 = GroupContent 的完整内容，含组头与展开的分 P 子行）；
             // 竖屏 / 窄窗口单列。
-            // ⚠️ 两列分支**不注册 onMove**：长按拖动排序以 ListItem 为单位，
-            // 配对后拖动会以 pair 为单位、组序错乱 —— 横屏宽屏无拖动
-            //（PlaylistsPage 两列分支同款取舍）。
-            if (this.isTwoCol()) {
+            // ⚠️ 多列分支**不注册 onMove**：长按拖动排序以 ListItem 为单位，
+            // 配对后拖动会以「一行」为单位、组序错乱 —— 横屏宽屏无拖动
+            //（PlaylistsPage 多列分支同款取舍）。
+            if (this.listCols() > 1) {
               ForEach(
-                makePairs<DownloadGroup>(this.groups),
-                (pair: PairOf<DownloadGroup>): void => {
+                makeRows<DownloadGroup>(this.groups, this.listCols()),
+                (row: RowOf<DownloadGroup>): void => {
                   ListItem() {
                     Row() {
-                      Column() {
-                        this.GroupContent(pair.first)
-                      }
-                      .layoutWeight(1)
-                      if (pair.second !== null) {
-                        Column() {
-                          this.GroupContent(pair.second)
+                      ForEach(row.slots, (slot: DownloadGroup | null, slotIndex: number): void => {
+                        if (slot !== null) {
+                          Column() {
+                            this.GroupContent(slot)
+                          }
+                          .layoutWeight(1)
+                          .margin({ left: slotIndex > 0 ? TWO_COL_GAP_VP : 0 })
+                        } else {
+                          // 尾部空槽：留空占位，已放列行宽与满行一致
+                          Blank().layoutWeight(1)
                         }
-                        .layoutWeight(1)
-                        .margin({ left: TWO_COL_GAP_VP })
-                      } else {
-                        // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
-                        Blank().layoutWeight(1)
-                      }
+                      }, (slot: DownloadGroup | null, slotIndex: number): string =>
+                        `${slotIndex}_${slot !== null ? this.groupRowKey(slot) : 'x'}`)
                     }
                     .width('100%')
                   }
                 },
-                (pair: PairOf<DownloadGroup>): string =>
-                  `${this.groupRowKey(pair.first)}|${pair.second !== null ? this.groupRowKey(pair.second) : 'x'}`
+                (row: RowOf<DownloadGroup>): string => this.groupSlotRowKey(row)
               )
             } else {
               ForEach(
@@ -2284,9 +2267,10 @@ export struct DownloadsPage {
       .height('100%')
       // ⚠️ 不整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
       // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
-      // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）
-      // 横屏宽屏：上限 840vp，两列每列行宽约 400vp+。
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）。
+      // 两列激活改铺满口径（fillContentMaxWidth）——平板横屏 min(窗口宽,1660)
+      // 铺满不留白，列数由 listCols 按同窗口宽反推保持密度；单列维持原值。
+      .constraintSize({ maxWidth: TwoColumnLayout.fillContentMaxWidth(this.currentBreakpoint, this.isLandscape, this.windowWidthVp) })
 
       // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar 与
       // 「加入歌单」选择弹层），进度由列表 onDidScroll/onScrollStop 经

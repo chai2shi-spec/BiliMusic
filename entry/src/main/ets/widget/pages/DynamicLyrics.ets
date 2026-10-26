@@ -20,7 +20,6 @@ struct DynamicLyrics {
   @LocalStorageProp('formId') formId: string = '';
   @LocalStorageProp('isPlay') isPlay: boolean = false;
   @LocalStorageProp('title') title: string = 'Song Name';
-  @LocalStorageProp('singer') singer: string = 'Singer';
   @LocalStorageProp('hasCover') hasCover: boolean = false;
   @LocalStorageProp('musicCover') musicCover: string = 'cover';
   @LocalStorageProp('songId') songId: string = '';

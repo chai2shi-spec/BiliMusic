@@ -30,7 +30,7 @@ import { MusicPlayer } from '../../player/MusicPlayer';
 import { QueueSheet, repeatLabelOf, modeIconOf, nextRepeatMode } from '../QueueSheet';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { showAppToast } from '../AppToast';
-import { showAppAlertDialog } from '../AppAlertDialog';
+import { showConfirm } from '../AppAlertDialog';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { PlayButtonComponent } from './PlayButtonComponent';
@@ -214,10 +214,13 @@ export struct ControlAreaComponent {
   /**
    * 下载当前正在播放的曲目。
    *
+   * 正在播分 P 合集的某一 P 时**只下这一 P**（singleOnly）：用户在播放场景想留的是
+   * 「正在听的这首」，整合集下载留给列表页入口。想下整个合集去原列表条目点下载即可。
+   *
    * 三条路径要分清：
    *   · 已在下载队列 / 已完成 → 直接告诉用户「不用重复下」；
    *   · 被「仅 WiFi 下载」拦下 → 问一次（与列表页同一套措辞与行为）；
-   *   · 正常 → 排队并报数（分 P 合集会排多首，所以要报「N 首」而不是「已添加」）。
+   *   · 正常 → 排队（singleOnly 下永远只有当前这一首）。
    */
   private async downloadCurrent(): Promise<void> {
     const track: Track | null = this.currentTrack;
@@ -231,7 +234,7 @@ export struct ControlAreaComponent {
     }
     this.downloading = true;
     try {
-      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(track, false);
+      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(track, false, undefined, true);
       if (r.blockedReason.length > 0) {
         this.confirmCellularDownload(track);
         return;
@@ -305,26 +308,19 @@ export struct ControlAreaComponent {
 
   /** 「仅 WiFi 下载」拦下时的询问（与 SearchPage / UpSpacePage 同一套流程） */
   private confirmCellularDownload(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: WIFI_ONLY_BLOCKED,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          DownloadManager.getInstance().requestDownload(track, true)
-            .then((r: DownloadStartResult): void => {
-              this.toast(r.queued > 0 ? `已加入下载队列 ${r.queued} 首` : '没有可下载的音频');
-            })
-            .catch((e: Error): void => {
-              console.error(`downloadCurrent(ignoreWifiLimit) failed: ${e.message}`);
-              this.toast('下载启动失败，请稍后再试');
-            });
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        DownloadManager.getInstance().requestDownload(track, true, undefined, true)
+          .then((r: DownloadStartResult): void => {
+            this.toast(r.queued > 0 ? `已加入下载队列 ${r.queued} 首` : '没有可下载的音频');
+          })
+          .catch((e: Error): void => {
+            console.error(`downloadCurrent(ignoreWifiLimit) failed: ${e.message}`);
+            this.toast('下载启动失败，请稍后再试');
+          });
       }
     });
   }

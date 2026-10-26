@@ -1,23 +1,29 @@
 /**
  * 搜索二级页（路由名 'Search'）。
  *
- * 承载全部搜索逻辑：关键词搜索（视频 / UP 主双类型）、搜索历史、结果分页、
- * 下拉刷新。会话关键词与结果存于 SearchStateHolder（页面 / 标题栏行同源）；
- * 每次进入本页都从全新状态开始（aboutToAppear 清 holder，不恢复上次搜索的
- * 关键词与结果）。
+ * 承载全部搜索逻辑：关键词合并搜索（一次搜索并发返回视频 + UP 主两类
+ * 结果）、搜索历史、视频结果分页、下拉刷新。会话关键词与结果存于
+ * SearchStateHolder（页面 / 标题栏行同源）；每次进入本页都从全新状态开始
+ * （aboutToAppear 清 holder，不恢复上次搜索的关键词与结果）。
+ *
+ * 结果形态（一次搜索并发返回两类，结果区分「视频 | UP主」页签独立展示）：
+ *   · 视频 —— 默认页签，原列表形态（TrackItem 长条 / 大封面网格 / 宽屏
+ *     两列），分页 / 上拉加载 / 下拉刷新围绕它；
+ *   · UP 主 —— 竖排列表行（圆形头像 + 昵称 + 认证小标 + 粉丝/投稿，
+ *     点行进 UP 主页），searchUser 真分页（page / page_size=20，numPages
+ *     判到底）。两页签共用一个 List（滚动 / 下拉刷新 / 顶栏模糊联动全
+ *     复用），条目区按 resultTab 条件渲染，新搜索重置回「视频」页签。
  *
  * 结构（RecentPage 二级页样板同款）：
  *   · HdsNavDestination + HDS 沉浸光感标题栏（titleBar.stackBuilder 承载
  *     SearchInputBar 搜索行，56 锁高；返回键为 HDS 默认键）；
  *   · TopGradientBlurOverlay 自绘渐变模糊层 + 私有 scroller 命令式驱动
  *     （HDS 滚动效果经 styleOptions 第三参关闭，防双重模糊）；
- *   · 「最近搜索 / B 站热搜」页签区直接在页面内容区显示；
- *   · 「视频/UP主」分段按钮在 SearchInputBar（components/SearchTabBar.ets），
- *     动作经 TabScrollerHolder 静态回调转回本页私有方法。
+ *   · 「最近搜索 / B 站热搜」页签区直接在页面内容区显示。
  *
  * 分页说明（对照实验结论，细节见 api/BilibiliApi.ts 的注释）：
  *   · 搜索 —— /wbi/search/type 真分页：page / page_size，响应带 numPages；
- *     UP 主搜（search_type=bili_user）匿名完全可用，同款真分页。
+ *     UP 主搜（search_type=bili_user）匿名完全可用，同款真分页（本页只取第一页）。
  *   · 空页 ≠ 到底：风控时接口同样返回空列表（HTTP 200 / code 0），遇到空页
  *     只提示可重试，真到底由服务端 numPages 判定。
  */
@@ -30,12 +36,10 @@ import { TrackItem } from '../components/TrackItem';
 import { TrackCard } from '../components/TrackCard';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { toHttpsUrl, toThumbUrl, stripHtmlTags } from '../utils/TextUtil';
+import { toHttpsUrl, toThumbUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
 import {
   ComponentContent,
   CustomContentDialog,
-  Chip,
-  ChipSize,
   CapsuleSegmentButtonV2,
   LengthMetrics,
   SegmentButtonV2Items
@@ -53,17 +57,15 @@ import {
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_ITEM_DISPLAY_STYLE,
-  STORE_THEME_SURFACE,
   STORE_THEME_DEEP,
   STORE_THEME_ON,
   STORE_THEME_PRIMARY,
-  STORE_SEARCH_KEYWORD,
-  STORE_SEARCH_KIND
+  STORE_SEARCH_KEYWORD
 } from '../common/Constants';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
@@ -99,23 +101,6 @@ import {
   NAV_TRANSITION_MS
 } from '../common/constants/InteractionConstants';
 
-function parseDur(s: string | number | undefined): number {
-  if (!s) {
-    return 0;
-  }
-  if (typeof s === 'number') {
-    return s;
-  }
-  const parts: number[] = s.split(':').map(Number);
-  if (parts.length === 2) {
-    return parts[0] * 60 + parts[1];
-  }
-  if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  }
-  return 0;
-}
-
 /** 搜索结果的标题里有 <em class="keyword"> 高亮标签，必须剥掉（统一用 TextUtil.stripHtmlTags）。 */
 
 function mapSearch(item: SearchResultItem): Track {
@@ -128,7 +113,8 @@ function mapSearch(item: SearchResultItem): Track {
     // 搜索结果自带 mid（实测一直有）：「进 UP 主主页」全靠它
     upMid: item.mid !== undefined ? String(item.mid) : '',
     coverUrl: toHttpsUrl(item.pic),
-    duration: parseDur(item.duration),
+    // B 站搜索接口时长三形态（"mm:ss" / "hh:mm:ss" / 纯秒数）与 parseDurationText 逐值等价
+    duration: parseDurationText(String(item.duration ?? '')),
     playCount: item.play,
     pubdate: item.pubdate ?? 0
   });
@@ -178,6 +164,13 @@ const SKELETON_ROW_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7];
  * Search 的 defaultFocus 偶发不触发，转场落定后按 id 再补一次 requestFocus。
  */
 const SEARCH_FOCUS_FALLBACK_MS: number = 400;
+// ── UP 主结果行（结果页签「UP主」竖排列表）──
+/** 行头像边长（vp）：圆形头像，imgRadius 传一半 */
+const UP_ROW_AVATAR_VP: number = 48;
+/** 头像缩略图请求宽（px）：48vp 头像下约 2x 余量 */
+const UP_ROW_AVATAR_THUMB_PX: number = 128;
+/** UP 主搜索每页条数（searchUser 官方默认 page_size；视频仍用 SEARCH_PAGE_SIZE） */
+const USER_PAGE_SIZE: number = 20;
 
 /** 诊断：SearchPage 实例号（排查「平板下 searchSubmit 绑到旧实例」） */
 let searchPageInstanceSeq: number = 0;
@@ -190,8 +183,6 @@ export struct SearchPage {
    * 两侧经 AppStorage 即时互见。初值取 holder 的会话词（与栏组件同源）。
    */
   @StorageLink(STORE_SEARCH_KEYWORD) keyword: string = SearchStateHolder.keyword;
-  /** 主题色运行时值：加入歌单弹层的歌单名与新建按钮跟随切色刷新 */
-  @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   /** 新建常用搜索词弹窗「添加」自绘按钮的实底/文字色（见 AddWordBody） */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
@@ -339,22 +330,31 @@ export struct SearchPage {
   @State navTransX: string = '0%';
 
   /**
-   * 搜索类型：`'video'` 搜视频 / `'user'` 搜 UP 主。
-   *
-   * 为什么要这个开关：B 站的 `search_type=bili_user` **匿名完全可用**（实测 code=0，
-   * 「索尼音乐」能搜到官方号并带 `mid`），而搜出来的 UP 可以直接进站内 UP 主页 →
-   * 订阅投稿，等于把「找歌 → 找 UP → 长期收歌」这条链打通了。
-   *
-   * 切换后**不自动重搜**：用户可能只是改了模式还没按搜索，自动请求会白花一次配额
-   * （B 站对匿名搜索也有频率限制）。已经在结果态的话才自动重搜，手感更自然。
-   *
-   * 页面 / 标题栏行共享的双向状态：SearchInputBar 滑片选段改它，本页读它。
+   * UP 主搜索结果：与视频结果**同一次搜索并发返回**（doSearch 同时发
+   * `searchVideo` + `searchUser`），渲染在结果页签「UP主」的竖排列表里，
+   * 支持真分页（userPage / userTotalPages / loadMoreUsers）。
    */
-  @StorageLink(STORE_SEARCH_KIND) searchKind: string = 'video';
-  /** UP 主搜索结果（`searchKind === 'user'` 时渲染这个，其余时间忽略） */
   @State @Watch('onListSourceChanged') userResults: UserSearchResult[] = [];
+  /**
+   * UP 页签列表数据源（LazyForEach 渲染）：userResults 整表替换与 push 追加
+   * 都经 @Watch 触发 reload（V1 数组代理拦截 push），与视频 resultSource 同口径。
+   */
   private userSource: ArrayDataSource<UserSearchResult> = new ArrayDataSource<UserSearchResult>([]);
-  private userPairs: PairDataSource<UserSearchResult> = new PairDataSource<UserSearchResult>(this.userSource);
+  /**
+   * 结果页签：'video' 视频（默认）/ 'up' UP主。一次搜索两类结果并发返回，
+   * 分页签独立展示独立分页；新搜索与清空回初始页都重置回 'video'。
+   */
+  @State resultTab: string = 'video';
+  /** UP 结果已加载到第几页 / 共几页（0 表示未知，允许先试一页，与视频同口径） */
+  private userPage: number = 1;
+  private userTotalPages: number = 0;
+  /** UP 页签上拉加载更多进行中（onReachEnd 闸门与 footer 状态共用） */
+  @State userLoadingMore: boolean = false;
+  /** 结果页签分段按钮条目：静态一次构造 */
+  private resultSegItems: SegmentButtonV2Items = new SegmentButtonV2Items([
+    { text: '视频' },
+    { text: 'UP主' }
+  ]);
 
   /**
    * 请求序号（竞态保护）：快速连搜两次时，先发的那次可能后返回，
@@ -373,7 +373,6 @@ export struct SearchPage {
       this.resultPairs.sync();
     } else if (propName === 'userResults') {
       this.userSource.reload(this.userResults);
-      this.userPairs.sync();
     }
   }
 
@@ -382,7 +381,6 @@ export struct SearchPage {
     this.resultSource.reload(this.results);
     this.resultPairs.sync();
     this.userSource.reload(this.userResults);
-    this.userPairs.sync();
   }
 
   /**
@@ -408,6 +406,12 @@ export struct SearchPage {
     this.loadingMore = false;
     this.searchPage = 1;
     this.searchTotalPages = 0;
+    // 结果页签与 UP 翻页状态一并归零（userResults 清空在上面，
+    // userSource 由下方 syncAllListSources 兜底）
+    this.resultTab = 'video';
+    this.userPage = 1;
+    this.userTotalPages = 0;
+    this.userLoadingMore = false;
     // @Watch 触发的数据源同步与这里显式同步双保险（aboutToAppear 同款口径）
     this.syncAllListSources();
     // 列表归位 + 顺带校准自绘顶栏模糊层进度
@@ -497,12 +501,9 @@ export struct SearchPage {
       this.searchSectionTab = 'hot';
       this.loadHotWords();
     }
-    // 栏内动作（提交搜索 / 开关历史 / 切类型）经持有器转回本页私有方法
+    // 栏内动作（提交搜索 / 清空历史）经持有器转回本页私有方法
     this.pageId = ++searchPageInstanceSeq;
     console.info(`[Search] appear id=${this.pageId} bp=${this.currentBreakpoint}`);
-    TabScrollerHolder.searchSetKind = (kind: string): void => {
-      this.setSearchKind(kind);
-    };
     // 下拉刷新占位：ComponentContent 构造依赖 UIContext，属性初始化时还没就绪，
     // 只能在生命周期里建（工程内先例：PlayBar / CoverDiscComponent / LrcView 的 animator）。
     this.refreshPlaceholder =
@@ -604,30 +605,23 @@ export struct SearchPage {
     }, 0);
   }
 
-  /** 当前结果条数：搜 UP 主时装在 `userResults`（`results` 会被 doSearch 显式清空）。 */
+  /** 当前视频结果条数：分页（hasMore / loadMoreSearch）与底部状态条都围绕视频列表。 */
   private currentListLength(): number {
-    if (this.searchKind === 'user') {
-      return this.userResults.length;
-    }
     return this.results.length;
   }
 
+  /** 结果区是否有可见内容（视频或 UP 主任一非空）：空态判定与下拉骨架闸门用。 */
+  private hasAnyResult(): boolean {
+    return this.results.length > 0 || this.userResults.length > 0;
+  }
+
   /**
-   * 还有没有下一页。
+   * 视频结果还有没有下一页（UP 主只取第一页，不参与分页）。
    * 页数未知（0，如从 holder 恢复）时先允许试一页，返回空页会自动停；
    * 真到底由服务端 numPages 判定（空页可能是风控，见 loadMoreSearch）。
    */
   private hasMore(): boolean {
-    if (this.searchKind === 'user') {
-      if (this.userResults.length === 0) {
-        return false;
-      }
-      if (this.searchTotalPages <= 0) {
-        return true;
-      }
-      return this.searchPage < this.searchTotalPages;
-    }
-    if (this.results.length === 0) {
+    if (this.currentListLength() === 0) {
       return false;
     }
     if (this.searchTotalPages <= 0) {
@@ -636,102 +630,160 @@ export struct SearchPage {
     return this.searchPage < this.searchTotalPages;
   }
 
-  private async doSearch(): Promise<void> {
+  /**
+   * 合并搜索：同一关键词并发发起视频搜索（searchVideo）与 UP 主搜索
+   * （searchUser），各取第一页；视频落「视频」页签（分页 / 会话保持围绕
+   * 它），UP 主落「UP主」页签（翻页状态在此重置，后续上拉走 loadMoreUsers）。
+   *
+   * 竞态保护：searchSeq 作废制对两条请求**各自独立**生效 —— 任一响应返回
+   * 时号对不上（用户已清空 / 重新搜索 / 下拉刷新）就整体丢弃。
+   * `loading` 等两部分**都落定**才复位（pending 计数归零）：骨架屏盖住整个
+   * 合并搜索过程，不闪「视频先到、UP 后到」的中间态。
+   * UP 部分失败只记日志不打断：视频结果仍然可用，UP 缺席不该以
+   * 「搜索失败」的姿态打断用户（风控对两类接口的宽严程度不同）。
+   */
+  private doSearch(): void {
     const kw: string = this.keyword.trim();
     if (!kw) {
       this.toast('请输入搜索关键词', 1500);
       return;
     }
     const seq: number = ++this.searchSeq;
-    console.info(`[Search] doSearch id=${this.pageId} kw=${kw} kind=${this.searchKind} seq=${seq}`);
+    console.info(`[Search] doSearch id=${this.pageId} kw=${kw} seq=${seq}`);
+    // 新搜索回「视频」页签（B 站官方同款：新搜索回默认结果页）
+    this.resultTab = 'video';
     this.loading = true;
     // 先记历史再发请求：被风控 / 断网导致搜不出结果时，这次搜索同样算「搜过」，
     // 否则用户会遇到「明明搜过却不在历史里」。
     this.history = SearchHistoryStore.addSearchHistory(kw);
-    try {
-      if (this.searchKind === 'user') {
-        const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, 1, SEARCH_PAGE_SIZE);
+    let pending: number = 2;
+    let videoFailed: boolean = false;
+    const settlePart = (): void => {
+      pending--;
+      if (pending === 0 && seq === this.searchSeq) {
+        this.loading = false;
+        // 两类都空且视频没失败才提示「没搜到」：视频失败有自己的报错 toast，
+        // UP 单独缺席不构成「没搜到」。
+        if (this.results.length === 0 && this.userResults.length === 0 && !videoFailed) {
+          this.toast('没有搜索到结果，请换个关键词或稍后再试', 2000);
+        }
+      }
+    };
+    // ── 视频部分：主结果（Track 列表，分页 / 网格 / 两列都渲染它）──
+    BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE)
+      .then((resp: BilibiliApi.SearchResponse): void => {
+        // 已有更新的搜索在途（或已完成）：旧响应整体丢弃，不覆盖新结果
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        this.results = (resp.result || []).map(mapSearch);
+        this.searchKeyword = kw;
+        this.searchPage = 1;
+        this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+        this.searched = true;
+        this.resetResultScroll();
+        SearchStateHolder.save(kw, this.results);
+        console.info(`[Search] video done id=${this.pageId} n=${this.results.length} searched=${this.searched}`);
+      })
+      .catch((e: Error): void => {
+        // 失败的旧请求不提示、不碰状态：新请求还在飞，别让用户看到「先成功后报错」
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        videoFailed = true;
+        this.searched = true;
+        console.error(`doSearch video failed: ${JSON.stringify(e)}`);
+        this.toast('搜索失败，请检查网络或登录态', 2000);
+      })
+      .then((): void => {
+        settlePart();
+      });
+    // ── UP 主部分：「UP主」页签数据（第一页，翻页状态在此重置）──
+    BilibiliApi.searchUser(kw, 1, USER_PAGE_SIZE)
+      .then((resp: BilibiliApi.UserSearchResponse): void => {
         if (seq !== this.searchSeq) {
           return;
         }
         this.userResults = resp.result || [];
-        this.searchKeyword = kw;
-        this.searchPage = 1;
-        this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
-        this.results = [];
-        this.searched = true;
-        this.resetResultScroll();
-        console.info(`[Search] user done id=${this.pageId} n=${this.userResults.length} searched=${this.searched}`);
-        if (this.userResults.length === 0) {
-          this.toast('没有搜到相关 UP 主，换个关键词试试', 2000);
+        this.userPage = 1;
+        this.userTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+        console.info(`[Search] user done id=${this.pageId} n=${this.userResults.length}`);
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.searchSeq) {
+          return;
         }
-        return;
-      }
-      const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE);
-      // 已有更新的搜索在途（或已完成）：旧响应整体丢弃，不覆盖新结果
-      if (seq !== this.searchSeq) {
-        return;
-      }
-      this.results = (resp.result || []).map(mapSearch);
-      this.userResults = [];
-      this.searchKeyword = kw;
-      this.searchPage = 1;
-      this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
-      this.searched = true;
-      this.resetResultScroll();
-      SearchStateHolder.save(kw, this.results);
-      if (this.results.length === 0) {
-        // 搜索接口被风控时也是返回 0 条（HTTP 200 / code 0），明确提示，别让人以为没搜
-        this.toast('没有搜索到结果，请换个关键词或稍后再试', 2000);
-      }
-    } catch (e) {
-      // 失败的旧请求不提示、不碰状态：新请求还在飞，别让用户看到「先成功后报错」
-      if (seq !== this.searchSeq) {
-        return;
-      }
-      this.searched = true;
-      console.error(`doSearch failed: ${JSON.stringify(e)}`);
-      this.toast('搜索失败，请检查网络或登录态', 2000);
-    } finally {
-      // 只有「最新一次」请求有权复位 loading：旧请求的 finally 不能把
-      // 新请求的 loading=true 提前拉回 false（骨架屏会闪没）
-      if (seq === this.searchSeq) {
-        this.loading = false;
-      }
-    }
+        console.error(`doSearch user failed: ${JSON.stringify(e)}`);
+      })
+      .then((): void => {
+        settlePart();
+      });
   }
 
-  private async refreshSearch(): Promise<void> {
+  /**
+   * 下拉刷新：与 doSearch 同款两路并发（视频 + UP 主各刷新第一页），
+   * 不重记历史（刷新不算新搜索）。`refreshing` 等两部分都落定才复位
+   * （Refresh 的 $$ 双向绑定，不落回 false 刷新头不收起）。
+   * seq 竞态保护：刷新在途时提交新搜索（doSearch 会 ++searchSeq）或
+   * 再次刷新，旧响应必须整体丢弃；同时使同关键词在途的上拉翻页作废
+   * （刷新会整体置换结果集，翻页的增量 push 已无意义）。
+   */
+  private refreshSearch(): void {
     const kw: string = this.searchKeyword.trim();
     if (kw.length === 0) {
       this.refreshing = false;
       this.toast('还没有搜索内容', 1200);
       return;
     }
-    // seq 竞态保护：刷新在途时提交新搜索（doSearch）或
-    // 再次刷新，旧响应必须整体丢弃；++searchSeq 同时使同关键词在途的上拉
-    // 翻页作废（刷新会整体置换结果集，翻页的增量 push 已无意义）。
     const seq: number = ++this.searchSeq;
-    try {
-      const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE);
-      if (seq !== this.searchSeq) {
-        return;
+    let pending: number = 2;
+    const settlePart = (): void => {
+      pending--;
+      if (pending === 0) {
+        this.refreshing = false;
       }
-      const list: Track[] = (resp.result || []).map(mapSearch);
-      this.results = list;
-      this.searchPage = 1;
-      this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
-      this.searched = true;
-      SearchStateHolder.save(kw, list);
-    } catch (e) {
-      if (seq !== this.searchSeq) {
-        return;
-      }
-      console.error(`refreshSearch failed: ${JSON.stringify(e)}`);
-      this.toast('刷新失败，请稍后重试', 1800);
-    } finally {
-      this.refreshing = false;
-    }
+    };
+    BilibiliApi.searchVideo(kw, 1, SEARCH_PAGE_SIZE)
+      .then((resp: BilibiliApi.SearchResponse): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        const list: Track[] = (resp.result || []).map(mapSearch);
+        this.results = list;
+        this.searchPage = 1;
+        this.searchTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+        this.searched = true;
+        SearchStateHolder.save(kw, list);
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        console.error(`refreshSearch failed: ${JSON.stringify(e)}`);
+        this.toast('刷新失败，请稍后重试', 1800);
+      })
+      .then((): void => {
+        settlePart();
+      });
+    BilibiliApi.searchUser(kw, 1, USER_PAGE_SIZE)
+      .then((resp: BilibiliApi.UserSearchResponse): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        // 刷新整表换源：UP 翻页状态回到第一页
+        this.userResults = resp.result || [];
+        this.userPage = 1;
+        this.userTotalPages = resp.numPages > 0 ? resp.numPages : 0;
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        console.error(`refreshSearch user failed: ${JSON.stringify(e)}`);
+      })
+      .then((): void => {
+        settlePart();
+      });
   }
 
   /**
@@ -756,7 +808,7 @@ export struct SearchPage {
           this.pullSkelOffsetY = PULL_SKELETON_SETTLE_VP;
         });
       }
-      this.showPullSkeleton = this.currentListLength() > 0;
+      this.showPullSkeleton = this.hasAnyResult();
     } else if (status === RefreshStatus.Done) {
       this.dismissPullSkeleton();
     } else if (status === RefreshStatus.Inactive) {
@@ -795,7 +847,14 @@ export struct SearchPage {
    * 否则短列表在首帧布局时就会连环触发，一口气把后面几页全拉下来。
    */
   private onReachEnd(): void {
-    if (this.refreshing || this.loadingMore || this.loading) {
+    if (this.refreshing || this.loadingMore || this.loading || this.userLoadingMore) {
+      return;
+    }
+    // UP 页签：自己的翻页链路（空页 ≠ 到底、seq 竞态见 loadMoreUsers）
+    if (this.resultTab === 'up') {
+      if (this.userHasMore()) {
+        this.loadMoreUsers();
+      }
       return;
     }
     if (!this.hasMore()) {
@@ -816,50 +875,20 @@ export struct SearchPage {
     const seq: number = this.searchSeq;
     try {
       const next: number = this.searchPage + 1;
-      if (this.searchKind === 'user') {
-        const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, next, SEARCH_PAGE_SIZE);
-        if (seq !== this.searchSeq) {
-          return;
-        }
-        const list: UserSearchResult[] = resp.result || [];
-        // 空页 ≠ 到底：风控时接口同样返回空列表
-        //（HTTP 200 / code 0，见 doSearch 首页分支注释）。遇到空页只提示可重试，
-        // 不推进 searchPage、不锁定 searchTotalPages；真到底由服务端 numPages 判定。
-        if (list.length === 0) {
-          this.toast('这页没有加载出来，可能被限流，稍后再试', 2000);
-          return;
-        }
-        this.searchPage = next;
-        // 按 mid 去重后增量 push：翻页时 B 站可能把同一条挪位置，不去重会重复。
-        const seen: Set<string> = new Set<string>();
-        for (let i = 0; i < this.userResults.length; i++) {
-          seen.add(String(this.userResults[i].mid));
-        }
-        for (let i = 0; i < list.length; i++) {
-          const u: UserSearchResult = list[i];
-          const key: string = String(u.mid);
-          if (!seen.has(key)) {
-            seen.add(key);
-            this.userResults.push(u);
-          }
-        }
-        if (resp.numPages > 0) {
-          this.searchTotalPages = resp.numPages;
-        }
-        return;
-      }
       const resp: BilibiliApi.SearchResponse = await BilibiliApi.searchVideo(kw, next, SEARCH_PAGE_SIZE);
       if (seq !== this.searchSeq) {
         return;
       }
       const list: Track[] = (resp.result || []).map(mapSearch);
-      // 空页 ≠ 到底：理由同 user 分支（风控空页可重试，真到底看 numPages）。
+      // 空页 ≠ 到底：风控时接口同样返回空列表（HTTP 200 / code 0，见 doSearch
+      // 注释）。遇到空页只提示可重试，不推进 searchPage、不锁定 searchTotalPages；
+      // 真到底由服务端 numPages 判定。
       if (list.length === 0) {
         this.toast('这页没有加载出来，可能被限流，稍后再试', 2000);
         return;
       }
       this.searchPage = next;
-      // 按 id 去重后增量 push（理由同上 user 分支）
+      // 按 id 去重后增量 push：翻页时 B 站可能把同一条挪位置，不去重会重复。
       const seen: Set<string> = new Set<string>();
       for (let i = 0; i < this.results.length; i++) {
         seen.add(this.results[i].id);
@@ -887,11 +916,81 @@ export struct SearchPage {
   }
 
   /**
+   * UP 页签还有没有下一页。页数未知（0，如接口没带 numPages）时先允许试
+   * 一页，返回空页会自动停；真到底由服务端 numPages 判定（与视频 hasMore
+   * 同口径）。
+   */
+  private userHasMore(): boolean {
+    if (this.userResults.length === 0) {
+      return false;
+    }
+    if (this.userTotalPages <= 0) {
+      return true;
+    }
+    return this.userPage < this.userTotalPages;
+  }
+
+  /**
+   * UP 页签上拉加载更多（searchUser 真分页：page / page_size）。
+   * seq 竞态保护：翻页在途时提交新搜索（doSearch 会 ++searchSeq）或下拉
+   * 刷新，旧响应必须整体丢弃 —— 否则旧关键词的下一页会被 push 进新结果
+   * 数组（与 loadMoreSearch 同口径，loadMoreUsers 只读 seq 不自增）。
+   * 空页 ≠ 到底：风控时接口同样返回空列表（HTTP 200 / code 0），遇到空页
+   * 只提示可重试，不推进 userPage、不锁定 userTotalPages。
+   */
+  private async loadMoreUsers(): Promise<void> {
+    const kw: string = this.searchKeyword.trim();
+    if (kw.length === 0) {
+      return;
+    }
+    this.userLoadingMore = true;
+    const seq: number = this.searchSeq;
+    try {
+      const next: number = this.userPage + 1;
+      const resp: BilibiliApi.UserSearchResponse = await BilibiliApi.searchUser(kw, next, USER_PAGE_SIZE);
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      const list: UserSearchResult[] = resp.result || [];
+      if (list.length === 0) {
+        this.toast('这页没有加载出来，可能被限流，稍后再试', 2000);
+        return;
+      }
+      this.userPage = next;
+      // 按 mid 去重后增量 push：翻页时 B 站可能把同一条挪位置，不去重会重复
+      // （push 触发 @Watch → userSource 整表 reload，LazyForEach 只重建可视区）。
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.userResults.length; i++) {
+        seen.add(String(this.userResults[i].mid));
+      }
+      for (let i = 0; i < list.length; i++) {
+        const u: UserSearchResult = list[i];
+        const key: string = String(u.mid);
+        if (!seen.has(key)) {
+          seen.add(key);
+          this.userResults.push(u);
+        }
+      }
+      if (resp.numPages > 0) {
+        this.userTotalPages = resp.numPages;
+      }
+    } catch (e) {
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      console.error(`loadMoreUsers failed: ${JSON.stringify(e)}`);
+      this.toast('加载更多失败，请稍后重试', 1800);
+    } finally {
+      this.userLoadingMore = false;
+    }
+  }
+
+  /**
    * 加载中 / 空态的统一展示区。
    * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条，纯静态占位），
    * 占位形状对齐内容布局，加载完成内容「落位」不跳。
-   * 空态：区分「还没搜」和「搜了但没结果」（换词建议），
-   * 搜 UP 主时说「UP 主」，别沿用视频那句——两者换关键词的方向不一样。
+   * 空态：区分「还没搜」和「搜了但没结果」（视频与 UP 主都空才算没结果，
+   * 换词建议）。
    * 还没搜：常用搜索词区（CommonWordsSection）常驻初始页，其下方叠
    * 页签区（HistorySection：最近搜索 / B 站热搜；无历史时只剩热搜页签，
    * 所以不以历史非空作渲染闸门）。
@@ -900,11 +999,11 @@ export struct SearchPage {
   SearchStateArea(): void {
     if (this.loading) {
       this.SkeletonArea()
-    } else if (this.currentListLength() === 0) {
+    } else if (!this.hasAnyResult()) {
       if (!this.searched) {
         // height('100%')：外层 Column 高度确定（整屏），本列占满整高 →
         // 兄弟 Refresh(layoutWeight) 分到剩余 0 高。初始态结果列表为空、
-        // 下拉骨架闸门要求 currentListLength()>0，Refresh 塌缩无功能损失；
+        // 下拉骨架闸门要求 hasAnyResult()，Refresh 塌缩无功能损失；
         // 换来下方 HistorySection 能经 layoutWeight 链铺满到屏幕底部
         // （最近搜索/热搜需延伸到安全区）。
         Column() {
@@ -914,7 +1013,7 @@ export struct SearchPage {
         .height('100%')
       } else {
         Column() {
-          Text(this.searchKind === 'user' ? '没有找到相关 UP 主，换个关键词试试' : '没有找到相关内容，换个关键词试试')
+          Text('没有找到相关内容，换个关键词试试')
             .fontSize(16)
             .fontColor($r('app.color.text_secondary'))
         }
@@ -940,72 +1039,109 @@ export struct SearchPage {
   }
 
   /**
-   * UP 主结果行（`searchKind === 'user'` 时用）。
-   *
-   * 为什么不给 UP 加「加入队列 / 下载」：这两个动作的对象是**曲目**不是 UP。
-   * UP 行只有一个有意义的动作 —— **进他的主页**（那边能订阅，之后新歌自动进订阅歌单）。
+   * 结果页签分段行：「视频 | UP主」官方分段按钮（CapsuleSegmentButtonV2，
+   * B 站粉经 itemSelectedBackgroundColor 覆写，HistorySection 同一套语言）
+   * + 右侧当前页签结果计数。只在搜出内容后渲染（build 内闸门）。
+   * ⚠️ V2 分段按钮给多大渲染多大（均摊到各段），必须显式宽度。
+   */
+  @Builder
+  ResultTabBar(): void {
+    Row() {
+      CapsuleSegmentButtonV2({
+        items: this.resultSegItems,
+        selectedIndex: this.resultTab === 'up' ? 1 : 0,
+        onItemClicked: (index: number): void => {
+          this.switchResultTab(index === 1 ? 'up' : 'video');
+        },
+        itemSelectedBackgroundColor: this.segColors().selectedBg,
+        itemSelectedFontColor: this.segColors().selectedFont,
+        itemSelectedFontWeight: FontWeight.Medium,
+        itemFontColor: this.segColors().unselectedFont,
+        itemFontWeight: FontWeight.Normal,
+        itemFontSize: LengthMetrics.vp(13),
+        itemSelectedFontSize: LengthMetrics.vp(13),
+        buttonBackgroundColor: this.segColors().grooveBg,
+        buttonBorderRadius: LengthMetrics.vp(8),
+        itemBorderRadius: LengthMetrics.vp(6),
+        // 内部背板最小高度对齐 32（HistorySection 同款结论，否则约 36 盖过 .height(32)）
+        buttonMinHeight: LengthMetrics.vp(32),
+        // 紧凑内边距（系统默认 16vp 空气感过强，HistorySection 真机验收同款收到 8vp）
+        itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
+      })
+        .height(32)
+        // 显式宽度：背板 4×2 + 「视频」(≈26+16) + 「UP主」(≈28+16)
+        .width(100)
+      Blank()
+        .layoutWeight(1)
+      // 当前页签结果数：翻页后增长，直观反馈「还能翻」
+      Text(this.resultTab === 'video'
+        ? `${this.results.length} 个`
+        : `${this.userResults.length} 个`)
+        .fontSize(13)
+        .fontColor($r('app.color.text_tertiary'))
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16 })
+    .margin({ top: 4, bottom: 4 })
+  }
+
+  /** 切换结果页签：相同直接返回；换页签后列表归位（两页签共用一个滚动容器） */
+  private switchResultTab(tab: string): void {
+    if (this.resultTab === tab) {
+      return;
+    }
+    this.resultTab = tab;
+    this.resetResultScroll();
+  }
+
+  /** 卡片小标：有官方/企业认证取认证文案（匿名搜 UP 时区分「官方号」与「同名搬运号」最需要的信息），否则「UP主」 */
+  private upBadgeText(u: UserSearchResult): string {
+    if (u.verify_info && u.verify_info.desc.length > 0) {
+      return u.verify_info.desc;
+    }
+    return 'UP主';
+  }
+
+  /**
+   * UP 主结果行（「UP主」页签竖排列表）：圆形头像 + 昵称 + 认证小标 +
+   * 粉丝/投稿 + 「进入主页」chevron，点行进主页。
+   * 为什么不给 UP 加「加入队列 / 下载 / 播放」：这些动作的对象是**曲目**不是 UP，
+   * 行上唯一有意义的动作是**进他的主页**（那边能订阅，之后新歌自动进订阅歌单）。
    * 匿名态拿不到他的投稿列表（`arc/search` 被风控，站内页会退化成「搜索反查」路径），
    * 所以这一步是「搜 UP → 进主页 → 订阅」三段式的中间一环。
    */
   @Builder
-  UserResultRow(u: UserSearchResult, index: number): void {
-    Row() {
+  UpResultRow(u: UserSearchResult): void {
+    Row({ space: 12 }) {
       CoverImage({
         // face_nft 优先：实测它比 upic 更常不为空
-        url: toThumbUrl((u.face_nft && u.face_nft.length > 0) ? u.face_nft : u.upic, 96),
-        imgWidth: 48,
-        imgHeight: 48,
-        imgRadius: 24,
+        url: toThumbUrl((u.face_nft && u.face_nft.length > 0) ? u.face_nft : u.upic, UP_ROW_AVATAR_THUMB_PX),
+        imgWidth: UP_ROW_AVATAR_VP,
+        imgHeight: UP_ROW_AVATAR_VP,
+        imgRadius: UP_ROW_AVATAR_VP / 2,
         altText: u.uname
       })
-      Column() {
-        Row({ space: 6 }) {
-          Text(u.uname)
-            .fontSize(16)
-            .fontColor($r('app.color.text_primary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
-          // 官方 / 企业认证：匿名搜 UP 时最需要的信息（区分「官方号」与「同名搬运号」）
-          // 徽标用系统标准 Chip（不能链式挂属性 → 外层 Row）
-          if (u.verify_info && u.verify_info.desc.length > 0) {
-            Row() {
-              Chip({
-                label: {
-                  text: u.verify_info.desc,
-                  fontSize: 11,
-                  fontColor: this.themeDeep
-                },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                backgroundColor: this.themeSurface
-              })
-            }
-            .hitTestBehavior(HitTestMode.None)
-          }
-        }
-        .width('100%')
-        if (u.usign.length > 0) {
-          Text(u.usign)
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-            .margin({ top: 4 })
-        }
+      Column({ space: 2 }) {
+        Text(u.uname)
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.upBadgeText(u))
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
         Text(this.userMetaText(u))
           .fontSize(13)
-          .fontColor($r('app.color.text_tertiary'))
-          .width('100%')
-          .margin({ top: 4 })
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
-      .margin({ left: 12 })
-      Text('›')
-        .fontSize(20)
-        .fontColor($r('app.color.text_disabled'))
+      .layoutWeight(1)
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor([$r('app.color.text_tertiary')])
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 10, bottom: 10 })
@@ -1018,6 +1154,186 @@ export struct SearchPage {
     .onClick((): void => {
       this.openUpSpaceByUser(u);
     })
+  }
+
+  /**
+   * 视频页签条目区：三种条目形态（外观设置「条目展示」决定）+ 加载更多
+   * 状态条。整段自 build 内 List 迁入（逻辑未动，仅挪位）。
+   */
+  @Builder
+  VideoTabContent(): void {
+    // 大封面模式（外观设置「条目展示」）：视频结果配对成
+    // 双列网格卡（TrackCard），竖屏 / 横屏均双列，交互契约与行内版一致
+    // （整卡点击播/暂停、「⋯」菜单）；配对数据源复用 resultPairs
+    // （onListSourceChanged 无条件 sync，网格竖屏也是热的）。
+    if (this.isGrid()) {
+      LazyForEach(
+        this.resultPairs,
+        (pair: PairOf<Track>): void => {
+          ListItem() {
+            Row() {
+              TrackCard({
+                track: pair.first,
+                onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+              }).layoutWeight(1)
+              // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+              // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+              // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+              // 间隔条，末卡与满行卡等宽。
+              Blank().width(TWO_COL_GAP_VP)
+              if (pair.second !== null) {
+                TrackCard({
+                  track: pair.second,
+                  onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                  moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                }).layoutWeight(1)
+              } else {
+                Blank().layoutWeight(1)
+              }
+            }
+            .width('100%')
+            // 网格行页边距：两边留白 + 封面整体缩小约 15%，
+            // 见 GRID_EDGE_PADDING_VP 注释。
+            .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+            // Top 对齐：卡高随标题行数浮动，Row 默认 Center 会把矮卡
+            // 垂直居中 → 左右封面错位；Top 让左右封面严格同高起步。
+            .alignItems(VerticalAlign.Top)
+          }
+        },
+        (pair: PairOf<Track>): string =>
+          `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+      )
+    } else if (this.isTwoCol()) {
+      LazyForEach(
+        this.resultPairs,
+        (pair: PairOf<Track>, pIndex: number): void => {
+          ListItem() {
+            Row() {
+              TrackItem({
+                track: pair.first,
+                entranceIndex: pIndex * 2,
+                onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+              }).layoutWeight(1)
+              if (pair.second !== null) {
+                TrackItem({
+                  track: pair.second,
+                  entranceIndex: pIndex * 2 + 1,
+                  onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                  moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+              } else {
+                Blank().layoutWeight(1)
+              }
+            }
+            .width('100%')
+          }
+        },
+        (pair: PairOf<Track>): string =>
+          `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+      )
+    } else {
+      LazyForEach(
+        this.resultSource,
+        (t: Track, index: number): void => {
+          ListItem() {
+            TrackItem({
+              track: t,
+              entranceIndex: index,
+              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+            })
+          }
+        },
+        (t: Track): string => t.id
+      )
+    }
+
+    // 加载更多状态条（常驻 + 固定高度）：只在这一屏有内容时出现；
+    // 只换内容不插拔、高度恒定，数据落地帧尾部 extent 只增不减，底部弹簧
+    // 过滚动不被收缩强制解析（防加载下一页时列表整体跳动）。
+    // 加载态是单行转圈：为固定高度做的取舍，首屏/下拉刷新骨架不动。
+    if (this.currentListLength() > 0) {
+      ListItem() {
+        Row() {
+          if (this.loadingMore) {
+            LoadingProgress()
+              .width(18)
+              .height(18)
+              .color($r('app.color.text_tertiary'))
+            Text('加载中…')
+              .fontSize(12)
+              .fontColor($r('app.color.text_tertiary'))
+              .margin({ left: 8 })
+          } else if (!this.hasMore()) {
+            Text('已经到底啦')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          } else {
+            Text('上拉加载更多')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+        }
+        .width('100%')
+        .height(LIST_FOOTER_HEIGHT_VP)
+        .justifyContent(FlexAlign.Center)
+      }
+    }
+  }
+
+  /**
+   * UP 主页签条目区：竖排列表行（真分页）+ 加载更多状态条；
+   * 空态（另一页签有内容时）占位说明，两类都空由 SearchStateArea 整页空态接管。
+   */
+  @Builder
+  UpTabContent(): void {
+    if (this.userResults.length === 0) {
+      ListItem() {
+        Text('没有找到相关UP主')
+          .fontSize(16)
+          .fontColor($r('app.color.text_secondary'))
+      }
+      .width('100%')
+      .margin({ top: 48 })
+    } else {
+      LazyForEach(
+        this.userSource,
+        (u: UserSearchResult): void => {
+          ListItem() {
+            this.UpResultRow(u)
+          }
+        },
+        (u: UserSearchResult): string => `up_${u.mid}`
+      )
+      // 加载更多状态条（与视频页签同款：常驻 + 固定高度，防 extent 抖动）
+      ListItem() {
+        Row() {
+          if (this.userLoadingMore) {
+            LoadingProgress()
+              .width(18)
+              .height(18)
+              .color($r('app.color.text_tertiary'))
+            Text('加载中…')
+              .fontSize(12)
+              .fontColor($r('app.color.text_tertiary'))
+              .margin({ left: 8 })
+          } else if (!this.userHasMore()) {
+            Text('已经到底啦')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          } else {
+            Text('上拉加载更多')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+        }
+        .width('100%')
+        .height(LIST_FOOTER_HEIGHT_VP)
+        .justifyContent(FlexAlign.Center)
+      }
+    }
   }
 
   /** 「95.1 万粉丝 · 258 个投稿」这类副信息；空值不拼出孤零零的分隔符 */
@@ -1057,21 +1373,6 @@ export struct SearchPage {
     // 头像一并带过去，UP 主页首帧就有图（否则要等主页自己再拉一次 card）
     const face: string = u.face_nft && u.face_nft.length > 0 ? u.face_nft : u.upic;
     NavStackHolder.stack.pushPathByName('UpSpace', new UpSpaceRouteParam(mid, u.uname, face));
-  }
-
-  /**
-   * 切换搜索类型（SearchInputBar 滑片选段经持有器回调进来）；
-   * 已在结果态时立刻用新类型重搜同一关键词。
-   * 白片平移动画由分段按钮自带 .animation 承担（原 animateTo 跨不了组件层）。
-   */
-  private setSearchKind(kind: string): void {
-    if (this.searchKind === kind) {
-      return;
-    }
-    this.searchKind = kind;
-    if (this.searched && this.keyword.trim().length > 0) {
-      this.doSearch();
-    }
   }
 
   /** 「⋯」标准菜单项（bindMenu + MenuElement 数组） */
@@ -1191,17 +1492,12 @@ export struct SearchPage {
    * 用户在外面想下一首歌就得先去设置里关开关 —— 多加一步，还未必想得起来。
    */
   private confirmDownloadOnCellular(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.requestDownload(track, true);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.requestDownload(track, true);
       }
     });
   }
@@ -1702,7 +1998,7 @@ export struct SearchPage {
       Row() {
         if (this.history.length > 0) {
           // 「最近搜索 / 热搜」官方分段按钮（CapsuleSegmentButtonV2，B 站粉经
-          // itemSelectedBackgroundColor 覆写，与 SearchTabBar「视频/UP主」同一套语言）。
+          // itemSelectedBackgroundColor 覆写，与结果页签「视频/UP主」同一套语言）。
           // ⚠️ V2 分段按钮给多大渲染多大（均摊到各段），必须显式宽度。
           CapsuleSegmentButtonV2({
             items: this.historySegItems,
@@ -1726,8 +2022,10 @@ export struct SearchPage {
             itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
           })
             .height(32)
-            // 显式宽度：背板 4×2 + 「最近搜索」(≈52+16) + 「热搜」(≈26+16)
-            .width(124)
+            // 显式宽度：V2 分段按钮把总宽「均摊」到各段（非按内容自适应），
+            // 每段须容纳最长文案「最近搜索」（13fp ≈52vp + 16vp 内边距 ≈68），
+            // 152/2 = 76 ≥ 68 才不截断（「热搜」只需 ≈42，天然富余）。
+            .width(152)
         } else {
           // 没有历史时不显示「最近搜索」页签，热搜独占
           Text('热搜')
@@ -1908,7 +2206,7 @@ export struct SearchPage {
                 // ±92vp（64 封面 + 上下 padding 28）布局位移；Stack 定高，
                 // 挂载翻转只增删被定位的覆盖子节点，布局零影响。
                 Stack({ alignContent: Alignment.BottomStart }) {
-                  if (this.showPullSkeleton && this.currentListLength() > 0) {
+                  if (this.showPullSkeleton && this.hasAnyResult()) {
                     SkeletonTrackItem({ index: -1 })
                       .opacity(this.pullSkelOpacity)
                       .translate({ y: this.pullSkelOffsetY })
@@ -1921,165 +2219,34 @@ export struct SearchPage {
                 .height(this.listStartOffset())
               }
 
-              if (this.searchKind === 'user') {
-                // UP 主结果：List 里混排两种数据源不行，与本页视频结果分支互斥。
-                // 横屏宽屏：UP 行配对两列。
-                if (this.isTwoCol()) {
-                  LazyForEach(
-                    this.userPairs,
-                    (pair: PairOf<UserSearchResult>, pIndex: number): void => {
-                      ListItem() {
-                        Row() {
-                          Column() {
-                            this.UserResultRow(pair.first, pIndex * 2)
-                          }
-                          .layoutWeight(1)
-                          if (pair.second !== null) {
-                            Column() {
-                              this.UserResultRow(pair.second, pIndex * 2 + 1)
-                            }
-                            .layoutWeight(1)
-                            .margin({ left: TWO_COL_GAP_VP })
-                          } else {
-                            Blank().layoutWeight(1)
-                          }
-                        }
-                        .width('100%')
-                      }
-                    },
-                    (pair: PairOf<UserSearchResult>): string =>
-                      `${pair.first.mid}|${pair.second !== null ? pair.second.mid : 'x'}`
-                  )
-                } else {
-                  LazyForEach(
-                    this.userSource,
-                    (u: UserSearchResult, index: number): void => {
-                      ListItem() {
-                        this.UserResultRow(u, index)
-                      }
-                    },
-                    (u: UserSearchResult): string => `${u.mid}`
-                  )
+              // 结果页签分段行（「视频 | UP主」+ 当前页签计数）：搜出内容
+              // （视频或 UP 主任一非空）才出现；整屏骨架（loading）与整页
+              // 空态由 SearchStateArea 接管，不与本行叠出。
+              if (!this.loading && this.searched && this.hasAnyResult()) {
+                ListItem() {
+                  this.ResultTabBar()
                 }
-              // 大封面模式（外观设置「条目展示」）：视频结果配对成
-              // 双列网格卡（TrackCard），竖屏 / 横屏均双列，交互契约与行内版一致
-              // （整卡点击播/暂停、「⋯」菜单）；配对数据源复用 resultPairs
-              // （onListSourceChanged 无条件 sync，网格竖屏也是热的）。
-              // UP 结果分支在上方，不受大封面模式影响。
-              } else if (this.isGrid()) {
-                LazyForEach(
-                  this.resultPairs,
-                  (pair: PairOf<Track>): void => {
-                    ListItem() {
-                      Row() {
-                        TrackCard({
-                          track: pair.first,
-                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
-                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
-                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
-                        // 间隔条，末卡与满行卡等宽。
-                        Blank().width(TWO_COL_GAP_VP)
-                        if (pair.second !== null) {
-                          TrackCard({
-                            track: pair.second,
-                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1)
-                        } else {
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                      // 网格行页边距：两边留白 + 封面整体缩小约 15%，
-                      // 见 GRID_EDGE_PADDING_VP 注释。
-                      .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
-                      // Top 对齐：卡高随标题行数浮动，Row 默认 Center 会把矮卡
-                      // 垂直居中 → 左右封面错位；Top 让左右封面严格同高起步。
-                      .alignItems(VerticalAlign.Top)
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
-              } else if (this.isTwoCol()) {
-                LazyForEach(
-                  this.resultPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
-                    ListItem() {
-                      Row() {
-                        TrackItem({
-                          track: pair.first,
-                          entranceIndex: pIndex * 2,
-                          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        if (pair.second !== null) {
-                          TrackItem({
-                            track: pair.second,
-                            entranceIndex: pIndex * 2 + 1,
-                            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
-              } else {
-                LazyForEach(
-                  this.resultSource,
-                  (t: Track, index: number): void => {
-                    ListItem() {
-                      TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
-                    }
-                  },
-                  (t: Track): string => t.id
-                )
               }
 
-              // 加载更多状态条（常驻 + 固定高度）：只在这一屏有内容时出现；
-              // 只换内容不插拔、高度恒定，数据落地帧尾部 extent 只增不减，底部弹簧
-              // 过滚动不被收缩强制解析（防加载下一页时列表整体跳动）。
-              // 加载态是单行转圈：为固定高度做的取舍，首屏/下拉刷新骨架不动。
-              if (this.currentListLength() > 0) {
-                ListItem() {
-                  Row() {
-                    if (this.loadingMore) {
-                      LoadingProgress()
-                        .width(18)
-                        .height(18)
-                        .color($r('app.color.text_tertiary'))
-                      Text('加载中…')
-                        .fontSize(12)
-                        .fontColor($r('app.color.text_tertiary'))
-                        .margin({ left: 8 })
-                    } else if (!this.hasMore()) {
-                      Text('已经到底啦')
-                        .fontSize(13)
-                        .fontColor($r('app.color.text_tertiary'))
-                    } else {
-                      Text('上拉加载更多')
-                        .fontSize(13)
-                        .fontColor($r('app.color.text_tertiary'))
-                    }
+              // 两页签共用一个 List（滚动容器 / 下拉刷新 / 顶栏模糊联动全部
+              // 复用），条目区按 resultTab 条件渲染；切换即换源并归位
+              // （switchResultTab）。空页签在页签内占位说明，两类都空由
+              // SearchStateArea 整页空态接管。
+              if (this.resultTab === 'video') {
+                if (this.results.length === 0) {
+                  // 视频页签空态：另一页签有内容时才有本占位
+                  ListItem() {
+                    Text('没有找到相关视频')
+                      .fontSize(16)
+                      .fontColor($r('app.color.text_secondary'))
                   }
                   .width('100%')
-                  .height(LIST_FOOTER_HEIGHT_VP)
-                  .justifyContent(FlexAlign.Center)
+                  .margin({ top: 48 })
+                } else {
+                  this.VideoTabContent()
                 }
+              } else {
+                this.UpTabContent()
               }
             }
             .width('100%')
@@ -2156,7 +2323,7 @@ export struct SearchPage {
       .width('100%')
       .height('100%')
       // ⚠️ 栏内动作必须在 **onAppear**（真正挂载）里接管，不能放 aboutToAppear：
-      // 平板分支下 HdsNavigation 会先创建一个**临时实例**再销毁它（实测
+      // HdsNavigation 会先创建一个**临时实例**再销毁它（实测
       // appear id=1 → appear id=2 → disappear id=2），若在 aboutToAppear 里绑静态
       // 回调，就会被这个已销毁的临时实例抢走 —— 表现是「搜索请求发出去了、界面不动」。
       .onAppear((): void => {

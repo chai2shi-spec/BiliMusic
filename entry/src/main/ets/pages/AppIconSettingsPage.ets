@@ -35,6 +35,7 @@ import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 /**
  * 备选图标数据模型：key 为 app.json5 alternateIcons 的 name 字段（'' = 默认，
@@ -200,7 +201,8 @@ export struct AppIconSettingsPage {
         .radioStyle({ checkedBackgroundColor: this.themePrimary })
         .width(22)
         .height(22)
-        .hitTestBehavior(HitTestMode.None)    }
+        .hitTestBehavior(HitTestMode.None)
+    }
     .width('100%')
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
     .onClick(() => {
@@ -263,25 +265,12 @@ export struct AppIconSettingsPage {
     NavTitleRow({ title: '应用图标' })
   }
 
-  /**
-   * 标题行收窄容器（AppearanceSettingsPage 同款）：外层 Row 居中 + 内层
-   * Column constraintSize（上限与本页内容列同口径），大屏上标题行与内容列
-   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   appIconBarNarrow() {
-    Row() {
-      Column() {
-        this.appIconBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.appIconBar()
+    } })
   }
 
   build() {

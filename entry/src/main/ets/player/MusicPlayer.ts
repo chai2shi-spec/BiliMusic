@@ -69,6 +69,7 @@ import {
   STORE_TOAST_MSG,
   STORE_TOAST_HOLD_MS,
   STORE_TOAST_SEQ,
+  STORE_BT_PERM_REQ_SEQ,
   STORE_SLEEP_TIMER_END,
   RESUME_MIN_SEC,
   RESUME_TAIL_SEC,
@@ -361,6 +362,11 @@ export class MusicPlayer {
   private static instance: MusicPlayer | null = null;
 
   private context: common.Context | null = null;
+  /**
+   * 蓝牙权限是否已申请过（进程内一次）：审核要求「使用权限对应的产品或
+   * 服务时才申请」，故不在启动链弹窗，挪到首次开始播放（真实使用场景）。
+   */
+  private bluetoothPermissionAsked: boolean = false;
   private avPlayer: media.AVPlayer | null = null;
   private session: avSession.AVSession | null = null;
   /**
@@ -451,14 +457,6 @@ export class MusicPlayer {
   addCardSyncListener(listener: (key: string) => void): void {
     if (this.cardSyncListeners.indexOf(listener) < 0) {
       this.cardSyncListeners.push(listener);
-    }
-  }
-
-  /** 注销卡片同步监听器 */
-  removeCardSyncListener(listener: (key: string) => void): void {
-    const idx: number = this.cardSyncListeners.indexOf(listener);
-    if (idx >= 0) {
-      this.cardSyncListeners.splice(idx, 1);
     }
   }
 
@@ -557,6 +555,19 @@ export class MusicPlayer {
   private prefetchTimer: number = -1;
   /** 本会话已预取过音源的曲目 id，防止对同一首反复解析 */
   private prefetchedIds: Set<string> = new Set<string>();
+  /** 投播控制器（AVCastPicker 建立投播后由 setupCast 经 getAVCastController 获取；null = 未投播） */
+  private castController: avSession.AVCastController | null = null;
+  /** 投播进行中：远端为播放引擎（prepare+start 推 AVQueueItem），本机只解析直链不出声 */
+  private casting: boolean = false;
+  /** 最近一次 switchSource 成功挂载的在线直链：投播 mediaUri 的数据源 */
+  private lastResolvedPlayUrl: string = '';
+  /** 最近一次音源是否为本地文件（switchSourceLocal 成功置位）：本地文件跨设备不可访问，不投播 */
+  private lastSourceLocal: boolean = false;
+  /**
+   * 远端支持的播控命令集合（getValidCommands / validCommandChange 维护）。
+   * 空 = 尚未查询到，发送时不做白名单校验（best-effort 直发）。
+   */
+  private castValidCommands: Set<string> = new Set<string>();
   /**
    * 播放器重建互斥锁（promise 链）。
    *
@@ -628,6 +639,9 @@ export class MusicPlayer {
         // 媒体中心/车机（HiCar）能力声明（since 26）：真机 API 26 生效，
         // 低版本设备失败仅日志降级，不影响核心播控。
         this.declareSessionCapabilities(this.session);
+        // 投播设备监听：AVCastPicker 选定设备后系统回调 outputDeviceChange，
+        // 由此建立/拆除 AVCastController（见「投播」小节）
+        this.registerCastDeviceListener(this.session);
       }
     }
 
@@ -661,6 +675,31 @@ export class MusicPlayer {
       this.pause();
       this.notifyHint('蓝牙已断开，已暂停播放');
     });
+  }
+
+  /**
+   * 按需申请蓝牙权限（user_grant，进程内一次）。
+   *
+   * 合规（应用市场审核）：
+   *   · 「未见使用权限对应的产品或服务时，不得提前向用户申请权限」——
+   *     不在启动链弹窗，只在真实使用场景（用户首次开始播放）触发；
+   *   · 「申请权限须告知使用目的，禁止诱导欺骗授权」—— 播放内核拿不到
+   *     UIContext，不能直接弹系统授权框，改为递增 STORE_BT_PERM_REQ_SEQ
+   *     通知 Index 根页：先弹应用内弹窗说明用途，用户点「去授权」后
+   *     才由 UI 侧调 requestPermissionsFromUser。
+   *
+   * 用途仅一个：读 `AudioDeviceDescriptor.name`，让 AudioRouteWatcher 能按
+   * 设备名排除手表/手环，避免连接手表时误报「蓝牙已断开」。
+   * 用户拒绝 → 名称为空 → 名称过滤失效，只剩「断开后剩余蓝牙设备核查」兜底，
+   * 不影响正常播放。fire-and-forget，不阻塞播放链。
+   */
+  private requestBluetoothPermissionOnce(): void {
+    if (this.bluetoothPermissionAsked) {
+      return;
+    }
+    this.bluetoothPermissionAsked = true;
+    const seq: number = AppStorage.get<number>(STORE_BT_PERM_REQ_SEQ) ?? -1;
+    AppStorage.setOrCreate(STORE_BT_PERM_REQ_SEQ, seq + 1);
   }
 
   /**
@@ -841,10 +880,6 @@ export class MusicPlayer {
     }
   }
 
-  private getQueue(): Track[] {
-    return (AppStorage.get(STORE_QUEUE) as Track[]) ?? [];
-  }
-
   private syncQueue(): void {
     this.setStore(STORE_QUEUE, this.queue);
   }
@@ -918,10 +953,12 @@ export class MusicPlayer {
             this.seeking = false;
             this.lastProgressBucket = -1;
           }
-          if (doPlay) {
+          if (doPlay && !this.casting) {
             // 不背靠背 play——部分系统版本 prepared 态 seek 未完成
             // 就 play 会丢弃 seek（表现为「续播却从头播」）。挂起等 seekDone 再播；
             // seekDone 2.5s 不来则兜底播放（对齐 timeUpdate 里的抑制兜底时长）
+            // ⚠️ 投播中（casting）例外：本机只解析直链不出声，
+            // 远端定位由 pushCastItem(startAt) 的 startPosition 承担
             this.playAfterSeekPending = true;
             if (this.playAfterSeekTimer !== -1) {
               clearTimeout(this.playAfterSeekTimer);
@@ -941,9 +978,15 @@ export class MusicPlayer {
             }, 2500);
           }
         } else if (this.shouldAutoplay) {
-          player.play().catch((e: BusinessError): void => {
-            console.error(`autoplay failed: ${e.code} ${e.message}`);
-          });
+          if (this.casting) {
+            // 投播中：本机换源只为解析直链 + 更新元数据/队列，绝不出声；
+            // 远端起播由换源成功点的 pushCastItem 驱动
+            console.info('[Cast] suppress local autoplay on prepared');
+          } else {
+            player.play().catch((e: BusinessError): void => {
+              console.error(`autoplay failed: ${e.code} ${e.message}`);
+            });
+          }
         }
       } else if (state === 'playing') {
         this.setStore(STORE_IS_PLAYING, true);
@@ -1125,6 +1168,303 @@ export class MusicPlayer {
       });
     } catch (e) {
       console.error(`register session events failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  // ───────────────────────── 投播（AVCastController） ─────────────────────────
+  //
+  // 架构：AVCastPicker 选设备 → outputDeviceChange(STATE_CONNECTED) → setupCast
+  // 拿控制器。远端为播放引擎：prepare + start 推 AVQueueItem（mediaUri 用
+  // switchSource 记录的解析直链），本机换源链照常走但 casting 中抑制出声；
+  // 播控双向：远端事件（playNext / endOfStream / playbackStateChange…）驱动
+  // 本机队列与状态，App 侧 play / pause / seek 经 sendControlCommand 转发。
+  // 收口三条路（远端 error / 断开 / 进程销毁）统一走 teardownCast。
+  // 日志统一 [Cast] 前缀，hilog JSAPP tag 可过滤。
+  //
+  // 已知取舍：B 站 CDN 直链带鉴权参数，远端设备拉流可能被拒（UA / 防盗链），
+  // error 事件兜底「切回本机播放」；真机实测为准。
+
+  /** 订阅投播设备变化（init 内挂载，随 session 生命周期存续） */
+  private registerCastDeviceListener(session: avSession.AVSession): void {
+    session.on('outputDeviceChange', (state: avSession.ConnectionState, device: avSession.OutputDeviceInfo): void => {
+      const names: string[] = [];
+      for (let i = 0; i < device.devices.length; i++) {
+        names.push(device.devices[i].deviceName);
+      }
+      console.info(`[Cast] outputDeviceChange state=${state} devices=[${names.join(',')}]`);
+      if (state === avSession.ConnectionState.STATE_CONNECTED) {
+        this.setupCast();
+      } else if (state === avSession.ConnectionState.STATE_DISCONNECTED) {
+        this.notifyHint('投播已断开，已切回本机播放');
+        this.teardownCast(true);
+      }
+    });
+  }
+
+  /** 投播建立：取控制器、注册远端事件、停本机声、推当前曲 */
+  private setupCast(): void {
+    if (this.casting) {
+      console.info('[Cast] setupCast ignored: already casting');
+      return;
+    }
+    if (this.lastSourceLocal) {
+      // 本地文件跨设备不可访问：不建控制器，本机播放不中断
+      console.info('[Cast] setupCast skipped: local source in use');
+      this.notifyHint('本地下载曲目暂不支持投播，将在本机播放');
+      return;
+    }
+    const session: avSession.AVSession | null = this.session;
+    if (!session) {
+      console.error('[Cast] setupCast skipped: no session');
+      return;
+    }
+    session.getAVCastController().then((controller: avSession.AVCastController): void => {
+      if (this.casting) {
+        // 等待控制器期间投播已由并发流程建立：丢弃重复实例
+        console.info('[Cast] setupCast ignored: casting established while waiting');
+        return;
+      }
+      console.info('[Cast] got avCastController, casting start');
+      this.castController = controller;
+      this.casting = true;
+      this.registerCastControllerEvents(controller);
+      controller.getValidCommands().then((commands: avSession.AVCastControlCommandType[]): void => {
+        const next: Set<string> = new Set<string>();
+        for (let i = 0; i < commands.length; i++) {
+          next.add(commands[i]);
+        }
+        this.castValidCommands = next;
+        console.info(`[Cast] valid commands: ${commands.join(',')}`);
+      }).catch((e: BusinessError): void => {
+        console.error(`[Cast] getValidCommands failed: ${e.code} ${e.message}`);
+      });
+      // 本机先停声（此刻 casting 已置位，不能走 this.pause() 的远端转发分支）
+      this.pauseLocalForCast();
+      // 推当前曲：远端为播放引擎，从当前进度续播
+      this.pushCastItem(this.currentCastPositionMs()).catch((): void => {
+      });
+    }).catch((e: BusinessError): void => {
+      console.error(`[Cast] getAVCastController failed: ${e.code} ${e.message}`);
+      this.notifyHint('投播建立失败，请重试');
+    });
+  }
+
+  /** 投播中直接暂停本机 AVPlayer 实例（不经 this.pause()，避免远端转发） */
+  private pauseLocalForCast(): void {
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (!player) {
+      return;
+    }
+    const s: string = this.playerState;
+    if (s === 'prepared' || s === 'playing' || s === 'paused' || s === 'completed') {
+      try {
+        player.pause().catch((e: BusinessError): void => {
+          console.error(`[Cast] pause local player failed: ${e.code} ${e.message}`);
+        });
+      } catch (e) {
+        console.error(`[Cast] pause local player threw: ${JSON.stringify(e)}`);
+      }
+    }
+  }
+
+  /** 远端 → App：注册投播控制器事件（playNext / endOfStream / 状态镜像 / 错误兜底） */
+  private registerCastControllerEvents(controller: avSession.AVCastController): void {
+    controller.on('playNext', (): void => {
+      console.info('[Cast] remote playNext');
+      this.next();
+    });
+    controller.on('playPrevious', (): void => {
+      console.info('[Cast] remote playPrevious');
+      this.prev();
+    });
+    controller.on('endOfStream', (): void => {
+      console.info('[Cast] remote endOfStream');
+      // 与本机 AVPlayer 'completed' 同口径推进；
+      // 单曲循环例外：本机 handleEnded 的 seek(0)+play 链操作的是本机实例，
+      // 投播中不适用，改为重推当前曲（从 0 起播）
+      if (this.repeatMode === RepeatMode.ONE) {
+        this.pushCastItem(0).catch((): void => {
+        });
+        return;
+      }
+      this.handleEnded();
+    });
+    controller.on('seekDone', (pos: number): void => {
+      console.info(`[Cast] remote seekDone: ${pos}`);
+      this.setStore(STORE_PROGRESS, pos / 1000);
+      this.lastProgressBucket = Math.floor(pos / PROGRESS_PUSH_INTERVAL_MS);
+      this.updateSessionState();
+    });
+    controller.on('playbackStateChange', 'all', (state: avSession.AVPlaybackState): void => {
+      // 只镜像、不回发：远端状态同步到 AppStorage / 会话，回发会造成指令回环
+      const remoteState: avSession.PlaybackState | undefined = state.state;
+      const pos: avSession.PlaybackPosition | undefined = state.position;
+      console.info(`[Cast] playbackStateChange state=${remoteState} pos=${pos ? pos.elapsedTime : 'none'}`);
+      if (remoteState === avSession.PlaybackState.PLAYBACK_STATE_PLAY
+        || remoteState === avSession.PlaybackState.PLAYBACK_STATE_PAUSE
+        || remoteState === avSession.PlaybackState.PLAYBACK_STATE_STOP) {
+        const playing: boolean = remoteState === avSession.PlaybackState.PLAYBACK_STATE_PLAY;
+        this.shouldAutoplay = playing;
+        this.setStore(STORE_IS_PLAYING, playing);
+        this.updateSessionState();
+        this.syncBackgroundTask(playing);
+      }
+      if (pos !== undefined && pos.elapsedTime >= 0) {
+        this.setStore(STORE_PROGRESS, pos.elapsedTime / 1000);
+        this.lastProgressBucket = Math.floor(pos.elapsedTime / PROGRESS_PUSH_INTERVAL_MS);
+      }
+    });
+    controller.on('validCommandChange', (commands: avSession.AVCastControlCommandType[]): void => {
+      const next: Set<string> = new Set<string>();
+      for (let i = 0; i < commands.length; i++) {
+        next.add(commands[i]);
+      }
+      this.castValidCommands = next;
+      console.info(`[Cast] validCommandChange: ${commands.join(',')}`);
+    });
+    controller.on('error', (err: BusinessError): void => {
+      console.error(`[Cast] remote error: ${err.code} ${err.message}`);
+      this.notifyHint('投播出错，已切回本机播放');
+      this.teardownCast(true);
+    });
+    controller.on('castControlGenericError', (err: BusinessError): void => {
+      console.error(`[Cast] castControlGenericError: ${err.code} ${err.message}`);
+      this.notifyHint('投播出错，已切回本机播放');
+      this.teardownCast(true);
+    });
+  }
+
+  /** 当前播放进度的毫秒表示（投播 startPosition 数据源） */
+  private currentCastPositionMs(): number {
+    return Math.round(((AppStorage.get(STORE_PROGRESS) as number) ?? 0) * 1000);
+  }
+
+  /**
+   * 组装 AVQueueItem 并推送远端（prepare → start）。
+   * 失败（远端拒链 / 直链不可达）统一收口：toast + 切回本机播放。
+   */
+  private async pushCastItem(startPosMs: number): Promise<void> {
+    const controller: avSession.AVCastController | null = this.castController;
+    if (!controller || !this.casting) {
+      return;
+    }
+    const track: Track | null = this.currentTrackSnapshot();
+    if (!track) {
+      console.warn('[Cast] pushCastItem skipped: no current track');
+      return;
+    }
+    if (this.lastSourceLocal || this.lastResolvedPlayUrl.length === 0) {
+      // 本地文件跨设备不可访问 / 直链尚未解析出来：无从推起，回退本机
+      console.warn(`[Cast] pushCastItem failed: source not castable (local=${this.lastSourceLocal})`);
+      this.notifyHint('当前曲目暂不支持投播，已切回本机播放');
+      this.teardownCast(true);
+      return;
+    }
+    const durationSec: number = track.duration > 0 ? track.duration : this.lastDuration;
+    const description: avSession.AVMediaDescription = {
+      assetId: track.id,
+      // 远端/车机用 title 渲染歌名（兜底口径与 buildAVMetadata 一致）
+      title: track.title || '未命名歌曲',
+      mediaType: 'AUDIO',
+      mediaUri: this.lastResolvedPlayUrl,
+      startPosition: startPosMs > 0 ? startPosMs : 0,
+      duration: Math.round(durationSec * 1000),
+      artist: track.artist,
+      // B 站音源无专辑概念：专辑栏放歌名，兼顾只读 albumTitle 的 DLNA 渲染器
+      albumTitle: track.title,
+      albumCoverUri: track.coverUrl ?? '',
+      appName: 'BiliMusic'
+    };
+    const item: avSession.AVQueueItem = {
+      itemId: this.currentIndex >= 0 ? this.currentIndex : 0,
+      description: description
+    };
+    console.info(`[Cast] push item: ${track.id} start=${startPosMs}ms url=${urlHostOf(this.lastResolvedPlayUrl)}`);
+    try {
+      // prepare 只做远端加载缓冲，start 才真正起播；
+      // 顺序调用且 assetId 不变时 start 会复用 prepare 的完整描述
+      await controller.prepare(item);
+      await controller.start(item);
+      console.info('[Cast] remote started');
+      this.shouldAutoplay = true;
+      this.setStore(STORE_IS_PLAYING, true);
+      this.updateSessionState();
+      this.syncBackgroundTask(true);
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      console.error(`[Cast] push failed: ${err.code} ${err.message}`);
+      this.notifyHint('投播失败，已切回本机播放');
+      this.teardownCast(true);
+    }
+  }
+
+  /**
+   * App → 远端：转发播控命令（play / pause / seek / setSpeed / setLoopMode…）。
+   * castValidCommands 为空（尚未查询到）时 best-effort 直发；
+   * 白名单不含目标命令时仅记日志跳过 —— 唯 play 例外：降级重推当前曲兜底起播。
+   */
+  private sendCastCommand(command: avSession.AVCastControlCommandType, parameter?: number | string): void {
+    const controller: avSession.AVCastController | null = this.castController;
+    if (!controller) {
+      return;
+    }
+    if (this.castValidCommands.size > 0 && !this.castValidCommands.has(command)) {
+      if (command === 'play') {
+        console.warn('[Cast] play not supported by remote, fallback to push');
+        this.pushCastItem(this.currentCastPositionMs()).catch((): void => {
+        });
+        return;
+      }
+      console.warn(`[Cast] command ${command} not supported by remote, skipped`);
+      return;
+    }
+    const request: avSession.AVCastControlCommand = parameter !== undefined
+      ? { command: command, parameter: parameter }
+      : { command: command };
+    controller.sendControlCommand(request).catch((e: BusinessError): void => {
+      console.error(`[Cast] sendControlCommand ${command} failed: ${e.code} ${e.message}`);
+    });
+  }
+
+  /**
+   * 投播统一收口：摘事件 → 释放控制器 → 清状态。
+   * 幂等（未投播时静默）；resumeLocal 且播放意图为播放时恢复本机出声。
+   */
+  private teardownCast(resumeLocal: boolean): void {
+    const controller: avSession.AVCastController | null = this.castController;
+    const wasCasting: boolean = this.casting;
+    // 先清标志再操作实例：事件回调若在 off 前闯入，看到 casting=false 自然静默
+    this.casting = false;
+    this.castController = null;
+    this.castValidCommands.clear();
+    if (!wasCasting) {
+      return;
+    }
+    console.info(`[Cast] teardown (resumeLocal=${resumeLocal})`);
+    if (controller) {
+      try {
+        controller.off('playNext');
+        controller.off('playPrevious');
+        controller.off('endOfStream');
+        controller.off('seekDone');
+        controller.off('playbackStateChange');
+        controller.off('validCommandChange');
+        controller.off('error');
+        controller.off('castControlGenericError');
+      } catch (e) {
+        console.error(`[Cast] off controller events failed: ${JSON.stringify(e)}`);
+      }
+      try {
+        controller.release().catch((e: BusinessError): void => {
+          console.error(`[Cast] release controller failed: ${e.code} ${e.message}`);
+        });
+      } catch (e) {
+        console.error(`[Cast] release controller threw: ${JSON.stringify(e)}`);
+      }
+    }
+    if (resumeLocal && this.shouldAutoplay) {
+      // 本机实例仍握着当前音源（投播中只是被暂停），直接续播
+      this.play();
     }
   }
 
@@ -1459,6 +1799,11 @@ export class MusicPlayer {
         idx = 0;
       }
       const track: Track = dq[idx];
+      // 类型保护：反序列化恢复的队列可能混入 null/undefined 坏元素，
+      // 索引钳制只保证不越界、不保证元素有效
+      if (track === null || track === undefined) {
+        return;
+      }
       const localPath: string = track.localFilePath ?? '';
       if (localPath.length > 0) {
         // 本地文件不需要解析音源
@@ -1938,6 +2283,10 @@ export class MusicPlayer {
       this.failLoad('音频加载失败，请稍后重试', quiet);
       return false;
     }
+    // 投播数据源：记录最近一次成功挂载的在线直链（mediaUri 用）；
+    // 本地/在线互斥，此处清本地标记（switchSourceLocal 成功时会置位）
+    this.lastResolvedPlayUrl = url;
+    this.lastSourceLocal = false;
     // true = 音源已经交给播放器（音频这一侧已经有着落），
     // 调用方据此区分「真的没挂上音源」与「挂上之后收尾环节才出的岔子」。
     return true;
@@ -2047,6 +2396,9 @@ export class MusicPlayer {
       this.failLoad('', true);
       return 'badFile';
     }
+    // 本地文件跨设备不可访问：置位本地标记，setupCast / pushCastItem 据此拒投
+    this.lastSourceLocal = true;
+    this.lastResolvedPlayUrl = '';
     return 'ok';
   }
 
@@ -2245,7 +2597,6 @@ export class MusicPlayer {
   private applyRendererInfoInInitialized(player: media.AVPlayer): void {
     try {
       player.audioRendererInfo = {
-        content: audio.ContentType.CONTENT_TYPE_MUSIC,
         usage: audio.StreamUsage.STREAM_USAGE_MUSIC,
         rendererFlags: 0
       };
@@ -2482,6 +2833,13 @@ export class MusicPlayer {
   }
 
   private async loadAndPlay(track: Track, autoplay: boolean, startAt: number = 0): Promise<void> {
+    // 类型保护：队列经反序列化恢复（JSON 数组里的坏元素运行时可能是
+    // null/undefined，编译期 Track 类型拦不住），track 无效时后续读
+    // localFilePath 会抛 TypeError（Cannot read property of undefined）
+    if (track === null || track === undefined) {
+      console.error('loadAndPlay ignored: track is null/undefined');
+      return;
+    }
     const token: number = ++this.loadToken;
     // 「与其他应用同时播放」会话对账（见 ensureMixAudioSession）：AudioSession 并发
     // 策略只对激活后**新起**的音频流生效，必须赶在音源解析 / 播放器重建之前就位。
@@ -2494,6 +2852,10 @@ export class MusicPlayer {
     // 本次加载开始前的重建计数快照：recoverAfterLoadFailure 据此判断播放器
     // 握着的音源属于本次点歌还是上一首（见该方法的闸门说明）
     const seqBeforeLoad: number = this.playerRebuildSeq;
+    // 首次播放才申请蓝牙权限（审核合规：使用对应功能时才弹窗，见方法注释）
+    if (autoplay) {
+      this.requestBluetoothPermissionOnce();
+    }
     this.shouldAutoplay = autoplay;
     this.retryCount = 0;
     // 备用直链计数跟着每轮点歌一起归零：新一轮加载重新拥有完整的恢复梯度
@@ -2552,7 +2914,9 @@ export class MusicPlayer {
         fromListenCache = true;
       }
     }
-    if (localPathToTry.length > 0) {
+    // 投播中绕过本地优先链：本地文件跨设备不可访问，远端需要在线直链；
+    // 不投播时行为不变（本地优先照旧）
+    if (localPathToTry.length > 0 && !this.casting) {
       const trackToPlay: Track = localPathToTry === localPath ? track : this.withLocalPath(track, localPathToTry);
       const outcome: LocalPlayOutcome = await this.loadLocalFile(trackToPlay, localPathToTry, autoplay, startAt, token);
       if (token !== this.loadToken) {
@@ -2646,6 +3010,13 @@ export class MusicPlayer {
       }
       this.setStore(STORE_LOADING_AUDIO, false);
       this.lastPlayableTrack = updated;
+      // 投播中：本机换源只为解析直链（prepared 分支已抑制出声），
+      // 直链到手推给远端，从意图位置起播
+      if (this.casting) {
+        this.pushCastItem(startAt > 0 ? Math.round(startAt * 1000) : 0).catch((e: Error): void => {
+          console.error(`[Cast] pushCastItem threw: ${e.message}`);
+        });
+      }
       // 会话落盘只是附带副作用，单独兜底：写不进去也绝不能反过来影响播放。
         // 进度显式传 startAt——此刻 STORE_PROGRESS 还是清零的加载中间态，
       // 按 0 落盘会把磁盘上的续播点覆盖掉（缓冲中退出 / 解析失败即永久从头播）
@@ -2681,7 +3052,10 @@ export class MusicPlayer {
         // 冷却期内：不再叠加自动重试
       }
       if (!attached) {
-        this.recoverAfterLoadFailure(track, seqBeforeLoad);
+        // -404：B 站侧查无此稿件（已被删除 / 仅特定用户可见）—— 与「网络抖动
+        // 稍后可试」不同文案，避免用户对已失效的稿件反复重试
+        const gone: boolean = e instanceof BiliApiError && e.code === -404;
+        this.recoverAfterLoadFailure(track, seqBeforeLoad, gone);
       } else {
         // 音源已经交给播放器了（这一首其实已经在出声），异常只发生在收尾环节，
         // 对播放没有任何影响。此时**既不回滚界面、也不弹「加载失败」**
@@ -2754,7 +3128,7 @@ export class MusicPlayer {
    * 「封面歌名都换了、声音还是上一首」的不一致状态 —— 用户完全看不出发生了什么。
    * 回滚前要确认界面确实还停在失败的那首：用户可能已经手动切到别的歌，那就不该动。
    */
-  private recoverAfterLoadFailure(failed: Track, seqBeforeLoad: number): void {
+  private recoverAfterLoadFailure(failed: Track, seqBeforeLoad: number, gone: boolean = false): void {
     // 加载失败：挂着的待上报元数据属于失败的那首，留着只会在下次 'playing'
     // 时把错误曲目的封面 / 标题报给系统，必须清掉。
     this.pendingMetadataTrack = null;
@@ -2798,14 +3172,16 @@ export class MusicPlayer {
     const title: string = failed.title.length > 0 ? failed.title : '这首歌';
     if (rolledBack && fallback !== null) {
       const back: string = fallback.title.length > 0 ? fallback.title : '上一首';
-      this.notifyHint(`「${title}」无法播放，已切回「${back}」`);
+      this.notifyHint(`「${title}」${gone ? '已在 B 站失效' : '无法播放'}，已切回「${back}」`);
     } else {
       // 这种情况**必须**给提示：解析层失败（view/playurl 抛错、服务端 404、
       // 无音轨）时**没有 AVPlayer 参与**，永远不会有 error 回调 —— 不提示的话
       // 界面停在用户点的那首、loading 圈消失、没有声音、也没有任何说明。
       // 标题已写明是哪一首，重复点它不会更糟。
       plogWarn(`audio unavailable without rollback: ${failed.id}`);
-      this.notifyHint(`「${title}」暂时无法播放，请稍后重试`);
+      this.notifyHint(gone
+        ? `「${title}」已在 B 站失效（可能已被删除或仅限特定用户）`
+        : `「${title}」暂时无法播放，请稍后重试`);
     }
   }
 
@@ -2815,6 +3191,13 @@ export class MusicPlayer {
   }
 
   playTrack(track: Track, startAtSec: number = 0): void {
+    // 类型保护（同 loadAndPlay）：本方法是所有播放入口的汇聚点
+    //（playNow / playAll / next / prev / 页面点播全走这里），队列元素运行时
+    // 可能为 null/undefined（反序列化产物），必须先拦后读 localFilePath
+    if (track === null || track === undefined) {
+      console.error('playTrack ignored: track is null/undefined');
+      return;
+    }
     // 「仅 WiFi 播放」：在线音源在蜂窝网络下不启动播放（本地已下载曲目不耗流量，放行）。
     // 探测失败一律放行（isUnmeteredNetwork 的约定：拦错了比放行更伤用户）。
     // 拦截点选在 playTrack：playNow / playAll / 自动切下一首全部经由这里，一处拦截全覆盖。
@@ -2839,6 +3222,18 @@ export class MusicPlayer {
 
   play(): void {
     this.shouldAutoplay = true;
+    // 首次播放才申请蓝牙权限（审核合规：使用对应功能时才弹窗）
+    this.requestBluetoothPermissionOnce();
+    // 投播中：远端为播放引擎，播放命令转发远端（本机早已停声）
+    if (this.casting && this.castController !== null) {
+      console.info('[Cast] forward play');
+      this.sendCastCommand('play');
+      this.setStore(STORE_IS_PLAYING, true);
+      this.updateSessionState();
+      this.syncBackgroundTask(true);
+      this.savePlayerStateNow();
+      return;
+    }
     // 正在解析音源 / 重建播放器：此刻 avPlayer 可能为空、也可能正在被释放。
     // 只登记「要播放」的意图即可 —— 新音源进入 prepared 时会读 shouldAutoplay 自动开播。
     if (this.isPreparing) {
@@ -2889,6 +3284,17 @@ export class MusicPlayer {
   }
 
   pause(): void {
+    // 投播中：暂停命令转发远端（本机实例早已停声）
+    if (this.casting && this.castController !== null) {
+      console.info('[Cast] forward pause');
+      this.shouldAutoplay = false;
+      this.sendCastCommand('pause');
+      this.setStore(STORE_IS_PLAYING, false);
+      this.updateSessionState();
+      this.syncBackgroundTask(false);
+      this.savePlayerStateNow();
+      return;
+    }
     this.shouldAutoplay = false;
     // 准备中：播放器可能在释放/重建，直接操作有空指针风险。
     // 把播放意图置 false 就够了 —— 音源就绪后 prepared 分支不会再自动播放。
@@ -2989,7 +3395,12 @@ export class MusicPlayer {
     if (dur > 0 && target > dur) {
       target = dur;
     }
-    if (this.avPlayer) {
+    if (this.casting && this.castController !== null) {
+      // 投播中：seek 转发远端（毫秒）；本机实例不在出声，无需本地 seek。
+      // 回显统一走远端 seekDone 镜像，这里不抢写进度，避免与远端真实位置跳变
+      console.info(`[Cast] forward seek: ${target}s`);
+      this.sendCastCommand('seek', Math.round(target * 1000));
+    } else if (this.avPlayer) {
       const s: string = this.playerState;
       if (s === 'prepared' || s === 'playing' || s === 'paused' || s === 'completed') {
         // 标记 seeking：seek 异步生效前 timeUpdate 仍按旧位置回调，
@@ -3019,6 +3430,10 @@ export class MusicPlayer {
       // 的话，play() 的续播分支会优先消费旧的 pendingResumePosition（restoreState 登记的），
       // 拖动被静默回退到旧位置。必须同步登记，点播放才会从新位置开始。
       this.pendingResumePosition = target > 0 ? target : -1;
+    }
+    if (this.casting && this.castController !== null) {
+      // 投播中 seek：远端 seekDone 会镜像真实位置，这里跳过本地回显写入
+      return;
     }
     this.lastProgressBucket = Math.floor((target * 1000) / PROGRESS_PUSH_INTERVAL_MS);
     this.setStore(STORE_PROGRESS, target);
@@ -3187,7 +3602,11 @@ export class MusicPlayer {
         plogInfo(`[Collection] 单 P 视频，无需展开 bvid=${bvid}`);
         return;
       }
-      const inserted: number = this.insertAfterCurrent(parts.slice(1));
+      // 全量交给 insertAfterCurrent：它按 id 对队列去重（见该方法）——
+      // base 是合集入口条目时 parts[0] 与当前曲同 id 被去重（等价于旧 slice(1)）；
+      // base 是中间分 P（歌单 / 最近播放进来）时 base 自身被去重、P1 不再缺失
+      //（旧写法 slice(1) 会把 P1 永远挡在队列外，从中间分 P 播起就永远听不到 P1）。
+      const inserted: number = this.insertAfterCurrent(parts);
       this.notifyHint(`已加载合集，共 ${parts.length} 首`);
       // 合集诊断摘要：进 App 内「日志记录」页 —— 播放内核读不到
       // hilog 的用户复现「合集加载不完整」时，靠这条对照「展开总数 vs 实际插入」。
@@ -3272,17 +3691,6 @@ export class MusicPlayer {
     }
   }
 
-  addTracksToQueue(tracks: Track[]): void {
-    const existing: Set<string> = new Set<string>(this.queue.map((t: Track): string => t.id));
-    const fresh: Track[] = tracks.filter((t: Track): boolean => !existing.has(t.id));
-    if (fresh.length > 0) {
-      this.queue = [...this.queue, ...fresh];
-      this.shuffledQueue = this.shuffle(this.queue);
-      this.syncQueue();
-      this.markQueueDirty();
-    }
-  }
-
   removeFromQueue(trackId: string): void {
     this.queue = this.queue.filter((t: Track): boolean => t.id !== trackId);
     this.shuffledQueue = this.shuffle(this.queue);
@@ -3331,14 +3739,13 @@ export class MusicPlayer {
     }
     this.setStore(STORE_REPEAT_MODE, mode);
     this.setStore(STORE_SHUFFLE, this.isShuffled);
+    // 投播中：循环模式 best-effort 转发远端（失败仅日志，本机记账不受影响）
+    if (this.casting && this.castController !== null) {
+      this.sendCastCommand('setLoopMode', repeatModeToLoopMode(this.repeatMode));
+    }
     this.savePlayerStateNow();
     // 播放模式变了：媒体中心/车机卡片的模式图标要联动
     this.updateSessionState();
-  }
-
-  /** 兼容旧调用：开/关随机等价于在 随机 / 顺序 两个模式间切换。 */
-  setShuffle(shuffle: boolean): void {
-    this.setRepeatMode(shuffle ? RepeatMode.SHUFFLE : RepeatMode.NONE);
   }
 
   /**
@@ -3366,6 +3773,10 @@ export class MusicPlayer {
       } catch (e) {
         console.error(`setSpeed failed: ${JSON.stringify(e)}`);
       }
+    }
+    // 投播中：倍速 best-effort 转发远端（部分协议如 DLNA 不支持，失败仅日志）
+    if (this.casting && this.castController !== null) {
+      this.sendCastCommand('setSpeed', speedToPlaybackSpeed(normalized));
     }
     // 倍速变了：媒体中心/车机卡片的倍速状态要联动
     this.updateSessionState();
@@ -3594,6 +4005,8 @@ export class MusicPlayer {
   }
 
   release(): void {
+    // 投播收口：进程即将销毁，控制器随会话一起释放（不恢复本机播放）
+    this.teardownCast(false);
     // 退出兜底——播放快照落盘。onDestroy / onBackground 都不保证
     // 在划卡杀进程时被调，但能调到时就别丢「播放中直接退出」的最后一拍进度
     //（timeUpdate 落盘有 5s 粗节流窗口）

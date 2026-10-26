@@ -23,7 +23,6 @@ import { initPlayerStateStore } from './PlayerStateStore';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { PREF_FAV_PUSH_QUEUE, STORE_STARTUP_HINT_MSG, STORE_STARTUP_HINT_SEQ } from '../common/Constants';
-import { ensureDirUri, PublicSyncResult } from './PublicDownloadsSaver';
 import { CardPublisher } from './card/CardPublisher';
 
 /**
@@ -68,10 +67,9 @@ export class AppContainer {
     // 后台保活权限（normal 级 system_grant，不弹窗）：放在这里，
     // 减少首页加载瞬间的 IPC 竞争。
     AppContainer.requestKeepBackgroundPermission(context);
-    // 蓝牙权限（user_grant，首启弹一次系统窗）：读蓝牙音频设备名用 ——
-    // AudioRouteWatcher 靠设备名区分手表/手环与耳机/音箱。
-    // 拒绝也不影响播放：名称过滤失效后退到「剩余蓝牙设备核查」兜底。
-    AppContainer.requestBluetoothPermission(context);
+    // 蓝牙权限（user_grant）**不在这里申请**：应用市场审核要求
+    // 「未见使用权限对应的产品或服务时，不得提前向用户申请权限」——
+    // 已挪到真实使用场景（首次开始播放，MusicPlayer.requestBluetoothPermissionOnce）。
 
     await initRdb(context);
     // UP 主页缓存目录：文件型存储，进页直接用缓存不联网；
@@ -107,10 +105,10 @@ export class AppContainer {
     // 本链与 loadContent 并行执行，这里多 await 一次 RDB 读不影响首帧。
     // loadFromDb 顺带把上次进程被杀的中间态标为失败并清半截文件。
     await DownloadManager.getInstance().ensureLoaded();
-    // 升级一次性迁移：沙箱旧下载 → 公共「下载/BiliMusic」。
-    // fire-and-forget 不 await：迁移含目录授权与批量搬文件，拖慢启动链得不偿失；
-    // 标记先行写入（at-most-once），失败不再自动重跑，残留经设置页「同步已完成歌曲」补齐。
-    AppContainer.runPublicDirMigration(context).catch((e: BusinessError): void => {
+    // 升级一次性引导：沙箱存量老用户提示可开启「保存到系统下载目录」。
+    // fire-and-forget 不 await：不拖慢启动链；标记先行写入（at-most-once），
+    // 引导只弹一次，搬移由用户开启开关后经设置页「同步已完成歌曲」完成。
+    AppContainer.runPublicDirMigration().catch((e: BusinessError): void => {
       console.error(`[AppContainer] public dir migration failed: ${e.code} ${e.message}`);
     });
     // 播放器状态目录：双 JSON 文件（标量状态 + 队列全量）。
@@ -146,15 +144,17 @@ export class AppContainer {
   }
 
   /**
-   * 升级一次性迁移：把沙箱
-   * filesDir/downloads 的已完成下载迁入公共「下载/BiliMusic」目录。
+   * 升级一次性引导（原「沙箱 → 公共目录自动迁移」已改为默认关闭）：
+   * 「保存到系统下载目录」默认关闭，须由用户在设置页自行开启 —— 启动链
+   * 不再自动授权、不自动搬移、不自动开开关。
    *
-   * 标记**先行写入**（at-most-once）：即便中途失败也不再自动重跑 —— 每次启动
-   * 重复弹授权 / 重复搬移比「一次没搬成」更打扰；残留文件经设置页
-   * 「同步已完成歌曲」手动补齐（同一套搬移逻辑，沙箱前缀过滤天然幂等）。
-   * 无沙箱存量（新装 1.2.0 用户 / 早已搬完）直接 return，不弹提示不打扰。
+   * 这里只对「沙箱里还留着已完成下载」的老用户弹一次性引导，其余
+   * （新装用户 / 已搬完）直接 return，不提示不打扰。
+   * 标记**先行写入**（at-most-once）：引导只弹一次；用户开启开关（设置页
+   * 开关翻转处完成目录授权）后经「同步已完成歌曲」手动搬移（同一套搬移
+   * 逻辑，沙箱前缀过滤天然幂等）。
    */
-  private static async runPublicDirMigration(context: common.UIAbilityContext): Promise<void> {
+  private static async runPublicDirMigration(): Promise<void> {
     if (AppPreferences.getSettings().publicDirMigrated) {
       return;
     }
@@ -164,23 +164,7 @@ export class AppContainer {
     if (!DownloadManager.getInstance().hasSandboxCompletedTask()) {
       return;
     }
-    // 启动链无手势，系统可能拒绝 DOWNLOAD 模式授权（ensureDirUri 现有唯一调用点
-    // 在设置页开关翻转，用户手势内）：拿不到就降级为一次性引导 —— 用户在设置页
-    // （有手势处）可正常授权并手动同步，链路不断。
-    const uri: string = await ensureDirUri(context);
-    if (uri.length === 0) {
-      AppContainer.setStartupHint('开启「保存到系统下载目录」可将已下载歌曲移入「下载/BiliMusic」');
-      return;
-    }
-    // 迁移成功自动开开关：新下载行为与迁移后保持一致（产品决策）
-    AppPreferences.updateSettings((s: AppSettings): void => {
-      s.saveToPublicDownloads = true;
-    });
-    // 搬移本身幂等：只搬「已完成且仍在沙箱」的（前缀过滤），已搬过的天然排除
-    const result: PublicSyncResult = await DownloadManager.getInstance().syncCompletedToPublicDir();
-    if (result.ok > 0) {
-      AppContainer.setStartupHint(`已下载歌曲已移入「下载/BiliMusic」文件夹（${result.ok} 首）`);
-    }
+    AppContainer.setStartupHint('开启「保存到系统下载目录」可将已下载歌曲移入「下载/BiliMusic」');
   }
 
   /**
@@ -196,15 +180,16 @@ export class AppContainer {
 
   /**
    * 清理已移除的收藏夹回推链路残留分片数据。
-   * 分片上限 33（0..32），串成 Promise 链避免并发打爆 Preferences。
+   * 分片上限 33（0..32）。攒一批走 removeMany（单次 flush）——
+   * 逐 key remove 是 33 次串行全量落盘（AppFreeze 日志里启动期
+   * PreferencesDelete/Flush 风暴的来源之一），对不存在的 key 是 no-op。
    */
   private static purgeLegacyFavPushQueue(): void {
-    let seq: Promise<void> = Promise.resolve();
+    const keys: string[] = [];
     for (let i = 0; i <= 32; i++) {
-      const key: string = `${PREF_FAV_PUSH_QUEUE}${i}`;
-      seq = seq.then((): Promise<void> => AppPreferences.remove(key));
+      keys.push(`${PREF_FAV_PUSH_QUEUE}${i}`);
     }
-    seq.then((): void => {
+    AppPreferences.removeMany(keys).then((): void => {
       console.info('[AppContainer] legacy fav push queue purged');
     }).catch((e: BusinessError): void => {
       console.error(`[AppContainer] purge legacy fav push queue failed: ${e.code} ${e.message}`);
@@ -226,31 +211,6 @@ export class AppContainer {
       });
     } catch (e) {
       console.error(`requestNeededPermissions exception: ${JSON.stringify(e)}`);
-    }
-  }
-
-  /**
-   * 申请蓝牙权限（user_grant，系统弹窗，首启一次）。
-   * 用途仅一个：读 `AudioDeviceDescriptor.name`，让 AudioRouteWatcher 能按
-   * 设备名排除手表/手环，避免连接手表时误报「蓝牙已断开」。
-   * 用户拒绝 → 名称为空 → 名称过滤失效，只剩「断开后剩余蓝牙设备核查」兜底，
-   * 不影响正常播放。fire-and-forget，不阻塞启动链。
-   */
-  private static requestBluetoothPermission(context: common.Context): void {
-    try {
-      const atManager = abilityAccessCtrl.createAtManager();
-      const permissions: Array<Permissions> = [
-        'ohos.permission.ACCESS_BLUETOOTH'
-      ];
-      atManager.requestPermissionsFromUser(context, permissions, (err: BusinessError, data: object): void => {
-        if (err) {
-          console.error(`[Bluetooth] requestPermissionsFromUser failed: ${err.code} ${err.message}`);
-        } else {
-          console.info(`[Bluetooth] permissions result: ${JSON.stringify(data)}`);
-        }
-      });
-    } catch (e) {
-      console.error(`[Bluetooth] requestPermission exception: ${JSON.stringify(e)}`);
     }
   }
 }

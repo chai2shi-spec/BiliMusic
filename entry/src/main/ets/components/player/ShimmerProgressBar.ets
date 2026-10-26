@@ -23,6 +23,7 @@
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../../common/constants/InteractionConstants';
 import { STORE_IS_PLAYING, STORE_THEME_PRIMARY } from '../../common/Constants';
+import { ProgressMath } from './ProgressMath';
 
 /** 命中区高度（vp）：视觉轨道居中，上下留手指余量 */
 const SHIMMER_HIT_VP: number = 32;
@@ -80,13 +81,7 @@ export struct ShimmerProgressBar {
 
   /** Area 尺寸（Length）→ vp 数值；资源型（理论上不会出现）按 0 兜底 */
   private toVp(v: Length): number {
-    if (typeof v === 'number') {
-      return v;
-    }
-    if (typeof v === 'string') {
-      return parseFloat(v);
-    }
-    return 0;
+    return ProgressMath.toVp(v);
   }
 
   /** 起播：流光带从左界外线性扫到右界外，无限循环（LTPO 30fps，合成器插值） */
@@ -155,30 +150,22 @@ export struct ShimmerProgressBar {
 
   /** 进度比例（0~1）：时长未知时恒 0（不显示已播段） */
   private pct(): number {
-    if (this.max <= 0) {
-      return 0;
-    }
-    const p: number = this.value / this.max;
-    return Math.min(1, Math.max(0, p));
+    return ProgressMath.pct(this.value, this.max);
   }
 
   /** 已播段宽度（百分比字符串）：拖拽/插值每帧重算 */
   private filledWidthStr(): string {
-    return `${(this.pct() * 100).toFixed(2)}%`;
+    return ProgressMath.filledWidthStr(this.value, this.max);
   }
 
   /** 滑块中心 x（vp）：钳制在轨道内，未测宽时贴左 */
   private headX(): number {
-    return Math.min(this.trackWidth, this.trackWidth * this.pct());
+    return ProgressMath.headX(this.trackWidth, this.value, this.max);
   }
 
   /** 触摸横坐标 → 秒（钳制 0~max） */
   private secAt(x: number): number {
-    if (this.trackWidth <= 0) {
-      return 0;
-    }
-    const ratio: number = Math.min(1, Math.max(0, x / this.trackWidth));
-    return ratio * this.max;
+    return ProgressMath.secAt(x, this.trackWidth, this.max);
   }
 
   /** 主题色加透明度前缀（#RRGGBB → #AARRGGBB）；非 7 位原样返回 */

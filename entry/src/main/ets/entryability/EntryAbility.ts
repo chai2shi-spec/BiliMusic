@@ -20,7 +20,9 @@ import { AppSettings, Track } from '../model/MusicModels';
 import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { flushPendingLibraryPersist } from '../service/LibraryStore';
+import { initLogStore, flushLogStoreNow } from '../service/PlaybackLogStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
+import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
 import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_LOUDNESS_NORM_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_CARD_OPEN_PLAYER_SEQ } from '../common/Constants';
 
@@ -127,6 +129,10 @@ export default class EntryAbility extends UIAbility {
   }
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    // 应用日志存储初始化：读回上次运行的历史日志 + 安装 console.error 全局
+    // 收割（所有模块的 catch 错误自动入档，跨重启保留）。必须最先执行 ——
+    // 之后任何初始化链的错误才进入收割口径。
+    initLogStore(this.context);
     // 卡片路由：冷启动直达播放页（Index aboutToAppear 补刀消费 seq）
     this.handleCardRouter(want);
     // 卡片播控 / 收藏 call 通道（postCardAction CALL → callee）
@@ -212,6 +218,8 @@ export default class EntryAbility extends UIAbility {
       // 去抖窗口内划卡杀进程会丢最后一次写，退后台立刻冲掉待写队列
       // （正在跑的落盘不受影响）。
       flushPendingLibraryPersist();
+      // 应用日志同款冲刷：去抖窗口内的错误记录立即落盘。
+      flushLogStoreNow();
       MusicPlayer.getInstance().savePlayerStateNow();
     } catch (e) {
       console.error(`save player state on background failed: ${JSON.stringify(e)}`);
@@ -243,6 +251,10 @@ export default class EntryAbility extends UIAbility {
     // ② 必须在 loadContent 之前把避让区尺寸写进 AppStorage：首页 build 的首帧就要用它
     //    算「根容器底部让位 / 页签层顶部让位」，晚一拍会看到内容先贴边再弹回来。
     this.publishSafeArea(windowStage);
+    // ②.5 首页三源缓存目录：HomePage.aboutToAppear 读缓存前必须就绪。
+    //     同步建目录（已存在跳过）；不依赖 Preferences，放在 initPreferences 链之前，
+    //     成功 / 失败两条路径都先于 loadIndexPage 执行（消除 initRest 并行竞态）。
+    initHomeFeedCache(this.context);
     // ③ 只等 Preferences（首帧必须就位的主题模式 / 主题色 / 底栏布局都只依赖它），
     //    RDB / 下载表 / AVSession 等重初始化与页面加载并行。
     AppPreferences.initPreferences(this.context)
@@ -311,21 +323,22 @@ export default class EntryAbility extends UIAbility {
             console.error(`AppContainer initRest failed: ${JSON.stringify(e)}`);
           });
         // ⑤ 立即加载首页（与 initRest 并行）
-        windowStage.loadContent('pages/Index', (err: BusinessError): void => {
-          if (err.code) {
-            console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
-          }
-        });
+        this.loadIndexPage(windowStage);
       })
       .catch((e: Error): void => {
         console.error(`initPreferences failed: ${JSON.stringify(e)}`);
         // Preferences 初始化失败也要让应用可进入（页面内读偏好有各自兜底）
-        windowStage.loadContent('pages/Index', (err: BusinessError): void => {
-          if (err.code) {
-            console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
-          }
-        });
+        this.loadIndexPage(windowStage);
       });
+  }
+
+  /** 加载首页（成功 / Preferences 失败两路共用） */
+  private loadIndexPage(windowStage: window.WindowStage): void {
+    windowStage.loadContent('pages/Index', (err: BusinessError): void => {
+      if (err.code) {
+        console.error(`Failed to load content. code: ${err.code}, message: ${err.message}`);
+      }
+    });
   }
 
   /**
@@ -397,13 +410,18 @@ export default class EntryAbility extends UIAbility {
     try {
       const density: number = display.getDefaultDisplaySync().densityPixels;
       const sys: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      // 挖孔避让区：全屏布局下横屏状态栏不上报侧边条带（TYPE_SYSTEM leftRect=0），
+      // 挖孔只在 TYPE_CUTOUT 上报 —— 不合并的话横屏左列文字压进挖孔区
+      //（实测见紧凑横屏播放页文字重叠）。取 max：无挖孔设备返回零矩形零影响，
+      // 竖屏状态栏恒 ≥ 挖孔也不变。
+      const cutout: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
       const indicator: window.AvoidArea =
         win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-      const topVp: number = sys.topRect.height / density;
+      const topVp: number = Math.max(sys.topRect.height, cutout.topRect.height) / density;
       // 水平安全区：横屏下状态栏若以侧边条带上报，避让值在 leftRect / rightRect；
-      // 竖屏两值通常为 0，纯增量发布。
-      const leftVp: number = sys.leftRect.width / density;
-      const rightVp: number = sys.rightRect.width / density;
+      // 竖屏两值通常为 0，纯增量发布。挖孔条带同侧合并（max）。
+      const leftVp: number = Math.max(sys.leftRect.width, cutout.leftRect.width) / density;
+      const rightVp: number = Math.max(sys.rightRect.width, cutout.rightRect.width) / density;
       const navBarBottomVp: number = sys.bottomRect.height / density;
       const indicatorBottomVp: number = indicator.bottomRect.height / density;
       const bottomVp: number = Math.max(navBarBottomVp, indicatorBottomVp);

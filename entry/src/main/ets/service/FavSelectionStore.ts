@@ -14,45 +14,22 @@
  *    清理已删除夹镜像（pruneDeletedFolders）仍必须拿**全量**收藏夹列表，
  *    否则未勾选夹的本地镜像会被误判删除。
  *
- * 存储：单 key（PREF_FAV_SELECTION，`number[]` JSON），体量极小，无需分片。
+ * 存取委托 PrefStringSetStore（成员=假极性，倒置存储）；
+ * 存储：单 key（PREF_FAV_SELECTION，`number[]` JSON）。
  */
 
-import { AppPreferences } from '../preferences/AppPreferences';
 import { PREF_FAV_SELECTION } from '../common/Constants';
+import { PrefStringSetStore } from './PrefStringSetStore';
 
-/** 读「未勾选」集合原始数组（坏数据 / 老版本缺 key 容错为空数组） */
-function loadDeselectedIds(): number[] {
-  const stored: number[] | null = AppPreferences.getObject<number[]>(PREF_FAV_SELECTION);
-  if (!stored || !Array.isArray(stored)) {
-    return [];
-  }
-  const out: number[] = [];
-  for (let i = 0; i < stored.length; i++) {
-    const v: number = stored[i];
-    if (typeof v === 'number' && v > 0) {
-      out.push(v);
-    }
-  }
-  return out;
-}
-
-/** 整体覆盖写入（fire-and-forget，与 FavSyncStore 落盘风格一致） */
-function saveDeselectedIds(ids: number[]): void {
-  AppPreferences.setObject<number[]>(PREF_FAV_SELECTION, ids)
-    .catch((e: Error): void => {
-      console.error(`saveDeselectedIds failed: ${e.message}`);
-    });
-}
+/** 共享存取器：集合成员 ⇔「未勾选」（倒置存储） */
+const store: PrefStringSetStore = new PrefStringSetStore(PREF_FAV_SELECTION, false);
 
 /**
  * 该收藏夹是否勾选参与同步（默认勾选：未记录 = 勾选）。
  * 非法 id（<=0）按勾选处理，绝不让坏数据挡住同步。
  */
 export function isFolderSelected(mediaId: number): boolean {
-  if (!(mediaId > 0)) {
-    return true;
-  }
-  return loadDeselectedIds().indexOf(mediaId) < 0;
+  return store.is(mediaId);
 }
 
 /**
@@ -61,25 +38,10 @@ export function isFolderSelected(mediaId: number): boolean {
  * 幂等：状态没变化时不写盘。
  */
 export function setFolderSelected(mediaId: number, selected: boolean): void {
-  if (!(mediaId > 0)) {
-    return;
-  }
-  const cur: number[] = loadDeselectedIds();
-  const idx: number = cur.indexOf(mediaId);
-  if (selected) {
-    if (idx >= 0) {
-      cur.splice(idx, 1);
-      saveDeselectedIds(cur);
-    }
-    return;
-  }
-  if (idx < 0) {
-    cur.push(mediaId);
-    saveDeselectedIds(cur);
-  }
+  store.set(mediaId, selected);
 }
 
 /** 未勾选集合整体读出（FavSyncManager 一轮只读一次，避免逐夹反复读盘） */
 export function deselectedFolderIds(): Set<number> {
-  return new Set<number>(loadDeselectedIds());
+  return store.setOf();
 }

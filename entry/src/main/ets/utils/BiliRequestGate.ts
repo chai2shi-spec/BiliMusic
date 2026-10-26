@@ -30,6 +30,7 @@ import {
   BILI_GATE_MIN_INTERVAL_MS,
   BILI_GATE_JITTER_MS,
   BILI_GATE_MAX_CONCURRENCY,
+  BILI_GATE_FULL_BACKOFF_MS,
   BILI_GATE_COOLDOWN_STEPS_MS
 } from '../common/Constants';
 
@@ -150,13 +151,23 @@ export class BiliRequestGate {
    * 调度 pump：确保有一个定时器在未来最近的「可出队时刻」触发。
    * 可出队时刻 = max(下次可发送时刻, 冷却截止)。已在途/队列空时定时器
    * 到点后自然空转，无副作用。句柄判 -1 防重复调度。
+   *
+   * ⚠️ 名额占满（inFlight ≥ 上限）时必须退避：弱网/后台恢复下在途请求
+   * 可挂 15s，此时若按「可出队时刻已过期」算出 0ms 定时器，libuv 的
+   * uv__run_timers 会在同一轮里无限处理新加的 0ms 定时器 —— 主线程
+   * 永远回不到事件循环，THREAD_BLOCK_6S 假死被杀（实测见
+   * er/appfreeze-...20261026084545，栈顶卡在 schedulePump 的
+   * setTimeout）。名额释放走 release() 主动唤醒，退避只是防自旋兜底。
    */
   private static schedulePump(): void {
     if (BiliRequestGate.pumpTimer >= 0) {
       return;
     }
     const readyAt: number = Math.max(BiliRequestGate.nextSendAt, BiliRequestGate.cooldownUntil);
-    const delay: number = Math.max(0, readyAt - Date.now());
+    let delay: number = Math.max(0, readyAt - Date.now());
+    if (BiliRequestGate.queue.length > 0 && BiliRequestGate.inFlight >= BILI_GATE_MAX_CONCURRENCY) {
+      delay = Math.max(delay, BILI_GATE_FULL_BACKOFF_MS);
+    }
     BiliRequestGate.pumpTimer = setTimeout((): void => {
       BiliRequestGate.pumpTimer = -1;
       BiliRequestGate.pump();

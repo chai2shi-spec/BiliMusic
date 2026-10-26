@@ -34,13 +34,15 @@
       {
         // 蓝牙音频路由监听需要读蓝牙设备名（AudioDeviceDescriptor.name），
         // 用于区分手表/手环与耳机/音箱（WATCH 3 连接误报「蓝牙已断开」的修复）。
-        // user_grant：首启由 AppContainer.requestBluetoothPermission 弹一次系统窗；
-        // 用户拒绝 → 设备名为空 → 名称过滤失效，仅剩「剩余蓝牙设备核查」兜底。
+        // user_grant：审核合规（不得提前申请）—— 不在启动链弹窗，
+        // 由 MusicPlayer.requestBluetoothPermissionOnce 在首次开始播放（真实
+        // 使用场景）弹一次系统窗；用户拒绝 → 设备名为空 → 名称过滤失效，
+        // 仅剩「剩余蓝牙设备核查」兜底。
         "name": "ohos.permission.ACCESS_BLUETOOTH",
         "reason": "$string:permission_bluetooth_reason",
         "usedScene": {
           "abilities": ["EntryAbility"],
-          "when": "always"
+          "when": "inuse"
         }
       },
       {

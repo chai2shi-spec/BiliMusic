@@ -57,9 +57,7 @@ export const THEME_PALETTES: ThemePalette[] = [
   { id: 'purple', label: '紫', primary: '#8E24AA', deepLight: '#6A1B9A', deepDark: '#CE93D8', surfaceLight: '#F7F0FA', surfaceDark: '#2C1F33', on: '#2E0033' }
 ];
 
-export const DEFAULT_THEME_COLOR: string = 'pink';
-
-/** 按 id 取调色板；未知 id（含旧偏好缺字段场景由调用方 ?? DEFAULT 兜底后传入）回落粉 */
+/** 按 id 取调色板；未知 id 回落粉（THEME_PALETTES[0]） */
 export function getThemePalette(id: string): ThemePalette {
   const found: ThemePalette | undefined =
     THEME_PALETTES.find((p: ThemePalette): boolean => p.id === id);

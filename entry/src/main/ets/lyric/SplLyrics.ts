@@ -494,54 +494,6 @@ export function yrcToSpl(yrcContent: string): string {
 }
 
 /**
- * 酷狗 KRC（逐字）→ SPL 文本。
- * KRC 行格式：`[行起始ms,行时长ms]<词起始ms,词时长ms,0>词…`
- */
-export function krcToSpl(krcContent: string): string {
-  if (!krcContent || krcContent.length === 0) {
-    return '';
-  }
-  const lines: string[] = krcContent.split('\n');
-  const splLines: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    let line: string = lines[i];
-    if (line.endsWith('\r')) {
-      line = line.substring(0, line.length - 1);
-    }
-    const trimmed: string = line.trim();
-    if (trimmed.length === 0) {
-      continue;
-    }
-    const headMatch: RegExpExecArray | null = new RegExp('^\\[(\\d+),(\\d+)\\](.*)').exec(trimmed);
-    if (headMatch === null) {
-      continue;
-    }
-    const lineStart: number = Number.parseInt(headMatch[1], 10);
-    const content: string = headMatch[3];
-    const wordRegex: RegExp = new RegExp('<(\\d+),(\\d+),(\\d+)>([^<]*)', 'g');
-    const pieces: string[] = [];
-    let wMatch: RegExpExecArray | null = wordRegex.exec(content);
-    let first: boolean = true;
-    while (wMatch !== null) {
-      const wordStart: number = Number.parseInt(wMatch[1], 10);
-      const wordText: string = wMatch[4];
-      if (first) {
-        pieces.push(wordText);
-        first = false;
-      } else {
-        pieces.push(`<${formatSplTime(wordStart)}>${wordText}`);
-      }
-      wMatch = wordRegex.exec(content);
-    }
-    if (first) {
-      pieces.push(content);
-    }
-    splLines.push(`[${formatSplTime(lineStart)}]${pieces.join('')}`);
-  }
-  return splLines.join('\n');
-}
-
-/**
  * 纯文本（无时间轴）→ 行数组备用。
  * 只在「有歌词但完全没有时间标签」时用，展示为静态歌词。
  */

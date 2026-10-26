@@ -28,7 +28,7 @@ import {
 import { AppSettings, DEFAULT_APP_SETTINGS } from '../model/MusicModels';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
@@ -43,6 +43,7 @@ import { QUALITY_OPTIONS, QualityOption, formatBytes } from '../utils/SettingsSh
 import { ensureDirUri, PublicSyncResult } from '../service/PublicDownloadsSaver';
 import { DownloadManager } from '../service/DownloadManager';
 import { countListenCache, listenCacheUsage, clearListenCache } from '../service/ListenCacheStore';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 @Component
 export struct DownloadSettingsPage {
@@ -187,17 +188,12 @@ export struct DownloadSettingsPage {
   }
 
   private confirmClearCache(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '清理缓存',
       message: '将删除应用临时缓存文件。已下载的歌曲、歌单与播放记录不受影响。',
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '清理',
-        action: (): void => {
-          this.doClearCache();
-        }
+      confirmText: '清理',
+      onConfirm: (): void => {
+        this.doClearCache();
       }
     });
   }
@@ -254,17 +250,12 @@ export struct DownloadSettingsPage {
 
   /** 清理听后缓存前确认：明确「已下载歌曲与播放记录不受影响」 */
   private confirmClearListenCache(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '清理听后缓存',
       message: '将删除全部听后缓存音频。已下载的歌曲、歌单与播放记录不受影响。',
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '清理',
-        action: (): void => {
-          this.doClearListenCache();
-        }
+      confirmText: '清理',
+      onConfirm: (): void => {
+        this.doClearListenCache();
       }
     });
   }
@@ -372,8 +363,13 @@ export struct DownloadSettingsPage {
         this.settings = AppPreferences.getSettings();
         return;
       }
+      // ⚠️ URI 与开关位必须**同一次** updateSettings 写入：AppSettings 是单键
+      // 整包 JSON，分开两次读-改-写会竞态互覆盖（历史 bug：{save:false, uri:X}
+      // 脏状态表现为「开关显示开但不生效」「同步误报无待同步」）。ensureDirUri
+      // 已改为纯取 URI 不落盘，此处是唯一写者。
       this.update((s: AppSettings): void => {
         s.saveToPublicDownloads = true;
+        s.publicDownloadsDirUri = uri;
       });
       this.toast('已开启：下载完成后自动保存到「下载/BiliMusic」', 2400);
     });
@@ -382,7 +378,7 @@ export struct DownloadSettingsPage {
   /**
    * 「同步已完成歌曲」：把已完成且文件仍在沙箱的任务批量搬入「下载/BiliMusic」
    * （DownloadManager.syncCompletedToPublicDir，批内去重命名 + 失败计数）。
-   * 防重入（syncing）；结果 toast 三态：无待同步 / 全成功 / 部分失败。
+   * 防重入（syncing）；结果 toast 四态：开关未开启 / 无待同步 / 全成功 / 部分失败。
    */
   private syncCompletedToPublic(): void {
     if (this.syncing) {
@@ -396,6 +392,11 @@ export struct DownloadSettingsPage {
     DownloadManager.getInstance().syncCompletedToPublicDir()
       .then((r: PublicSyncResult): void => {
         this.syncing = false;
+        // 持久层开关未开启（页面快照与持久层分歧的兜底）：提示开启而非误报「无待同步」
+        if (r.skippedSwitchOff) {
+          this.toast('请先开启「保存到系统下载目录」', 1800);
+          return;
+        }
         if (r.total === 0) {
           this.toast('没有需要同步的歌曲', 1800);
           return;
@@ -450,25 +451,12 @@ export struct DownloadSettingsPage {
     NavTitleRow({ title: '下载与存储' })
   }
 
-  /**
-   * 标题行收窄容器（AboutPage 同款）：外层 Row 居中 + 内层 Column constraintSize
-   * （上限与本页内容列同口径），大屏上标题行与内容列同宽对齐；
-   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   downloadBarNarrow() {
-    Row() {
-      Column() {
-        this.downloadBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.downloadBar()
+    } })
   }
 
   build() {

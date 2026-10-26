@@ -55,6 +55,15 @@ export const BILI_GATE_JITTER_MS: number = 80;
 /** 同时在途 B 站请求上限：2 = 保住并行收益的同时不挤爆连接池 / 不触发突发判定 */
 export const BILI_GATE_MAX_CONCURRENCY: number = 2;
 /**
+ * 名额占满时的重试退避（ms）：在途请求已满（弱网/后台恢复时单个请求
+ * 可挂 15s）而队列还有等待者时，pump 用该间隔轮询而非 0ms 定时器 ——
+ * libuv 的 uv__run_timers 会把同一轮里新加的 0ms 定时器无限循环处理，
+ * 主线程永远回不到事件循环，直接 THREAD_BLOCK_6S 假死被杀（实测见
+ * er/appfreeze-...20261026084545）。名额释放由 release() 主动唤醒，
+ * 退避只是兜底，>MIN_INTERVAL 保证不拖慢正常节拍。
+ */
+export const BILI_GATE_FULL_BACKOFF_MS: number = 200;
+/**
  * 风控熔断冷却阶梯（ms）：观测到风控信号（HTTP 412/403/429 或响应体
  * `{"code":-352/-412/-509/-799`）后全局暂停出队，连续命中逐级拉长，
  * 任一干净成功复位到第 0 档。排队请求顺延不丢弃。
@@ -62,17 +71,7 @@ export const BILI_GATE_MAX_CONCURRENCY: number = 2;
 export const BILI_GATE_COOLDOWN_STEPS_MS: number[] = [2000, 5000, 12000];
 export const OIAPI_QQ_LYRIC: string = 'https://www.oiapi.net/api/QQMusicLyric';
 
-export const DB_NAME: string = 'bilimusic_rdb.db';/**
- * ⚠️ 这个版本号**目前不生效**，别指望它触发迁移。
- *
- * 鸿蒙 RDB 的 `StoreConfig` 没有 version 字段、`RdbStore.version` 是只读属性
- * （SDK `relationalStore.d.ts:3813`），没有版本升级钩子；而且
- * `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不会做。
- * 所以表结构变化一律走 `RdbHelper.ensureColumns()` 的幂等补列
- * （`PRAGMA table_info` 查列 → 缺则 `ALTER TABLE ADD COLUMN`）。
- * 加列时**同步把这个数字 +1**，留个「结构到哪一版了」的可读标记。
- */
-export const DB_VERSION: number = 2;
+export const DB_NAME: string = 'bilimusic_rdb.db';
 export const TABLE_DOWNLOAD: string = 'download_task';
 
 /**
@@ -96,8 +95,6 @@ export const DEFAULT_PLAYLIST_NAME: string = '我的歌单';
  */
 /** 主题色光晕透明度（HDS 侧对应 `lightColor: withAlpha(themePrimary, 0.12)`） */
 export const GLOW_ALPHA: number = 0.12;
-/** 品牌粉的 RGB 部分（颜色资源里是 #FFFB7299），用来拼带 alpha 的光晕色 */
-export const BILI_PINK_HEX: string = '#FB7299';
 
 /**
  * 主题色（8 色切换，调色板与发布入口见 common/ThemeColors.ts）。
@@ -469,7 +466,7 @@ export const STORE_PLAYER_IMAGE_COLOR: string = 'playerImageColor';
  * 折叠屏展开态全局唯一真源（display.FoldDisplayMode.FOLD_DISPLAY_MODE_FULL）。
  * 由 service/FormFactorHolder（App 生命周期常驻，EntryAbility.onCreate 初始化）
  * **唯一写入**：冷启动同步读一次 getFoldDisplayMode，之后 foldDisplayModeChange
- * 持续跟进开合。消费端（Index 壳选择、播放页分栏、歌词/标题字号）一律
+ * 持续跟进开合。消费端（播放页分栏、歌词/标题字号）一律
  * @StorageProp 只读订阅。
  */
 export const STORE_FOLD_EXPANDED: string = 'foldExpanded';
@@ -499,32 +496,28 @@ export const STORE_DOWNLOAD_PAUSED: string = 'downloadPaused';
  */
 export const STORE_DL_BAR_SELECTING: string = 'dlBarSelecting';
 export const STORE_DL_BAR_HAS_TASKS: string = 'dlBarHasTasks';
-export const STORE_DL_BAR_SELECTED_COUNT: string = 'dlBarSelectedCount';
 export const STORE_DL_BAR_ALL_SELECTED: string = 'dlBarAllSelected';
-export const STORE_DL_BAR_CAN_RETRY: string = 'dlBarCanRetry';
 export const STORE_DL_BAR_QUEUE_ACTIVE: string = 'dlBarQueueHasActive';
 export const STORE_DL_BAR_QUEUE_PAUSED: string = 'dlBarQueueHasPaused';
 
 /**
- * 歌单页顶栏状态镜像键（机制同 STORE_DL_BAR_*：顶栏在根 HdsNavigation
- * titleBar 的状态通道）。页面侧唯一写入口：PlaylistsPage.syncBarState；
- * 栏内组件 components/PlaylistsTabBar.ets（PlTitleActions / PlSelectToolbar）
- * @StorageProp 订阅。
- */
+  * 歌单页顶栏状态镜像键（机制同 STORE_DL_BAR_*：顶栏在根 HdsNavigation
+  * titleBar 的状态通道）。页面侧唯一写入口：PlaylistsPage.syncBarState；
+  * 栏内组件 components/PlaylistsTabBar.ets（PlTitleActions）
+  * @StorageProp 订阅。
+  */
 export const STORE_PL_BAR_SELECTING: string = 'plBarSelecting';
 export const STORE_PL_BAR_CAN_SELECT: string = 'plBarCanSelect';
-export const STORE_PL_BAR_SELECTED_COUNT: string = 'plBarSelectedCount';
 export const STORE_PL_BAR_ALL_SELECTED: string = 'plBarAllSelected';
 
 /**
- * 搜索状态键（搜索独立成 'Search' 二级页，首页三 chip 化）。
- * keyword / searchKind 是搜索二级页（SearchPage）与其标题栏行（SearchInputBar，
- * components/SearchTabBar.ets）共享的**双向**状态（两侧都 @StorageLink，
- * 任一侧写入另一侧即见）；tab 是首页分类 chip（HomeCategoryChips）与
- * HomePage 内容分支的共享通道。
- */
+  * 搜索状态键（搜索独立成 'Search' 二级页，首页三 chip 化）。
+  * keyword 是搜索二级页（SearchPage）与其标题栏行（SearchInputBar，
+  * components/SearchTabBar.ets）共享的**双向**状态（两侧都 @StorageLink，
+  * 任一侧写入另一侧即见）；tab 是首页分类 chip（HomeCategoryChips）与
+  * HomePage 内容分支的共享通道。
+  */
 export const STORE_SEARCH_KEYWORD: string = 'searchKeyword';
-export const STORE_SEARCH_KIND: string = 'searchKind';
 export const STORE_SEARCH_TAB: string = 'searchTab';
 
 /**
@@ -646,6 +639,16 @@ export const STORE_TOAST_SEQ: string = 'toastSeq';
  */
 export const STORE_STARTUP_HINT_MSG: string = 'startupHintMsg';
 export const STORE_STARTUP_HINT_SEQ: string = 'startupHintSeq';
+
+/**
+ * 蓝牙权限申请信号（seq 读-改-写递增）：播放内核（MusicPlayer，拿不到
+ * UIContext）在首次真实播放场景写入；Index 根页 @Watch 消费 —— 先弹
+ * 应用内弹窗**告知权限使用目的**，用户点「去授权」后才调
+ * requestPermissionsFromUser 弹系统授权框（应用市场合规：申请权限必须
+ * 告知使用目的、不得直接弹系统框、禁止诱导欺骗授权）。
+ * 信号不含消息体：弹窗文案固定，seq 只承担「跨层通知 UI」的职责。
+ */
+export const STORE_BT_PERM_REQ_SEQ: string = 'btPermReqSeq';
 
 /**
  * 媒体库（歌单 / 收藏 / 最近）版本号，每次写操作递增。

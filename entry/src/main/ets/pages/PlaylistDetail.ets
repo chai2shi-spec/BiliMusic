@@ -16,7 +16,7 @@
  */
 
 import { Playlist, Track, DownloadTask, DownloadStatus, buildTrack, VideoDetail, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
-import { LibraryStore, PlaylistSortKey } from '../service/LibraryStore';
+import { LibraryStore, PlaylistSortKey, PlaylistDedupResult } from '../service/LibraryStore';
 import { isFolderTwoway } from '../service/FavTwowayStore';
 import * as BilibiliApi from '../api/BilibiliApi';
 import { SpaceVideo } from '../api/BilibiliApi';
@@ -26,11 +26,19 @@ import { TrackItem } from '../components/TrackItem';
 import { TrackCard } from '../components/TrackCard';
 import { CoverImage } from '../components/CoverImage';
 // 菜单弹层：曲目菜单动作有三个，AlertDialog 只有两颗按钮放不下，用 MenuDialog。
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 // 下载链：与 SearchPage 同一套（requestDownload → 仅 WiFi 拦截询问 → toast 回执）
 import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../service/DownloadManager';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
+import { sleep } from '../utils/AsyncUtil';
+import { scanDuplicateTracks, TrackDedupScan } from '../utils/TrackDedup';
+import {
+  FavFlushSummary,
+  flushFavPushes,
+  cancelFavPushFlush,
+  FLUSH_DEBOUNCE_MS
+} from '../service/FavPushRunner';
 import { PlaylistDetailRouteParam, NavRouteParamReader, UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
@@ -52,8 +60,7 @@ import {
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
-  STORE_THEME_DEEP,
-  STORE_THEME_ON
+  STORE_THEME_DEEP
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
@@ -157,12 +164,10 @@ export struct PlaylistDetail {
   /** 状态栏高度（vp）：标题栏要整体落在状态栏下方，由本页自己顶下来 */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
 
-  /** 主题色运行时值：头部按钮浅底 / 主色 / 深字跟随切色刷新 */
+  /** 主题色运行时值：头部浅底按钮（Surface 底 + Primary 字）与弹层新建行深粉字（Deep）跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
-  /** 主色底按钮的反差字色（多选「加入歌单」主色底按钮） */
-  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /** 横竖屏（Index 常驻注册写入）：横屏宽屏时曲目条目两列显示 */
@@ -495,9 +500,10 @@ export struct PlaylistDetail {
    * LibraryStore.compareByTitle 同款比较器）/ 按时长（降序）/ 按播放量（降序）/
    * 按加入时间（降序，新在前；存量无戳条目首排时物化，见 materializeAddedAt）。
    * 自动排序是一次性动作，不启用 titleSorted 持续规则（见 sortPlaylistTracks 注释）。
+   * 自建歌单（sourceKind === ''）末尾追加「去重」入口（见 confirmDedup）。
    */
   private sortMenuItems(): MenuElement[] {
-    return [
+    const items: MenuElement[] = [
       {
         value: '按名称',
         action: (): void => {
@@ -523,6 +529,17 @@ export struct PlaylistDetail {
         }
       }
     ];
+    // 去重只对自建歌单开放：订阅歌单内容随投稿自动重建、收藏夹镜像
+    // 由 B 站服务端决定，去重成果都会被下次同步覆盖，开放只会误导。
+    if (this.playlist !== null && this.playlist.sourceKind === '') {
+      items.push({
+        value: '去重',
+        action: (): void => {
+          this.confirmDedup();
+        }
+      });
+    }
+    return items;
   }
 
   /** 执行自动排序并 toast 回执（歌单不存在 = 菜单打开期间被删，静默返回） */
@@ -531,6 +548,38 @@ export struct PlaylistDetail {
     if (sorted !== null) {
       this.toast(toastText, 1500);
     }
+  }
+
+  /**
+   * 「去重」入口：先扫描报数（同 id 精确重复 + 同名同歌手、时长差 ≤ 5 秒
+   * 或时长未知的智能重复），确认后交给 LibraryStore.dedupPlaylistTracks
+   * 一次性重建落盘（每组保留最靠前的一首，单次 persist 保序）。
+   * 落盘 → STORE_LIBRARY_REV bump → onLibraryChanged → load() 自动刷新。
+   */
+  private confirmDedup(): void {
+    const p: Playlist | null = this.playlist;
+    if (p === null) {
+      return;
+    }
+    const scan: TrackDedupScan = scanDuplicateTracks(p.tracks);
+    const dupCount: number = scan.removeIndexes.length;
+    if (dupCount === 0) {
+      this.toast('没有发现重复歌曲', 1800);
+      return;
+    }
+    showConfirm(this.getUIContext(), {
+      title: '歌单去重',
+      message: `在「${p.name}」中发现 ${dupCount} 首重复歌曲，移除后剩 ${p.tracks.length - dupCount} 首（每组保留最靠前的一首）。`,
+      confirmText: '去重',
+      onConfirm: (): void => {
+        // 以执行时刻的扫描结果为准（弹窗打开期间歌单可能已变）
+        const result: PlaylistDedupResult | null = LibraryStore.dedupPlaylistTracks(this.playlistId);
+        if (result === null) {
+          return;
+        }
+        this.toast(result.removed > 0 ? `已移除 ${result.removed} 首重复歌曲` : '没有发现重复歌曲', 1800);
+      }
+    });
   }
 
 
@@ -770,45 +819,62 @@ export struct PlaylistDetail {
       return;
     }
     if (isFolderTwoway(LibraryStore.favMediaIdOf(p))) {
-      showAppAlertDialog(this.getUIContext(), {
+      showConfirm(this.getUIContext(), {
         title: '取消收藏并移除',
         message: `「${p.name}」已开启双向同步，移除将同时取消 B 站收藏夹中的这首收藏。`,
-        primaryButton: {
-          value: '取消',
-          action: (): void => {
-            // 取消：不做任何事
-          }
-        },
-        secondaryButton: {
-          value: '取消收藏并移除',
-          action: (): void => {
-            // store 挂钩会自动把移除意图实时推送到 B 站（失败自动补推）
-            LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
-            this.load();
-            this.toast('已移除，正在同步到 B 站…', 2000);
-          }
+        confirmText: '取消收藏并移除',
+        onConfirm: (): void => {
+          // store 挂钩会自动把移除意图实时推送到 B 站（失败自动补推）
+          LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
+          this.load();
+          this.toast('已移除，正在同步到 B 站…', 2000);
+          this.reportFavPushResult();
         }
       });
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '从收藏夹镜像移除',
       message: `「${p.name}」是 B 站收藏夹的镜像。同步为单向（B 站 → 本地），移除不会取消 B 站收藏，下次同步这首歌会重新出现。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-          // 取消：不做任何事
-        }
-      },
-      secondaryButton: {
-        value: '仅本地移除',
-        action: (): void => {
-          LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
-          this.load();
-          this.toast('已从本地移除（下次同步会重新出现）', 2000);
-        }
+      confirmText: '仅本地移除',
+      onConfirm: (): void => {
+        LibraryStore.removeTracksFromPlaylist(this.playlistId, [track.id]);
+        this.load();
+        this.toast('已从本地移除（下次同步会重新出现）', 2000);
       }
     });
+  }
+
+  /**
+   * 双向夹删除的写回结果回执：接管去抖窗口（取消去抖计时器），到点自己
+   * 显式冲刷拿真实结果，把「正在同步到 B 站…」的下文补上 —— 此前成功/
+   * 失败全部静默，用户永远不知道有没有真的取消 B 站收藏。
+   * 全零且无失败 = 队列空（对冲抵消：B 站本就没有该视频，本地已一致）→ 静默。
+   */
+  private reportFavPushResult(): void {
+    cancelFavPushFlush();
+    sleep(FLUSH_DEBOUNCE_MS + 300)
+      .then((): Promise<FavFlushSummary> => flushFavPushes())
+      .then((s: FavFlushSummary): void => {
+        if (s.needLogin) {
+          this.toast('登录已失效，未能取消 B 站收藏，请重新登录', 2600);
+          return;
+        }
+        if (s.pushDropped > 0) {
+          this.toast(`写回 B 站失败 ${s.pushDropped} 首（视频可能已失效）`, 2400);
+          return;
+        }
+        if (s.pushPending > 0) {
+          this.toast('B 站暂未确认写回，稍后同步时会自动补推', 2400);
+          return;
+        }
+        if (s.pushed > 0) {
+          this.toast('已取消 B 站收藏', 2000);
+        }
+      })
+      .catch((e: Error): void => {
+        console.error(`reportFavPushResult failed: ${e.message}`);
+      });
   }
 
   private startDownload(track: Track): void {
@@ -849,17 +915,12 @@ export struct PlaylistDetail {
 
   /** 「仅 WiFi 下载」被触发：先问一句而不是直接拒绝（开关的本意是防偷跑，不是绝对禁用） */
   private confirmDownloadOnCellular(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.requestDownload(track, true);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.requestDownload(track, true);
       }
     });
   }
@@ -995,17 +1056,12 @@ export struct PlaylistDetail {
       this.toast('先选择歌曲', 1500);
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '下载选中歌曲',
       message: `将把选中的 ${tracks.length} 首歌曲加入下载队列。\n已下载的会自动跳过。`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '开始下载',
-        action: (): void => {
-          this.enqueueSelectedSerial(tracks);
-        }
+      confirmText: '开始下载',
+      onConfirm: (): void => {
+        this.enqueueSelectedSerial(tracks);
       }
     });
   }
@@ -1049,17 +1105,12 @@ export struct PlaylistDetail {
 
   /** 「仅 WiFi 下载」拦下批量下载：问一次（措辞与单曲 confirmDownloadOnCellular 一致） */
   private confirmCellularSelected(tracks: Track[]): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.enqueueSelectedWithWifiOverride(tracks);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.enqueueSelectedWithWifiOverride(tracks);
       }
     });
   }
@@ -1116,58 +1167,44 @@ export struct PlaylistDetail {
     const ids: string[] = tracks.map((t: Track): string => t.id);
     const countText: string = `选中的 ${tracks.length} 首`;
     if (!LibraryStore.isFavMirror(p)) {
-      showAppAlertDialog(this.getUIContext(), {
+      showConfirm(this.getUIContext(), {
         title: '从歌单移除',
         message: `确定从「${p.name}」移除${countText}吗？`,
-        primaryButton: {
-          value: '取消'
-        },
-        secondaryButton: {
-          value: '移除',
-          action: (): void => {
-            LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
-            this.load();
-            this.exitSelecting();
-            this.toast('已移除', 1500);
-          }
+        confirmText: '移除',
+        onConfirm: (): void => {
+          LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
+          this.load();
+          this.exitSelecting();
+          this.toast('已移除', 1500);
         }
       });
       return;
     }
     if (isFolderTwoway(LibraryStore.favMediaIdOf(p))) {
-      showAppAlertDialog(this.getUIContext(), {
+      showConfirm(this.getUIContext(), {
         title: '取消收藏并移除',
         message: `「${p.name}」已开启双向同步，移除${countText}将同时取消 B 站收藏夹中的这些收藏。`,
-        primaryButton: {
-          value: '取消'
-        },
-        secondaryButton: {
-          value: '取消收藏并移除',
-          action: (): void => {
-            // store 挂钩会自动把移除意图实时推送到 B 站（失败自动补推）
-            LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
-            this.load();
-            this.exitSelecting();
-            this.toast('已移除，正在同步到 B 站…', 2000);
-          }
+        confirmText: '取消收藏并移除',
+        onConfirm: (): void => {
+          // store 挂钩会自动把移除意图实时推送到 B 站（失败自动补推）
+          LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
+          this.load();
+          this.exitSelecting();
+          this.toast('已移除，正在同步到 B 站…', 2000);
+          this.reportFavPushResult();
         }
       });
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '从收藏夹镜像移除',
       message: `「${p.name}」是 B 站收藏夹的镜像。同步为单向（B 站 → 本地），移除${countText}不会取消 B 站收藏，下次同步这些歌曲会重新出现。`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '仅本地移除',
-        action: (): void => {
-          LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
-          this.load();
-          this.exitSelecting();
-          this.toast('已从本地移除（下次同步会重新出现）', 2000);
-        }
+      confirmText: '仅本地移除',
+      onConfirm: (): void => {
+        LibraryStore.removeTracksFromPlaylist(this.playlistId, ids);
+        this.load();
+        this.exitSelecting();
+        this.toast('已从本地移除（下次同步会重新出现）', 2000);
       }
     });
   }
@@ -1232,11 +1269,11 @@ export struct PlaylistDetail {
       //   正好是一键填歌单的入口。
       Row({ space: 8 }) {
         if (this.playlist && this.playlist.tracks.length > 0) {
+          // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
           Button('播放全部', { type: ButtonType.Normal })
             .fontSize(13)
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
-            // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
             .backgroundColor(this.themeSurface)
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)

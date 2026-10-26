@@ -75,6 +75,4 @@ export class TabScrollerHolder {
    * 接管，与 searchSubmit 同一对绑定/解绑，归属校验共用 searchSubmitOwner）。
    */
   static searchReset: () => void = (): void => {};
-  /** 切换搜索类型（视频 / UP 主）：白片动画在栏滑片上，页面只换值 + 结果态自动重搜 */
-  static searchSetKind: (kind: string) => void = (kind: string): void => {};
 }

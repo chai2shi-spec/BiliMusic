@@ -9,8 +9,7 @@
  *   材质由 HDS 自己施加，我们只通过 `MaterialCompat.supportsImmersiveMaterial()`
  *   决定材质档位（EXQUISITE 精美 / ADAPTIVE 自适应）。
  * - **uiMaterial 通路**（`uiMaterial.ImmersiveMaterial` + `.systemMaterial()`）：
- *   给自绘组件（Row / Column 等）用。低版本或运行时能力缺失时返回 undefined，
- *   调用方再用 `MaterialCompat.effect()` 走 backgroundEffect 模拟毛玻璃。
+ *   给自绘组件（Row / Column 等）用。低版本或运行时能力缺失时返回 undefined。
  *   ⚠️ 官方《沉浸光感常见问题》生效范围（真机实证）：「其他组件」的
  *   systemMaterial 仅在 Navigation/NavDestination 标题栏或横向 Tabs 底部
  *   TabBar（barPosition=End）内生效，其他区域**静默不渲染**——自绘 Row 直接
@@ -33,14 +32,6 @@ export enum MaterialCompatStyle {
   REGULAR = 2,
   THICK = 3,
   ULTRA_THICK = 4
-}
-
-/** 模拟材质参数，结构兼容 backgroundEffect 的 BackgroundEffectOptions */
-export interface MaterialEffectOptions {
-  radius: number;
-  saturation: number;
-  brightness: number;
-  color: string;
 }
 
 export interface MaterialImmersiveOptions {
@@ -115,53 +106,6 @@ export class MaterialCompat {
     } catch (e) {
       console.error(`[MaterialCompat] probe capability failed: ${JSON.stringify(e)}`);
     }
-  }
-
-  /**
-   * 生成模拟沉浸式材质的 backgroundEffect 参数
-   * @param isDark 是否深色模式
-   * @param cardBg 卡片底色（深色模式下作为蒙版基色）
-   * @param style 材质分档
-   */
-  static effect(isDark: boolean, cardBg: string, style?: MaterialCompatStyle): MaterialEffectOptions {
-    const s: MaterialCompatStyle = style !== undefined ? style : MaterialCompatStyle.REGULAR;
-    let radius: number = 20;
-    let lightAlpha: number = 0.52;
-    let darkAlpha: number = 0.80;
-    switch (s) {
-      case MaterialCompatStyle.ULTRA_THIN:
-        radius = 12;
-        lightAlpha = 0.36;
-        darkAlpha = 0.65;
-        break;
-      case MaterialCompatStyle.THIN:
-        radius = 16;
-        lightAlpha = 0.44;
-        darkAlpha = 0.72;
-        break;
-      case MaterialCompatStyle.THICK:
-        radius = 28;
-        lightAlpha = 0.64;
-        darkAlpha = 0.86;
-        break;
-      case MaterialCompatStyle.ULTRA_THICK:
-        radius = 36;
-        lightAlpha = 0.78;
-        darkAlpha = 0.92;
-        break;
-      case MaterialCompatStyle.REGULAR:
-      default:
-        break;
-    }
-    const color: string = isDark
-      ? MaterialCompat.withAlpha(cardBg, darkAlpha)
-      : MaterialCompat.withAlpha('#FFFFFF', lightAlpha);
-    return {
-      radius: radius,
-      saturation: 1.2,
-      brightness: 1.0,
-      color: color
-    };
   }
 
   /**

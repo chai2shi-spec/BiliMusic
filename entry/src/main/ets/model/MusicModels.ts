@@ -549,8 +549,6 @@ export interface LyricCandidate {
   remoteId?: string;
 }
 
-export type LyricStatus = 'idle' | 'loading' | 'ok' | 'unsynced' | 'empty';
-
 export interface DownloadTask {
   id: string;
   musicId: string;

@@ -71,6 +71,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.UpSpacePageWrapped);
       break;
     }
+    case 'SeasonSeriesDetail': {
+      const m = await import('../pages/SeasonSeriesDetailPage');
+      builders.set(name, m.SeasonSeriesDetailPageWrapped);
+      break;
+    }
     case 'WatchHistory': {
       const m = await import('../pages/WatchHistoryPage');
       builders.set(name, m.WatchHistoryPageWrapped);
@@ -138,7 +143,7 @@ async function loadByName(name: string): Promise<void> {
 
 /** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
 const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'Recent', 'Follows',
-  'UpSpace', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
+  'UpSpace', 'SeasonSeriesDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
   'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'PlaylistBackup', 'PlaybackLog', 'Reward', 'About', 'Login'];
 
 function preloadAt(index: number): void {

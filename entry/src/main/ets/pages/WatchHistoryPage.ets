@@ -39,7 +39,7 @@ import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { stripHtmlTags, toThumbUrl, toHttpsUrl, formatDurationText } from '../utils/TextUtil';
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { ArrayDataSource } from '../utils/ArrayDataSource';
@@ -621,17 +621,12 @@ export struct WatchHistoryPage {
 
   /** 「仅 WiFi 下载」被拦下：先问一句，同意后整批放行 */
   private confirmDownloadOnCellular(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.requestDownload(track, true);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.requestDownload(track, true);
       }
     });
   }

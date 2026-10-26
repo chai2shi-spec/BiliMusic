@@ -49,6 +49,33 @@ export class PlaylistDetailRouteParam {
 }
 
 /**
+ * 「合集·系列详情」（路由名 SeasonSeriesDetail）入参。
+ *
+ * kind：'season'（B 站合集 ugc_season）/ 'series'（UP 主手动系列），决定详情页
+ * 走哪个条目分页接口；itemId 为 season_id / series_id。title/cover 是列表卡片
+ * 已有数据的首帧兜底，upName/upMid 供 Track 构建（artist / upMid 字段）。
+ */
+export class SeasonSeriesDetailRouteParam {
+  kind: string;
+  mid: string;
+  itemId: string;
+  title: string;
+  cover: string;
+  upName: string;
+  upMid: string;
+
+  constructor(kind: string, mid: string, itemId: string, title: string, cover: string, upName: string, upMid: string) {
+    this.kind = kind;
+    this.mid = mid;
+    this.itemId = itemId;
+    this.title = title;
+    this.cover = cover;
+    this.upName = upName;
+    this.upMid = upMid;
+  }
+}
+
+/**
  * 「登录页」（路由名 Login）入参。登录页自身不读参数（登录态经
  * LoginStore 广播），此类只用于占住 pushPathByName 的 param 槽位，
  * 让带 onPop 回调的重载能通过类型检查；预留后续传「登录后跳转目标」。
@@ -94,6 +121,18 @@ export class NavRouteParamReader {
     if (Array.isArray(params) && params.length > 0) {
       const first: ESObject = params[0];
       if (first instanceof PlaylistDetailRouteParam) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  /** 取 SeasonSeriesDetail 路由参数；栈上没有 / 类型不符返回 null（按无参兜底） */
+  static readSeasonSeriesDetailParam(stack: NavPathStack): SeasonSeriesDetailRouteParam | null {
+    const params: ESObject = stack.getParamByName('SeasonSeriesDetail');
+    if (Array.isArray(params) && params.length > 0) {
+      const first: ESObject = params[0];
+      if (first instanceof SeasonSeriesDetailRouteParam) {
         return first;
       }
     }

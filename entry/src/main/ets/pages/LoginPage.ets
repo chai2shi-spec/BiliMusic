@@ -69,6 +69,7 @@ import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 /** 二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
 const QR_POLL_INTERVAL_MS: number = 2000;
@@ -992,28 +993,12 @@ export struct LoginPage {
     .alignItems(VerticalAlign.Center)
   }
 
-  /**
-   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
-   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
-   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
-   *（上限与本页内容列 contentMaxWidth 完全同口径 600/720），标题行与内容列
-   * 同宽对齐；两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   * sm 回退 600（窗口 <600vp）天然无操作。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   loginBarNarrow() {
-    Row() {
-      Column() {
-        this.loginBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.loginBar()
+    } })
   }
 
   /**

@@ -37,14 +37,21 @@ export interface PublicSyncResult {
   ok: number;
   /** 搬移失败（沙箱原件已保留，可重试） */
   failed: number;
+  /** 开关未开启：未执行任何搬移。页面应提示开启开关，不得显示成「没有需要同步的歌曲」 */
+  skippedSwitchOff: boolean;
 }
 
 /**
  * 确保「下载/包名」目录 URI 就绪（设置页开关打开时调用，须在用户手势内）。
  *
  * 偏好里已有 URI 且目录可达 → 直接复用（持久化授权跨重启有效）；
- * 否则走 DOWNLOAD 模式 save() 重新取 URI 并写偏好。
+ * 否则走 DOWNLOAD 模式 save() 重新取 URI。
  * 返回空串 = 未授权 / 用户取消 / 异常，调用方不得打开开关。
+ *
+ * ⚠️ 本函数**不落盘**：拿到非空 URI 后，调用方必须在**一次** updateSettings
+ * 中同时写入 publicDownloadsDirUri 与 saveToPublicDownloads。AppSettings 是
+ * 单键整包 JSON，两次分开的读-改-写会竞态互覆盖（历史 bug：曾产生
+ * {save:false, uri:X} 脏状态，表现为「开关显示开但不生效」「同步误报无待同步」）。
  */
 export async function ensureDirUri(context: common.UIAbilityContext): Promise<string> {
   const existing: string = AppPreferences.getSettings().publicDownloadsDirUri;
@@ -68,11 +75,7 @@ export async function ensureDirUri(context: common.UIAbilityContext): Promise<st
     if (uris.length === 0) {
       return '';
     }
-    const uri: string = uris[0];
-    AppPreferences.updateSettings((s: AppSettings): void => {
-      s.publicDownloadsDirUri = uri;
-    });
-    return uri;
+    return uris[0];
   } catch (e) {
     console.error(`ensureDirUri failed: ${JSON.stringify(e)}`);
     return '';

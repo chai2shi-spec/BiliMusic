@@ -42,7 +42,7 @@ import { NavStackHolder } from '../service/NavStackHolder';
 import { LoginRouteParam } from '../service/NavRouteParams';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { copyText } from '../utils/ClipboardUtil';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 // 设置页签内容列上限与根顶栏（immersiveTitleBarNarrow）
@@ -50,6 +50,8 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
  * 设置入口行的图标底色（iOS 设置风格：每行固定异色，深浅色模式通用；
@@ -127,10 +129,26 @@ export struct SettingsPage {
    * 替换实例会让根栏绑定在注册前求值拿到未挂载的占位实例。
    */
 
+  /**
+   * 自绘顶栏渐变模糊层进度更新器 + 校准（下载页同款）：
+   * onDidScroll / onScrollStop 命令式驱动 opacity（不标 @State，滚动高频
+   * 回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater
+   * 内截断，边缘回弹负偏移归零 = 死区）。
+   */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (TabScrollerHolder.settings.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   aboutToAppear(): void {
     // 登录态：同步读缓存渲染首帧；已登录则顺带做一次懒校验（nav 拉最新昵称/头像，
     // Cookie 被服务端拒绝时**不再清凭据**，只标 loginStale）。fire-and-forget。
     this.refreshLoginUi();
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
+    // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
+    this.syncTopBlurProgress();
     setTimeout((): void => {
       if (isLoggedIn()) {
         refreshLoginUser();
@@ -164,17 +182,12 @@ export struct SettingsPage {
 
   /** 已登录时点击账户行：确认退出（本地凭据 + B 站服务端会话一并撤销） */
   private confirmLogout(): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '退出登录',
       message: '将清除本机保存的登录凭据，并撤销 B 站服务端会话。',
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '退出登录',
-        action: (): void => {
-          this.doLogout();
-        }
+      confirmText: '退出登录',
+      onConfirm: (): void => {
+        this.doLogout();
       }
     });
   }
@@ -667,6 +680,15 @@ export struct SettingsPage {
         // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
         // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
         .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+        // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
+        // onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
+        .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+          this.syncTopBlurProgress();
+        })
+        .onScrollStop((): void => {
+          // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
+          this.syncTopBlurProgress();
+        })
       }
       .width('100%')
       .height('100%')
@@ -678,6 +700,13 @@ export struct SettingsPage {
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
       // 顶栏由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），
       // 本页只负责把 listScroller 注册给根容器驱动滚动模糊。
+
+      // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar），进度由列表
+      // onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动（下载页同款）。
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
     }
     .width('100%')
     .height('100%')

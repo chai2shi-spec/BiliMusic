@@ -30,20 +30,20 @@ import {
   STORE_PICK_PLAYLIST_ADD,
   STORE_PL_BAR_ALL_SELECTED,
   STORE_PL_BAR_CAN_SELECT,
-  STORE_PL_BAR_SELECTED_COUNT,
   STORE_PL_BAR_SELECTING,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
-  STORE_THEME_ON
+  STORE_THEME_ON,
+  STORE_WINDOW_WIDTH_VP
 } from '../common/Constants';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showAppAlertDialog, showConfirm } from '../components/AppAlertDialog';
 import { CoverImage } from '../components/CoverImage';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
-  PairOf,
-  makePairs,
+  RowOf,
+  makeRows,
   TWO_COL_GAP_VP,
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
@@ -158,6 +158,15 @@ export struct PlaylistsPage {
   /** 合并后是否删除源歌单（默认开：合并即归一） */
   @State mergeDeleteSources: boolean = true;
   /**
+   * 合并时启用智能去重（默认开）：精确层（同 id）之上再按
+   * 「归一化标题 + 歌手一致 + 时长差 ≤ 5 秒或时长未知」抓同歌不同投稿。
+   * 关 = 仅同 id 精确去重（旧行为），给「就是想全保留」留退路。
+   */
+  @State mergeSmartDedup: boolean = true;
+  /** 智能去重开启口径的预览（与 mergeTotal / mergeDropped 的精确口径对照，开关即切） */
+  @State mergeTotalSmart: number = 0;
+  @State mergeDroppedSmart: number = 0;
+  /**
    * 歌单编辑弹窗（CustomContentDialog）：新建 / 重命名 / 合并各一个 controller。
    * aboutToAppear 里创建一次、绝不重新赋值（复用场景重新赋值会关不掉旧弹窗，
    * 见 AppAlertDialog.ets 头注释）。
@@ -201,13 +210,19 @@ export struct PlaylistsPage {
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
 
   /**
-   * 横屏宽屏（窗口 ≥600vp 的横屏）时歌单行两列显示。
-   * ⚠️ 两列分支**不注册 onMove**：长按拖动排序以 ListItem 为单位，配对后拖动
-   * 会以「一对」为单位错乱 —— 拖动排序是竖屏专属（有意取舍，同 PlaylistDetail
-   * 可排序歌单的门控口径）；横屏浏览 / 多选 / 点选加入不受影响。
+   * 多列行的 ForEach 键（配对时代 `${id}_${name}_${tracks.length}|...` 的
+   * N 列泛化）：空槽记 'x'，键含全部槽 → 列数变化 / 行内容变化都会重排行。
    */
-  private isTwoCol(): boolean {
-    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
+  private plRowKey(row: RowOf<Playlist>): string {
+    let key: string = '';
+    for (let i: number = 0; i < row.slots.length; i++) {
+      const slot: Playlist | null = row.slots[i];
+      if (i > 0) {
+        key += '|';
+      }
+      key += slot !== null ? `${slot.id}_${slot.name}_${slot.tracks.length}` : 'x';
+    }
+    return key;
   }
 
   /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
@@ -216,6 +231,23 @@ export struct PlaylistsPage {
   /** 大封面模式：歌单以双列网格卡渲染（PlaylistCard），交互契约与行内版一致 */
   private isGrid(): boolean {
     return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
+
+  /**
+   * 窗口宽（vp，Index 常驻回写）：平板横屏按它反推网格/长条列数。
+   * ForEach 路径无需 @Watch——@StorageProp 变化直接触发 build 重跑，
+   * makeRows 现场按新列数重排，键含 id/名/曲目数天然区分行列组合。
+   */
+  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
+
+  /** 长条行列数：非两列态 1；两列激活 clamp(floor((w-32)/400), 2, 4) */
+  private listCols(): number {
+    return TwoColumnLayout.listColumns(this.currentBreakpoint, this.isLandscape, this.windowWidthVp);
+  }
+
+  /** 网格卡列数：非两列态 2；两列激活 clamp(floor((w-48)/240), 2, 6) */
+  private gridCols(): number {
+    return TwoColumnLayout.gridColumns(this.currentBreakpoint, this.isLandscape, this.windowWidthVp);
   }
   /**
    * 列表滚动控制器：List 直接挂 TabScrollerHolder.playlists（唯一真源，身份恒定，
@@ -247,13 +279,14 @@ export struct PlaylistsPage {
     this.editorCreateController = this.buildEditorDialog('新建歌单');
     this.editorRenameController = this.buildEditorDialog('重命名歌单');
     this.editorMergeController = this.buildEditorDialog('合并歌单');
-    // 首次 refresh 是冷启动同步读（getSync + JSON.parse ×2：歌单 + 最近播放），
-    // 延后一拍执行别卡首帧（做法同 SettingsPage 的缓存统计）。跑完缓存即热，
-    // onLibraryChanged 的后续 refresh 全走内存快照，无 IO；
+    // 首次 refresh 触发歌单冷启动读：走预热（分片加载、每 N 片让出主线程一拍，
+    // 防 THREAD_BLOCK_6S —— 主线程停摆时 3/6S 堆栈落在 libtimer.z.so 即此因），
+    // 完成后本处 then 与 STORE_LIBRARY_REV bump 双路触发 refresh（幂等，重灌只读内存快照）。
+    // 跑完缓存即热，后续 refresh 全走内存快照，无 IO；
     // 首帧歌单列表短暂空态可接受，换的是首屏零磁盘读。
-    setTimeout((): void => {
+    LibraryStore.prewarmPlaylists().then((): void => {
       this.refresh();
-    }, 0);
+    });
   }
 
   onLibraryChanged(): void {
@@ -386,13 +419,12 @@ export struct PlaylistsPage {
 
   /**
    * 顶栏派生镜像唯一写入口：把栏内组件渲染所需的派生状态
-   * （可否多选 / 选中数 / 全选态）推到 AppStorage，PlTitleActions / PlSelectToolbar
+   * （可否多选 / 全选态）推到 AppStorage，PlTitleActions
    * （components/PlaylistsTabBar.ets）@StorageProp 订阅。
    * 触发点：refresh（歌单变化）+ selectedIds @Watch。
    */
   private syncBarState(): void {
     AppStorage.setOrCreate(STORE_PL_BAR_CAN_SELECT, this.playlists.length >= 2);
-    AppStorage.setOrCreate(STORE_PL_BAR_SELECTED_COUNT, this.selectedIds.length);
     AppStorage.setOrCreate(STORE_PL_BAR_ALL_SELECTED, this.allSelected());
   }
 
@@ -476,10 +508,13 @@ export struct PlaylistsPage {
     this.editingId = '';
     this.editorMode = EDITOR_MODE_CREATE;
     this.mergeDeleteSources = true;
+    this.mergeSmartDedup = true;
     this.mergeSourceCount = 0;
     this.mergeRawTotal = 0;
     this.mergeTotal = 0;
     this.mergeDropped = 0;
+    this.mergeTotalSmart = 0;
+    this.mergeDroppedSmart = 0;
     this.mergeSubscriptions = 0;
   }
 
@@ -538,20 +573,12 @@ export struct PlaylistsPage {
     if (favMirrorCount > 0) {
       parts.push(`其中 ${favMirrorCount} 个是收藏夹镜像，仅删除本地，B 站收藏夹保留（下次同步会重新拉回）。`);
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '删除选中歌单',
       message: parts.join('\n'),
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-          // 取消：不做任何事
-        }
-      },
-      secondaryButton: {
-        value: '删除',
-        action: (): void => {
-          this.deleteSelectedPlaylists();
-        }
+      confirmText: '删除',
+      onConfirm: (): void => {
+        this.deleteSelectedPlaylists();
       }
     });
   }
@@ -622,31 +649,45 @@ export struct PlaylistsPage {
     return joined.length > MAX_MERGE_NAME_CHARS ? `${joined.slice(0, MAX_MERGE_NAME_CHARS)}…` : joined;
   }
 
-  /** 打开合并弹窗：先算预览（条数 / 去重 / 超限 / 订阅数），再预填名字 */
+  /** 打开合并弹窗：先算两种口径的预览（精确 / 智能，开关即切、无需重算），再预填名字 */
   private openMergeEditor(): void {
     if (this.selectedIds.length < 2) {
       this.toast('请至少选择两个歌单', 1500);
       return;
     }
-    const preview = LibraryStore.previewPlaylistMerge(this.selectedIds);
-    if (preview.sources < 2) {
+    const plainPreview = LibraryStore.previewPlaylistMerge(this.selectedIds, false);
+    if (plainPreview.sources < 2) {
       this.toast('选中的歌单已不足两个', 1500);
       return;
     }
-    this.mergeSourceCount = preview.sources;
-    this.mergeRawTotal = preview.rawTotal;
-    this.mergeTotal = preview.total;
-    this.mergeDropped = preview.dropped;
-    this.mergeSubscriptions = preview.subscriptionCount;
+    const smartPreview = LibraryStore.previewPlaylistMerge(this.selectedIds, true);
+    this.mergeSourceCount = plainPreview.sources;
+    this.mergeRawTotal = plainPreview.rawTotal;
+    this.mergeTotal = plainPreview.total;
+    this.mergeDropped = plainPreview.dropped;
+    this.mergeTotalSmart = smartPreview.total;
+    this.mergeDroppedSmart = smartPreview.dropped;
+    this.mergeSubscriptions = plainPreview.subscriptionCount;
     this.mergeDeleteSources = true;
+    this.mergeSmartDedup = true;
     this.editingId = '';
     this.editorName = this.defaultMergeName();
     this.editorMode = EDITOR_MODE_MERGE;
     this.editorMergeController?.open();
   }
 
+  /** 合并弹窗「去重后 N 首」按智能去重开关取对应口径（弹窗文案响应式刷新的数据源） */
+  private mergePreviewTotal(): number {
+    return this.mergeSmartDedup ? this.mergeTotalSmart : this.mergeTotal;
+  }
+
+  /** 合并弹窗超限丢弃条数：同 mergePreviewTotal 按开关取口径 */
+  private mergePreviewDropped(): number {
+    return this.mergeSmartDedup ? this.mergeDroppedSmart : this.mergeDropped;
+  }
+
   private submitMerge(name: string): void {
-    const result = LibraryStore.mergePlaylists(this.selectedIds, name, this.mergeDeleteSources);
+    const result = LibraryStore.mergePlaylists(this.selectedIds, name, this.mergeDeleteSources, this.mergeSmartDedup);
     if (result === null) {
       this.toast('合并失败：没有足够的有效歌单', 1800);
       this.dismissEditor();
@@ -737,19 +778,12 @@ export struct PlaylistsPage {
       this.toast('歌单是空的', 1500);
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '下载整个歌单',
       message: `将把「${p.name}」的 ${p.tracks.length} 首加入下载队列。\n已下载的会自动跳过。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '开始下载',
-        action: (): void => {
-          this.enqueuePlaylist(p);
-        }
+      confirmText: '开始下载',
+      onConfirm: (): void => {
+        this.enqueuePlaylist(p);
       }
     });
   }
@@ -874,42 +908,26 @@ export struct PlaylistsPage {
     //（store 挂钩会顺带清空该夹的待推送意图）。
     if (LibraryStore.isFavMirror(p)) {
       const twoway: boolean = isFolderTwoway(LibraryStore.favMediaIdOf(p));
-      showAppAlertDialog(this.getUIContext(), {
+      showConfirm(this.getUIContext(), {
         title: '删除收藏夹歌单',
         message: `「${p.name}」是 B 站收藏夹的镜像。删除不会影响 B 站收藏夹，下次收藏夹同步会把它重新拉回来。${twoway ? '该收藏夹开启了双向同步：删除后尚未写回 B 站的本地改动将不再同步。' : ''}`,
-        primaryButton: {
-          value: '取消',
-          action: (): void => {
-            // 取消：不做任何事
-          }
-        },
-        secondaryButton: {
-          value: '删除',
-          action: (): void => {
-            LibraryStore.deletePlaylist(p.id);
-            this.refresh();
-            this.toast('已删除本地歌单，B 站收藏夹保留（下次同步会重新拉回）', 2600);
-          }
+        confirmText: '删除',
+        onConfirm: (): void => {
+          LibraryStore.deletePlaylist(p.id);
+          this.refresh();
+          this.toast('已删除本地歌单，B 站收藏夹保留（下次同步会重新拉回）', 2600);
         }
       });
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '删除歌单',
       message: `确定删除「${p.name}」？删除后不可恢复。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-          // 取消：不做任何事
-        }
-      },
-      secondaryButton: {
-        value: '删除',
-        action: (): void => {
-          LibraryStore.deletePlaylist(p.id);
-          this.refresh();
-          this.toast('已删除歌单', 1500);
-        }
+      confirmText: '删除',
+      onConfirm: (): void => {
+        LibraryStore.deletePlaylist(p.id);
+        this.refresh();
+        this.toast('已删除歌单', 1500);
       }
     });
   }
@@ -931,13 +949,13 @@ export struct PlaylistsPage {
     Column() {
       // 合并模式：先摆清楚「合并了什么、会丢什么」，再让用户决定名字与是否删源
       if (this.editorMode === EDITOR_MODE_MERGE) {
-        Text(`已选 ${this.mergeSourceCount} 个歌单 · ${this.mergeRawTotal} 首 → 去重后 ${this.mergeTotal} 首`)
+        Text(`已选 ${this.mergeSourceCount} 个歌单 · ${this.mergeRawTotal} 首 → 去重后 ${this.mergePreviewTotal()} 首`)
           .fontSize(13)
           .fontColor($r('app.color.text_secondary'))
           .width('100%')
           .margin({ bottom: 6 })
-        if (this.mergeDropped > 0) {
-          Text(`超出 ${PLAYLIST_MAX_ITEMS} 首上限，只保留前 ${PLAYLIST_MAX_ITEMS} 首（丢弃 ${this.mergeDropped} 首）`)
+        if (this.mergePreviewDropped() > 0) {
+          Text(`超出 ${PLAYLIST_MAX_ITEMS} 首上限，只保留前 ${PLAYLIST_MAX_ITEMS} 首（丢弃 ${this.mergePreviewDropped()} 首）`)
             .fontSize(12)
             .fontColor($r('app.color.state_error'))
             .width('100%')
@@ -969,6 +987,31 @@ export struct PlaylistsPage {
             .selectedColor(this.themePrimary)
             .onChange((v: boolean): void => {
               this.mergeDeleteSources = v;
+            })
+        }
+        .width('100%')
+        .margin({ top: 12 })
+        .alignItems(VerticalAlign.Center)
+
+        // 智能去重开关：副文本讲清判重规则与保留策略，开关切换时
+        // 上方「去重后 N 首」/超限提示经 mergePreviewTotal()/mergePreviewDropped() 响应式刷新
+        Row() {
+          Column() {
+            Text('智能去重')
+              .fontSize(15)
+              .fontColor($r('app.color.text_primary'))
+            Text('同名同歌手视为重复（时长差≤5秒或未知），保留靠前一首')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .margin({ top: 2 })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.mergeSmartDedup })
+            .selectedColor(this.themePrimary)
+            .onChange((v: boolean): void => {
+              this.mergeSmartDedup = v;
             })
         }
         .width('100%')
@@ -1319,80 +1362,73 @@ export struct PlaylistsPage {
               // 首个「占位+点选提示」条目保持整行（在下方分支之外）。
               if (this.isGrid()) {
                 ForEach(
-                  makePairs<Playlist>(this.playlists),
-                  (pair: PairOf<Playlist>): void => {
+                  makeRows<Playlist>(this.playlists, this.gridCols()),
+                  (row: RowOf<Playlist>): void => {
                     ListItem() {
                       Row() {
-                        Column() {
-                          this.PlaylistCard(pair.first)
-                        }
-                        .layoutWeight(1)
-                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
-                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
-                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
-                        // 间隔条，末卡与满行卡等宽。
-                        Blank().width(TWO_COL_GAP_VP)
-                        if (pair.second !== null) {
-                          Column() {
-                            this.PlaylistCard(pair.second)
+                        ForEach(row.slots, (slot: Playlist | null, slotIndex: number): void => {
+                          if (slotIndex > 0) {
+                            // 固定宽间隔条（非 weighted）：各卡均 layoutWeight(1) 且零
+                            // margin → 各列封面严格等宽（layoutWeight 份额含 margin，
+                            // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+                            // 间隔条，末卡与满行卡等宽。
+                            Blank().width(TWO_COL_GAP_VP)
                           }
-                          .layoutWeight(1)
-                        } else {
-                          // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
-                          Blank().layoutWeight(1)
-                        }
+                          if (slot !== null) {
+                            Column() {
+                              this.PlaylistCard(slot)
+                            }
+                            .layoutWeight(1)
+                          } else {
+                            // 尾部空槽：留空占位，已放卡列宽与满行一致
+                            Blank().layoutWeight(1)
+                          }
+                        }, (slot: Playlist | null, slotIndex: number): string =>
+                          `${slotIndex}_${slot !== null ? slot.id : 'x'}`)
                       }
                       .width('100%')
-                       // 网格行页边距：两边留白 + 封面整体
-                      // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+                        // 网格行页边距：两边留白 + 封面整体
+                       // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
                       .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
-                       // Top 对齐：卡高随歌单名行数浮动，
-                      // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
-                      // Top 让左右封面严格同高起步。
+                        // Top 对齐：卡高随歌单名行数浮动，
+                       // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
+                       // Top 让同行封面严格同高起步。
                       .alignItems(VerticalAlign.Top)
                     }
                   },
-                  (pair: PairOf<Playlist>): string =>
-                    `${pair.first.id}_${pair.first.name}_${pair.first.tracks.length}` +
-                    `|${pair.second !== null
-                      ? `${pair.second.id}_${pair.second.name}_${pair.second.tracks.length}`
-                      : 'x'}`
+                  (row: RowOf<Playlist>): string => this.plRowKey(row)
                 )
-              } else if (this.isTwoCol()) {
-               // 横屏宽屏：歌单行配对两列（PlaylistRow 同一份
-              // 行内容，左右槽各渲染一次）；拖动排序（onMove）只挂在单列分支 ——
-              // 配对后拖动会以「一对」为单位错乱，有意做成竖屏专属（与
-              // PlaylistDetail 可排序歌单同口径）。首个「占位+点选提示」条目保持整行。
-                ForEach(
-                  makePairs<Playlist>(this.playlists),
-                  (pair: PairOf<Playlist>): void => {
-                    ListItem() {
-                      Row() {
-                        Column() {
-                          this.PlaylistRow(pair.first)
-                        }
-                        .layoutWeight(1)
-                        if (pair.second !== null) {
-                          Column() {
-                            this.PlaylistRow(pair.second)
-                          }
-                          .layoutWeight(1)
-                          .margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                    }
-                  },
-                  (pair: PairOf<Playlist>): string =>
-                    `${pair.first.id}_${pair.first.name}_${pair.first.tracks.length}` +
-                    `|${pair.second !== null
-                      ? `${pair.second.id}_${pair.second.name}_${pair.second.tracks.length}`
-                      : 'x'}`
-                )
-              } else {
+              } else if (this.listCols() > 1) {
+                // 多列长条行（横屏宽屏/平板）：歌单行按列数排布
+                // （PlaylistRow 同一份行内容，各槽各渲染一次）；拖动排序（onMove）
+                // 只挂在单列分支 —— 多列后拖动会以「一行」为单位错乱，有意做成
+                // 竖屏专属（与 PlaylistDetail 可排序歌单同口径）。
+                // 首个「占位+点选提示」条目保持整行。
+                 ForEach(
+                   makeRows<Playlist>(this.playlists, this.listCols()),
+                   (row: RowOf<Playlist>): void => {
+                     ListItem() {
+                       Row() {
+                         ForEach(row.slots, (slot: Playlist | null, slotIndex: number): void => {
+                           if (slot !== null) {
+                             Column() {
+                               this.PlaylistRow(slot)
+                             }
+                             .layoutWeight(1)
+                             .margin({ left: slotIndex > 0 ? TWO_COL_GAP_VP : 0 })
+                           } else {
+                             // 尾部空槽：留空占位，已放列行宽与满行一致
+                             Blank().layoutWeight(1)
+                           }
+                         }, (slot: Playlist | null, slotIndex: number): string =>
+                           `${slotIndex}_${slot !== null ? slot.id : 'x'}`)
+                       }
+                       .width('100%')
+                     }
+                   },
+                   (row: RowOf<Playlist>): string => this.plRowKey(row)
+                 )
+               } else {
                 ForEach(
                   this.playlists,
                   (p: Playlist): void => {
@@ -1437,8 +1473,9 @@ export struct PlaylistsPage {
       // 负责让出标题栏 barTotalHeight），否则条目在栏底被裁掉、永远滑不进模糊板下方。
       // 空态区自己补 topBarHeight。
       // 大屏适配：内容列收窄居中（根 Stack 默认居中对齐，挂上限即可）；
-      // 横屏宽屏两列时上限放宽到 840（CONTENT_MAX_WIDTH_TWOCOL），竖屏维持原值
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 两列激活改铺满口径（fillContentMaxWidth）——平板横屏 min(窗口宽,1660)
+      // 铺满不留白，列数由 listCols/gridCols 按同窗口宽反推保持密度；单列维持原值。
+      .constraintSize({ maxWidth: TwoColumnLayout.fillContentMaxWidth(this.currentBreakpoint, this.isLandscape, this.windowWidthVp) })
 
        // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar），
       // 进度由列表 onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动。

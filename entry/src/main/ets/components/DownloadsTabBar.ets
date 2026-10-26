@@ -1,21 +1,21 @@
 /**
  * 下载页顶栏内容。
  *
- * 标题行按钮 + 多选工具条都由根 HdsNavigation titleBar 的 stackBuilder 承载
+ * 标题行按钮由根 HdsNavigation titleBar 的 stackBuilder 承载
  * （Index.immersiveTitleBarContent 下载页分支），对齐歌单页节奏：
  *
  * - 标题行（行 1，Index.tabTitleRow 下载页分支）：
- *   · DlSelectToggle：「选择 / 完成」；
+ *   · DlSelectToggle：常规态「选择」；多选态变身动作组
+ *     （完成 / 全选 / 重试 / 加入歌单 / 删除），「下载」标题保留，
+ *     动作组靠标题行右侧，PlaylistDetail 多选按钮同款胶囊样式；
  *   · DlQueueActions：常规态队列控制「全部开始 / 全部暂停」并入标题行
- *     （启停状态由按钮可用态表达）；
- * - 多选工具条（行 2，DlControlBar）：只在多选态渲染（Index 侧 dlSelecting
- *   门控，position 溢出渲染到标题栏下方），全选 / 重试选中 / 删除选中。
+ *     （启停状态由按钮可用态表达），多选态让位。
  *
  * - 状态：不读页面 @State（跨组件不可见），统一 @StorageProp 订阅
  *   DownloadsPage 推到 AppStorage 的镜像键（STORE_DL_BAR_*，唯一写入口
  *   DownloadsPage.syncBarState / refreshQueueFlags）。
  * - 动作：经 TabScrollerHolder 静态回调转交页面私有方法执行（页面注册）。
- * - 视觉：13fp 字号、32 按钮高、按压态、禁用色，与歌单页同款语言。
+ * - 视觉：13fp 字号、32 按钮高、按压态，与歌单页同款语言。
  */
 
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
@@ -24,40 +24,112 @@ import { ButtonMaterialModifier, makeButtonMaterialModifier } from '../utils/Hea
 import {
   STORE_DL_BAR_SELECTING,
   STORE_DL_BAR_ALL_SELECTED,
-  STORE_DL_BAR_CAN_RETRY,
-  STORE_DL_BAR_SELECTED_COUNT,
   STORE_DL_BAR_QUEUE_ACTIVE,
   STORE_DL_BAR_QUEUE_PAUSED,
   STORE_DOWNLOAD_PAUSED,
   STORE_THEME_PRIMARY,
-  STORE_THEME_SURFACE,
-  STORE_THEME_DEEP
+  STORE_THEME_SURFACE
 } from '../common/Constants';
 
+/** 多选动作组淡入淡出时长：与 PlaylistDetail 的 PD_SELECT_FADE_MS 一致 */
+const DL_SELECT_FADE_MS: number = 250;
+
 /**
- * 标题行右侧「选择 / 完成」按钮（Index.tabTitleRow 下载页分支槽入）。
+ * 标题行右侧按钮组（Index.tabTitleRow 下载页分支槽入）。
+ * 常规态「选择」；多选态变身动作组（完成 / 全选 / 重试 / 加入歌单 / 删除），
+ * 「下载」标题保留、动作组靠标题行右侧（歌单页同款节奏）。
  * 有任务才显示，可见性由 Index 侧门控（activeTab + dlBarHasTasks 镜像）。
  */
 @Component
 export struct DlSelectToggle {
   @StorageProp(STORE_DL_BAR_SELECTING) selecting: boolean = false;
+  /** 全选态：动作组「全选 / 取消全选」文案切换（页面 syncBarState 推送） */
+  @StorageProp(STORE_DL_BAR_ALL_SELECTED) allSelected: boolean = false;
   /** 主题色运行时值：按钮浅底 / 粉字跟随切色刷新 */
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
 
   build() {
-    Button(this.selecting ? '完成' : '选择', { type: ButtonType.Normal })
-      .fontSize(13)
-      .height(32)
-      .borderRadius(BUTTON_RADIUS_VP)
-      // 标题行按钮统一「浅粉底 + 粉字」
-      .backgroundColor(this.themeSurface)
-      .fontColor(this.themePrimary)
-      .attributeModifier(this.buttonMaterial)
-      .onClick((): void => {
-        TabScrollerHolder.dlToggleSelecting();
-      })
+    if (this.selecting) {
+      // 多选动作组：退出键在前、动作组随后，破坏性的删除放最后
+      // （PlaylistDetail 多选层同款顺序）。动作不带计数、不置灰 ——
+      // 空选区 / 无失败项由页面 toast 兜底（「还没有选中条目」
+      // 「没有失败的任务」，见 DownloadsPage 各动作方法）。
+      // 标签用短式（重试 / 删除）：391vp 级窄屏里标题 + 五颗按钮
+      // 放不下「重试选中」「删除选中」全称。
+      Row({ space: 8 }) {
+        Button('完成', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            TabScrollerHolder.dlToggleSelecting();
+          })
+        Button(this.allSelected ? '取消全选' : '全选', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            TabScrollerHolder.dlToggleSelectAll();
+          })
+        Button('重试', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            TabScrollerHolder.dlRetrySelected();
+          })
+        Button('加入歌单', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            TabScrollerHolder.dlAddSelectedToPlaylist();
+          })
+        Button('删除', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor(this.themeSurface)
+          .fontColor(this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            TabScrollerHolder.dlRemoveSelected();
+          })
+      }
+      .transition(TransitionEffect.OPACITY
+        .animation({ duration: DL_SELECT_FADE_MS, curve: Curve.EaseInOut }))
+    } else {
+      Button('选择', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        // 标题行按钮统一「浅粉底 + 粉字」
+        .backgroundColor(this.themeSurface)
+        .fontColor(this.themePrimary)
+        .attributeModifier(this.buttonMaterial)
+        .onClick((): void => {
+          TabScrollerHolder.dlToggleSelecting();
+        })
+    }
   }
 }
 
@@ -113,82 +185,5 @@ export struct DlQueueActions {
           }
         })
     }
-  }
-}
-
-/**
- * 多选工具条（根栏 stackBuilder 行 2：Index 侧 position 溢出渲染，
- * 只在多选态出现；常规态队列控制在标题行 DlQueueActions）。
- * 全选 / 重试选中 / 删除选中。纯内容件：磨砂由根栏 HDS 统一负责（仅覆盖
- * 标题栏区，本行无背板）。
- */
-@Component
-export struct DlControlBar {
-  @StorageProp(STORE_DL_BAR_ALL_SELECTED) allSelected: boolean = false;
-  @StorageProp(STORE_DL_BAR_CAN_RETRY) canRetry: boolean = false;
-  @StorageProp(STORE_DL_BAR_SELECTED_COUNT) selectedCount: number = 0;
-  /** 主题色深字色：工具条动作文字跟随切色刷新 */
-  @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
-
-  build() {
-    Row() {
-      Text(this.allSelected ? '取消全选' : '全选')
-        .fontSize(13)
-        .fontColor(this.themeDeep)
-        .height(44)
-        .padding({ left: 16, right: 12 })
-        .borderRadius(8)
-        .stateStyles({
-          pressed: { .backgroundColor($r('app.color.press_overlay')) },
-          normal: { .backgroundColor(Color.Transparent) }
-        })
-        .onClick((): void => {
-          TabScrollerHolder.dlToggleSelectAll();
-        })
-      Blank()
-      // 批量重试：只对选中的**失败**项生效（非失败项会被 retryTasks 跳过）
-      Text('重试选中')
-        .fontSize(13)
-        .fontColor(this.canRetry ? this.themeDeep : $r('app.color.text_disabled'))
-        .height(44)
-        .padding({ left: 12, right: 12 })
-        .borderRadius(8)
-        .stateStyles({
-          pressed: { .backgroundColor($r('app.color.press_overlay')) },
-          normal: { .backgroundColor(Color.Transparent) }
-        })
-        .onClick((): void => {
-          TabScrollerHolder.dlRetrySelected();
-        })
-      // 加入歌单（选中）：空选区置灰；有选中时转 Track 开「加入歌单」弹层选目标歌单
-      Text('加入歌单')
-        .fontSize(13)
-        .fontColor(this.selectedCount > 0 ? this.themeDeep : $r('app.color.text_disabled'))
-        .height(44)
-        .padding({ left: 12, right: 12 })
-        .borderRadius(8)
-        .stateStyles({
-          pressed: { .backgroundColor($r('app.color.press_overlay')) },
-          normal: { .backgroundColor(Color.Transparent) }
-        })
-        .onClick((): void => {
-          TabScrollerHolder.dlAddSelectedToPlaylist();
-        })
-      Text(this.selectedCount > 0 ? `删除选中(${this.selectedCount})` : '删除选中')
-        .fontSize(13)
-        .fontColor(this.selectedCount > 0 ? $r('app.color.state_error') : $r('app.color.text_disabled'))
-        .height(44)
-        .padding({ left: 12, right: 16 })
-        .borderRadius(8)
-        .stateStyles({
-          pressed: { .backgroundColor($r('app.color.press_overlay')) },
-          normal: { .backgroundColor(Color.Transparent) }
-        })
-        .onClick((): void => {
-          TabScrollerHolder.dlRemoveSelected();
-        })
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
   }
 }

@@ -34,7 +34,7 @@
 import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { LrcEntry } from './LrcEntry';
 import { angleToRadian } from './LrcUtils';
-import { Rectangle, LyricTopPosition, LyricScrollEffect } from './LyricConst';
+import { LyricTopPosition, LyricScrollEffect } from './LyricConst';
 import { STORE_PLAYBACK_SPEED, STORE_PLAYBACK_SPEED_ENABLED } from '../common/Constants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../common/constants/InteractionConstants';
 
@@ -137,7 +137,6 @@ export struct LrcView {
   private context: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private mCurrentLine: number = NONE_LINE;
   private readonly TEXT_ADD_SIZE: number = 2;
-  private lyricRectangle: Rectangle = new Rectangle(0, 0, 0, 0);
   /** 首行歌词的初始 Y（Middle 时取内容区上部约 1/2.8 处） */
   private initFirstLineY: number = 0;
   /** 滚动补间（aboutToAppear 里经 UIContext 创建） */
@@ -951,9 +950,6 @@ export struct LrcView {
       this.drawLyricLine(EMPTY_LYRIC, true, -1);
     }
 
-    this.updateLyricArea(this.paddingLeft, this.paddingTop, this.viewWidth - this.paddingRight,
-      this.viewHeight - this.paddingBottom);
-
     if (this.mLrcEntryList && this.mLrcEntryList.length > 0) {
       // 上下渐隐遮罩：先按歌词形状填充，再用透明渐变以 source-in 方式裁剪
       this.context.globalCompositeOperation = 'source-in';
@@ -966,10 +962,6 @@ export struct LrcView {
       this.context.fillStyle = grad;
       this.context.fillRect(0, 0, this.viewWidth, this.viewHeight);
     }
-  }
-
-  private updateLyricArea(left: number, top: number, right: number, bottom: number): void {
-    this.lyricRectangle = new Rectangle(left, top, right, bottom);
   }
 
   hasLrc(): boolean {

@@ -9,45 +9,22 @@
  *     老版本升级**零迁移**（单向即现状行为，语义安全）；
  *   · 双向是显式开启的少数派，集合通常很小。
  *
- * 存储：单 key（PREF_FAV_TWOWAY_IDS，`number[]` JSON），体量极小，无需分片。
+ * 存取委托 PrefStringSetStore（成员=真极性）；
+ * 存储：单 key（PREF_FAV_TWOWAY_IDS，`number[]` JSON）。
  */
 
-import { AppPreferences } from '../preferences/AppPreferences';
 import { PREF_FAV_TWOWAY_IDS } from '../common/Constants';
+import { PrefStringSetStore } from './PrefStringSetStore';
 
-/** 读「双向」集合原始数组（坏数据 / 老版本缺 key 容错为空数组） */
-function loadTwowayIds(): number[] {
-  const stored: number[] | null = AppPreferences.getObject<number[]>(PREF_FAV_TWOWAY_IDS);
-  if (!stored || !Array.isArray(stored)) {
-    return [];
-  }
-  const out: number[] = [];
-  for (let i = 0; i < stored.length; i++) {
-    const v: number = stored[i];
-    if (typeof v === 'number' && v > 0) {
-      out.push(v);
-    }
-  }
-  return out;
-}
-
-/** 整体覆盖写入（fire-and-forget，与 FavSelectionStore 落盘风格一致） */
-function saveTwowayIds(ids: number[]): void {
-  AppPreferences.setObject<number[]>(PREF_FAV_TWOWAY_IDS, ids)
-    .catch((e: Error): void => {
-      console.error(`saveTwowayIds failed: ${e.message}`);
-    });
-}
+/** 共享存取器：集合成员 ⇔「双向」为真（正向存储） */
+const store: PrefStringSetStore = new PrefStringSetStore(PREF_FAV_TWOWAY_IDS, true);
 
 /**
  * 该收藏夹是否开启双向同步（默认单向：未记录 = 单向）。
  * 非法 id（<=0）按单向处理，绝不让坏数据触发写回。
  */
 export function isFolderTwoway(mediaId: number): boolean {
-  if (!(mediaId > 0)) {
-    return false;
-  }
-  return loadTwowayIds().indexOf(mediaId) >= 0;
+  return store.is(mediaId);
 }
 
 /**
@@ -56,25 +33,5 @@ export function isFolderTwoway(mediaId: number): boolean {
  * 幂等：状态没变化时不写盘。
  */
 export function setFolderTwoway(mediaId: number, twoway: boolean): void {
-  if (!(mediaId > 0)) {
-    return;
-  }
-  const cur: number[] = loadTwowayIds();
-  const idx: number = cur.indexOf(mediaId);
-  if (twoway) {
-    if (idx < 0) {
-      cur.push(mediaId);
-      saveTwowayIds(cur);
-    }
-    return;
-  }
-  if (idx >= 0) {
-    cur.splice(idx, 1);
-    saveTwowayIds(cur);
-  }
-}
-
-/** 双向集合整体读出（一轮只读一次，避免逐夹反复读盘） */
-export function twowayFolderIds(): Set<number> {
-  return new Set<number>(loadTwowayIds());
+  store.set(mediaId, twoway);
 }

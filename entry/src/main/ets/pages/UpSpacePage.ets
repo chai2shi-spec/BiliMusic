@@ -25,7 +25,7 @@
  * 缓存策略：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
  * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有显式动作才联网：
  *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料；
- *  · 头部「订阅投稿」（仅未订阅时）：取投稿建歌单，成功后本页列表与缓存一并换新。
+ *  · 头部「订阅」（仅未订阅时）：取投稿建歌单，成功后本页列表与缓存一并换新。
  * 本页不提供「拉取新投稿」：订阅歌单的更新入口在歌单详情页
  * （PlaylistDetail 的「拉取新投稿」按钮）。
  * 无缓存（首次进入）仍走 loadCard + loadPage(1) 联网加载，成功后落盘。
@@ -47,7 +47,7 @@ import { DownloadManager, DownloadStartResult, WIFI_ONLY_BLOCKED } from '../serv
 import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { ArrayDataSource } from '../utils/ArrayDataSource';
-import { UpSpaceRouteParam, NavRouteParamReader } from '../service/NavRouteParams';
+import { UpSpaceRouteParam, SeasonSeriesDetailRouteParam, NavRouteParamReader } from '../service/NavRouteParams';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
 import { TrackCard } from '../components/TrackCard';
@@ -83,7 +83,7 @@ import {
   LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -124,12 +124,8 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-/** `mm:ss` / `hh:mm:ss` → 秒（SpaceVideo.length 是字符串；榜单是秒数，两种都认） */
-function spaceDuration(raw: string): number {
-  return parseDurationText(raw);
-}
-
-/** UP 投稿 → 曲目。upMid / upName 由列表所在 UP 决定（投稿条目自身不带 mid） */
+/** UP 投稿 → 曲目。upMid / upName 由列表所在 UP 决定（投稿条目自身不带 mid）。
+ * 时长走 parseDurationText（`mm:ss` / `hh:mm:ss` 两种都认，SpaceVideo.length 是字符串） */
 function mapSpaceVideo(v: SpaceVideo, upMid: string, upName: string): Track {
   return buildTrack({
     id: v.bvid,
@@ -139,7 +135,7 @@ function mapSpaceVideo(v: SpaceVideo, upMid: string, upName: string): Track {
     artist: v.author || upName,
     upMid: upMid,
     coverUrl: toHttpsUrl(v.pic),
-    duration: spaceDuration(v.length),
+    duration: parseDurationText(v.length),
     playCount: v.play ?? 0,
     pubdate: v.created || 0
   });
@@ -153,7 +149,31 @@ function formatFans(fans: number): string {
   if (fans >= 10000) {
     return `${(fans / 10000).toFixed(1)} 万`;
   }
-  return `${fans}`;
+    return `${fans}`;
+}
+
+/** 配对行 LazyForEach/ForEach 的 key：两列 id 拼接（缺右列用 'x' 占位） */
+function pairKeyOf(pair: PairOf<Track>): string {
+  return `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`;
+}
+
+/**
+ * 「合集 / 系列」页签卡片模型：合集（UpSeasonSummary）与系列（UpSeriesSummary）
+ * 字段同源但类型不同，页签列表渲染与详情页跳转共用本收口模型。
+ * kind：'season'（B 站合集 ugc_season）/ 'series'（UP 主手动系列）。
+ */
+class UpSpaceCollectionCard {
+  kind: string;
+  itemId: number;
+  title: string;
+  cover: string;
+
+  constructor(kind: string, itemId: number, title: string, cover: string) {
+    this.kind = kind;
+    this.itemId = itemId;
+    this.title = title;
+    this.cover = cover;
+  }
 }
 
 @Component
@@ -182,7 +202,6 @@ export struct UpSpacePage {
   @State failReason: string = '';
   /** 是否已订阅（进页面时按 upMid 查一次本地库） */
   @State subscribed: boolean = false;
-  @State subscribedCount: number = 0;
   /** 订阅 / 拉新进行中：按钮禁用并显示「处理中…」 */
   @State subBusy: boolean = false;
   /** 重试冷却中：按钮禁用（真正的门在 retryLocked 成员，状态只是给用户看的） */
@@ -207,6 +226,26 @@ export struct UpSpacePage {
   private searchToken: number = 0;
   private retryLocked: boolean = false;
   private retryTimer: number = -1;
+
+  // ===== 「投稿 / 合集 / 系列」页签（合集/系列 = web-space 聚合物接口） =====
+  /** 当前页签：'videos'（投稿，默认）/ 'seasons'（合集）/ 'series'（系列） */
+  @State spaceTab: string = 'videos';
+  /** 页签行可见（点封面切换）：true = 「投稿/合集/系列」替换「播放全部」操作行 */
+  @State tabRowVisible: boolean = false;
+  /** 合集卡片（getUpSeasonsSeriesList 一次请求双列表，首次切页签懒加载） */
+  @State seasonCards: UpSpaceCollectionCard[] = [];
+  /** 系列卡片（与合集同源一次请求） */
+  @State seriesCards: UpSpaceCollectionCard[] = [];
+  /** 合集/系列列表在途（页签骨架） */
+  @State seasonsLoading: boolean = false;
+  /** 合集/系列已成功加载（成功后不再重复请求；失败重试走 retrySeasonsSeries） */
+  @State seasonsLoaded: boolean = false;
+  @State seasonsFailed: boolean = false;
+  @State seasonsFailReason: string = '';
+  /** 合集/系列重试冷却中（与投稿重试同款 4s 冷却） */
+  @State seasonsRetryCooling: boolean = false;
+  private seasonsRetryLocked: boolean = false;
+  private seasonsRetryTimer: number = -1;
   /**
    * 最近一次取投稿走的是哪条路（`BilibiliApi.UP_VIA_*`）。
    *
@@ -282,6 +321,8 @@ export struct UpSpacePage {
   @State headerAreaHeight: number = 0;
   /** 投稿列表滚动控制器：bindToScrollable 绑给 HDS 标题栏驱动滚动模糊 */
   private listScroller: Scroller = new Scroller();
+  /** 合集/系列卡片列表滚动控制器：非投稿页签时接管滚动模糊联动与顶部渐变校准 */
+  private seasonsScroller: Scroller = new Scroller();
   /**
    * 列表数据源：LazyForEach 驱动源，与 displayTracks()
    * 三态保持同步 —— 三态 @State（tracks / filteredTracks / remoteResults /
@@ -321,8 +362,10 @@ export struct UpSpacePage {
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
   private syncTopBlurProgress(): void {
+    // 页签感知：投稿页签走投稿列表，合集/系列页签走卡片列表（未挂载时 offset 恒 0）
+    const sc: Scroller = this.spaceTab === 'videos' ? this.listScroller : this.seasonsScroller;
     this.topBlurUpdater.setProgress(
-      (this.listScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+      (sc.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
   }
 
   private player: MusicPlayer = MusicPlayer.getInstance();
@@ -360,24 +403,19 @@ export struct UpSpacePage {
     // 读取器内部 getParamByName 取回 + instanceof 判型（返回已判型对象或 null）。
     const routeParam: UpSpaceRouteParam | null =
       NavRouteParamReader.readUpSpaceParam(NavStackHolder.stack);
-    const mid: string = routeParam !== null ? routeParam.upMid : '';
-    this.upMid = mid;
-    this.upName = routeParam !== null ? routeParam.upName : '';
-    // 入口方若已拿到头像（搜 UP 主结果）就先垫上，loadCard 拿到真图后会覆盖
-    this.upFace = routeParam !== null ? routeParam.upFace : '';
-    if (mid.length === 0) {
+    if (routeParam === null || routeParam.upMid.length === 0) {
       this.loadFailed = true;
       this.failReason = '没有拿到 UP 主信息，请从列表里重新进入';
       return;
     }
+    this.upMid = routeParam.upMid;
+    this.upName = routeParam.upName;
+    // 入口方若已拿到头像（搜 UP 主结果）就先垫上，loadCard 拿到真图后会覆盖
+    this.upFace = routeParam.upFace;
     this.refreshSubscriptionState();
     // 缓存读取为异步（getUpSpaceCache 返回 Promise）：恢复逻辑在 async 方法里，
-    // aboutToAppear 不同步读文件，页面挂载零阻塞。
-    this.restoreFromCache().catch((): void => {
-      // 读缓存异常按无缓存兜底：直接联网拉取
-      this.loadCard();
-      this.loadPage(1);
-    });
+    // aboutToAppear 不同步读文件，页面挂载零阻塞；读缓存异常也在其内部按无缓存兜底。
+    this.restoreFromCache();
   }
 
   /**
@@ -387,7 +425,13 @@ export struct UpSpacePage {
    * readText 在异步任务里执行，读完再决定恢复 / 联网。
    */
   private async restoreFromCache(): Promise<void> {
-    const cached: UpSpaceCacheEntry | null = await getUpSpaceCache(this.upMid);
+    let cached: UpSpaceCacheEntry | null = null;
+    try {
+      cached = await getUpSpaceCache(this.upMid);
+    } catch (e) {
+      // 读缓存异常按无缓存兜底：直接联网拉取
+      cached = null;
+    }
     if (cached !== null) {
       if (cached.upName.length > 0) {
         this.upName = cached.upName;
@@ -417,13 +461,16 @@ export struct UpSpacePage {
       clearTimeout(this.retryTimer);
       this.retryTimer = -1;
     }
+    if (this.seasonsRetryTimer !== -1) {
+      clearTimeout(this.seasonsRetryTimer);
+      this.seasonsRetryTimer = -1;
+    }
   }
 
-  /** 本地是否已有该 UP 的订阅歌单（决定头部是否继续显示「订阅投稿」按钮：已订阅则隐藏） */
+  /** 本地是否已有该 UP 的订阅歌单（决定头部是否继续显示「订阅」按钮：已订阅则隐藏） */
   private refreshSubscriptionState(): void {
     const existing = LibraryStore.getPlaylistByUpMid(this.upMid);
     this.subscribed = existing !== null;
-    this.subscribedCount = existing ? existing.tracks.length : 0;
   }
 
   // ===== 数据加载 =====
@@ -580,10 +627,7 @@ export struct UpSpacePage {
         this.hasMore = false;
         return;
       }
-      const mapped: Track[] = [];
-      for (let i = 0; i < vlist.length; i++) {
-        mapped.push(mapSpaceVideo(vlist[i], this.upMid, this.upName));
-      }
+      const mapped: Track[] = this.mapAll(vlist);
       // 翻页边界漂移兜底：拉页期间 UP 发新稿会把后续页整体前移，页 N 尾条可能与
       // 页 N+1 首条相同 —— 追加前按 id 去重，已有条目保留原位置，不重复追加。
       const seen: Set<string> = new Set(this.tracks.map((t: Track): string => t.id));
@@ -635,10 +679,10 @@ export struct UpSpacePage {
    * 从中抠出 code 与服务端 message；HTTP 层异常（`HTTP 412 for …`）则直接用原文。
    * 分不清时退回通用文案，**不要**把 `[object Object]` 之类甩给用户。
    */
-  private describeError(e: Error): string {
+  private describeError(e: Error, fallback: string = '投稿加载失败'): string {
     const raw: string = e && e.message ? e.message : '';
     if (raw.length === 0) {
-      return '投稿加载失败';
+      return fallback;
     }
     const matched: RegExpMatchArray | null = raw.match(/\[(-?\d+)\]\s*([^(\/]*)/);
     if (matched) {
@@ -713,6 +757,107 @@ export struct UpSpacePage {
         this.loading = false;
         this.refreshing = false;
       });
+  }
+
+  // ===== 合集 / 系列（「投稿 / 合集 / 系列」页签行懒加载） =====
+
+  /** 当前页签的卡片列表（合集 / 系列，视频页签不消费） */
+  private currentCards(): UpSpaceCollectionCard[] {
+    return this.spaceTab === 'series' ? this.seriesCards : this.seasonCards;
+  }
+
+  /**
+   * 拉取 UP 的合集 + 系列列表（一次请求双列表，`getUpSeasonsSeriesList`）。
+   * 首次切到「合集 / 系列」页签时懒加载；成功后 `seasonsLoaded` 置位不再重复请求
+   * （合集/系列低频变化，一次会话拉一次足够）。失败保持未加载态，由失败分支的
+   * 「重试」（`retrySeasonsSeries`）重新发起。
+   */
+  private loadSeasonsSeries(): void {
+    if (this.seasonsLoading || this.seasonsLoaded || this.upMid.length === 0) {
+      return;
+    }
+    this.seasonsLoading = true;
+    this.seasonsFailed = false;
+    this.seasonsFailReason = '';
+    BilibiliApi.getUpSeasonsSeriesList(Number(this.upMid))
+      .then((res: BilibiliApi.UpSeasonsSeriesResult): void => {
+        const seasonCards: UpSpaceCollectionCard[] = [];
+        for (let i = 0; i < res.seasons.length; i++) {
+          const s: BilibiliApi.UpSeasonSummary = res.seasons[i];
+          seasonCards.push(new UpSpaceCollectionCard('season', s.seasonId, s.title, s.cover));
+        }
+        const seriesCards: UpSpaceCollectionCard[] = [];
+        for (let i = 0; i < res.series.length; i++) {
+          const s: BilibiliApi.UpSeriesSummary = res.series[i];
+          seriesCards.push(new UpSpaceCollectionCard('series', s.seriesId, s.title, s.cover));
+        }
+        this.seasonCards = seasonCards;
+        this.seriesCards = seriesCards;
+        this.seasonsLoaded = true;
+      })
+      .catch((e: Error): void => {
+        this.seasonsFailed = true;
+        this.seasonsFailReason = this.describeError(
+          e instanceof Error ? e : new Error(JSON.stringify(e)), '合集加载失败');
+      })
+      .then((): void => {
+        this.seasonsLoading = false;
+      });
+  }
+
+  /** 合集/系列加载失败的「重试」（与投稿重试同款 4s 冷却：连点只会继续被风控拒） */
+  private retrySeasonsSeries(): void {
+    if (this.seasonsRetryLocked) {
+      return;
+    }
+    this.seasonsRetryLocked = true;
+    this.seasonsRetryCooling = true;
+    this.seasonsRetryTimer = setTimeout((): void => {
+      this.seasonsRetryLocked = false;
+      this.seasonsRetryCooling = false;
+    }, RETRY_COOLDOWN_MS);
+    this.loadSeasonsSeries();
+  }
+
+  /** 切页签：点「投稿」恢复播放全部操作行；合集/系列保持页签行，按需懒加载合集/系列 */
+  private switchSpaceTab(tab: string): void {
+    if (this.selecting) {
+      this.exitSelecting();
+    }
+    this.spaceTab = tab;
+    // 投稿 = 收起页签行恢复操作行；合集/系列 = 页签行保持可见（否则无法切回）。
+    // 幂等赋值：点已激活页签无副作用（loadSeasonsSeries 内部有闸门），
+    // 「投稿页签行可见时再点投稿」也能借此恢复操作行。
+    this.tabRowVisible = tab !== 'videos';
+    // 失败态不自动重发（保留冷却纪律），只有「重试」按钮能再发起
+    if (tab !== 'videos' && !this.seasonsLoaded && !this.seasonsFailed) {
+      this.loadSeasonsSeries();
+    }
+    // 页签切换后可见滚动容器换人（投稿列表 ↔ 卡片列表），按新容器偏移重新校准
+    this.syncTopBlurProgress();
+  }
+
+  /**
+   * 封面（UP 头像）点击：操作行 ↔ 页签行切换。
+   * 投稿页签下是开关（再点收起页签行、恢复操作行）；合集/系列页签下页签行
+   * 本就可见且是唯一导航，no-op（点「投稿」才恢复操作行）。
+   */
+  private onCoverTapped(): void {
+    if (this.spaceTab !== 'videos') {
+      return;
+    }
+    // 展示页签行前退出多选：选区动作按钮随操作行一起消失，选区挂着会卡死
+    if (this.selecting && !this.tabRowVisible) {
+      this.exitSelecting();
+    }
+    this.tabRowVisible = !this.tabRowVisible;
+  }
+
+  /** 打开合集/系列详情页（kind 决定详情页走哪个条目分页接口） */
+  private openCollectionDetail(card: UpSpaceCollectionCard): void {
+    NavStackHolder.stack.pushPathByName('SeasonSeriesDetail', new SeasonSeriesDetailRouteParam(
+      card.kind, this.upMid, String(card.itemId), card.title, card.cover, this.upName, this.upMid
+    ));
   }
 
   // ===== 投稿搜索 =====
@@ -904,7 +1049,6 @@ export struct UpSpacePage {
           this.upMid, this.upName, mapped, this.upFace
         );
         this.subscribed = true;
-        this.subscribedCount = r.playlist.tracks.length;
         this.showSubscribeResult(r);
         // 订阅取回的就是该 UP 的最新投稿页：与「拉取新投稿」同样把
         // 页面列表和缓存一并换新 —— 否则缓存命中进入 + 订阅的场景下，缓存里还是
@@ -1122,41 +1266,29 @@ export struct UpSpacePage {
       showAppToast('还没有选中投稿', 1500);
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '下载选中投稿',
       message: `将把选中的 ${tracks.length} 首投稿加入下载队列。\n已下载的会自动跳过。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '开始下载',
-        action: (): void => {
-          this.enqueueSelectedSerial(tracks);
-        }
+      confirmText: '开始下载',
+      onConfirm: (): void => {
+        this.enqueueSelectedSerial(tracks);
       }
     });
   }
 
   /**
-   * 串行入队 + 每首间隔节流（B 站匿名密集请求直接限流，见
-   * SELECT_ENQUEUE_GAP_MS 注释）。「仅 WiFi 下载」闸门在 requestDownload 入口，
-   * 只会在**首条**返回 blockedReason —— 用它探测一次，被拦则询问，
-   * 用户确认后整批以 ignoreWifiLimit 重跑（已入队的自动跳过计数，
-   * PlaylistsPage 整单下载同一套逻辑）。
+   * 串行入队核心：ignoreWifiLimit=true 时跳过「仅 WiFi」闸门（用户已在弹窗确认）。
+   * 每首间隔节流（B 站匿名密集请求直接限流，见 SELECT_ENQUEUE_GAP_MS）。
+   * 「仅 WiFi 下载」闸门在 requestDownload 入口，只会在**首条**返回 blockedReason ——
+   * 用它探测一次，被拦则询问，用户确认后整批以 ignoreWifiLimit 重跑（已入队的
+   * 自动跳过计数，PlaylistsPage 整单下载同一套逻辑）。
    */
-  private async enqueueSelectedSerial(tracks: Track[]): Promise<void> {
-    if (this.downloadingSelected) {
-      showAppToast('正在加入下载队列，请稍候', 1500);
-      return;
-    }
-    this.downloadingSelected = true;
+  private async enqueueBatch(tracks: Track[], ignoreWifiLimit: boolean): Promise<void> {
     let queued: number = 0;
     let skipped: number = 0;
     for (let i = 0; i < tracks.length; i++) {
-      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(tracks[i], false);
-      if (r.blockedReason.length > 0) {
+      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(tracks[i], ignoreWifiLimit);
+      if (!ignoreWifiLimit && r.blockedReason.length > 0) {
         // 首条就被「仅 WiFi 下载」拦下：收尾状态交给确认弹窗的两条分支
         this.downloadingSelected = false;
         this.confirmCellularSelected(tracks);
@@ -1164,7 +1296,7 @@ export struct UpSpacePage {
       }
       queued += r.queued;
       skipped += r.skipped;
-      if ((i + 1) % 5 === 0) {
+      if (!ignoreWifiLimit && (i + 1) % 5 === 0) {
         showAppToast(`正在加入下载队列（${i + 1}/${tracks.length}）`, 800);
       }
       if (i < tracks.length - 1) {
@@ -1175,21 +1307,23 @@ export struct UpSpacePage {
     showAppToast(this.selectedDownloadResultText(queued, skipped), 2500);
   }
 
+  private async enqueueSelectedSerial(tracks: Track[]): Promise<void> {
+    if (this.downloadingSelected) {
+      showAppToast('正在加入下载队列，请稍候', 1500);
+      return;
+    }
+    this.downloadingSelected = true;
+    await this.enqueueBatch(tracks, false);
+  }
+
   /** 「仅 WiFi 下载」拦下批量下载：问一次（措辞与单曲 confirmDownloadOnCellular 一致） */
   private confirmCellularSelected(tracks: Track[]): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.enqueueSelectedWithWifiOverride(tracks);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.enqueueSelectedWithWifiOverride(tracks);
       }
     });
   }
@@ -1200,18 +1334,7 @@ export struct UpSpacePage {
       return;
     }
     this.downloadingSelected = true;
-    let queued: number = 0;
-    let skipped: number = 0;
-    for (let i = 0; i < tracks.length; i++) {
-      const r: DownloadStartResult = await DownloadManager.getInstance().requestDownload(tracks[i], true);
-      queued += r.queued;
-      skipped += r.skipped;
-      if (i < tracks.length - 1) {
-        await delay(SELECT_ENQUEUE_GAP_MS);
-      }
-    }
-    this.downloadingSelected = false;
-    showAppToast(this.selectedDownloadResultText(queued, skipped), 2500);
+    await this.enqueueBatch(tracks, true);
   }
 
   /** 批量入队结果文案：排上 / 跳过 分开说，用户才知道有多少真进了队列 */
@@ -1279,26 +1402,19 @@ export struct UpSpacePage {
    * 措辞与 SearchPage.confirmDownloadOnCellular 保持一致。
    */
   private confirmDownloadOnCellular(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          DownloadManager.getInstance().requestDownload(track, true)
-            .then((r: DownloadStartResult): void => {
-              showAppToast(r.queued > 0 ? `已开始下载 ${r.queued} 首` : '没有可下载的曲目', 1800);
-            })
-            .catch((e: Error): void => {
-              console.error(`requestDownload(ignoreWifiLimit) failed: ${e.message}`);
-              showAppToast('下载启动失败', 1800);
-            });
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        DownloadManager.getInstance().requestDownload(track, true)
+          .then((r: DownloadStartResult): void => {
+            showAppToast(r.queued > 0 ? `已开始下载 ${r.queued} 首` : '没有可下载的曲目', 1800);
+          })
+          .catch((e: Error): void => {
+            console.error(`requestDownload(ignoreWifiLimit) failed: ${e.message}`);
+            showAppToast('下载启动失败', 1800);
+          });
       }
     });
   }
@@ -1493,6 +1609,94 @@ export struct UpSpacePage {
   }
 
   /**
+   * 大封面网格列表条目区（build() 抽出）。条目渲染的非多选 / 多选双路径纪律
+   * （三个 *TrackItems 共用）：非多选走 LazyForEach，多选走 ForEach ——
+   * LazyForEach 只认数据源通知，@Prop 选择态不随页面 @State 同步
+   * （勾选不亮、「⋯」不隐、点击仍走 onPlay），多选必须 ForEach ——
+   * 随页面 @State 重跑 itemGenerator 就地更新（DownloadsPage 多选同因）；
+   * 进出多选切换渲染控件的一次性整表重建视为模式转场。
+   * 渲染源走 displayTracks() 三态切换（远程搜索结果 / 本地过滤结果 / 全量已加载），
+   * @Watch（onListSourceChanged）把三态 @State 的变化同步进
+   * trackSource / trackPairs，按需建行、翻页不全量重建。
+   */
+  @Builder
+  GridTrackItems(): void {
+    if (this.selecting) {
+      ForEach(
+        makePairs<Track>(this.displayTracks()),
+        (pair: PairOf<Track>): void => {
+          ListItem() {
+            this.GridPairRow(pair)
+          }
+        },
+        pairKeyOf
+      )
+    } else {
+      LazyForEach(
+        this.trackPairs,
+        (pair: PairOf<Track>): void => {
+          ListItem() {
+            this.GridPairRow(pair)
+          }
+        },
+        pairKeyOf
+      )
+    }
+  }
+
+  /** 横屏宽屏两列列表条目区（双路径口径见 GridTrackItems） */
+  @Builder
+  TwoColTrackItems(): void {
+    if (this.selecting) {
+      ForEach(
+        makePairs<Track>(this.displayTracks()),
+        (pair: PairOf<Track>, pIndex: number): void => {
+          ListItem() {
+            this.TwoColPairRow(pair, pIndex)
+          }
+        },
+        pairKeyOf
+      )
+    } else {
+      LazyForEach(
+        this.trackPairs,
+        (pair: PairOf<Track>, pIndex: number): void => {
+          ListItem() {
+            this.TwoColPairRow(pair, pIndex)
+          }
+        },
+        pairKeyOf
+      )
+    }
+  }
+
+  /** 单列列表条目区（双路径口径见 GridTrackItems） */
+  @Builder
+  SingleTrackItems(): void {
+    if (this.selecting) {
+      ForEach(
+        this.displayTracks(),
+        (t: Track, index: number): void => {
+          ListItem() {
+            this.SingleTrackRow(t, index)
+          }
+        },
+        (t: Track): string => t.id
+      )
+    } else {
+      LazyForEach(
+        this.trackSource,
+        (t: Track, index: number): void => {
+          ListItem() {
+            this.SingleTrackRow(t, index)
+          }
+        },
+        (t: Track): string => t.id
+      )
+    }
+  }
+
+  /**
    * 子页转场：从右滑入 slow(400ms) EaseOut，pop 反向（照 RecentPage / PlaylistDetail 同款）。
    */
   private navTransitionDelegate(op: NavigationOperation,
@@ -1554,7 +1758,7 @@ export struct UpSpacePage {
   /**
    * 头部区（整体钉在悬浮固定栏内，不随列表滚动）—— 与 PlaylistDetail.PlaylistHeader 同款：
    * 左侧 96vp 圆角头像 + 右侧 28fp 大标题 + 元信息行；头像行下方是操作行
-   * （单行：播放全部 + 订阅投稿（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
+   * （单行：播放全部 + 订阅（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
    *
    * 头像尺寸与圆角对齐歌单封面（96 / 12）：两个详情页的头部视觉语言一致，
    * 进哪个页都是同一套「大图 + 大标题」。
@@ -1569,6 +1773,9 @@ export struct UpSpacePage {
           imgHeight: 96,
           imgRadius: 12,
           altText: this.upName
+        })
+        .onClick((): void => {
+          this.onCoverTapped();
         })
         Column() {
           Text(this.upName.length > 0 ? this.upName : 'UP 主主页')
@@ -1593,24 +1800,27 @@ export struct UpSpacePage {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 操作行：播放全部 + 选择 + 订阅投稿（仅未订阅）+ 搜索框（含框内 ×
+      // 操作行：播放全部 + 选择 + 订阅（仅未订阅）+ 搜索框（含框内 ×
       // 清除）+ 搜索按钮，单行排布（新增按钮后搜索框靠 layoutWeight 收窄适应）。
+      // 订阅处理中（subBusy）：搜索框与搜索按钮暂离（尾部槽位留空），
+      // 处理结束后淡入回归，见下方尾部槽位条件渲染。
       // · 播放全部：有投稿才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
       // · 选择：多选入口（播放全部右边）；多选态变身「完成」退出，同一颗按钮
       //   承担进出，位置恒定不跳。播放全部 / 订阅投稿在多选态用 visibility
       //   摘出布局让位（opacity 不摘布局会留空洞，不能用；属性摘出无过渡，
       //   DownloadsPage 同款可接受）。
-      // · 订阅投稿：本页核心动作，仅未订阅时显示 —— 订阅成功后 subscribed=true
-      //   自动消失（本页没有「拉取新投稿」，订阅歌单的更新入口在歌单详情页）。
+      // · 订阅：本页核心动作（未订阅时显示，订阅后消失）——
+      //   按钮文案只留「订阅」两字：四字版会挤压同行搜索框。
+      //   （本页没有「拉取新投稿」，订阅歌单的更新入口在歌单详情页）。
       // · 清除不用独立按钮：搜索框内右侧 × 承接（点击调 clearSearch，
       //   有关键词或处于远程结果态时才出现）。
       Row({ space: 8 }) {
         if (this.tracks.length > 0) {
+          // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
           Button('播放全部', { type: ButtonType.Normal })
             .fontSize(13)
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
-            // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
             .backgroundColor(this.themeSurface)
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
@@ -1636,7 +1846,7 @@ export struct UpSpacePage {
             })
         }
         if (this.upMid.length > 0 && !this.subscribed) {
-          Button(this.subBusy ? '处理中…' : '订阅投稿', { type: ButtonType.Normal })
+          Button(this.subBusy ? '处理中…' : '订阅', { type: ButtonType.Normal })
             .fontSize(13)
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
@@ -1649,8 +1859,9 @@ export struct UpSpacePage {
               this.subscribe();
             })
         }
-        // 尾部槽位（layoutWeight 1）if/else 换层：常态 = 搜索框 + 搜索按钮，
-        // 多选态 = 全选 / 加入歌单 / 下载。
+        // 尾部槽位（layoutWeight 1）条件换层：常态 = 搜索框 + 搜索按钮，
+        // 多选态 = 全选 / 加入歌单 / 下载；订阅处理中（subBusy）常态层也
+        // 不挂载、槽位留空，搜索区随 subBusy 复位经既有 transition 淡入回归。
         // ⚠️ 隐藏层必须用条件渲染（不挂载），不能双层叠放 + 透明层：
         // HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
         // 常态点搜索框位置误触透明的「加入歌单」/「下载」，搜索框要点多次）。
@@ -1658,7 +1869,7 @@ export struct UpSpacePage {
         //（插入/移除动画，换层时旧层淡出新层淡入）。
         // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）。
         Stack() {
-          if (!this.selecting) {
+          if (!this.selecting && !this.subBusy) {
           // 常态层：搜索框 + 搜索按钮
           Row({ space: 8 }) {
             // 搜索框：输入即过滤**已加载**的投稿（本地，离线可用）；
@@ -1722,7 +1933,7 @@ export struct UpSpacePage {
           .width('100%')
           .transition(TransitionEffect.OPACITY
             .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
-          } else {
+          } else if (this.selecting) {
           // 多选态层：全选 / 加入歌单 / 下载（淡入替换搜索区）
           Row({ space: 8 }) {
             Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
@@ -1760,18 +1971,210 @@ export struct UpSpacePage {
           .transition(TransitionEffect.OPACITY
             .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
           }
+          // 其余情形（非多选 && subBusy）：订阅处理中，槽位不渲染任何层（留空），
+          // 处理结束（成功 / 失败都复位 subBusy）后常态层淡入回归。
         }
         .layoutWeight(1)
+        // ⚠️ 固定高度：消失转场期间退场节点脱离布局，Stack 无固定高度会塌缩
+        // 到 0、退场动画节点被按塌缩位置渲染（真机表现：订阅处理中搜索区
+        // 「向下移走」而非原位淡出）。固定 32 = 同行按钮高度，槽位空置 / 换层
+        // 时框架恒定，淡入淡出始终原位播放（官方 FAQ faqs-arkui-384 同款结论：
+        // 固定内层容器宽高）。
+        .height(32)
       }
       .width('100%')
       .margin({ top: 12 })
       .alignItems(VerticalAlign.Center)
+      // 操作行两隐藏场景：合集/系列页签（播放全部/搜索都是投稿语义）与封面点击
+      // 展开的页签行占用本槽位（tabRowVisible；与页签行同尺寸互斥换层，
+      // headerAreaHeight 实测不受影响）。
+      .visibility(this.spaceTab === 'videos' && !this.tabRowVisible ? Visibility.Visible : Visibility.None)
+
+      // 「投稿 / 合集 / 系列」页签行（默认隐藏：点封面展开，点「投稿」收起）：
+      // 与操作行同槽位互斥换层（两行同高：32vp 按钮 + margin 12，替换无布局跳变）；
+      // 合集/系列首次触达才拉取（switchSpaceTab 内懒加载）；当前页签实底高亮。
+      // 三枚等宽（layoutWeight 1）。
+      Row({ space: 8 }) {
+        Button('投稿', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .layoutWeight(1)
+          .backgroundColor(this.spaceTab === 'videos' ? this.themePrimary : this.themeSurface)
+          .fontColor(this.spaceTab === 'videos' ? this.themeOn : this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            this.switchSpaceTab('videos');
+          })
+        Button('合集', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .layoutWeight(1)
+          .backgroundColor(this.spaceTab === 'seasons' ? this.themePrimary : this.themeSurface)
+          .fontColor(this.spaceTab === 'seasons' ? this.themeOn : this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            this.switchSpaceTab('seasons');
+          })
+        Button('系列', { type: ButtonType.Normal })
+          .fontSize(13)
+          .height(32)
+          .borderRadius(BUTTON_RADIUS_VP)
+          .layoutWeight(1)
+          .backgroundColor(this.spaceTab === 'series' ? this.themePrimary : this.themeSurface)
+          .fontColor(this.spaceTab === 'series' ? this.themeOn : this.themePrimary)
+          .attributeModifier(this.buttonMaterial)
+          .onClick((): void => {
+            this.switchSpaceTab('series');
+          })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      .alignItems(VerticalAlign.Center)
+      .visibility(this.tabRowVisible ? Visibility.Visible : Visibility.None)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     // 头部区间距：top 4 紧贴标题行下沿，bottom 8 让首个投稿条目同步上移
     //（列表占位随 headerAreaHeight 实测自动跟随）。
     .padding({ left: 20, right: 20, top: 4, bottom: 8 })
+  }
+
+  /**
+   * 合集 / 系列卡片（页签列表条目）：封面 + 标题 + 形态角标，
+   * 整行点击进「合集·系列详情」（SeasonSeriesDetail）。
+   */
+  @Builder
+  CollectionCard(card: UpSpaceCollectionCard): void {
+    Row({ space: 12 }) {
+      CoverImage({
+        url: toThumbUrl(card.cover, 128),
+        imgWidth: 64,
+        imgHeight: 64,
+        imgRadius: 10,
+        altText: card.title
+      })
+      Column() {
+        Text(card.title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(card.kind === 'season' ? '合集' : '系列')
+          .fontSize(12)
+          .fontColor($r('app.color.text_tertiary'))
+          .margin({ top: 4 })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 8, bottom: 8 })
+    .alignItems(VerticalAlign.Center)
+    .stateStyles({
+      pressed: { .backgroundColor($r('app.color.press_overlay')) },
+      normal: { .backgroundColor(Color.Transparent) }
+    })
+    .onClick((): void => {
+      this.openCollectionDetail(card);
+    })
+  }
+
+  /**
+   * 「合集 / 系列」页签内容：骨架 / 失败 / 空态 / 卡片列表四分支。
+   * 让位口径与投稿分支完全同款：非列表分支自补 padding top（barTotalHeight），
+   * 列表走「首个空白占位 ListItem」穿透模式，滚动时卡片从沉浸材质下穿过。
+   */
+  @Builder
+  SeasonsSeriesContent(): void {
+    if (!this.seasonsLoaded && this.seasonsLoading) {
+      // 首次拉取骨架：与投稿骨架同款条目占位
+      Column() {
+        ForEach([0, 1, 2, 3, 4], (_i: number): void => {
+          SkeletonTrackItem({ index: _i })
+        }, (_i: number): string => `up_season_skel_${_i}`)
+      }
+      .width('100%')
+      .padding({ top: this.barTotalHeight() })
+    } else if (this.seasonsFailed) {
+      Column() {
+        Text('合集加载失败')
+          .fontColor($r('app.color.text_secondary'))
+          .fontSize(16)
+        Text(this.seasonsFailReason.length > 0 ? this.seasonsFailReason : '检查网络后再试一次')
+          .fontColor($r('app.color.text_tertiary'))
+          .fontSize(13)
+          .textAlign(TextAlign.Center)
+          .padding({ left: 24, right: 24 })
+          .margin({ top: 8 })
+        Row() {
+          Button(this.seasonsRetryCooling ? '稍等 4 秒' : '重试', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 18, right: 18 })
+            .backgroundColor(this.themePrimary)
+            .fontColor(this.themeOn)
+            .enabled(!this.seasonsRetryCooling)
+            .onClick((): void => {
+              this.retrySeasonsSeries();
+            })
+        }
+        .height(44)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(VerticalAlign.Center)
+        .margin({ top: 12 })
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
+      .padding({ top: this.barTotalHeight() })
+    } else if (this.currentCards().length === 0) {
+      // 已加载但该形态为空：区分「UP 没建过」与「拉不到」（后者在失败分支）
+      Column() {
+        Text(this.spaceTab === 'series' ? '该 UP 暂无系列' : '该 UP 暂无合集')
+          .fontColor($r('app.color.text_secondary'))
+          .fontSize(16)
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
+      .padding({ top: this.barTotalHeight() })
+    } else {
+      List({ scroller: this.seasonsScroller }) {
+        // 顶部空白占位条目（投稿列表同款）：首个卡片恰从标题栏底部起排
+        ListItem() {
+          Row()
+            .width('100%')
+            .height(this.barTotalHeight())
+        }
+        ForEach(
+          this.currentCards(),
+          (card: UpSpaceCollectionCard): void => {
+            ListItem() {
+              this.CollectionCard(card)
+            }
+          },
+          (card: UpSpaceCollectionCard): string => `${card.kind}_${card.itemId}`
+        )
+      }
+      .width('100%')
+      .height('100%')
+      // 裁剪放开：卡片内容要能画进标题栏区域供材质/模糊采样（投稿列表同款）
+      .clip(false)
+      .edgeEffect(EdgeEffect.Spring)
+      .cachedCount(8)
+      .contentEndOffset(CONTENT_END_OFFSET)
+      .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+        this.syncTopBlurProgress();
+      })
+      .onScrollStop((): void => {
+        // Idle 校准终态（与投稿列表同款）
+        this.syncTopBlurProgress();
+      })
+    }
   }
 
   /**
@@ -1861,7 +2264,10 @@ export struct UpSpacePage {
           // UP 资料头在钉顶固定栏（UpHeader）里，这里直接是列表内容 ——
           // 与 PlaylistDetail 同结构：列表视口铺满全屏，首项从整栏底部起排，
           // 滚动时条目从毛玻璃下穿过（顶部占位条目负责让位）。
-          if (this.loading && this.tracks.length === 0) {
+          // 合集 / 系列页签内容（骨架 / 失败 / 空态 / 卡片列表，四分支见 SeasonsSeriesContent）
+          if (this.spaceTab !== 'videos') {
+            this.SeasonsSeriesContent()
+          } else if (this.loading && this.tracks.length === 0) {
             // 首屏骨架：同款条目占位，不用「转圈 + 加载中」
             Column() {
               ForEach([0, 1, 2, 3, 4], (_i: number): void => {
@@ -1958,90 +2364,17 @@ export struct UpSpacePage {
                     .width('100%')
                     .height(this.barTotalHeight())
                 }
-                // 条目渲染：非多选走 LazyForEach，多选走 ForEach
-                //（GridPairRow / TwoColPairRow / SingleTrackRow 双路径共用）：
-                // LazyForEach 只认数据源通知，@Prop 选择态不随页面 @State 同步
-                //（勾选不亮、「⋯」不隐、点击仍走 onPlay），多选必须 ForEach ——
-                // 随页面 @State 重跑 itemGenerator 就地更新（DownloadsPage 多选同因）；
-                // 进出多选切换渲染控件的一次性整表重建视为模式转场。
-                // 渲染源走 displayTracks() 三态切换（远程搜索结果 / 本地过滤结果 /
-                // 全量已加载），@Watch（onListSourceChanged）把三态 @State 的变化
-                // 同步进 trackSource / trackPairs，按需建行、翻页不全量重建。
-                // 横屏宽屏：条目配对，每个 ListItem 左右两列。
-                // 大封面模式（外观设置「条目展示」）：投稿配对成双列
-                // 网格卡（TrackCard），竖屏 / 横屏均双列，交互契约与行内版一致
-                // （整卡点击播/暂停、「⋯」菜单）；配对数据源复用 trackPairs
-                // （onListSourceChanged 无条件 sync，网格竖屏也是热的）。
+                // 条目渲染按展示形态三分支：大封面网格（外观设置「条目展示」，
+                // 投稿配对成双列网格卡 TrackCard，竖屏 / 横屏均双列，交互契约与
+                // 行内版一致——整卡点击播/暂停、「⋯」菜单；配对数据源复用 trackPairs）
+                // / 横屏宽屏（条目配对，每个 ListItem 左右两列）/ 单列。
+                // 各分支内部的多选 ForEach / 非多选 LazyForEach 双路径见对应 @Builder。
                 if (this.isGrid()) {
-                  if (this.selecting) {
-                    ForEach(
-                      makePairs<Track>(this.displayTracks()),
-                      (pair: PairOf<Track>): void => {
-                        ListItem() {
-                          this.GridPairRow(pair)
-                        }
-                      },
-                      (pair: PairOf<Track>): string =>
-                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                    )
-                  } else {
-                    LazyForEach(
-                      this.trackPairs,
-                      (pair: PairOf<Track>): void => {
-                        ListItem() {
-                          this.GridPairRow(pair)
-                        }
-                      },
-                      (pair: PairOf<Track>): string =>
-                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                    )
-                  }
+                  this.GridTrackItems()
                 } else if (this.isTwoCol()) {
-                  if (this.selecting) {
-                    ForEach(
-                      makePairs<Track>(this.displayTracks()),
-                      (pair: PairOf<Track>, pIndex: number): void => {
-                        ListItem() {
-                          this.TwoColPairRow(pair, pIndex)
-                        }
-                      },
-                      (pair: PairOf<Track>): string =>
-                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                    )
-                  } else {
-                    LazyForEach(
-                      this.trackPairs,
-                      (pair: PairOf<Track>, pIndex: number): void => {
-                        ListItem() {
-                          this.TwoColPairRow(pair, pIndex)
-                        }
-                      },
-                      (pair: PairOf<Track>): string =>
-                        `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                    )
-                  }
+                  this.TwoColTrackItems()
                 } else {
-                  if (this.selecting) {
-                    ForEach(
-                      this.displayTracks(),
-                      (t: Track, index: number): void => {
-                        ListItem() {
-                          this.SingleTrackRow(t, index)
-                        }
-                      },
-                      (t: Track): string => t.id
-                    )
-                  } else {
-                    LazyForEach(
-                      this.trackSource,
-                      (t: Track, index: number): void => {
-                        ListItem() {
-                          this.SingleTrackRow(t, index)
-                        }
-                      },
-                      (t: Track): string => t.id
-                    )
-                  }
+                  this.SingleTrackItems()
                 }
                 // 加载更多状态条（常驻 + 固定高度）：只换内容不插拔条目，
                 // 数据落地帧尾部 extent 只增不减，底部弹簧过滚动不被收缩强制解析。
@@ -2177,8 +2510,9 @@ export struct UpSpacePage {
       }
     })
     // 返回键：用 HDS 默认返回键（"<" 系统样式，位置由 HDS 管理以避开状态栏）。
-    // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页列表交给 HDS 联动
-    .bindToScrollable([this.listScroller])
+    // 滚动模糊（scrollEffectOpts）依赖 scroller 绑定：把本页两个列表（投稿 / 合集系列卡片）
+    // 都交给 HDS 联动，页签切换后模糊随可见列表滚动。
+    .bindToScrollable([this.listScroller, this.seasonsScroller])
     .translate({ x: this.navTransX })
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);

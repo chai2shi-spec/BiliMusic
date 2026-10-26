@@ -24,7 +24,7 @@ import { NavStackHolder } from '../service/NavStackHolder';
 import { LibraryStore, PlaylistImportResult } from '../service/LibraryStore';
 import { copyText, readText } from '../utils/ClipboardUtil';
 import { showAppToast } from '../components/AppToast';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
@@ -36,6 +36,7 @@ import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 /**
  * 剪贴板导入授权弹窗：官方 CustomContentDialog 承载（正文 + 系统粘贴按钮）。
@@ -201,19 +202,12 @@ export struct PlaylistBackupPage {
       this.toast('剪贴板里不是歌单数据（需要先「导出歌单」）', 2200);
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '导入歌单',
       message: `剪贴板里解析到 ${count} 个歌单，将追加到现有歌单列表（重名自动加「导入」后缀）。`,
-      primaryButton: {
-        value: '取消',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '导入',
-        action: (): void => {
-          this.doImportPlaylists(text);
-        }
+      confirmText: '导入',
+      onConfirm: (): void => {
+        this.doImportPlaylists(text);
       }
     });
   }
@@ -265,31 +259,18 @@ export struct PlaylistBackupPage {
     return undefined;
   }
 
-  /** 标题栏内容（titleBar 的 stackBuilder 承载）：「歌单备份」标题（返回键为 HDS 默认键） */
+  /** 标题栏内容（titleBar 的 stackBuilder 承载）：「歌单导入」标题（返回键为 HDS 默认键） */
   @Builder
   backupBar() {
     NavTitleRow({ title: '歌单导入' })
   }
 
-  /**
-   * 标题行收窄容器（AboutPage 同款）：外层 Row 居中 + 内层 Column constraintSize
-   * （上限与本页内容列同口径），大屏上标题行与内容列同宽对齐；
-   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   backupBarNarrow() {
-    Row() {
-      Column() {
-        this.backupBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.backupBar()
+    } })
   }
 
   build() {
@@ -370,7 +351,7 @@ export struct PlaylistBackupPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截（播放页 overlay 打开时吞掉返回，否则走默认 pop）
+    // 系统返回拦截（与 AppIconSettingsPage 同款，无 overlay 时走默认 pop）
     .onBackPressed((): boolean => handleSubPageBackPress())
     // 内容避让（官方组件级沉浸口径，AboutPage 同款）；内容层避让由 plain padding 自理
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])

@@ -13,7 +13,7 @@ import { MusicPlayer } from '../player/MusicPlayer';
 import { toThumbUrl } from '../utils/TextUtil';
 import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { CoverImage } from './CoverImage';
-import { showAppAlertDialog } from './AppAlertDialog';
+import { showConfirm } from './AppAlertDialog';
 import { STORE_CURRENT_TRACK, STORE_QUEUE, STORE_REPEAT_MODE, STORE_THEME_PRIMARY } from '../common/Constants';
 
 const REPEAT_CYCLE: RepeatMode[] = [
@@ -169,19 +169,14 @@ export struct QueueSheet {
     if (count === 0) {
       return;
     }
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '清除播放列表',
       message: `将清空 ${count} 首歌曲并停止播放。已加入歌单的歌曲不受影响。`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '清除',
-        action: (): void => {
-          this.player.clearQueue();
-          this.showSheet = false;
-          this.toast('播放列表已清除');
-        }
+      confirmText: '清除',
+      onConfirm: (): void => {
+        this.player.clearQueue();
+        this.showSheet = false;
+        this.toast('播放列表已清除');
       }
     });
   }

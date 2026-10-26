@@ -9,9 +9,9 @@
  *   - 手选缓存：`{filesDir}/lyrics/manual/{sanitizedTrackId}.json`
  *   - `status='ok'`：直接返回；
  *   - `status='miss'`：24h 内不再联网（避免每次进播放页都白搜一遍）；
- *   - `manual=true`：用户手动选过候选，落 manual 子目录 —— 容量淘汰（prune）
- *     永远不碰它，只有用户显式操作（面板「重新获取」/ 设置页「清理缓存」）
- *     才会清除；读路径永远先看 manual 目录（手选 > 算法）；
+ *   - `manual=true`：用户手动选过候选，落 manual 子目录 —— 容量淘汰只在超过
+ *     各自上限时发生（自动 300 / manual 200）；清除仅限用户显式操作
+ *     （面板「重新获取」走 deleteLyricCache）；读路径永远先看 manual 目录（手选 > 算法）；
  *   - `skipped=true`：用户主动跳过，永久不再自动搜（等价 BBPlayer 的 manualSkip）。
  *
  * 兼容：旧版本 manual 条目写在自动目录里 —— 读到后自愈迁移进 manual 目录
@@ -53,7 +53,7 @@ export interface LyricCacheEntry {
 let cacheDir: string = '';
 let cacheDirManual: string = '';
 
-/** 初始化缓存目录。AppContainer.initRest 调用，同步建目录（毫秒级）。 */
+/** 初始化缓存目录。AppContainer.initRest / CardPayloadBuilder（卡片进程）调用，同步建目录（毫秒级）。 */
 export function initLyricCache(context: common.Context): void {
   try {
     cacheDir = `${context.filesDir}/lyrics`;
@@ -90,6 +90,30 @@ function pathOf(trackId: string, manual: boolean): string {
   return `${manual ? cacheDirManual : cacheDir}/${fileNameOf(trackId)}.json`;
 }
 
+/** 删单个缓存文件；失败（含文件不存在，属常态）静默吞掉 —— 删缓存路径上的 best-effort */
+function unlinkSafe(path: string): void {
+  try {
+    fs.unlinkSync(path);
+  } catch (e) {
+  }
+}
+
+/** 同步列举目录内全部 .json 文件名；目录不存在 / 列举失败返回 null（日志策略由调用方定） */
+function listJsonNamesSync(dir: string): string[] | null {
+  try {
+    const names: string[] = fs.listFileSync(dir);
+    const out: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      if (names[i].endsWith('.json')) {
+        out.push(names[i]);
+      }
+    }
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
 /** 读文件文本：任何失败（不存在 / IO 错误）一律空串 */
 async function readTextSafe(path: string): Promise<string> {
   try {
@@ -109,16 +133,17 @@ function parseEntry(raw: string, trackId: string): LyricCacheEntry | null {
     if (parsed === null || parsed.trackId !== trackId) {
       return null;
     }
+    const status: string = typeof parsed.status === 'string' ? parsed.status : LYRIC_CACHE_MISS;
     const entry: LyricCacheEntry = {
       trackId: trackId,
       cacheKey: typeof parsed.cacheKey === 'string' ? parsed.cacheKey : '',
-      status: typeof parsed.status === 'string' ? parsed.status : LYRIC_CACHE_MISS,
+      status: status,
       updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
       manual: parsed.manual === true,
       skipped: parsed.skipped === true,
       candidateSource: typeof parsed.candidateSource === 'string' ? parsed.candidateSource : '',
       candidateRemoteId: typeof parsed.candidateRemoteId === 'string' ? parsed.candidateRemoteId : '',
-      result: parsed.status === LYRIC_CACHE_OK ? parsed.result : null
+      result: status === LYRIC_CACHE_OK ? parsed.result : null
     };
     if (entry.status === LYRIC_CACHE_OK
       && (entry.result === null || !Array.isArray(entry.result.lines) || entry.result.lines.length === 0)) {
@@ -147,11 +172,8 @@ export async function readLyricCache(trackId: string): Promise<LyricCacheEntry |
     // 旧版把 manual 条目写进了自动目录：自愈迁移（写进 manual 目录 + 删旧文件），
     // 之后读路径直接命中 manual 目录，自动目录的容量淘汰也碰不到它。
     await writeLyricCache(autoEntry);
-    try {
-      fs.unlinkSync(pathOf(trackId, false));
-    } catch (e) {
-      // 删不掉也无碍：读路径永远先看 manual 目录
-    }
+    // 删不掉也无碍：读路径永远先看 manual 目录
+    unlinkSafe(pathOf(trackId, false));
   }
   return autoEntry;
 }
@@ -208,16 +230,9 @@ export function deleteLyricCache(trackId: string): void {
   if (cacheDir.length === 0) {
     return;
   }
-  try {
-    fs.unlinkSync(pathOf(trackId, false));
-  } catch (e) {
-    // 文件不存在属常态
-  }
-  try {
-    fs.unlinkSync(pathOf(trackId, true));
-  } catch (e) {
-    // 文件不存在属常态
-  }
+  // manual / 自动两个路径都删 —— 用户显式要求重搜时允许清掉手选结果
+  unlinkSafe(pathOf(trackId, false));
+  unlinkSafe(pathOf(trackId, true));
 }
 
 /** 清空单个目录内全部 .json */
@@ -225,24 +240,17 @@ function clearDir(dir: string): void {
   if (dir.length === 0) {
     return;
   }
-  try {
-    const names: string[] = fs.listFileSync(dir);
-    for (let i = 0; i < names.length; i++) {
-      if (!names[i].endsWith('.json')) {
-        continue;
-      }
-      try {
-        fs.unlinkSync(`${dir}/${names[i]}`);
-      } catch (e) {
-        // 单个失败不影响其它
-      }
-    }
-  } catch (e) {
-    console.error(`clearDir failed: ${JSON.stringify(e)}`);
+  const names: string[] | null = listJsonNamesSync(dir);
+  if (names === null) {
+    console.error('clearDir failed: listFileSync rejected');
+    return;
+  }
+  for (let i = 0; i < names.length; i++) {
+    unlinkSafe(`${dir}/${names[i]}`);
   }
 }
 
-/** 清空全部歌词缓存（设置页「清理缓存」用）：manual + 自动两目录都清（用户显式操作） */
+/** 清空全部歌词缓存（预留 API：当前工程内无调用方，未来设置页接入时用）：manual + 自动两目录都清 */
 export function clearAllLyricCache(): void {
   clearDir(cacheDir);
   clearDir(cacheDirManual);
@@ -253,21 +261,11 @@ function countDir(dir: string): number {
   if (dir.length === 0) {
     return 0;
   }
-  try {
-    const names: string[] = fs.listFileSync(dir);
-    let n: number = 0;
-    for (let i = 0; i < names.length; i++) {
-      if (names[i].endsWith('.json')) {
-        n++;
-      }
-    }
-    return n;
-  } catch (e) {
-    return 0;
-  }
+  const names: string[] | null = listJsonNamesSync(dir);
+  return names === null ? 0 : names.length;
 }
 
-/** 缓存条数（「清理缓存」显示用）：manual + 自动两目录合计 */
+/** 缓存条数（预留 API：当前工程内无调用方）：manual + 自动两目录合计 */
 export function countLyricCache(): number {
   return countDir(cacheDir) + countDir(cacheDirManual);
 }

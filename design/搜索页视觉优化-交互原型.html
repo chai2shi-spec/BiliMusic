@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>搜索页视觉优化 · 交互原型对照（现状 / 优化后）</title>
+<style>
+/* ══════════════════════════════════════════════════════════
+   设计交付外壳（固定深色，与 design/BiliMusic-UI.html 同一套惯例：
+   深色舞台 + 浅色/深色两种手机原型，反差让原型更突出）
+   原型内部的色值全部来自 entry/src/main/resources/{base,dark}/element/color.json
+   ══════════════════════════════════════════════════════════ */
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:#17171B;color:#E8E8EC;
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  line-height:1.5;padding:0 0 80px;
+}
+.wrap{max-width:1280px;margin:0 auto;padding:0 24px}
+
+/* ── 页头 ── */
+.doc-head{padding:40px 0 24px}
+.doc-head h1{font-size:24px;font-weight:600;letter-spacing:.2px}
+.doc-head .sub{font-size:13px;color:#93939E;margin-top:8px;max-width:760px}
+.doc-head .meta{font-size:11px;color:#6E6E7A;margin-top:12px;font-family:ui-monospace,Consolas,monospace}
+.tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:6px}
+.tag{font-size:11px;padding:3px 10px;border-radius:999px;background:#26262E;color:#B9B9C4;border:1px solid #33333D}
+.tag.pk{background:rgba(251,114,153,.14);color:#FB7299;border-color:rgba(251,114,153,.3)}
+.tag.dp{background:rgba(194,24,91,.16);color:#E8589B;border-color:rgba(194,24,91,.34)}
+
+/* ── 工具栏 ── */
+.toolbar{
+  position:sticky;top:0;z-index:60;
+  background:rgba(23,23,27,.86);backdrop-filter:blur(18px) saturate(160%);
+  border-bottom:1px solid #2A2A32;
+}
+.toolbar-in{max-width:1280px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+.tgroup{display:flex;align-items:center;gap:8px}
+.tlabel{font-size:11px;color:#6E6E7A;letter-spacing:.4px}
+.segctl{display:flex;background:#22222A;border-radius:9px;padding:2px;gap:2px}
+.segctl button{
+  font:inherit;font-size:12px;color:#A9A9B4;background:transparent;border:0;cursor:pointer;
+  padding:5px 11px;border-radius:7px;transition:background .16s,color .16s;white-space:nowrap;
+}
+.segctl button:hover{color:#E8E8EC}
+.segctl button.on{background:#FB7299;color:#3D0018;font-weight:600}
+.swatches{display:flex;gap:6px}
+.sw{
+  width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;
+  outline:1px solid rgba(255,255,255,.14);outline-offset:-1px;transition:transform .14s,border-color .14s;
+}
+.sw:hover{transform:scale(1.14)}
+.sw.on{border-color:#fff;transform:scale(1.14)}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:#A9A9B4;cursor:pointer;user-select:none}
+.chk input{accent-color:#FB7299;width:14px;height:14px;cursor:pointer}
+
+/* ── 舞台 ── */
+.stage{display:flex;gap:40px;justify-content:center;align-items:flex-start;margin-top:30px;flex-wrap:wrap}
+.pane{display:flex;flex-direction:column;align-items:center;gap:14px;width:372px}
+.pane-head{display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;letter-spacing:.3px}
+.badge.b-before{background:#2E2E37;color:#9C9CA8}
+.badge.b-after{background:rgba(251,114,153,.16);color:#FB7299}
+.pane-title{font-size:13px;color:#C9C9D2}
+
+/* ── 手机外壳 ── */
+.phone{
+  width:356px;height:684px;position:relative;overflow:hidden;
+  border-radius:34px;background:#000;
+  border:8px solid #2A2A31;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+}
+/* 原型内部中性色（base / dark 两套，逐字对应 color.json） */
+.phone{
+  --n-bgpage:#F5F5F5; --n-bgcard:#FFFFFF; --n-divider:#E8E8EC;
+  --n-tp:#1A1A1A; --n-ts:#6B6B70; --n-tt:#8A8A90; --n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06); --n-error:#D93026; --n-scrimlight:rgba(0,0,0,.08);
+}
+body[data-mode="dark"] .phone{
+  --n-bgpage:#121216; --n-bgcard:#1E1E24; --n-divider:#33333C;
+  --n-tp:#F5F5F7; --n-ts:#ABABB5; --n-tt:#83838F; --n-td:#55555F;
+  --n-press:rgba(255,255,255,.08); --n-error:#FF6B5E; --n-scrimlight:rgba(255,255,255,.08);
+}
+
+/* 状态栏 */
+.statusbar{
+  position:absolute;top:0;left:0;right:0;height:44px;z-index:12;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px 0 26px;font-size:12px;font-weight:600;color:var(--n-tp);
+  background:var(--n-bgpage);
+}
+.statusbar .ic{display:flex;align-items:center;gap:5px}
+.statusbar svg{display:block}
+
+/* 顶栏（HDS titleBar + SearchInputBar，56 锁高） */
+.titlebar{
+  position:absolute;top:44px;left:0;right:0;height:56px;z-index:11;
+  display:flex;align-items:center;padding:0 16px;
+  background:var(--n-bgpage);
+}
+.backbtn{
+  width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tp);margin-right:4px;
+}
+.searchbox{
+  flex:1;height:36px;border-radius:18px;background:var(--n-bgcard);
+  display:flex;align-items:center;gap:8px;padding:0 12px;
+}
+.searchbox .mag{flex:none;color:var(--n-ts);display:flex}
+.searchbox .ph{font-size:13px;color:var(--n-ts);letter-spacing:.1px}
+/* 现状：常驻 0.5 描边；优化：无描边，仅聚焦时 1vp 品牌色
+   描边一律用 inset shadow 表达 —— 不占布局宽度，两侧 chip 换行位置才严格一致 */
+.phone.before .searchbox{border:0;box-shadow:inset 0 0 0 1px var(--n-divider)}
+.phone.after .searchbox{border:0;box-shadow:inset 0 0 0 1px var(--brand)}
+
+/* 内容区 */
+.screen{
+  position:absolute;inset:0;padding-top:100px;background:var(--n-bgpage);
+  display:none;flex-direction:column;overflow:hidden;
+}
+.screen.active{display:flex}
+
+/* ── 常用搜索区（CommonWordsSection） ── */
+.cm{padding:0 16px;flex:none}
+.phone.before .cm{margin-top:12px}
+.phone.after  .cm{margin-top:24px}
+
+.cm-labelbar{display:flex;align-items:center;margin-bottom:8px;height:16px}
+.cm-label{font-size:13px;color:var(--n-tt);line-height:16px;padding-right:12px;transition:all .2s}
+.phone.after .cm-label{font-size:11px;color:var(--n-ts);letter-spacing:.3px;font-weight:500}
+.cm-edit{
+  margin-left:auto;font-size:11px;color:var(--n-tt);
+  height:16px;display:none;align-items:center;padding-right:12px;
+}
+.phone.after .cm-edit{display:flex}
+
+.chips{display:flex;flex-wrap:wrap}
+.chip{
+  font-size:13px;color:var(--n-tp);line-height:18px;
+  padding:6px 12px;margin:0 8px 8px 0;
+  background:var(--n-bgcard);border-radius:14px;
+  display:inline-flex;align-items:center;gap:5px;
+  transition:background .22s,border-radius .22s;
+}
+.phone.before .chip{box-shadow:inset 0 0 0 1px var(--n-divider)}
+.phone.after  .chip{border:0;border-radius:15px;background:var(--surface)}
+.chip-add{color:var(--n-ts);padding:6px 12px}
+.chip-add svg{display:block}
+
+/* ── 页签区（HistorySection） ── */
+.hist{padding:0 16px;flex:1;display:flex;flex-direction:column;min-height:0}
+.phone.before .hist{margin-top:24px}
+.phone.after  .hist{margin-top:20px}
+
+.segrow{display:flex;align-items:center}
+.phone.before .segrow{margin-bottom:4px}
+.phone.after  .segrow{margin-bottom:8px}
+
+/* CapsuleSegmentButtonV2：背板 r8 底 bg_divider，选中块 r6 实底 themePrimary */
+.seg{
+  height:32px;border-radius:8px;background:var(--n-divider);
+  display:flex;align-items:center;padding:2px;gap:2px;
+  transition:width .22s;
+}
+.phone.before .seg{width:124px}
+.phone.after  .seg{width:132px}
+.segitem{
+  height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:var(--n-ts);padding:0 8px;flex:1;white-space:nowrap;
+}
+.segitem.on{background:var(--brand);color:var(--on);font-weight:500}
+
+/* 右侧文字按钮：现状 13fp / 优化 11fp，命中区由 44 高容器承担 */
+.segtext{
+  margin-left:auto;font-size:13px;color:var(--n-tt);padding:0 0 0 8px;
+  transition:font-size .2s;white-space:nowrap;
+}
+.phone.after .segtext{font-size:11px}
+
+/* 列表 */
+.list{flex:1;min-height:0;overflow:hidden}
+.row16{
+  font-size:16px;color:var(--n-tp);padding:12px 0;line-height:22px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.hotrow{display:flex;align-items:center;padding:12px 0}
+.hotrow .no{width:24px;font-size:13px;color:var(--n-tt);flex:none;line-height:22px}
+.hotrow .no.top{color:var(--deep);font-weight:600}
+.hotrow .wd{font-size:16px;color:var(--n-tp);line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── 空态 ── */
+.phone.before .empty{padding-top:160px}
+.phone.after  .empty{padding-top:0}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;padding:0 16px}
+.phone.after .empty{justify-content:center;padding-bottom:60px}
+.empty-ico{display:none;color:var(--n-td);margin-bottom:16px}
+.phone.after .empty-ico{display:block}
+.empty-main{font-size:16px;color:var(--n-ts);text-align:center;line-height:24px;padding-right:12px}
+.phone.after .empty-main{color:var(--n-tp);font-weight:500}
+.empty-sub{display:none;font-size:13px;color:var(--n-ts);margin-top:8px;text-align:center;line-height:18px}
+.phone.after .empty-sub{display:block}
+/* 空态文案两侧不同：现状一行通稿，优化版回显关键词 */
+.t-after{display:none}
+.phone.after .t-before{display:none}
+.phone.after .t-after{display:inline}
+.empty-rec{display:none;margin-top:20px;width:100%;justify-content:center;flex-wrap:wrap}
+.phone.after .empty-rec{display:flex}
+
+/* ── 结果页 ── */
+.reslist{flex:1;min-height:0;overflow:hidden;padding:0 16px}
+.up-label{font-size:13px;color:var(--n-tt);margin-bottom:10px;display:inline-block;padding-right:12px}
+.phone.after .up-label{font-size:11px;color:var(--n-ts);letter-spacing:.3px}
+.uprow{display:flex;gap:12px;overflow:hidden;margin-right:-16px}
+.upcard{
+  width:156px;height:184px;border-radius:16px;flex:none;position:relative;overflow:hidden;
+  background:linear-gradient(150deg,#8E8E96,#5A5A62);
+}
+.upcard .bar{
+  position:absolute;left:8px;right:8px;bottom:8px;height:34px;border-radius:10px;
+  background:rgba(0,0,0,.3);backdrop-filter:blur(14px);
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;color:#fff;
+}
+.vlabel{font-size:13px;color:var(--n-tt);margin:18px 0 8px;display:inline-block;padding-right:12px}
+.phone.after .vlabel{font-size:11px;color:var(--n-ts);letter-spacing:.3px}
+.vrow{display:flex;gap:10px;align-items:center;padding:6px 0}
+.vthumb{width:52px;height:52px;border-radius:8px;flex:none;background:linear-gradient(150deg,#7E7E88,#4E4E56)}
+.vmeta{flex:1;min-width:0}
+.vmeta .t1{font-size:14px;color:var(--n-tp);line-height:19px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vmeta .t2{font-size:11px;color:var(--n-ts);line-height:16px;margin-top:2px}
+
+/* ── 编辑态 ── */
+.chip .xmark{display:none;color:var(--n-error)}
+.phone .screen[data-state="editing"] .xmark{display:flex}
+
+/* ── 改动标记 ── */
+.chg{position:relative}
+body.marks .chg{outline:1px dashed rgba(251,114,153,.75);outline-offset:2px}
+body.marks .chg::after{
+  content:attr(data-n);position:absolute;top:-8px;right:-8px;
+  width:15px;height:15px;border-radius:50%;background:#FB7299;color:#3D0018;
+  font-size:9px;font-weight:700;line-height:15px;text-align:center;z-index:5;
+  font-family:ui-monospace,Consolas,monospace;
+}
+/* chip 群只标第一个（同一改动不重复打 9 个点，噪声太大） */
+body.marks .chips .chip.chg:not(:first-child){outline:none}
+body.marks .chips .chip.chg:not(:first-child)::after{display:none}
+/* 「编辑」在行末，角标放右上会撞上方间距标尺 → 改挂右下 */
+body.marks .cm-edit.chg::after{top:auto;bottom:-9px;right:-4px}
+
+/* 顶部间距标尺：把 12 → 24 这件"看不见的事"画出来 */
+.gapmark{position:absolute;right:6px;top:100px;width:1px;display:none;z-index:6}
+.screen[data-state="landing"] .gapmark,
+.screen[data-state="hot"] .gapmark,
+.screen[data-state="editing"] .gapmark{display:block}
+.phone.before .gapmark{height:12px}
+.phone.after  .gapmark{height:24px}
+body:not(.marks) .gapmark{display:none !important}
+.gapmark::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:1px;
+  background:rgba(251,114,153,.85);
+}
+.gapmark::after{
+  content:'12vp';position:absolute;right:2px;top:35%;transform:translateY(-50%);
+  font-size:8px;line-height:1;font-weight:700;letter-spacing:.1px;
+  color:#FB7299;white-space:nowrap;font-family:ui-monospace,Consolas,monospace;
+}
+.phone.after .gapmark::after{content:'24vp'}
+
+/* 图注 */
+.figcap{font-size:11px;color:#6E6E7A;text-align:center;max-width:356px;line-height:1.6}
+
+/* ── 说明条 ── */
+.notes{width:100%;display:flex;flex-direction:column;gap:8px;margin-top:2px}
+.note{display:flex;gap:8px;font-size:11.5px;line-height:1.65;color:#A9A9B4}
+.note .k{
+  flex:none;width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:700;
+  line-height:16px;text-align:center;background:#2E2E37;color:#9C9CA8;
+  font-family:ui-monospace,Consolas,monospace;margin-top:1px;
+}
+.pane.is-after .note .k{background:rgba(251,114,153,.18);color:#FB7299}
+.note b{color:#E8E8EC;font-weight:600}
+
+/* ── 分区标题 ── */
+.sec{margin-top:64px}
+.sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:18px}
+.sec-head h2{font-size:16px;font-weight:600}
+.sec-head .no{font-size:11px;color:#6E6E7A;font-family:ui-monospace,Consolas,monospace}
+.sec-head .hint{font-size:11px;color:#6E6E7A;margin-left:auto}
+
+/* ── 表格 ── */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #26262E;vertical-align:top}
+th{font-size:11px;color:#6E6E7A;font-weight:500;letter-spacing:.3px;background:#1C1C22}
+td{color:#B9B9C4}
+td.strong{color:#E8E8EC;font-weight:500}
+td.num{font-family:ui-monospace,Consolas,monospace;color:#C9C9D2;white-space:nowrap}
+td .to{color:#FB7299;font-family:ui-monospace,Consolas,monospace}
+tr:hover td{background:#1A1A20}
+.tblwrap{border:1px solid #26262E;border-radius:12px;overflow:hidden}
+.cap{font-size:11px;color:#6E6E7A;margin-top:10px;line-height:1.6}
+
+/* ── 卡片网格 ── */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.card{background:#1C1C22;border:1px solid #26262E;border-radius:12px;padding:16px 18px}
+.card h3{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.card h3 .dot{width:6px;height:6px;border-radius:50%;background:#FB7299;flex:none}
+.card p{font-size:12px;color:#A9A9B4;line-height:1.75}
+.card p+p{margin-top:8px}
+.card b{color:#E8E8EC;font-weight:600}
+.card .mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#C9C9D2}
+.card.no h3 .dot{background:#6E6E7A}
+
+/* ── 验收清单 ── */
+.check{width:100%;display:grid;gap:2px}
+.check label{
+  display:flex;gap:10px;align-items:flex-start;font-size:12.5px;color:#B9B9C4;
+  padding:9px 12px;border-radius:8px;cursor:pointer;line-height:1.6;
+}
+.check label:hover{background:#1C1C22}
+.check input{margin-top:3px;accent-color:#FB7299;flex:none}
+.check input:checked+span{color:#6E6E7A;text-decoration:line-through}
+
+/* ── 代码块 ── */
+pre{
+  background:#1C1C22;border:1px solid #26262E;border-radius:12px;
+  padding:16px 18px;overflow-x:auto;font-size:11.5px;line-height:1.75;
+  font-family:ui-monospace,Consolas,monospace;color:#B9B9C4;
+}
+pre .c{color:#5E5E6A}
+pre .k{color:#FB7299}
+pre .n{color:#C9C9D2}
+
+.foot{margin-top:56px;padding-top:20px;border-top:1px solid #26262E;font-size:11px;color:#5E5E6A;line-height:1.8}
+
+@media (max-width:840px){
+  .stage{gap:28px}
+  .pane{width:min(356px,100%)}
+  .phone{transform-origin:top center}
+}
+</style>
+</head>
+<body data-mode="light" class="marks">
+
+<!-- ══════════ 页头 ══════════ -->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>搜索页视觉优化 · 交互原型对照</h1>
+    <p class="sub">
+      同一屏并排「现状 / 优化后」。切状态看落地页、热搜、空态、结果页、编辑态；
+      切主题色可以逐个核对 chip 底、聚焦描边、段控选中块是否<b style="color:#E8E8EC">同步变色</b>——
+      这是「符合主题」的唯一硬判据。
+    </p>
+    <div class="meta">pages/SearchPage.ets（2271 行）· components/SearchTabBar.ets（131 行）· 代码零改动 · 纯参数级方案</div>
+    <div class="tags">
+      <span class="tag pk">P0 间距拆分</span>
+      <span class="tag pk">P0 字号收敛</span>
+      <span class="tag pk">P0 chip 换底</span>
+      <span class="tag dp">P1 聚焦描边</span>
+      <span class="tag dp">P1 空态重做</span>
+      <span class="tag dp">P1 编辑入口</span>
+      <span class="tag">P2 段控 132</span>
+    </div>
+  </header>
+</div>
+
+<!-- ══════════ 工具栏 ══════════ -->
+<div class="toolbar">
+  <div class="toolbar-in">
+    <div class="tgroup">
+      <span class="tlabel">状态</span>
+      <div class="segctl" id="stateCtl">
+        <button data-s="landing" class="on">落地页</button>
+        <button data-s="hot">热搜</button>
+        <button data-s="empty">空态</button>
+        <button data-s="result">结果页</button>
+        <button data-s="editing">编辑态</button>
+      </div>
+    </div>
+    <div class="tgroup">
+      <span class="tlabel">明暗</span>
+      <div class="segctl" id="modeCtl">
+        <button data-m="light" class="on">浅色</button>
+        <button data-m="dark">深色</button>
+      </div>
+    </div>
+    <div class="tgroup">
+      <span class="tlabel">主题</span>
+      <div class="swatches" id="sw"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="marksChk" checked><span>改动标记</span></label>
+  </div>
+</div>
+
+<!-- ══════════ 舞台 ══════════ -->
+<div class="wrap">
+  <div class="stage">
+    <section class="pane is-before">
+      <div class="pane-head"><span class="badge b-before">现状</span><span class="pane-title">现在真机长这样</span></div>
+      <div class="phone before" id="phoneBefore"></div>
+      <div class="notes" id="notesBefore"></div>
+    </section>
+    <section class="pane is-after">
+      <div class="pane-head"><span class="badge b-after">优化后</span><span class="pane-title">P0 三项 + P1 三处</span></div>
+      <div class="phone after" id="phoneAfter"></div>
+      <div class="notes" id="notesAfter"></div>
+    </section>
+  </div>
+  <p class="figcap" style="margin:22px auto 0">
+    原型按 1vp = 1px 还原，内容宽 308（对应真机 360vp 减左右 16 边距）。
+    真机 0.5vp 描边在此放大为 1px 以便观察——这正是「chip 与搜索框同底同描边」被看见的原因。
+  </p>
+</div>
+
+<!-- ══════════ 手机模板（一份结构，差异全在 CSS） ══════════ -->
+<template id="phoneTpl">
+  <div class="statusbar">
+    <span>9:41</span>
+    <span class="ic">
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 8.5v1.2M4.4 6.2v3.5M7.8 3.6v6.1M11.2 1v8.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 4.2a9.4 9.4 0 0 1 12.4 0M3.4 6.7a6 6 0 0 1 8 0M5.8 9a2.6 2.6 0 0 1 3.8 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      <svg width="22" height="11" viewBox="0 0 22 11" fill="none"><rect x=".6" y=".6" width="18" height="9.8" rx="2.6" stroke="currentColor" stroke-opacity=".45" stroke-width="1.1"/><rect x="2.2" y="2.2" width="13" height="6.6" rx="1.4" fill="currentColor"/><path d="M20.4 4v3" stroke="currentColor" stroke-opacity=".45" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </span>
+  </div>
+
+  <div class="titlebar">
+    <div class="backbtn">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <path d="M15 4.5 7.5 12 15 19.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="searchbox chg" data-n="5">
+      <span class="mag">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="7" cy="7" r="5.1" stroke="currentColor" stroke-width="1.5"/>
+          <path d="m11 11 3.2 3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <span class="ph">搜索歌曲、歌单、UP主</span>
+    </div>
+  </div>
+
+  <!-- ① 落地页（有历史） -->
+  <div class="screen active" data-state="landing">
+    <div class="gapmark"></div>
+    <div class="cm">
+      <div class="cm-labelbar">
+        <span class="cm-label chg" data-n="3">常用搜索</span>
+        <span class="cm-edit chg" data-n="7">编辑</span>
+      </div>
+      <div class="chips">
+        <span class="chip chg" data-n="2">playlist<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">原创音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">翻唱音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">二创音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">ai创造<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">相声评书<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">有声书<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">脱口秀<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chip-add chg" data-n="2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </span>
+      </div>
+    </div>
+    <div class="hist">
+      <div class="segrow">
+        <div class="seg chg" data-n="4">
+          <span class="segitem on">最近搜索</span>
+          <span class="segitem">热搜</span>
+        </div>
+        <span class="segtext chg" data-n="4">删除搜索记录</span>
+      </div>
+      <div class="list">
+        <div class="row16">晴天</div>
+        <div class="row16">周杰伦</div>
+        <div class="row16">夜曲</div>
+        <div class="row16">稻香</div>
+        <div class="row16">以父之名</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ② 热搜 -->
+  <div class="screen" data-state="hot">
+    <div class="gapmark"></div>
+    <div class="cm">
+      <div class="cm-labelbar">
+        <span class="cm-label chg" data-n="3">常用搜索</span>
+        <span class="cm-edit chg" data-n="7">编辑</span>
+      </div>
+      <div class="chips">
+        <span class="chip chg" data-n="2">playlist</span>
+        <span class="chip chg" data-n="2">原创音乐</span>
+        <span class="chip chg" data-n="2">翻唱音乐</span>
+        <span class="chip chg" data-n="2">二创音乐</span>
+        <span class="chip chg" data-n="2">ai创造</span>
+        <span class="chip chg" data-n="2">相声评书</span>
+        <span class="chip chg" data-n="2">有声书</span>
+        <span class="chip chg" data-n="2">脱口秀</span>
+        <span class="chip chip-add chg" data-n="2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </span>
+      </div>
+    </div>
+    <div class="hist">
+      <div class="segrow">
+        <div class="seg chg" data-n="4">
+          <span class="segitem">最近搜索</span>
+          <span class="segitem on">热搜</span>
+        </div>
+        <span class="segtext chg" data-n="4">刷新</span>
+      </div>
+      <div class="list">
+        <div class="hotrow"><span class="no top">1</span><span class="wd">周杰伦 新歌</span></div>
+        <div class="hotrow"><span class="no top">2</span><span class="wd">华语说唱 2026</span></div>
+        <div class="hotrow"><span class="no top">3</span><span class="wd">夏日歌单推荐</span></div>
+        <div class="hotrow"><span class="no">4</span><span class="wd">乐队现场</span></div>
+        <div class="hotrow"><span class="no">5</span><span class="wd">古风 编曲</span></div>
+        <div class="hotrow"><span class="no">6</span><span class="wd">爵士 入门</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ③ 空态 -->
+  <div class="screen" data-state="empty">
+    <div class="empty">
+      <span class="empty-ico">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <circle cx="21" cy="21" r="14.5" stroke="currentColor" stroke-width="3"/>
+          <path d="m32 32 8.5 8.5" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          <path d="M15.5 18.5a6 6 0 0 1 4.2-4.4" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" opacity=".55"/>
+        </svg>
+      </span>
+      <div class="empty-main chg" data-n="6"><span class="t-before">没有找到相关内容，换个关键词试试</span><span class="t-after">没有找到「jay chou」的相关内容</span></div>
+      <div class="empty-sub">试试更短的关键词，或检查有没有错别字</div>
+      <div class="empty-rec chips">
+        <span class="chip">playlist</span>
+        <span class="chip">原创音乐</span>
+        <span class="chip">翻唱音乐</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ④ 结果页 -->
+  <div class="screen" data-state="result">
+    <div class="reslist">
+      <div class="up-label chg" data-n="3">UP主</div>
+      <div class="uprow">
+        <div class="upcard"><div class="bar">周杰伦音乐馆</div></div>
+        <div class="upcard"><div class="bar">华语音乐台</div></div>
+        <div class="upcard"><div class="bar">耳机评测局</div></div>
+      </div>
+      <div class="vlabel chg" data-n="3">视频</div>
+      <div class="vrow"><div class="vthumb"></div><div class="vmeta"><div class="t1">晴天 · 官方 MV</div><div class="t2">周杰伦音乐馆 · 32.1万播放</div></div></div>
+      <div class="vrow"><div class="vthumb"></div><div class="vmeta"><div class="t1">夜曲 · 现场版</div><div class="t2">华语音乐台 · 18.7万播放</div></div></div>
+      <div class="vrow"><div class="vthumb"></div><div class="vmeta"><div class="t1">稻香 · 钢琴翻奏</div><div class="t2">耳机评测局 · 9.4万播放</div></div></div>
+    </div>
+  </div>
+
+  <!-- ⑤ 编辑态 -->
+  <div class="screen" data-state="editing">
+    <div class="gapmark"></div>
+    <div class="cm">
+      <div class="cm-labelbar">
+        <span class="cm-label chg" data-n="3">常用搜索</span>
+        <span class="cm-edit chg" data-n="7">完成</span>
+      </div>
+      <div class="chips">
+        <span class="chip chg" data-n="2">playlist<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">原创音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">翻唱音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">二创音乐<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chg" data-n="2">ai创造<svg class="xmark" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+        <span class="chip chip-add chg" data-n="2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </span>
+      </div>
+    </div>
+    <div class="hist">
+      <div class="segrow">
+        <div class="seg chg" data-n="4">
+          <span class="segitem on">最近搜索</span>
+          <span class="segitem">热搜</span>
+        </div>
+        <span class="segtext chg" data-n="4">删除搜索记录</span>
+      </div>
+      <div class="list">
+        <div class="row16">晴天</div>
+        <div class="row16">周杰伦</div>
+        <div class="row16">夜曲</div>
+        <div class="row16">稻香</div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ══════════ 规格区 ══════════ -->
+<div class="wrap">
+
+  <!-- 1 间距 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.1</span><h2>P0 · 拆开共用的 12vp</h2>
+      <span class="hint">风险最低，先做这条</span>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th style="width:26%">位置</th><th style="width:18%">当前</th><th style="width:18%">建议</th><th>依据</th></tr></thead>
+        <tbody>
+          <tr><td class="strong">落地页顶部间距</td><td class="num">12 <span style="color:#6E6E7A">（复用结果页常量）</span></td><td class="num"><span class="to">24</span> 新常量 SEARCH_STATE_TOP_VP</td><td>分组起始需要换气感；与搜索框占位 13fp 拉开层次</td></tr>
+          <tr><td class="strong">结果页列表首项占位</td><td class="num">12</td><td class="num"><span class="to">16</span> SEARCH_LIST_START_EXTRA_VP</td><td>列表紧接搜索框，12 偏挤，16 与 NAV_H_PADDING 同档</td></tr>
+          <tr><td>「常用搜索」→ chip 群</td><td class="num">8</td><td class="num">8 不变</td><td>标题与自己的内容必须紧贴</td></tr>
+          <tr><td>chip 群 → 段控行</td><td class="num">24</td><td class="num"><span class="to">20</span></td><td>标题变小后整体收紧，24 显松散</td></tr>
+          <tr><td>段控行 → 列表首项</td><td class="num">4</td><td class="num"><span class="to">8</span></td><td>4 太贴，8 与「同级元素间距」一致</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">
+      ⚠️ 这两个量<b style="color:#E8E8EC">必须拆成两个常量</b>。现在同一个 12 同时管「落地页顶部间距」和「结果页列表首项占位」，
+      两个场景需求不同；若继续共用一个，改落地页会把结果页列表一起推下去 12vp。
+    </p>
+  </section>
+
+  <!-- 2 字号 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.2</span><h2>P0 · 把 13fp 收敛成两级</h2>
+      <span class="hint">13fp 由 6 处 → 3 处</span>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th style="width:30%">元素</th><th style="width:28%">当前</th><th>建议</th></tr></thead>
+        <tbody>
+          <tr><td class="strong">「常用搜索」</td><td class="num">13fp · text_tertiary</td><td class="num"><span class="to">11fp · text_secondary · ls 0.3</span></td></tr>
+          <tr><td class="strong">「UP主」/「视频」</td><td class="num">13fp · text_tertiary</td><td class="num"><span class="to">11fp · text_secondary · ls 0.3</span></td></tr>
+          <tr><td>「删除搜索记录」/「刷新」</td><td class="num">13fp · text_tertiary</td><td class="num"><span class="to">11fp · text_tertiary</span></td></tr>
+          <tr><td>chip 文字</td><td class="num">13fp</td><td class="num">13fp 不变</td></tr>
+          <tr><td>分段切换器</td><td class="num">13fp</td><td class="num">13fp 不变</td></tr>
+          <tr><td>搜索框输入 / 占位</td><td class="num">13fp</td><td class="num">13fp 不变（框内空间约束）</td></tr>
+          <tr><td>历史 / 热搜词条</td><td class="num">16fp</td><td class="num">16fp 不变（内容主体）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">
+      降字号的同时<b style="color:#E8E8EC">必须提一档色</b>，这两件事不能只做一件：11fp 已是最小档，再叠最浅的灰会看不清。
+      实测对比度 —— 浅色 <span class="mono" style="font-family:ui-monospace,monospace">#6B6B70</span> on <span class="mono" style="font-family:ui-monospace,monospace">#F5F5F5</span> = 5.31:1；
+      深色 <span class="mono" style="font-family:ui-monospace,monospace">#ABABB5</span> on <span class="mono" style="font-family:ui-monospace,monospace">#121216</span> = 8.21:1，都稳过 AA。
+    </p>
+  </section>
+
+  <!-- 3 chip -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.3</span><h2>P0 · chip 换主题 surface 底</h2>
+      <span class="hint">这条同时修掉「品牌色缺席」</span>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot"></span>① 与搜索框彻底分开</h3>
+        <p>搜索框保留「白底 + 0.5 描边」（输入框语言）；chip 变「实底无描边」（标签语言）。
+        此前两者<b>同底同描边、只差圆角 14 vs 18</b>，本就是误读来源。</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot"></span>② 形成品牌色层级</h3>
+        <p>白底页面上一片淡粉 chip 群，不必用任何装饰图形就完成了「符合主题」。
+        换主题色时 chip 跟着变 —— 正好补上 P4「8 套主题搜素页几乎无变化」。</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot"></span>③ 密度下降</h3>
+        <p>去掉描边后 chip 群横向视觉重量变轻，更简约。圆角 14 → <b>15</b>（chip 高约 30，视觉近 full）。</p>
+      </div>
+    </div>
+    <div class="tblwrap" style="margin-top:14px">
+      <table>
+        <thead><tr><th style="width:22%">属性</th><th style="width:32%">当前</th><th>建议</th></tr></thead>
+        <tbody>
+          <tr><td class="strong">底</td><td class="num">bg_card · 浅 #FFFFFF / 深 #1E1E24</td><td class="num"><span class="to">themeSurface</span> · 浅 #FFF1F5 / 深 #33222B</td></tr>
+          <tr><td class="strong">描边</td><td class="num">0.5 bg_divider</td><td class="num"><span class="to">去掉</span></td></tr>
+          <tr><td class="strong">圆角</td><td class="num">14</td><td class="num"><span class="to">15</span></td></tr>
+          <tr><td>padding / 文字 / 按压态</td><td class="num">12,6 / text_primary / press_overlay</td><td class="num">全部不变</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">
+      对比度实测（text_primary on themeSurface）：浅色 <span style="font-family:ui-monospace,monospace">#1A1A1A</span> on <span style="font-family:ui-monospace,monospace">#FFF1F5</span> = <b style="color:#E8E8EC">15.9:1</b>；
+      深色 <span style="font-family:ui-monospace,monospace">#F5F5F7</span> on <span style="font-family:ui-monospace,monospace">#33222B</span> = <b style="color:#E8E8EC">13.7:1</b>，淡底不牺牲可读性。
+    </p>
+    <p class="cap">
+      把主题点到<b style="color:#E8E8EC">绿 / 青</b>会看到一件事：这两套的 surface（#F0F7F0 / #EDF8F9）与 bg_page（#F5F5F5）明度几乎相同，
+      chip 更像「同色系色块」而不是「浮起的卡」。这不是 bug —— 品牌色倾向本来靠色相而非明度表达；
+      但真机验收时如果觉得糊，退路是给 chip 加 0.5vp 的同色描边（浅色比深色更需要边界）。
+    </p>
+    <p class="cap" style="color:#E8589B">
+      ⚠️ 技术前提：搜索页当前只订阅 STORE_THEME_DEEP / PRIMARY / ON，<b>没有 STORE_THEME_SURFACE</b>。
+      必须新增 <span style="font-family:ui-monospace,monospace">@StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5'</span>，
+      否则只能用静态资源 <span style="font-family:ui-monospace,monospace">$r('app.color.brand_surface')</span> —— 那是构建期常量，不跟主题切换，等于没做到「符合主题」。
+    </p>
+  </section>
+
+  <!-- 4 搜索框 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.4</span><h2>P1 · 搜索框只在聚焦时描边</h2>
+      <span class="hint">品牌色落点之二</span>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th style="width:24%">状态</th><th style="width:34%">当前</th><th>建议</th></tr></thead>
+        <tbody>
+          <tr><td class="strong">静态（未聚焦）</td><td class="num">0.5 bg_divider 常驻</td><td class="num"><span class="to">无描边</span>，仅 bg_card 底</td></tr>
+          <tr><td class="strong">聚焦</td><td class="num">同静态（无反馈）</td><td class="num"><span class="to">1vp themePrimary 描边</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">
+      搜索页一进来就 defaultFocus(true) 自动聚焦弹键盘，静态态基本只在「用户主动收起键盘后」出现。
+      把描边让给聚焦态，既省掉一条常驻线，又给品牌色一个<b style="color:#E8E8EC">有功能含义</b>的落点（不是装饰）。
+      需新增 <span style="font-family:ui-monospace,monospace">@State inputFocused</span> + onFocus/onBlur；描边 0.5→1 会让内容宽缩 1vp，可用 .outline() 规避。
+    </p>
+  </section>
+
+  <!-- 5 空态 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.5</span><h2>P1 · 空态重做：信息 + 出口</h2>
+      <span class="hint">本方案唯一新增视觉元素的部分</span>
+    </div>
+    <div class="cards">
+      <div class="card"><h3><span class="dot"></span>图标</h3><p>给「这是空态」一个非文字信号，扫一眼就懂。</p></div>
+      <div class="card"><h3><span class="dot"></span>回显关键词</h3><p>用户能立刻发现是不是打错了字 —— 当前版本连搜的是什么都没提。</p></div>
+      <div class="card"><h3><span class="dot"></span>给出下一步</h3><p>不只有「换个词试试」，直接给三个可点词，点了就重搜。</p></div>
+      <div class="card"><h3><span class="dot"></span>去掉 +48 魔数</h3><p>垂直居中由布局决定，不再跟 listStartOffset 耦合。</p></div>
+    </div>
+    <pre style="margin-top:14px"><span class="c">// 目标结构（内容区垂直居中，不再用 margin-top 硬算）</span>
+[放大镜图标 48fp, text_disabled]
+[主文案 16fp text_primary]     没有找到「{keyword}」的相关内容
+[副文案 13fp text_secondary]   试试更短的关键词，或检查有没有错别字
+[推荐词 chip ×3]               取 commonWords 前 3，点击直接重搜</pre>
+  </section>
+
+  <!-- 6 编辑入口 + 命中区 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">4.6</span><h2>P1 · 编辑态可发现 + 44 命中区</h2>
+      <span class="hint">顺手修一处既存违规</span>
+    </div>
+    <p class="cap" style="margin:0 0 14px">
+      现状：长按 400ms 才进编辑态（词旁出现红 ✕），界面<b style="color:#E8E8EC">没有任何提示</b> —— 功能存在但用户找不到。
+      改法是在「常用搜索」标题行右侧加 11fp text_tertiary 的「编辑 / 完成」文字按钮，与段控行右侧「删除搜索记录」同一套语法，
+      长按手势保留。不新增任何布局行。
+    </p>
+    <p class="cap" style="color:#E8589B;margin:0">
+      ⚠️ 第 ④ 条铁律「命中区 ≥ 44」当前已被违反：「删除搜索记录」/「刷新」是 13fp 字 + 上下各 4 padding ≈ <b>26vp</b>。
+      改的时候外层包 44 高 Row 一并补上（视觉不变）。
+    </p>
+  </section>
+
+  <!-- 7 状态矩阵 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">5</span><h2>状态矩阵（改完后逐状态核对）</h2>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th style="width:20%">状态</th><th style="width:16%">顶部</th><th style="width:38%">主体</th><th>品牌色出现</th></tr></thead>
+        <tbody>
+          <tr><td class="strong">刚进页（空历史）</td><td>搜索框聚焦描边</td><td>常用搜索 + 热搜独占（无段控，显示「热搜」文字标签）</td><td>描边 + chip 底</td></tr>
+          <tr><td class="strong">有历史</td><td>聚焦描边</td><td>常用搜索 + 段控（最近搜索）+ 列表</td><td>描边 + chip 底 + 选中块</td></tr>
+          <tr><td class="strong">切到热搜</td><td>聚焦描边</td><td>常用搜索 + 段控（热搜）+ 榜单（前三序号）</td><td>描边 + chip 底 + 选中块 + 序号</td></tr>
+          <tr><td>搜索中</td><td>聚焦描边</td><td>8 行骨架</td><td>描边</td></tr>
+          <tr><td>有结果</td><td>聚焦描边</td><td>UP主标签 + 卡行 + 视频标签 + 列表</td><td>描边</td></tr>
+          <tr><td>无结果</td><td>聚焦描边</td><td>空态（图标 + 回显 + 推荐词）</td><td>描边 + chip 底（推荐词）</td></tr>
+          <tr><td>编辑常用词态</td><td>聚焦描边</td><td>chip 旁红 ✕ + 标题行「完成」</td><td>描边 + chip 底 + error 色</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">
+      深色模式下 chip 底 <span style="font-family:ui-monospace,monospace">#33222B</span> 与 bg_page <span style="font-family:ui-monospace,monospace">#121216</span> 明度差很小，视觉上是「深棕」——
+      这是有意的：深色 UI 惯例就是用低对比实底代替描边。切到深色看真机观感，如果太糊，退路是把深色 chip 底改为 bg_card <span style="font-family:ui-monospace,monospace">#1E1E24</span>，但那样就失去主题色倾向。
+    </p>
+  </section>
+
+  <!-- 8 不做 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">7</span><h2>明确不做的六件事</h2>
+      <span class="hint">简约靠层次，不靠减法</span>
+    </div>
+    <div class="cards">
+      <div class="card no"><h3><span class="dot"></span>不加「共 N 条结果」</h3><p>搜索接口只返回 numPages，<b>没有 total 字段</b>。要显示得额外请求或不准确计数，违背简约。</p></div>
+      <div class="card no"><h3><span class="dot"></span>不把常用搜索改成横向滚动单行</h3><p>wrap 换行虽占高度，但一次看到全部 8 个词，比「藏起来要横滑」更高效。</p></div>
+      <div class="card no"><h3><span class="dot"></span>不动 UP 主卡片 156×184</h3><p>它与首页快捷卡 HomeQuickCards 是同一套几何，共享组件语言不能单方面改。</p></div>
+      <div class="card no"><h3><span class="dot"></span>不重构「搜索前/后」两套顶栏</h3><p>搜索框在 HDS titleBar 里、56 锁高，是顶栏规范 v2 的既定结构，拆掉牵动整个顶栏体系。</p></div>
+      <div class="card no"><h3><span class="dot"></span>不改返回键 / 手势区</h3><p>返回键是 HDS 默认件，NavTitleRow 已统一，不属于本页问题。</p></div>
+      <div class="card no"><h3><span class="dot"></span>不为「简约」删元素</h3><p>常用搜索、段控、热搜、UP 卡行都是真实功能出口。</p></div>
+    </div>
+  </section>
+
+  <!-- 9 验收 -->
+  <section class="sec">
+    <div class="sec-head">
+      <span class="no">8</span><h2>验收清单（真机）</h2>
+      <span class="hint">勾选只在本页生效，不落盘</span>
+    </div>
+    <div class="check">
+      <label><input type="checkbox"><span>落地页顶部：搜索框底到「常用搜索」标题 ≥ 24vp，标题与 placeholder 不同字号、不同色档</span></label>
+      <label><input type="checkbox"><span>结果页：搜索框底到首个列表项 = 16vp，比当前松一档但不空</span></label>
+      <label><input type="checkbox"><span>chip 群：无描边、底为淡粉，与搜索框放在一起不再被误认为同类</span></label>
+      <label><input type="checkbox"><span>深色模式：chip 底 #33222B 与 bg_page 能分出层次，chip 文字清晰</span></label>
+      <label><input type="checkbox"><span>8 套主题色逐个切换：chip 底、聚焦描边、段控选中块三者同步变色（符合主题的唯一硬判据）</span></label>
+      <label><input type="checkbox"><span>搜索框：静态无描边、聚焦 1vp 主题色，收键盘后描边消失</span></label>
+      <label><input type="checkbox"><span>空态：图标 + 回显关键词 + 3 个推荐词，点推荐词能直接重搜</span></label>
+      <label><input type="checkbox"><span>「编辑」按钮：能进能出，44 命中区，有按压态</span></label>
+      <label><input type="checkbox"><span>「删除搜索记录」：视觉不变，但命中区实测 ≥ 44</span></label>
+      <label><input type="checkbox"><span>系统字体放大到 1.2x：段控不截断、chip 不溢出、标题不换行</span></label>
+      <label><input type="checkbox"><span>网格 / 两列 / 长条三种列表形态下间距一致</span></label>
+    </div>
+  </section>
+
+  <div class="foot">
+    数据来源：pages/SearchPage.ets（COMMON_SEARCH_WORDS / SEARCH_LIST_START_EXTRA_VP / CommonWordsSection / HistorySection / HotWordList / SearchStateArea）、
+    components/SearchTabBar.ets、utils/HeaderBarMaterial.ets（makeBiliSegmentColors）、
+    resources/base+dark/element/color.json、common/ThemeColors.ts（8 套主题 token）。<br>
+    文字方案见同目录 <b style="color:#B9B9C4">搜索页视觉优化方案.md</b>（10 节 / 含可直接粘贴给 AI 的执行 prompt）。本页为止<b style="color:#B9B9C4">代码零改动</b>。
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   1. 8 套主题 token —— 逐字来自 common/ThemeColors.ts:50-57
+   ══════════════════════════════════════════════════════════ */
+const THEMES = [
+  {id:'pink',  label:'粉', primary:'#FB7299', deepL:'#C2185B', deepD:'#FF8BAC', surL:'#FFF1F5', surD:'#33222B', on:'#3D0018'},
+  {id:'red',   label:'红', primary:'#E5484D', deepL:'#C62828', deepD:'#FF8A80', surL:'#FFF3F3', surD:'#332020', on:'#3D0006'},
+  {id:'orange',label:'橙', primary:'#F57C00', deepL:'#C05600', deepD:'#FFB74D', surL:'#FFF5EC', surD:'#33261A', on:'#3D1F00'},
+  {id:'yellow',label:'黄', primary:'#F5A623', deepL:'#B07C00', deepD:'#FFD54F', surL:'#FFF9E6', surD:'#33301A', on:'#3D2E00'},
+  {id:'green', label:'绿', primary:'#43A047', deepL:'#2E7D32', deepD:'#81C995', surL:'#F0F7F0', surD:'#1F3320', on:'#00330D'},
+  {id:'cyan',  label:'青', primary:'#00A5B5', deepL:'#00707F', deepD:'#4DD0E1', surL:'#EDF8F9', surD:'#1A2E33', on:'#00303A'},
+  {id:'blue',  label:'蓝', primary:'#00AEEC', deepL:'#00688F', deepD:'#64C8F0', surL:'#EDF7FC', surD:'#1A2733', on:'#002A3D'},
+  {id:'purple',label:'紫', primary:'#8E24AA', deepL:'#6A1B9A', deepD:'#CE93D8', surL:'#F7F0FA', surD:'#2C1F33', on:'#2E0033'}
+];
+
+/* 初始 mode 从 body 的 data-mode 读 —— 若只靠默认值，首屏可能出现
+   「中性色已深、品牌 surface 还是浅」的白底白字（真实踩过） */
+const state = {
+  mode: document.body.dataset.mode === 'dark' ? 'dark' : 'light',
+  theme:'pink',
+  screen:'landing'
+};
+
+/* 2. 手机实例化：一份模板 → 两台（before / after） */
+const tpl = document.getElementById('phoneTpl');
+['phoneBefore','phoneAfter'].forEach(id => {
+  document.getElementById(id).appendChild(tpl.content.cloneNode(true));
+});
+
+/* 3. 主题色圆点 */
+const swBox = document.getElementById('sw');
+THEMES.forEach(t => {
+  const b = document.createElement('button');
+  b.className = 'sw' + (t.id === state.theme ? ' on' : '');
+  b.style.background = t.primary;
+  b.title = t.label;
+  b.setAttribute('aria-label', '主题：' + t.label);
+  b.onclick = () => { state.theme = t.id; paintSw(); applyTheme(); };
+  swBox.appendChild(b);
+});
+function paintSw(){
+  [...swBox.children].forEach((b, i) => b.classList.toggle('on', THEMES[i].id === state.theme));
+}
+
+/* 4. 应用主题：品牌三件套 + surface/deep 随明暗取值 */
+function applyTheme(){
+  const t = THEMES.find(x => x.id === state.theme);
+  const dark = state.mode === 'dark';
+  const r = document.documentElement.style;
+  r.setProperty('--brand',   t.primary);
+  r.setProperty('--deep',    dark ? t.deepD : t.deepL);
+  r.setProperty('--surface', dark ? t.surD : t.surL);
+  r.setProperty('--on',      t.on);
+  r.setProperty('--brand-ink', t.on);
+  paintSw();
+  // 明暗按钮与 state.mode 保持一致（首屏从 body 读，避免按钮与画面对不上）
+  document.querySelectorAll('#modeCtl button').forEach(b => {
+    b.classList.toggle('on', b.dataset.m === state.mode);
+  });
+}
+
+/* 5. 状态切换 */
+const NOTES = {
+  landing: {
+    before: [
+      ['1','顶部只有 <b>12vp</b>，「常用搜索」13fp tertiary 与搜索框占位 13fp secondary <b>同号近色</b>，又被挤在一起 → 被读成「搜索框的第二行说明」。'],
+      ['2','chip 是 <b>白底 + 0.5 描边 + r14</b>，与上方搜索框<b>同底同描边</b>只差圆角（14 vs 18）→ 像「缩小版搜索框」。'],
+      ['3','全页唯一的大片留白在顶部却最紧；品牌色在这一屏<b>一次都没出现</b>。'],
+      ['7','长按 400ms 才进编辑态，界面没有任何提示 → 功能存在但找不到。']
+    ],
+    after: [
+      ['1','顶部放到 <b>24vp</b>，分组起始有换气感；结果页另走 16，两个语义拆成两个常量。'],
+      ['2','chip 换 <b>themeSurface 实底 + 去描边 + r15</b>：与输入框彻底分开，且<b>跟着主题变色</b>——补上「品牌色缺席」。'],
+      ['3','标题降到 <b>11fp / text_secondary / 字距 0.3</b>，与 13fp 控件文字拉开一级。'],
+      ['4','段控 124 → <b>132</b>（1.2x 字体不截断）；「删除搜索记录」13 → <b>11fp</b>，命中区补到 44。'],
+      ['7','标题行右侧新增「编辑」，<b>入口可见</b>，长按手势保留。']
+    ]
+  },
+  hot: {
+    before: [
+      ['4','段控 r8/r6 与 chip r14 圆角差 8 —— 不足以一眼区分「切换器」和「标签」。'],
+      ['4','「刷新」13fp 与段控同排同字号同显眼度，低频操作占着高频位置。'],
+      ['3','前三序号是这一屏<b>唯一的品牌色</b>，标题、chip、按钮全是灰。']
+    ],
+    after: [
+      ['2','chip 淡粉底 + 段控实粉选中块 → 品牌色出现<b>两档层次</b>（淡底 / 实底），不再只有序号。'],
+      ['4','「刷新」降到 11fp；段控加宽到 132。'],
+      ['3','标题、榜单层次由「字号 + 色档」承担，不靠位置推断。']
+    ]
+  },
+  empty: {
+    before: [
+      ['6','只有一行 16fp 灰字：<b>不回显关键词、无图标、无出口</b>。用户看不到自己搜了什么，也没法一键重搜。'],
+      ['6','位置靠 <span style="font-family:ui-monospace,monospace">margin-top: listStartOffset() + 48</span> 硬算，跟搜索框间距耦合。']
+    ],
+    after: [
+      ['6','<b>图标 48 text_disabled</b> 给非文字信号 + 主文案回显关键词 + 副文案给方向 + <b>3 个推荐词 chip</b> 点了直接重搜。'],
+      ['6','整块<b>垂直居中</b>，去掉 +48 魔数，不再跟 listStartOffset 耦合。']
+    ]
+  },
+  result: {
+    before: [
+      ['1','列表首项占位 12vp，紧贴搜索框，偏挤。'],
+      ['3','「UP主」「视频」两个分组标签 13fp tertiary —— 与页面上其它 13fp 灰字完全同级，形不成「分组」。']
+    ],
+    after: [
+      ['1','占位 12 → <b>16</b>，只影响结果页与骨架，不动落地页。'],
+      ['3','两个标签降到 <b>11fp text_secondary</b>，与「常用搜索」共用同一套分组标签语言。'],
+      ['—','<b>UP 卡 156×184 不动</b> —— 与首页 HomeQuickCards 共享几何，不能单方面改。'],
+      ['—','结果页顶部「视频 | UP主」段控行不在本次改动范围，原型中省略。']
+    ]
+  },
+  editing: {
+    before: [
+      ['7','进编辑态的唯一路径是<b>长按 400ms</b>，没有任何视觉提示；退出靠点词体，也没提示。'],
+      ['7','红 ✕ 只有 12fp，命中区小于 44。']
+    ],
+    after: [
+      ['7','标题行右侧「编辑 / 完成」文字按钮，<b>入口和出口都可见</b>，44 命中区 + 按压态。'],
+      ['2','编辑态下 chip 仍是 themeSurface 实底，红 ✕ 用 state_error，不额外引入色值。']
+    ]
+  }
+};
+
+function renderNotes(){
+  const n = NOTES[state.screen];
+  const build = (arr, box) => {
+    box.innerHTML = arr.map(([k, txt]) => {
+      const num = /^\d+$/.test(k) ? k : '';
+      return '<div class="note"><span class="k">' + num + '</span><span>' + txt + '</span></div>';
+    }).join('');
+  };
+  build(n.before, document.getElementById('notesBefore'));
+  build(n.after,  document.getElementById('notesAfter'));
+}
+
+document.getElementById('stateCtl').addEventListener('click', e => {
+  const bt = e.target.closest('button'); if (!bt) return;
+  state.screen = bt.dataset.s;
+  [...e.currentTarget.children].forEach(b => b.classList.toggle('on', b === bt));
+  document.querySelectorAll('.screen').forEach(s => {
+    s.classList.toggle('active', s.dataset.state === state.screen);
+  });
+  applyTheme(); renderNotes();
+});
+
+document.getElementById('modeCtl').addEventListener('click', e => {
+  const bt = e.target.closest('button'); if (!bt) return;
+  state.mode = bt.dataset.m;
+  document.body.dataset.mode = state.mode;
+  [...e.currentTarget.children].forEach(b => b.classList.toggle('on', b === bt));
+  applyTheme();
+});
+
+document.getElementById('marksChk').addEventListener('change', e => {
+  document.body.classList.toggle('marks', e.target.checked);
+});
+
+/* 初始化 */
+applyTheme();
+renderNotes();
+</script>
+</body>
+</html>

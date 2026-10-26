@@ -53,6 +53,7 @@ import {
 } from './FavSyncStore';
 import { STORE_FAV_SYNC_REV } from '../common/Constants';
 import { Playlist, Track } from '../model/MusicModels';
+import { sleep } from '../utils/AsyncUtil';
 
 /**
  * 双向删除总开关（拉取侧：B 站取消收藏 → 本地移除，`applyFavMirror` 的
@@ -95,6 +96,8 @@ export interface FavSyncSummary {
   pushDropped: number;
   /** 双向写回：仍积压待补推的意图条数（瞬态失败保留，下轮再试） */
   pushPending: number;
+  /** 双向写回：补推阶段登录已失效（csrf / SESSDATA 缺失，写回未完成） */
+  pushNeedLogin: boolean;
   /** 因 B 站已删除而被清掉的本地镜像数 */
   deletedFolders: number;
   /** 整体失败/中止的人话原因；正常为空串 */
@@ -121,6 +124,7 @@ function emptySummary(): FavSyncSummary {
     pushed: 0,
     pushDropped: 0,
     pushPending: 0,
+    pushNeedLogin: false,
     deletedFolders: 0,
     reason: ''
   };
@@ -224,6 +228,7 @@ export class FavSyncManager {
       summary.pushDropped = summary.pushDropped + flushS.pushDropped;
       summary.pushPending = summary.pushPending + flushS.pushPending;
       if (flushS.needLogin) {
+        summary.pushNeedLogin = true;
         console.warn('fav sync: push flush reports needLogin, intents kept pending, continue pull');
       }
     } catch (e) {
@@ -314,7 +319,7 @@ export class FavSyncManager {
       }
       // 夹间间隔（降风控）
       if (i < enabled.length - 1) {
-        await this.sleep(FOLDER_GAP_MS);
+        await sleep(FOLDER_GAP_MS);
       }
     }
 
@@ -520,11 +525,5 @@ export class FavSyncManager {
     const mirror: Playlist | null = LibraryStore.getFavMirrorByMediaId(mediaId);
     const actual: number = mirror ? mirror.tracks.length : 0;
     return recorded > actual ? recorded : actual;
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, ms);
-    });
   }
 }

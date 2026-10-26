@@ -18,6 +18,7 @@ import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 /** 打赏二维码显示宽度（vp）：主流 360vp 屏宽下两侧各余 40vp；高度按原图宽高比自适应 */
 const REWARD_IMG_WIDTH: number = 280;
@@ -81,27 +82,12 @@ export struct RewardPage {
     NavTitleRow({ title: '打赏作者' })
   }
 
-  /**
-   * 标题行收窄容器（平板模式宽度适配）：HDS titleBar 的 stackBuilder
-   * 横跨目的地整列全宽，而本页内容列被 constraintSize 收窄居中 —— 大屏上标题行
-   * 会贴到整列左缘、与居中内容错位。外层 Row 居中 + 内层 Column constraintSize
-   *（上限与本页内容列 contentMaxWidth 完全同口径），标题行与内容列同宽对齐；
-   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   rewardBarNarrow() {
-    Row() {
-      Column() {
-        this.rewardBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.rewardBar()
+    } })
   }
 
   build() {

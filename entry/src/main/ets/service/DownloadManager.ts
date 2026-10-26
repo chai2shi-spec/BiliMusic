@@ -56,6 +56,7 @@
 import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
 import common from '@ohos.app.ability.common';
+import { sleep } from '../utils/AsyncUtil';
 import { extractAudioFromVideo, expandVideoParts } from '../api/BilibiliApi';
 import {
   insertDownload,
@@ -182,12 +183,6 @@ export interface DownloadStartResult {
 interface QueuedDownload {
   task: DownloadTask;
   track: Track;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
 }
 
 /**
@@ -386,6 +381,9 @@ export class DownloadManager {
       this.notify();
     } catch (e) {
       console.error(`load downloads failed: ${describeError(e)}`);
+      // 失败后清空进行中 Promise：否则它保持「已 resolve 的失败」状态，
+      // 后续 ensureLoaded 直接放行、loaded 永远 false，装载再也无法重试。
+      this.loadingPromise = null;
     }
   }
 
@@ -446,11 +444,15 @@ export class DownloadManager {
    * 下载入口。多 P 合集会被**展开成多个独立任务**，一起排队、再串行下载。
    *
    * @param ignoreWifiLimit 用户在「仅 WiFi 下载」的询问里选了「继续下载」时传 true 重入。
+   * @param singleOnly 只下载 track 本身、不展开合集（播放页下载当前 P 用）：
+   *        正在播的是第几个 P 就只下那一 P 的音频。列表页入口保持默认 false——
+   *        列表条目代表整个合集，「点一下全下」是刻意的。
    */
   async requestDownload(
     track: Track,
     ignoreWifiLimit: boolean = false,
-    source?: DownloadSource
+    source?: DownloadSource,
+    singleOnly: boolean = false
   ): Promise<DownloadStartResult> {
     const result: DownloadStartResult = { queued: 0, skipped: 0, blockedReason: '' };
     if (!this.context) {
@@ -471,7 +473,7 @@ export class DownloadManager {
       return result;
     }
 
-    const all: Track[] = await this.resolveDownloadTracks(track);
+    const all: Track[] = await this.resolveDownloadTracks(track, singleOnly);
 
     for (let i = 0; i < all.length; i++) {
       const t: Track = all[i];
@@ -525,8 +527,15 @@ export class DownloadManager {
    *
    * 代价：每次下载请求会多一次 `view` 请求（展开要读 pages）。一次请求换「合集点一下全下」，
    * 相比用户手动点 12 次各 2 次请求，净开销只有 +1 次，划算。
+   *
+   * singleOnly（播放页下载当前 P）：跳过展开，只下 track 本身。正在播的分 P
+   * track 自带 bvid/cid（id 形如 `BV…#cid`），runDownload 的 extractAudioFromVideo
+   * 直接按 cid 取该 P 的音频流，不需要 view 展开这一步。
    */
-  private async resolveDownloadTracks(track: Track): Promise<Track[]> {
+  private async resolveDownloadTracks(track: Track, singleOnly: boolean = false): Promise<Track[]> {
+    if (singleOnly) {
+      return [track];
+    }
     const bvid: string = this.bvidOf(track);
     if (bvid.indexOf('BV') !== 0) {
       return [track];
@@ -947,15 +956,29 @@ export class DownloadManager {
    * 把「已完成且文件仍在沙箱」的任务批量搬移到「下载/包名」（设置页
    * 「同步已完成歌曲」入口）。
    *
+   * 开关未开启 → skippedSwitchOff 置位返回（页面提示开启，不误报「无待同步」）；
+   * 任务表未就绪（冷启动早期点击 / RDB 未开）→ 抛错，页面提示「稍后重试」。
+   *
    * 与完成点自动搬移共用 moveTaskFile（含单份存储语义与失败兜底：单条失败
    * 计数继续不中断批次，沙箱原件无损）；批内重名加 " (2)"、" (3)"…
    *（AudioExporter 导出同款去重 —— 批量场景同曲多任务混排，自动搬移的
    * 覆盖语义会静默吞歌）。同步成功后 notify 一次刷新快照。
    */
   async syncCompletedToPublicDir(): Promise<PublicSyncResult> {
-    const result: PublicSyncResult = { total: 0, ok: 0, failed: 0 };
+    const result: PublicSyncResult = { total: 0, ok: 0, failed: 0, skippedSwitchOff: false };
     if (!AppPreferences.getSettings().saveToPublicDownloads) {
+      // 不静默返回 total=0：页面会把「开关没开」误显示成「没有需要同步的歌曲」
+      //（页面快照与持久层分歧时的兜底信号）。
+      result.skippedSwitchOff = true;
       return result;
+    }
+    // 冷启动早期点击：任务表可能尚未从 RDB 装填（doInitRest 与页面加载并行），
+    // 先等装填完成再过滤（redownloadTask 同款），否则扫空表同样误报「无待同步」。
+    await this.ensureLoaded();
+    if (!this.context || !this.loaded) {
+      // 初始化未就绪（RDB 未开 / 上下文未注入）：抛错走页面 catch 的
+      // 「同步失败，请稍后重试」，不能让用户把「没准备好」误读成「没有歌」。
+      throw new Error('download manager not ready');
     }
     // 沙箱路径前缀过滤：已完成 + localFilePath 仍在沙箱 downloads 下才参与
     //（已搬过的路径在公共目录，indexOf !== 0 天然排除；半截/失败路径已清空）。
@@ -1561,23 +1584,6 @@ export class DownloadManager {
       result.skipped = 1;
     }
     return result;
-  }
-
-  /**
-   * 算出一组任务里处于「失败」的那些 id（组级「重试」按钮用）。
-   *
-   * 不放进 `DownloadTask` / `DownloadGroup` 的理由：那两处是纯数据 + 纯渲染，
-   * 塞状态判定会让两边都沾上业务逻辑；而组头本来就要显示「N 首失败」。
-   */
-  failedIdsOf(ids: string[]): string[] {
-    const out: string[] = [];
-    for (let i = 0; i < ids.length; i++) {
-      const t: DownloadTask | undefined = this.tasks.get(ids[i]);
-      if (t && t.status === DownloadStatus.ERROR) {
-        out.push(t.id);
-      }
-    }
-    return out;
   }
 
   async removeTask(id: string): Promise<void> {

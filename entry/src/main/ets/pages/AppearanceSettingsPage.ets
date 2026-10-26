@@ -70,6 +70,7 @@ import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { BarNarrowShell } from '../components/BarNarrowShell';
 
 @Component
 export struct AppearanceSettingsPage {
@@ -384,25 +385,12 @@ export struct AppearanceSettingsPage {
     NavTitleRow({ title: '外观设置' })
   }
 
-  /**
-   * 标题行收窄容器（AboutPage 同款）：外层 Row 居中 + 内层 Column constraintSize
-   * （上限与本页内容列同口径），大屏上标题行与内容列同宽对齐；
-   * 两侧空白区 hitTestBehavior(Transparent) 穿透点击。
-   */
+  /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */
   @Builder
   appearanceBarNarrow() {
-    Row() {
-      Column() {
-        this.appearanceBar()
-      }
-      .width('100%')
-      .height('100%')
-      .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .hitTestBehavior(HitTestMode.Transparent)
+    BarNarrowShell({ bar: (): void => {
+      this.appearanceBar()
+    } })
   }
 
   build() {
@@ -531,8 +519,8 @@ export struct AppearanceSettingsPage {
 
             // 底部导航布局：水平融合（播放栏与页签同一行）/ 垂直两层（播放栏上、页签下）。
             // 点击循环切换，写偏好 + AppStorage 镜像即时生效（Index 受控样式重建）。
-            // HDS 底部页签栏只在手机形态（SM）渲染，md/lg 是 NavRail + 浮岛，
-            // 本项在平板上点了没有任何可见效果 → 非 SM 整卡隐藏。
+            // HDS 底部页签栏各断点均渲染同款底栏；本项只在手机竖屏（SM）有
+            // 明显差异 → 非 SM 整卡隐藏。
             if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
               HdsListItemCard({
                 textItem: { primaryText: { text: '底部导航布局' } },

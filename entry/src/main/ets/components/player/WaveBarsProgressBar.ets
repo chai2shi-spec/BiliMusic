@@ -26,6 +26,7 @@ import { Track } from '../../model/MusicModels';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../../common/constants/InteractionConstants';
 import { STORE_CURRENT_TRACK, STORE_IS_PLAYING, STORE_THEME_PRIMARY } from '../../common/Constants';
+import { ProgressMath } from './ProgressMath';
 
 /** 命中区高度（vp） */
 const WAVE_HIT_VP: number = 32;
@@ -239,13 +240,7 @@ export struct WaveBarsProgressBar {
 
   /** Area 尺寸（Length）→ vp 数值；资源型（理论上不会出现）按 0 兜底 */
   private toVp(v: Length): number {
-    if (typeof v === 'number') {
-      return v;
-    }
-    if (typeof v === 'string') {
-      return parseFloat(v);
-    }
-    return 0;
+    return ProgressMath.toVp(v);
   }
 
   /** 切歌 → 伪随机高度集整体换样（同轨宽下数量不变，只换高度） */
@@ -255,16 +250,12 @@ export struct WaveBarsProgressBar {
 
   /** 进度比例（0~1）：时长未知时恒 0（全部按未播色） */
   private pct(): number {
-    if (this.max <= 0) {
-      return 0;
-    }
-    const p: number = this.value / this.max;
-    return Math.min(1, Math.max(0, p));
+    return ProgressMath.pct(this.value, this.max);
   }
 
   /** 已播裁切宽度（百分比字符串）：进度插值每帧只改这一个属性 */
   private filledWidthStr(): string {
-    return `${(this.pct() * 100).toFixed(2)}%`;
+    return ProgressMath.filledWidthStr(this.value, this.max);
   }
 
   /** 竖条高度集：N = floor((轨宽+间距)/(条宽+间距))；曲目 id 播种伪随机 */
@@ -323,11 +314,7 @@ export struct WaveBarsProgressBar {
 
   /** 触摸横坐标 → 秒（钳制 0~max） */
   private secAt(x: number): number {
-    if (this.trackWidth <= 0) {
-      return 0;
-    }
-    const ratio: number = Math.min(1, Math.max(0, x / this.trackWidth));
-    return ratio * this.max;
+    return ProgressMath.secAt(x, this.trackWidth, this.max);
   }
 
   build() {

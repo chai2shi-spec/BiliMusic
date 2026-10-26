@@ -52,7 +52,7 @@ import {
   DownloadStartResult,
   WIFI_ONLY_BLOCKED
 } from '../service/DownloadManager';
-import { currentNetworkLabel } from '../utils/NetworkUtil';
+import { currentNetworkLabel, hasNetwork } from '../utils/NetworkUtil';
 import {
   CONTENT_END_OFFSET,
   DEFAULT_PLAYLIST_NAME,
@@ -64,18 +64,19 @@ import {
   STORE_THEME_DEEP,
   STORE_HOME_SEARCH_ENTRY_ACTIVE,
   STORE_HOME_CHIPS_ACTIVE,
-  STORE_LIBRARY_REV
+  STORE_LIBRARY_REV,
+  STORE_WINDOW_WIDTH_VP
 } from '../common/Constants';
 import { FlingSampler } from '../components/FlingSampler';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { showAppToast } from '../components/AppToast';
 import { PLAYBACK_LOG_INFO, PLAYBACK_LOG_ERROR, recordPlaybackLog } from '../service/PlaybackLogStore';
-import { showAppAlertDialog } from '../components/AppAlertDialog';
+import { showConfirm } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
-  PairOf,
-  PairDataSource,
+  RowOf,
+  RowDataSource,
   TWO_COL_GAP_VP,
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
@@ -86,6 +87,11 @@ import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { HomeCategoryChips } from '../components/HomeCategoryChips';
 import { HomeQuickCards } from '../components/HomeQuickCards';
 import { HomeCardStore } from '../service/HomeCardStore';
+import {
+  HomeFeedCacheEntry,
+  getHomeFeedCache,
+  saveHomeFeedCache
+} from '../service/HomeFeedCacheStore';
 import {
   PULL_REFRESH_OFFSET_VP,
   PULL_REFRESH_RATIO,
@@ -298,15 +304,17 @@ export struct HomePage {
   @State @Watch('onListSourceChanged') center: Track[] = [];
   // ===== 列表数据源（LazyForEach 渲染）=====
   // 三 tab 数组都挂 @Watch('onListSourceChanged')：整表替换与 push 追加都会触发
-  // （V1 数组代理拦截 push），对应 ArrayDataSource 整表 reload + 两列 PairDataSource
+  // （V1 数组代理拦截 push），对应 ArrayDataSource 整表 reload + 行数据源
   // sync。reload 语义与 tab 数据流天然匹配：刷新必是整表换源；翻页 push 时
   // LazyForEach 只重建可视区，代价可控。
+  // 行数据源（RowOf N 槽）：列数随窗口宽动态（onColumnsChanged setColumns+sync，
+  // 平板横屏 3~4 列铺满，手机/折叠屏落回 2 列现值）。
   private recommendSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private recommendPairs: PairDataSource<Track> = new PairDataSource<Track>(this.recommendSource);
+  private recommendRows: RowDataSource<Track> = new RowDataSource<Track>(this.recommendSource, 2);
   private rankingSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private rankingPairs: PairDataSource<Track> = new PairDataSource<Track>(this.rankingSource);
+  private rankingRows: RowDataSource<Track> = new RowDataSource<Track>(this.rankingSource, 2);
   private centerSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private centerPairs: PairDataSource<Track> = new PairDataSource<Track>(this.centerSource);
+  private centerRows: RowDataSource<Track> = new RowDataSource<Track>(this.centerSource, 2);
   /** 诊断用实例号（aboutToAppear 分配） */
   private pageId: number = 0;
   /** 推荐位待完成的数据源数量（热门 + 推荐两个源并行，互不影响） */
@@ -347,26 +355,61 @@ export struct HomePage {
    */
   @StorageProp(STORE_NET_RETRY_REV) @Watch('onNetRetry') netRetryRev: number = 0;
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中，见 build 里的 constraintSize */
-  @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时条目两列显示 */
-  @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
-
-  /** 横屏宽屏（窗口 ≥600vp 的横屏）时条目两列显示；竖屏 / 窄窗口单列不变 */
-  private isTwoCol(): boolean {
-    return TwoColumnLayout.isActive(this.currentBreakpoint, this.isLandscape);
-  }
+  @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) @Watch('onColumnsChanged') currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
+  /** 横竖屏（Index 常驻注册写入）：横屏宽屏时条目多列显示 */
+  @StorageProp(BreakpointConstants.IS_LANDSCAPE) @Watch('onColumnsChanged') isLandscape: boolean = false;
+  /**
+   * 窗口宽（vp，Index 常驻回写）：平板横屏按它反推行数（2~4 列长条 / 2~6 卡网格）
+   * 与铺满上限；@StorageProp 初值同步不触发 @Watch，aboutToAppear 显式补一次。
+   */
+  @StorageProp(STORE_WINDOW_WIDTH_VP) @Watch('onColumnsChanged') windowWidthVp: number = 0;
 
   /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
-  @StorageProp(STORE_ITEM_DISPLAY_STYLE) itemDisplay: string = ITEM_DISPLAY_LIST;
+  @StorageProp(STORE_ITEM_DISPLAY_STYLE) @Watch('onColumnsChanged') itemDisplay: string = ITEM_DISPLAY_LIST;
 
   /**
    * 大封面模式：三页签（推荐 / 排行榜 / 音乐中心）的封面类视频条目配对成
    * 双列网格卡（TrackCard），竖屏 / 横屏均双列；交互契约与行内版一致
-   * （整卡点击播/暂停、「⋯」菜单）。配对数据源（recommendPairs 等）在
+   * （整卡点击播/暂停、「⋯」菜单）。配对数据源（recommendRows 等）在
    * onListSourceChanged 无条件 sync，网格竖屏也是热的。
    */
   private isGrid(): boolean {
     return this.itemDisplay === ITEM_DISPLAY_GRID;
+  }
+
+  // ── 动态列数状态（平板横屏铺满改造）──
+  /** 长条行列数（TwoColumnLayout.listColumns 反推，非两列态 1） */
+  @State listCols: number = 1;
+  /** 网格卡列数（TwoColumnLayout.gridColumns 反推，非两列态仍 2——竖屏网格本就双列） */
+  @State gridCols: number = 2;
+  /** 行数据源当前生效列数缓存：与重算值不同才 setColumns+sync（防 @Watch 抖动重载） */
+  private activeCols: number = 2;
+
+  /** 当前行渲染列数：网格模式取 gridCols、长条模式取 listCols（@State 驱动 build 分支） */
+  private rowColumns(): number {
+    return this.isGrid() ? this.gridCols : this.listCols;
+  }
+
+  /**
+   * 列数联动（@Watch：断点 / 横竖屏 / 窗口宽 / 展示样式变化）：
+   * 重算长条与网格列数，行数据源列数变化时 setColumns + sync
+   * （漏 sync 会出现 totalCount 与渲染数不一致的空白/重叠）。
+   * aboutToAppear 显式补一次（@StorageProp 初值同步不触发 @Watch）。
+   */
+  private onColumnsChanged(): void {
+    this.listCols = TwoColumnLayout.listColumns(this.currentBreakpoint, this.isLandscape, this.windowWidthVp);
+    this.gridCols = TwoColumnLayout.gridColumns(this.currentBreakpoint, this.isLandscape, this.windowWidthVp);
+    const active: number = this.rowColumns();
+    if (active === this.activeCols) {
+      return;
+    }
+    this.activeCols = active;
+    this.recommendRows.setColumns(active);
+    this.recommendRows.sync();
+    this.rankingRows.setColumns(active);
+    this.rankingRows.sync();
+    this.centerRows.setColumns(active);
+    this.centerRows.sync();
   }
 
   /** Refresh 组件的转圈状态（$$ 双向绑定，干完活必须落回 false 才会收起） */
@@ -407,6 +450,26 @@ export struct HomePage {
   private centerHotTracks: Track[] = [];
   /** 排行榜全量（接口一次给全，展示侧按 RANKING_PAGE_SIZE 切片） */
   private rankingAll: Track[] = [];
+  /**
+   * 推荐位首屏双源暂存（热门 / 推荐流）：与 centerNewTracks/centerHotTracks 同款
+   * staging 模式 —— 各自落定后由 settleRecommend 按固定顺序合成整表替换，
+   * 支撑「启动缓存在场时静默校验、成功才替换」的语义（见 initHomeFeed）。
+   */
+  private recommendHotTracks: Track[] = [];
+  private recommendFeedTracks: Track[] = [];
+  // ===== 启动缓存兜底（网络不佳时先出缓存内容，见 initHomeFeed）=====
+  /** 本次会话任一 tab 恢复过启动缓存（决定静默校验与恢复提示的分支） */
+  private cacheAppliedAny: boolean = false;
+  /** 「网络不佳」类 toast 只弹一次（启动轮 5 个请求的失败提示共享去重） */
+  private netPoorToastShown: boolean = false;
+  /** 启动即离线、跳过了联网加载（等 STORE_NET_RETRY_REV 恢复信号补拉） */
+  private offlineStartupSkipped: boolean = false;
+  /** initHomeFeed 已跑完（收尾前忽略 onNetRetry，防「注册瞬间的 available」抢跑双拉） */
+  private homeFeedInitDone: boolean = false;
+  /** 启动轮统计窗口：只覆盖 initHomeFeed 发起的第一轮 5 个请求 */
+  private startupRoundActive: boolean = false;
+  private startupDone: number = 0;
+  private startupFail: number = 0;
 
   /**
    * 头部在场状态镜像（vp 偏移 < HOME_ENTRY_FLIP_VP）：只在翻转时写
@@ -452,24 +515,24 @@ export struct HomePage {
   private onListSourceChanged(propName: string): void {
     if (propName === 'recommend') {
       this.recommendSource.reload(this.recommend);
-      this.recommendPairs.sync();
+      this.recommendRows.sync();
     } else if (propName === 'ranking') {
       this.rankingSource.reload(this.ranking);
-      this.rankingPairs.sync();
+      this.rankingRows.sync();
     } else if (propName === 'center') {
       this.centerSource.reload(this.center);
-      this.centerPairs.sync();
+      this.centerRows.sync();
     }
   }
 
   /** 初值同步（@Watch 不触发初始赋值）：挂载时补一次 */
   private syncAllListSources(): void {
     this.recommendSource.reload(this.recommend);
-    this.recommendPairs.sync();
+    this.recommendRows.sync();
     this.rankingSource.reload(this.ranking);
-    this.rankingPairs.sync();
+    this.rankingRows.sync();
     this.centerSource.reload(this.center);
-    this.centerPairs.sync();
+    this.centerRows.sync();
   }
 
   /**
@@ -539,6 +602,9 @@ export struct HomePage {
   aboutToAppear(): void {
     // 列表数据源初值同步（见 syncAllListSources 注释）
     this.syncAllListSources();
+    // 列数初算（@StorageProp 初值同步不触发 @Watch）：窗口宽已在 AppStorage 时
+    // 首帧即正确列数，不等首个变化事件。
+    this.onColumnsChanged();
     this.normalizeTab();
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
@@ -620,12 +686,13 @@ export struct HomePage {
       autoCancel: true,
       alignment: DialogAlignment.Center
     });
-    this.loadHomeData();
-    // 快捷卡行首灌：LibraryStore 冷启动是同步磁盘读（getSync + JSON.parse），
-    // 延后一拍防卡首帧（PlaylistsPage 首次 refresh 同款取舍）
-    setTimeout((): void => {
+    this.initHomeFeed();
+    // 快捷卡行首灌：歌单冷启动读走预热（分片加载、每 N 片让出主线程一拍，
+    // 防 THREAD_BLOCK_6S —— 主线程停摆时 3/6S 堆栈落在 libtimer.z.so 即此因），
+    // 完成后本处 then 与 STORE_LIBRARY_REV bump 双路触发重灌（PlaylistsPage 首次 refresh 同款）
+    LibraryStore.prewarmPlaylists().then((): void => {
       this.refreshQuickCards();
-    }, 0);
+    });
     this.pageId = ++homePageInstanceSeq;
     console.info(`[Home] appear id=${this.pageId} bp=${this.currentBreakpoint}`);
     // 下拉刷新占位：ComponentContent 构造依赖 UIContext，属性初始化时还没就绪，
@@ -700,11 +767,61 @@ export struct HomePage {
    * 首屏数据。刻意拆成各自独立的任务：串行 await 后合并的话，任一源失败
    * （如缺 buvid 导致 rcmd 返回 412）会把另一个源已拿到的数据一起丢掉，
    * 表现为"首页一片空白"。
+   *
+   * revalidate=true（静默校验，启动缓存在场 / 网络恢复补拉时用）：
+   * 不清现有列表 —— 用户继续看得到缓存内容，双源落定后 settleRecommend /
+   * settleCenter 整表替换；全部失败时保留现有内容不动。
+   * revalidate=false（默认）维持原行为：reset 清列表 → 骨架接管 → 成功替换。
    */
-  private loadHomeData(): void {
-    this.loadHomeRecommend();
+  private loadHomeData(revalidate: boolean = false): void {
+    this.loadHomeRecommend(revalidate);
     this.loadRanking();
-    this.loadCenter();
+    this.loadCenter(revalidate);
+  }
+
+  /**
+   * 启动数据入口（aboutToAppear 调，fire-and-forget）：
+   *   1) 先读三 tab 启动缓存（本地 IO 毫秒级）——命中立即出内容、不闪骨架，
+   *      网络不佳时用户看到的不再是 15 秒骨架屏；
+   *   2) 完全离线：跳过 5 个注定各挂 15s 超时的请求，toast 提示后直接返回，
+   *      等网络恢复信号（STORE_NET_RETRY_REV → onNetRetry）补拉；
+   *   3) 在线：正常联网校验（缓存在场时静默校验、成功才替换并更新缓存）。
+   * 三个 tab 顺序 await 即可 —— 单文件毫秒级，先于任何网络回调完成，无竞态。
+   */
+  private async initHomeFeed(): Promise<void> {
+    const offline: boolean = !hasNetwork();
+    const rec: HomeFeedCacheEntry | null = await getHomeFeedCache('recommend');
+    const rank: HomeFeedCacheEntry | null = await getHomeFeedCache('ranking');
+    const ctr: HomeFeedCacheEntry | null = await getHomeFeedCache('center');
+    // 恢复：整体赋值 @State → onListSourceChanged 自动 reload 数据源；
+    // 不碰 pending 标志 → homeLoading() 保持 false → 直接出内容、不闪骨架
+    if (rec !== null) {
+      this.recommend = rec.tracks;
+      this.cacheAppliedAny = true;
+    }
+    if (rank !== null) {
+      // 排行榜存的是全量 100 条：恢复后离线 revealMoreRanking 翻页仍可用
+      this.rankingAll = rank.tracks;
+      this.ranking = rank.tracks.slice(0, RANKING_PAGE_SIZE);
+      this.cacheAppliedAny = true;
+    }
+    if (ctr !== null) {
+      this.center = ctr.tracks;
+      this.cacheAppliedAny = true;
+    }
+    this.homeFeedInitDone = true;
+    if (offline) {
+      this.offlineStartupSkipped = true;
+      this.netPoorToastShown = true;
+      this.toast(this.cacheAppliedAny ? '网络未连接，已为你展示缓存内容'
+        : '网络未连接，请检查网络后重试', 2000);
+      return;
+    }
+    this.startupRoundActive = true;
+    this.startupDone = 0;
+    this.startupFail = 0;
+    // 无缓存时走原路径（reset → 骨架）；有缓存时静默校验（不清缓存内容）
+    this.loadHomeData(this.cacheAppliedAny);
   }
 
   private resetRecommend(): void {
@@ -713,39 +830,68 @@ export struct HomePage {
     this.recommendHasMore = true;
     // 先预置为 2（热门 + 推荐），避免首帧渲染时因计数为 0 闪一下"暂无数据"
     this.recommendPending = 2;
+    this.recommendHotTracks = [];
+    this.recommendFeedTracks = [];
   }
 
-  private loadHomeRecommend(): void {
-    this.resetRecommend();
+  private loadHomeRecommend(revalidate: boolean = false): void {
+    if (revalidate) {
+      // 静默校验：不清缓存内容（用户继续看得到），只重置分页状态与双源暂存
+      this.recommendFreshIdx = 1;
+      this.recommendHasMore = true;
+      this.recommendPending = 2;
+      this.recommendHotTracks = [];
+      this.recommendFeedTracks = [];
+    } else {
+      this.resetRecommend();
+    }
     this.loadPopular();
     this.loadRecommended();
-  }
-
-  private appendRecommend(list: Track[]): void {
-    this.recommend = mergeTracks(this.recommend, list);
   }
 
   private async loadPopular(): Promise<void> {
     try {
       const pop: PopularVideo[] = await BilibiliApi.getPopularVideos(10, 1);
-      this.appendRecommend(pop.map(mapPopular));
+      this.recommendHotTracks = pop.map(mapPopular);
     } catch (e) {
       console.error(`loadPopular failed: ${JSON.stringify(e)}`);
+      this.noteStartupLoadFail();
     } finally {
       this.recommendPending = this.recommendPending - 1;
+      this.settleRecommend();
+      this.noteStartupSettled();
     }
   }
 
   private async loadRecommended(): Promise<void> {
     try {
       const rec: PopularVideo[] = await BilibiliApi.getRecommendedVideos(10);
-      this.appendRecommend(rec.map(mapPopular));
+      this.recommendFeedTracks = rec.map(mapPopular);
     } catch (e) {
       // 该接口在缺少 buvid Cookie 时会返回 HTTP 412；此处失败不影响同行热门数据
       console.error(`loadRecommended failed: ${JSON.stringify(e)}`);
+      this.noteStartupLoadFail();
     } finally {
       this.recommendPending = this.recommendPending - 1;
+      this.settleRecommend();
+      this.noteStartupSettled();
     }
+  }
+
+  /**
+   * 推荐位双源落定（settleCenter 同款）：pending 归零后按固定顺序合成整表替换。
+   * 双源皆空 = 全部失败：保留现有内容（启动缓存 / 上一轮数据），不清不写 ——
+   * 这是「网络不佳时缓存兜底」的关键守卫，防止联网失败把已恢复的缓存清掉。
+   */
+  private settleRecommend(): void {
+    if (this.recommendPending > 0) {
+      return;
+    }
+    if (this.recommendHotTracks.length === 0 && this.recommendFeedTracks.length === 0) {
+      return;
+    }
+    this.recommend = mergeTracks(this.recommendHotTracks, this.recommendFeedTracks);
+    this.persistHomeFeedCache('recommend', this.recommend);
   }
 
   private async loadRanking(): Promise<void> {
@@ -754,10 +900,14 @@ export struct HomePage {
       const list: RankingVideoItem[] = await BilibiliApi.getGlobalRankingV2();
       this.rankingAll = list.map(mapRankingV2);
       this.ranking = this.rankingAll.slice(0, RANKING_PAGE_SIZE);
+      // 全量落盘（100 条）：启动恢复后离线 revealMoreRanking 翻页仍可用
+      this.persistHomeFeedCache('ranking', this.rankingAll);
     } catch (e) {
       console.error(`loadRanking failed: ${JSON.stringify(e)}`);
+      this.noteStartupLoadFail();
     } finally {
       this.loadingRanking = false;
+      this.noteStartupSettled();
     }
   }
 
@@ -771,8 +921,17 @@ export struct HomePage {
   }
 
   /** 两个数据源各自独立：串行 await 后合并会把已成功那份一起丢掉。 */
-  private loadCenter(): void {
-    this.resetCenter();
+  private loadCenter(revalidate: boolean = false): void {
+    if (revalidate) {
+      // 静默校验：不清缓存内容（用户继续看得到），只重置分页状态与双源暂存
+      this.centerPage = 1;
+      this.centerHasMore = true;
+      this.centerPending = 2;
+      this.centerNewTracks = [];
+      this.centerHotTracks = [];
+    } else {
+      this.resetCenter();
+    }
     this.loadCenterRank();
     this.loadCenterNew();
   }
@@ -788,7 +947,13 @@ export struct HomePage {
     if (this.centerPending > 0) {
       return;
     }
+    // 双源皆空 = 全部失败：保留现有内容（启动缓存 / 上一轮数据），不清不写 ——
+    // 防止联网失败把已恢复的缓存清掉（缓存兜底的关键守卫，settleRecommend 同款）
+    if (this.centerNewTracks.length === 0 && this.centerHotTracks.length === 0) {
+      return;
+    }
     this.center = mergeTracks(this.centerNewTracks, this.centerHotTracks);
+    this.persistHomeFeedCache('center', this.center);
   }
 
   private async loadCenterRank(): Promise<void> {
@@ -797,9 +962,11 @@ export struct HomePage {
       this.centerHotTracks = mapMusicCenterList(hot);
     } catch (e) {
       console.error(`loadCenterRank failed: ${JSON.stringify(e)}`);
+      this.noteStartupLoadFail();
     } finally {
       this.centerPending = this.centerPending - 1;
       this.settleCenter();
+      this.noteStartupSettled();
     }
   }
 
@@ -809,9 +976,11 @@ export struct HomePage {
       this.centerNewTracks = mapMusicCenterList(fresh);
     } catch (e) {
       console.error(`loadCenterNew failed: ${JSON.stringify(e)}`);
+      this.noteStartupLoadFail();
     } finally {
       this.centerPending = this.centerPending - 1;
       this.settleCenter();
+      this.noteStartupSettled();
     }
   }
 
@@ -868,12 +1037,75 @@ export struct HomePage {
   }
 
   /**
-   * 网络恢复自动重试（Index 发信号）：只救「tab 加载失败后停在空态」的场景 ——
-   * 失败态的判据与空态 UI 一致（非加载中 + 列表为空，见 HomeStateArea）。
+   * 网络恢复自动重试（Index 发信号）：
+   *   · 空态场景（原行为）：tab 加载失败后停在「暂无数据」—— 只重载当前 tab；
+   *   · 缓存兜底场景（新增）：缓存在场 / 启动时离线跳过了联网 —— 静默校验
+   *     三源（loadHomeData(true)，成功即替换并更新缓存），覆盖「启动即离线，
+   *     netLost 从未触发，恢复后必须有人补拉」的盲区。
    */
   private onNetRetry(): void {
-    if (!this.homeLoading() && this.currentListLength() === 0) {
+    // initHomeFeed 未跑完时信号先到（如「注册瞬间的 available」）：缓存还在读，
+    // 不抢跑 —— 否则会和 initHomeFeed 的联网分支双拉同一批请求。
+    if (!this.homeFeedInitDone) {
+      return;
+    }
+    if (this.homeLoading()) {
+      return;
+    }
+    if (this.currentListLength() === 0) {
       this.reloadCurrentTab();
+      return;
+    }
+    if (this.cacheAppliedAny || this.offlineStartupSkipped) {
+      this.loadHomeData(true);
+    }
+  }
+
+  /**
+   * 启动缓存落盘（fire-and-forget）：失败只打日志 —— 落盘失败只影响
+   * 「下次启动有没有缓存」，本次会话的展示不受影响（HomeCardStore 同款取舍）。
+   */
+  private persistHomeFeedCache(tab: string, tracks: Track[]): void {
+    if (tracks.length === 0) {
+      return;
+    }
+    saveHomeFeedCache(tab, tracks).catch((e: Error): void => {
+      console.error(`save home feed cache failed (${tab}): ${e.message}`);
+    });
+  }
+
+  /**
+   * 启动轮单个请求失败上报（5 个首屏请求的 catch 各调一次）：
+   * 已恢复缓存 + 首个失败 → 立即 toast「网络不佳」（比等 5 个请求全部落定
+   * 快得多，弱网下用户能尽早知道内容是缓存兜底的）；toast 只弹一次。
+   */
+  private noteStartupLoadFail(): void {
+    if (this.cacheAppliedAny && !this.netPoorToastShown) {
+      this.netPoorToastShown = true;
+      this.toast('网络不佳，已为你展示缓存内容', 2000);
+    }
+    if (this.startupRoundActive) {
+      this.startupFail++;
+    }
+  }
+
+  /**
+   * 启动轮单个请求落定（成功 / 失败都算，5 个首屏请求的 finally 各调一次）。
+   * 5 个全部落定后收口：无缓存且全部失败 → 补一条弱网提示
+   * （原先是静默空态，用户毫无感知，正是「像卡死一样」的来源之一）。
+   * 下拉刷新 / 重试复用同一批加载函数时 startupRoundActive 已为 false，自动跳过。
+   */
+  private noteStartupSettled(): void {
+    if (!this.startupRoundActive) {
+      return;
+    }
+    this.startupDone++;
+    if (this.startupDone >= 5) {
+      this.startupRoundActive = false;
+      if (this.startupFail >= 5 && !this.cacheAppliedAny && !this.netPoorToastShown) {
+        this.netPoorToastShown = true;
+        this.toast('网络不佳，请检查网络后重试', 2000);
+      }
     }
   }
 
@@ -1272,17 +1504,12 @@ export struct HomePage {
    * 用户在外面想下一首歌就得先去设置里关开关 —— 多加一步，还未必想得起来。
    */
   private confirmDownloadOnCellular(track: Track): void {
-    showAppAlertDialog(this.getUIContext(), {
+    showConfirm(this.getUIContext(), {
       title: '仅 WiFi 下载',
       message: `${WIFI_ONLY_BLOCKED}\n当前网络：${currentNetworkLabel()}`,
-      primaryButton: {
-        value: '取消'
-      },
-      secondaryButton: {
-        value: '继续下载',
-        action: (): void => {
-          this.requestDownload(track, true);
-        }
+      confirmText: '继续下载',
+      onConfirm: (): void => {
+        this.requestDownload(track, true);
       }
     });
   }
@@ -1590,52 +1817,45 @@ export struct HomePage {
   }
 
   /**
-   * 配对条目行（两列 / 大封面网格共用骨架）：
-   * 长条（TrackItem）路径：first + second / Blank 布局。
-   * 大封面路径渲染双列 TrackCard（无入场错峰）。
-   * 几何：网格路径两卡均 layoutWeight(1) 零 margin、中间
-   * 固定宽间隔条（layoutWeight 份额含 margin，margin 挂 weighted 卡会让右卡
-   * 窄 12vp）→ 左右封面严格等宽；Row 页边距只在网格模式生效（长条路径零页
-   * 边距，防横屏两列长条行整体外移）。pIndex 供长条模式入场错峰
-   * （first = pIndex*2，second = pIndex*2+1）。
+   * 多列行渲染（RowOf N 槽，平板横屏铺满改造）：行内 ForEach 展开 N 槽，
+   * 槽间 Blank 间隔（网格）/ 槽 left margin（长条，TrackItem 自带内边距不加
+   * 额外页边距）；空槽（奇数末行尾部）Blank 占位保持满行列宽。
+   * 网格路径卡均 layoutWeight(1) 零 margin + 固定宽间隔条 → 左右封面严格等宽；
+   * 长条路径槽 margin(TWO_COL_GAP_VP)（与配对时代二槽口径一致）。
+   * rowIndex 供长条模式入场错峰（entranceIndex = rowIndex*cols + slotIndex）。
    */
   @Builder
-  TrackPairRow(pair: PairOf<Track>, pIndex: number): void {
+  TrackColumnsRow(row: RowOf<Track>, rowIndex: number): void {
     Row() {
-      if (this.isGrid()) {
-        TrackCard({
-          track: pair.first,
-          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-        }).layoutWeight(1)
-        Blank().width(TWO_COL_GAP_VP)
-        if (pair.second !== null) {
-          TrackCard({
-            track: pair.second,
-            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-          }).layoutWeight(1)
+      ForEach(row.slots, (slot: Track | null, slotIndex: number): void => {
+        if (this.isGrid()) {
+          if (slotIndex > 0) {
+            Blank().width(TWO_COL_GAP_VP)
+          }
+          if (slot !== null) {
+            TrackCard({
+              track: slot,
+              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+            }).layoutWeight(1)
+          } else {
+            Blank().layoutWeight(1)
+          }
         } else {
-          Blank().layoutWeight(1)
+          if (slot !== null) {
+            TrackItem({
+              track: slot,
+              entranceIndex: rowIndex * this.rowColumns() + slotIndex,
+              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+            })
+              .layoutWeight(1)
+              .margin({ left: slotIndex > 0 ? TWO_COL_GAP_VP : 0 })
+          } else {
+            Blank().layoutWeight(1)
+          }
         }
-      } else {
-        TrackItem({
-          track: pair.first,
-          entranceIndex: pIndex * 2,
-          onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-        }).layoutWeight(1)
-        if (pair.second !== null) {
-          TrackItem({
-            track: pair.second,
-            entranceIndex: pIndex * 2 + 1,
-            onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-        } else {
-          Blank().layoutWeight(1)
-        }
-      }
+      }, (slot: Track | null, slotIndex: number): string => `${slotIndex}_${slot !== null ? slot.id : 'x'}`)
     }
     .width('100%')
     .padding({
@@ -1646,6 +1866,20 @@ export struct HomePage {
     // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；网格 Top 让封面严格
     // 同高起步。两列长条路径保持默认 Center。
     .alignItems(this.isGrid() ? VerticalAlign.Top : VerticalAlign.Center)
+  }
+
+  /**
+   * 行 key（LazyForEach keyGenerator 共用）：模式前缀（g/l）+ 槽 id 以 | join。
+   * 模式前缀保证「网格↔长条同列数切换」时 key 变化强制重建行内组件
+   * （TrackCard ↔ TrackItem），防 LazyForEach 缓存行内容陈旧。
+   */
+  private rowKeyOf(row: RowOf<Track>): string {
+    let key: string = this.isGrid() ? 'g' : 'l';
+    for (let i = 0; i < row.slots.length; i++) {
+      const s: Track | null = row.slots[i];
+      key += `|${s !== null ? s.id : 'x'}`;
+    }
+    return key;
   }
 
   build() {
@@ -1721,18 +1955,17 @@ export struct HomePage {
             .width('100%')
 
             if (this.tab === 'recommend') {
-              // 大封面模式（外观设置「条目展示」）竖屏也走双列网格；
-              // 与横屏两列共用 TrackPairRow（长条 / 网格卡在其内部分支）
-              if (this.isTwoCol() || this.isGrid()) {
+              // 多列行（平板横屏 3~4 列铺满 / 大封面竖屏双列网格）：
+              // 行数据源列数由 onColumnsChanged 联动；单列走原 TrackItem 路径。
+              if (this.rowColumns() > 1) {
                 LazyForEach(
-                  this.recommendPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
+                  this.recommendRows,
+                  (row: RowOf<Track>, rowIndex: number): void => {
                     ListItem() {
-                      this.TrackPairRow(pair, pIndex)
+                      this.TrackColumnsRow(row, rowIndex)
                     }
                   },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  (row: RowOf<Track>): string => this.rowKeyOf(row)
                 )
               } else {
                 LazyForEach(
@@ -1751,17 +1984,16 @@ export struct HomePage {
                 )
               }
             } else if (this.tab === 'ranking') {
-              // 大封面模式：同推荐页签（TrackPairRow 内部分支）
-              if (this.isTwoCol() || this.isGrid()) {
+              // 多列行：同推荐页签（TrackColumnsRow 内部分支）
+              if (this.rowColumns() > 1) {
                 LazyForEach(
-                  this.rankingPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
+                  this.rankingRows,
+                  (row: RowOf<Track>, rowIndex: number): void => {
                     ListItem() {
-                      this.TrackPairRow(pair, pIndex)
+                      this.TrackColumnsRow(row, rowIndex)
                     }
                   },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  (row: RowOf<Track>): string => this.rowKeyOf(row)
                 )
               } else {
                 LazyForEach(
@@ -1780,17 +2012,16 @@ export struct HomePage {
                 )
               }
             } else {
-              // 音乐中心页签：同上（TrackPairRow 内部分支）
-              if (this.isTwoCol() || this.isGrid()) {
+              // 音乐中心页签：同上（TrackColumnsRow 内部分支）
+              if (this.rowColumns() > 1) {
                 LazyForEach(
-                  this.centerPairs,
-                  (pair: PairOf<Track>, pIndex: number): void => {
+                  this.centerRows,
+                  (row: RowOf<Track>, rowIndex: number): void => {
                     ListItem() {
-                      this.TrackPairRow(pair, pIndex)
+                      this.TrackColumnsRow(row, rowIndex)
                     }
                   },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  (row: RowOf<Track>): string => this.rowKeyOf(row)
                 )
               } else {
                 LazyForEach(
@@ -1915,8 +2146,9 @@ export struct HomePage {
       // 否则条目在栏底被裁掉、永远滑不进模糊板下方。骨架/空态区各自补 listStartOffset()。
       // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp，见 BreakpointConstants）。
       // 根 Stack 默认居中对齐，直接给内容列挂上限即可，不需要额外包一层。
-      // 横屏宽屏：上限放宽到 840vp，两列每列行宽约 400vp+。
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 横屏宽屏 / 平板：铺满口径（fillContentMaxWidth）——平板横屏 min(窗口宽,1660)
+      // 铺满不留白，列数由 listColumns/gridColumns 按同窗口宽反推保持行宽密度。
+      .constraintSize({ maxWidth: TwoColumnLayout.fillContentMaxWidth(this.currentBreakpoint, this.isLandscape, this.windowWidthVp) })
 
       // 顶栏渐变模糊层：盖主内容列之上（低于 HDS titleBar；弹窗类已全部
       // 迁移到官方 CustomContentDialog，不再挂根 Stack），进度由列表

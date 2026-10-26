@@ -17,9 +17,6 @@
 /** 标题行高度（vp）：HDS titleBar 的 stackBuilder 可用空间，不得超出 */
 export const NAV_TITLE_BAR_HEIGHT: number = 56;
 
-/** 辅助行高度（vp）：页签胶囊行 / 多选工具条（胶囊 32 + 上下留白 12） */
-export const NAV_SUB_BAR_HEIGHT: number = 44;
-
 /** 顶栏水平基线（vp）：标题、搜索框、页签胶囊、列表内容共用 */
 export const NAV_H_PADDING: number = 16;
 
@@ -28,9 +25,3 @@ export const NAV_BACK_SIZE: number = 44;
 
 /** 返回键占位与标题之间的视觉间距（vp） */
 export const NAV_TITLE_GAP: number = 4;
-
-/** 顶栏文字动作按钮高（vp） */
-export const NAV_ACTION_HEIGHT: number = 32;
-
-/** 顶栏文字动作按钮字号（fp） */
-export const NAV_ACTION_FONT_SIZE: number = 13;

@@ -263,17 +263,8 @@ export function getRecentTracks<T>(): T[] {
   return getObject<T[]>(PREF_RECENT) ?? [];
 }
 
-/** @deprecated 已无调用方（LibraryStore 走分片存储）。保留供回滚。 */
-export async function saveRecentTracks<T>(list: T[]): Promise<void> {
-  await setObject<T[]>(PREF_RECENT, list.slice(0, 50));
-}
-
 export function getFavoriteTracks<T>(): T[] {
   return getObject<T[]>(PREF_FAVORITES) ?? [];
-}
-
-export async function saveFavoriteTracks<T>(list: T[]): Promise<void> {
-  await setObject<T[]>(PREF_FAVORITES, list);
 }
 
 export function getPlaylists<T>(): T[] {
@@ -383,9 +374,7 @@ export const AppPreferences = {
   getTotalListenSeconds,
   addListenSeconds,
   getRecentTracks,
-  saveRecentTracks,
   getFavoriteTracks,
-  saveFavoriteTracks,
   getPlaylists,
   savePlaylists,
   getPlaylistTombstones,

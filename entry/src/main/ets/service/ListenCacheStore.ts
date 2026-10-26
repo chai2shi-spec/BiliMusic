@@ -28,13 +28,14 @@ import common from '@ohos.app.ability.common';
 import { extractAudioFromVideo } from '../api/BilibiliApi';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { isUnmeteredNetwork, hasNetwork } from '../utils/NetworkUtil';
+import { sleep } from '../utils/AsyncUtil';
 import { HttpUtil } from '../utils/HttpUtil';
 import { audioFileExt } from '../utils/TextUtil';
 import { BILI_REFERER } from '../common/Constants';
 import { Track } from '../model/MusicModels';
 
-/** 缓存区容量上限（512MB）：单曲 m4a 约 3~8MB，约可容纳 60~150 首 */
-const LISTEN_CACHE_MAX_BYTES: number = 512 * 1024 * 1024;
+/** 缓存区容量上限（1024MB）：单曲 m4a 约 3~8MB，约可容纳 120~300 首 */
+const LISTEN_CACHE_MAX_BYTES: number = 1024 * 1024 * 1024;
 /** 淘汰水位线（90%）：超限后删到这条线为止，留出滞回带 */
 const LISTEN_CACHE_EVICT_TARGET: number = Math.floor(LISTEN_CACHE_MAX_BYTES * 0.9);
 /** 最小有效音频体积：小于它的文件必是错误页残骸 */
@@ -327,14 +328,6 @@ async function isValidAudioFile(path: string): Promise<boolean> {
       }
     }
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: (value: void) => void): void => {
-    setTimeout((): void => {
-      resolve();
-    }, ms);
-  });
 }
 
 /**

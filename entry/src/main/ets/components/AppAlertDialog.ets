@@ -218,3 +218,28 @@ export function showAppAlertDialog(uiContext: UIContext, options: AppAlertDialog
   host.closeAlert();
   host.openAlert();
 }
+
+/** 确认弹窗简化参数：标准「取消 / 确认」两键问句 */
+export interface AppConfirmOptions {
+  title: string;
+  message: string;
+  /** 左侧取消键文案，默认「取消」 */
+  cancelText?: string;
+  /** 右侧确认键文案 */
+  confirmText: string;
+  /** 点确认后的回调（点取消只关弹窗、不做事） */
+  onConfirm: () => void;
+}
+
+/**
+ * 标准确认问句（showAppAlertDialog 的薄封装）：左「取消」右「确认」，
+ * 点取消只关弹窗。取消键需要额外动作（如提示语）的场合仍走 showAppAlertDialog。
+ */
+export function showConfirm(uiContext: UIContext, options: AppConfirmOptions): void {
+  showAppAlertDialog(uiContext, {
+    title: options.title,
+    message: options.message,
+    primaryButton: { value: options.cancelText ?? '取消' },
+    secondaryButton: { value: options.confirmText, action: options.onConfirm }
+  });
+}

@@ -291,7 +291,7 @@ export struct PlayerInfoComponent {
 
   /**
    * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开（isFoldFull）且宽度落 lg（≥840vp，
-   * Index.ets isTabletShell 同口径 —— 阔折叠 Pura X 类展开落 lg，常规折叠
+    * 阔折叠 Pura X 类展开落 lg，常规折叠
    * Mate X 类展开落 md 仍走分栏）且竖屏。命中时 build() 的 isFoldFull 分栏
    * 分支放行，穿透到 SM Swiper 双页分支（直板机版式）。横屏排除：直板机
    * Swiper 版式不处理横屏，展开横屏命中 isCompactLandscape（isFoldFull &&
@@ -396,11 +396,13 @@ export struct PlayerInfoComponent {
   /** 音质回显文案（分档逻辑与 MusicInfoComponent.qualityText 完全一致） */
   private qualityText(): string {
     const t: Track | null = this.currentTrack;
-    if (t === null) {
+    // 类型保护：@StorageLink 的 Track | null 在运行时可能被写入 undefined，
+    // `=== null` 拦不住，必须一并判掉再读 localFilePath
+    if (t === null || t === undefined) {
       return '';
     }
     // 本地文件：没有经过 playurl 解析，码率字段是 0。只标来源，不假装有码率。
-    if (t.localFilePath !== undefined && t.localFilePath.length > 0) {
+    if ((t.localFilePath ?? '').length > 0) {
       return '本地文件';
     }
     const base: string = formatTrackQuality(t.audioQuality, t.audioBandwidth);

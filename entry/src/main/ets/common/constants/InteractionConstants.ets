@@ -175,16 +175,6 @@ export const SELECT_TOGGLE_MS: number = 250;
 export const DOWNLOAD_SMOOTH_MS: number = 250;
 
 /**
- * ══════════ iOS 式大标题收拢 ══════════
- *
- * PlaylistDetail / Playlists / Downloads / Settings 的列表头部大标题随内容滚出，
- * 固定栏小标题在下方距离内随滚动淡入（collapseProgress 0→1），
- * 滚回顶部再淡出。集中定义避免各页各写一份 72 迟早漂移不一致。
- */
-/** 大标题收拢动画距离（vp）：列表滚过该距离时固定栏小标题完全显现 */
-export const LARGE_TITLE_COLLAPSE_DIST: number = 72;
-
-/**
  * ══════════ 列表尾部加载状态条 ══════════
  * 常驻 + 固定高度：列表有内容时尾部条不插拔，只换内容（转圈 / 到底文案 / 上拉提示）。
  * 数据落地帧尾部 extent 只增不减（新条目追加），底部弹簧过滚动不被收缩强制解析。

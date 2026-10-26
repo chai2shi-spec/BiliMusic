@@ -429,6 +429,9 @@ export struct FavSyncPage {
       return;
     }
     const parts: string[] = [];
+    if (s.pushNeedLogin) {
+      parts.push('写回未完成：请重新登录');
+    }
     parts.push(`${s.okCount} 个已同步`);
     if (s.partialCount > 0) {
       parts.push(`${s.partialCount} 个未拉全`);

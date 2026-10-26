@@ -107,14 +107,3 @@ export function removeFavSyncState(mediaId: number): void {
   saveFavSyncStates(list);
 }
 
-/** 全部状态里最近一次同步时间（都没有则 0），供同步页显示「上次同步 …」 */
-export function latestSyncAt(): number {
-  const list: FavFolderSyncState[] = loadFavSyncStates();
-  let latest: number = 0;
-  for (let i = 0; i < list.length; i++) {
-    if (list[i].lastSyncAt > latest) {
-      latest = list[i].lastSyncAt;
-    }
-  }
-  return latest;
-}

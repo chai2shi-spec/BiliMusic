@@ -8,8 +8,6 @@
 export const ENTRY_ABILITY = 'EntryAbility';
 /** Form 扩展（module.json5 extensionAbilities.name，postCardAction message 用） */
 export const FORM_ABILITY = 'MusicCardFormAbility';
-/** liveForm 溢出动效扩展名（form_config sceneAnimationParams / module.json5 一致） */
-export const LIVE_FORM_ABILITY = 'CardLiveFormAbility';
 
 export enum FormCarAction {
   CALL = 'call',

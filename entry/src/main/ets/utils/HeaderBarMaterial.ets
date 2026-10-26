@@ -1,10 +1,6 @@
 /**
  * 标题栏毛玻璃的共享属性修饰器（各 Tab 页 / 子页固定标题栏通用）。
  *
- * 顶栏通路（HeaderBarMaterialModifier）：固定 backgroundEffect 真高斯模糊。
- * systemMaterial 在设备不支持沉浸材质（模拟器常见）或材质档为 SMOOTH 时
- * **静默不渲染**，故顶栏不走 systemMaterial。
- *
  * 另有按钮通路（ButtonMaterialModifier）：给搜索 / 新建 / 选择等胶囊按钮用。
  * 按钮自带链式实色底作为兜底，修饰器低版本 no-op 即可，不需要塞 backgroundColor。
  *
@@ -29,42 +25,7 @@
 import { ColorMetrics } from '@kit.ArkUI';
 import lazy { uiMaterial } from '@kit.ArkUI';
 import { MaterialCompat, MaterialCompatStyle } from './MaterialCompat';
-import { MaterialTokens } from '../common/style/MaterialTokens';
 import { STORE_THEME_PRIMARY, STORE_THEME_ON } from '../common/Constants';
-
-/**
- * 标题栏毛玻璃（真高斯模糊）的属性修饰器：
- * 固定走 backgroundEffect（radius 40 + 现有 header_glass_tint 蒙版）——
- * systemMaterial 在「设备上报不支持沉浸材质 / 材质档为 SMOOTH」时会静默不渲染
- * （模拟器正中此坑，肉眼只见半透明底、毫无磨砂感），而 backgroundEffect 是
- * API 11+ 的真高斯模糊，全环境一致可见；异常时落 bg_page 实底，栏始终可读。
- * 分支有 info 日志，设备上一眼确认走的是哪条通路。
- */
-export class HeaderBarMaterialModifier implements AttributeModifier<RowAttribute> {
-  applyNormalAttribute(instance: RowAttribute): void {
-    try {
-      console.info('[HeaderBarMaterial] apply -> backgroundEffect frost (radius 40)');
-      instance.backgroundEffect({
-        // radius 统一取 MaterialTokens.FROST_RADIUS
-        radius: MaterialTokens.FROST_RADIUS,
-        saturation: 1.3,
-        brightness: 1.0,
-        color: $r('app.color.header_glass_tint')
-      });
-    } catch (e) {
-      console.error(`apply header backgroundEffect failed: ${JSON.stringify(e)}`);
-      instance.backgroundColor($r('app.color.bg_page'));
-    }
-  }
-}
-
-/**
- * 生成毛玻璃标题栏修饰器：
- * PlaylistDetail / Playlists / Downloads / Settings / Search / Recent 的固定标题栏统一走这里。
- */
-export function makeHeaderBarModifier(): HeaderBarMaterialModifier {
-  return new HeaderBarMaterialModifier();
-}
 
 /**
  * 按钮沉浸光感材质的属性修饰器：仅当材质对象存在（API 26+ 且运行时支持）时

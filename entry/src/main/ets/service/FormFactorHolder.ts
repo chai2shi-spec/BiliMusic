@@ -8,8 +8,8 @@
  *
  * ══════════ 为什么在 EntryAbility.onCreate 初始化 ══════════
  * 折叠监听不能挂在播放页组件的 aboutToAppear 里：播放页是懒加载 overlay，
- * 不挂载就没有折叠态 —— 壳层（Index 的 phoneShell / tabletShell 选择）
- * 在冷启动时根本读不到。init() 由 EntryAbility.onCreate 调用（display API
+ * 不挂载就没有折叠态 —— 壳层（Index 的 phoneShell）在冷启动时
+ * 根本读不到。init() 由 EntryAbility.onCreate 调用（display API
  * 不依赖窗口，早于 loadContent / 首帧），App 常驻不反注册，开合全程有状态。
  *
  * 本文件是 .ts（非 .ets）：EntryAbility.ts 不能导入 .ets 模块，与
@@ -17,8 +17,6 @@
  * 能力缺失由 try/catch 兜底为「非折叠」，不依赖 ArkTS 全局 canIUse。
  *
  * 消费端（@StorageProp 只读，写入权仅归本类）：
- *   · pages/Index.ets          —— isTabletShell()：lg 宽度且**未**展开才进平板壳，
- *                                  折叠屏展开（md/lg）一律沉浸光感胶囊手机壳；
  *   · PlayerInfoComponent      —— 播放页「封面 | 歌词」左右分栏分支；
  *   · MusicInfoComponent       —— 展开态字号门控；
  *   · LyricsComponent          —— 展开态字号 / 布局门控。
