@@ -12,7 +12,7 @@ import { mediaquery } from '@kit.ArkUI';
 import { BreakpointConstants } from '../constants/BreakpointConstants';
 
 /** 三态取值选项：sm 必填，md / lg 可缺省（缺省回落 sm） */
-export interface BreakPointTypeOption<T> {
+interface BreakPointTypeOption<T> {
   sm: T;
   md?: T;
   lg?: T;

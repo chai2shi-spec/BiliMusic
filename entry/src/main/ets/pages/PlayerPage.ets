@@ -44,6 +44,7 @@ import {
   STORE_PLAYER_SLIDE_ALPHA,
   STORE_PLAYER_SLIDE_CLOSE_REQUEST,
   STORE_PLAYER_DRAG_ACTIVE,
+  STORE_WINDOW_WIDTH_VP,
   STORE_WINDOW_HEIGHT_VP,
   STORE_FOLD_EXPANDED
 } from '../common/Constants';
@@ -53,6 +54,7 @@ import {
   SLIDE_BACK_MS
 } from '../common/constants/InteractionConstants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import { PlayerConstants } from '../common/constants/PlayerConstants';
 import { PLAYER_CLOSE_STYLE_MORPH_SWIPE } from '../model/MusicModels';
 
 @Component
@@ -63,12 +65,12 @@ export struct PlayerPage {
   @StorageProp(STORE_PLAYER_CLOSE_ANIM) closeAnimStyle: string = '';
   /** 主动画/回弹进行中：手势与主动画互斥（回弹中再拉会与 250ms 补间打架） */
   @StorageProp(STORE_PLAYER_TRANSITIONING) transitioning: boolean = false;
-  /** 当前断点：手势挂载判定用（sm 直板机 / 阔折叠展开竖屏 lg） */
+  /** 当前断点：手势挂载判定用（sm 直板机） */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = 'sm';
   /**
    * 折叠屏展开态 + 横竖屏：下拉手势覆盖阔折叠展开竖屏（isWideFoldFull 同口径
    * 双份实现 —— 播放页该形态走直板机 Swiper 版式，交互随之对齐；见
-   * PlayerInfoComponent.isWideFoldFull）。
+   * PlayerInfoComponent.isWideFoldFull，宽高比门控，改判定口径时两处同步）。
    */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
@@ -76,7 +78,8 @@ export struct PlayerPage {
   @StorageProp(STORE_PLAYER_SLIDE_OFFSET) slideOffset: number = 0;
   /** 整页透明度：跟手渐隐（SLIDE_DIM_MAX 封顶）/ 终态归零，根节点 opacity 绑定 */
   @StorageProp(STORE_PLAYER_SLIDE_ALPHA) slideAlpha: number = 1;
-  /** 窗口内容区高度（vp）：跟手渐隐公式的分母兜底 1280 */
+  /** 窗口内容区宽 / 高（vp）：阔折叠展开判定（宽高比门控，同口径见 dragDismissEnabled） */
+  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
   @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   /** 本次手势会话是否有效挂载（onActionBegin 判定，End/Cancel 消费；构建函数不能读方法外的可变量） */
   @State dragSessionActive: boolean = false;
@@ -103,7 +106,8 @@ export struct PlayerPage {
     return this.closeAnimStyle === PLAYER_CLOSE_STYLE_MORPH_SWIPE
       && (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
         || (this.isFoldFull && !this.isLandscape
-          && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG))
+          && this.windowHeightVp > 0
+          && this.windowWidthVp / this.windowHeightVp >= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MIN))
       && this.playerOpen
       && !this.transitioning;
   }

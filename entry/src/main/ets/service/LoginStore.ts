@@ -346,7 +346,7 @@ export async function logout(): Promise<void> {
  * 「Cookie 被服务端拒绝」**不再**走这里（见 `refreshLoginUser`）——
  * 那属于「凭据待重验」，不是「用户要退出」。
  */
-export async function clearLoginState(): Promise<void> {
+async function clearLoginState(): Promise<void> {
   // 四个 key 攒一次 removeMany（单次 flush），避免逐 key remove 全量落盘 4 次。
   await AppPreferences.removeMany([PREF_LOGIN_COOKIE, PREF_LOGIN_USER, PREF_LOGIN_REFRESH_TOKEN, PREF_LOGIN_VERIFIED_AT]);
   cachedUser = null;

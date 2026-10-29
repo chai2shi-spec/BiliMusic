@@ -16,7 +16,7 @@ import connection from '@ohos.net.connection';
 import { BusinessError } from '@kit.BasicServicesKit';
 
 /** 网络监听回调：onAvailable = 网络恢复（有可用网络），onLost = 网络断开 */
-export interface NetworkWatchHandlers {
+interface NetworkWatchHandlers {
   onAvailable: () => void;
   onLost: () => void;
 }

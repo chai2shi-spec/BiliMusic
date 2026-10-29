@@ -13,7 +13,7 @@
 import { AppPreferences } from '../preferences/AppPreferences';
 
 /** 历史上限：显示与存储共用（用户要求最多显示 20 条） */
-export const SEARCH_HISTORY_MAX: number = 20;
+const SEARCH_HISTORY_MAX: number = 20;
 
 let historyCache: string[] | null = null;
 
@@ -41,7 +41,7 @@ function sanitize(raw: string[]): string[] {
 }
 
 /** 读取搜索历史（返回副本：调用方拿到内部数组时改它不会触发 UI 刷新） */
-export function getSearchHistory(): string[] {
+function getSearchHistory(): string[] {
   if (historyCache === null) {
     historyCache = sanitize(AppPreferences.getSearchHistory());
   }
@@ -55,7 +55,7 @@ function persistHistory(): void {
   });
 }
 
-export function addSearchHistory(word: string): string[] {
+function addSearchHistory(word: string): string[] {
   const trimmed: string = word.trim();
   if (trimmed.length === 0) {
     return getSearchHistory();
@@ -72,7 +72,7 @@ export function addSearchHistory(word: string): string[] {
   return historyCache.slice();
 }
 
-export function clearSearchHistory(): void {
+function clearSearchHistory(): void {
   historyCache = [];
   persistHistory();
 }

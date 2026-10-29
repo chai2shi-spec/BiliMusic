@@ -182,6 +182,16 @@ export const DOWNLOAD_SMOOTH_MS: number = 250;
 export const LIST_FOOTER_HEIGHT_VP: number = 48;
 
 /**
+ * ══════════ 页面内搜索本地过滤防抖 ══════════
+ *
+ * 歌单详情 / UP 主页 / 合集分 P 三页的搜索框输入即本地过滤（标题/歌手小写包含
+ * 匹配）。大歌单可达千级条目，每键同步全量过滤 + 列表 diff 有卡顿风险 ——
+ * 过滤重算统一防抖 200ms。防抖只覆盖按键路径：清除搜索 / 数据刷新（翻页、
+ * 歌单换新、订阅落地）仍即时执行，防抖回调读当刻关键词，幂等。
+ */
+export const SEARCH_FILTER_DEBOUNCE_MS: number = 200;
+
+/**
  * ══════════ 搜索页下拉刷新（骨架接管）══════════
  *
  * 刷新指示器复用 SkeletonTrackItem，不新增任何视觉元素：下拉时骨架行从

@@ -526,7 +526,7 @@ export async function fetchQqPlaylist(id: string): Promise<ExternalPlaylist> {
  * 搜索结果 → Track（SearchPage.mapSearch 同构，方案 §4 建议的公共层复用）。
  * 与页面私有版唯一差异：标题剥 <em> 高亮用 TextUtil.stripHtmlTags（同一实现）。
  */
-export function mapSearchResultToTrack(item: SearchResultItem): Track {
+function mapSearchResultToTrack(item: SearchResultItem): Track {
   return buildTrack({
     id: item.bvid,
     bvid: item.bvid,
@@ -678,7 +678,7 @@ function splitArtists(artist: string): string[] {
 }
 
 /** 取第一个歌手（备用关键词用） */
-export function primaryArtist(artist: string): string {
+function primaryArtist(artist: string): string {
   const list: string[] = splitArtists(artist);
   return list.length > 0 ? list[0] : '';
 }
@@ -693,7 +693,7 @@ export function primaryArtist(artist: string): string {
 const CJK_RUN_RE: RegExp =
   /[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af][\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\s]*/g;
 
-export function fallbackKeyword(song: ExternalSong): string {
+function fallbackKeyword(song: ExternalSong): string {
   const base: string = coreTitle(song.title);
   const runs: RegExpMatchArray | null = base.match(CJK_RUN_RE);
   let best: string = '';
@@ -756,7 +756,7 @@ function matchTitleTier(songTitle: string, videoTitle: string): TitleMatch {
  * 三级标题匹配（A5 / B4 / C3）+ 子歌手逐个比 + 版本一致性校验。
  * 返回 SCORE_OUT 表示标题对不上任何一档。
  */
-export function scoreCandidate(song: ExternalSong, item: SearchResultItem): number {
+function scoreCandidate(song: ExternalSong, item: SearchResultItem): number {
   const videoTitle: string = stripHtmlTags(item.title);
   const m: TitleMatch = matchTitleTier(song.title, videoTitle);
   if (m.base === SCORE_OUT) {

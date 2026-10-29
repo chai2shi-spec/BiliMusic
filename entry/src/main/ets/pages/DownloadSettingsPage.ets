@@ -1,9 +1,10 @@
 /**
  * 下载与存储页（设置二级页）。
  *
- * 内容：仅 WiFi 下载 / 下载音质（SelectDialog 弹窗）/ 保存到系统下载目录
- * （DOWNLOAD 模式持久授权 + 单份存储搬移）/ 同步已完成歌曲 /
- * 缓存（占用统计 + 清理）/ 听后缓存（开关 + 清理）。
+ * 按类别分三张分组卡片（SectionHeader 标类别）：
+ *   · 下载：仅 WiFi 下载 / 下载音质（SelectDialog 弹窗）
+ *   · 系统下载目录：保存到系统下载目录（DOWNLOAD 模式持久授权 + 单份存储搬移）/ 同步已完成歌曲
+ *   · 缓存：缓存（占用统计 + 清理）/ 听后缓存（开关）/ 清理听后缓存
  *
  * 「仅 WiFi 下载」只写偏好，**拦截逻辑在 DownloadManager.requestDownload 入口**
  * （见 service/DownloadManager.ts）：开关打开且当前是蜂窝网络时，那次下载请求会带着
@@ -33,7 +34,7 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
-import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider, SectionHeader } from '../components/InsetCardGroup';
 import { HdsListItemCard, SuffixSwitch, SuffixArrowIconText, SuffixText } from '@kit.UIDesignKit';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
@@ -405,7 +406,7 @@ export struct DownloadSettingsPage {
           this.toast(`已同步 ${r.ok} 首到「下载/BiliMusic」`, 2200);
           return;
         }
-        this.toast(`已同步 ${r.ok} 首，${r.failed} 首失败（可重试）`, 2400);
+        this.toast(`已同步 ${r.ok} 首，${r.failed} 首失败，可将「保存到系统下载目录」开关关闭再打开`, 3000);
       })
       .catch((e: Error): void => {
         this.syncing = false;
@@ -471,6 +472,10 @@ export struct DownloadSettingsPage {
         }
 
         ListItem() {
+          SectionHeader({ headerText: '下载' })
+        }
+
+        ListItem() {
           InsetCard() {
             HdsListItemCard({
               textItem: { primaryText: { text: '仅 WiFi 下载' } },
@@ -510,9 +515,15 @@ export struct DownloadSettingsPage {
                 this.openDownloadQualityDialog();
               }
             })
+          }
+        }
 
-            CardDivider()
+        ListItem() {
+          SectionHeader({ headerText: '系统下载目录' })
+        }
 
+        ListItem() {
+          InsetCard() {
             // 保存到系统下载目录：开启后每首下载
             // 完成自动搬入「下载/BiliMusic」（单份存储，系统文件管理可见）；
             // 打开瞬间走 DOWNLOAD 模式 Picker 持久授权（免选择界面）。
@@ -549,9 +560,15 @@ export struct DownloadSettingsPage {
                 this.syncCompletedToPublic();
               }
             })
+          }
+        }
 
-            CardDivider()
+        ListItem() {
+          SectionHeader({ headerText: '缓存' })
+        }
 
+        ListItem() {
+          InsetCard() {
             // 缓存：占用统计 + 点击清理。提示词并入本行副标题（精简为一行）：
             // 点击本行清理临时缓存；有已下载歌曲时前置「不受影响」说明。
             HdsListItemCard({

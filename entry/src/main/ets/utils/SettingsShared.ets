@@ -51,6 +51,9 @@ export function formatSleepMinutes(minutes: number): string {
   return `${minutes} 分钟`;
 }
 
+/** 定时停止播放的档位（分钟；0 = 关闭，不在选项里，走「关闭定时」动作） */
+export const SLEEP_OPTIONS: number[] = [10, 20, 30, 60, 120];
+
 export function formatRemain(totalSeconds: number): string {
   const sec: number = Math.max(0, totalSeconds);
   const h: number = Math.floor(sec / 3600);

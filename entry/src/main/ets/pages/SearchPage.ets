@@ -37,6 +37,7 @@ import { TrackCard } from '../components/TrackCard';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { toHttpsUrl, toThumbUrl, stripHtmlTags, parseDurationText } from '../utils/TextUtil';
+import { openCollectionOrPlay } from '../utils/CollectionNavigator';
 import {
   ComponentContent,
   CustomContentDialog,
@@ -1174,7 +1175,11 @@ export struct SearchPage {
             Row() {
               TrackCard({
                 track: pair.first,
-                onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                onPlay: (tr: Track): void => {
+                  // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                  //（utils/CollectionNavigator，viewCache 命中零开销）
+                  openCollectionOrPlay(tr, this.player);
+                },
                 moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
               }).layoutWeight(1)
               // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
@@ -1185,7 +1190,11 @@ export struct SearchPage {
               if (pair.second !== null) {
                 TrackCard({
                   track: pair.second,
-                  onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                  onPlay: (tr: Track): void => {
+                  // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                  //（utils/CollectionNavigator，viewCache 命中零开销）
+                  openCollectionOrPlay(tr, this.player);
+                },
                   moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
                 }).layoutWeight(1)
               } else {
@@ -1213,14 +1222,22 @@ export struct SearchPage {
               TrackItem({
                 track: pair.first,
                 entranceIndex: pIndex * 2,
-                onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                onPlay: (tr: Track): void => {
+                  // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                  //（utils/CollectionNavigator，viewCache 命中零开销）
+                  openCollectionOrPlay(tr, this.player);
+                },
                 moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
               }).layoutWeight(1)
               if (pair.second !== null) {
                 TrackItem({
                   track: pair.second,
                   entranceIndex: pIndex * 2 + 1,
-                  onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                  onPlay: (tr: Track): void => {
+                  // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                  //（utils/CollectionNavigator，viewCache 命中零开销）
+                  openCollectionOrPlay(tr, this.player);
+                },
                   moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
                 }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
               } else {
@@ -1241,7 +1258,10 @@ export struct SearchPage {
             TrackItem({
               track: t,
               entranceIndex: index,
-              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
+                onPlay: (tr: Track): void => {
+                  // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                  openCollectionOrPlay(tr, this.player);
+                },
               moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
             })
           }

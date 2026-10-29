@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Speaker</title>
+  <desc id="desc">音箱：竖向圆角箱体 + 镂空高音单元 + 镂空低音单元 + 白色防尘帽。两个单元用真镂空而非描边，32px 下仍能读出「喇叭」而非「眼睛」。底色石板灰 #334155。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#334155"/>
+  </g>
+
+  <g id="foreground-layer">
+    <mask id="speaker-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect x="0" y="0" width="1024" height="1024" fill="#000000"/>
+      <rect x="272" y="192" width="480" height="640" rx="88" fill="#FFFFFF"/>
+      <circle cx="512" cy="344" r="64" fill="#000000"/>
+      <circle cx="512" cy="636" r="150" fill="#000000"/>
+      <circle cx="512" cy="636" r="44" fill="#FFFFFF"/>
+    </mask>
+    <rect id="glyph" x="0" y="0" width="1024" height="1024" fill="#FFFFFF" mask="url(#speaker-mask)"/>
+  </g>
+</svg>

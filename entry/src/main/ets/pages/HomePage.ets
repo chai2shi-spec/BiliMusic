@@ -44,6 +44,7 @@ import { CoverImage } from '../components/CoverImage';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { toHttpsUrl, stripHtmlTags, toThumbUrl } from '../utils/TextUtil';
+import { openCollectionOrPlay } from '../utils/CollectionNavigator';
 import { ComponentContent, CustomContentDialog } from '@kit.ArkUI';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam } from '../service/NavRouteParams';
@@ -52,6 +53,7 @@ import {
   DownloadStartResult,
   WIFI_ONLY_BLOCKED
 } from '../service/DownloadManager';
+import { UpSpaceCacheEntry, getUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { currentNetworkLabel, hasNetwork } from '../utils/NetworkUtil';
 import {
   CONTENT_END_OFFSET,
@@ -332,11 +334,25 @@ export struct HomePage {
   @State recentTracks: Track[] = [];
   @State cardPlaylists: Playlist[] = [];
   /**
+   * 快捷卡 UP 订阅投稿数缓存（upMid → archiveCount，0 = 未知）：
+   * 订阅卡副题「N 个投稿」的 N 优先取它，未知回退歌单已落库曲目数
+   * （口径与歌单页 subLineOf 一致）。getUpSpaceCache 只读本地缓存，不联网。
+   */
+  @State upArchiveCounts: Map<string, number> = new Map();
+  /**
    * 「+」卡选择器（快捷卡行末尾添加卡）：官方 CustomContentDialog 标准
    * 弹窗（addCardPickerController）。候选 = 未加入首页的歌单（与歌单页
    * getPlaylists 同口径，含订阅歌单）。
    */
   @State addCandidates: Playlist[] = [];
+  /**
+   * 「更换首页歌单」选择器（歌单卡长按菜单「更换歌单」入口）：候选同
+   * 「+」卡口径（未加入首页的歌单），选中走 HomeCardStore.replaceHomePlaylist
+   * 原位替换（卡片位置不变）。
+   */
+  @State replaceCandidates: Playlist[] = [];
+  /** 被更换的原歌单（打开选择器时定格；null = 不在选择流程中） */
+  @State replaceFromPlaylist: Playlist | null = null;
   /** 底部安全区高度（vp）：根容器不再统一避让，列表末尾让位要自己叠上这一份 */
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   /**
@@ -507,6 +523,8 @@ export struct HomePage {
   private playlistPickerController: CustomDialogController | undefined = undefined;
   /** 「添加歌单到首页」弹窗：同上，官方 CustomContentDialog 标准对话框 */
   private addCardPickerController: CustomDialogController | undefined = undefined;
+  /** 「更换首页歌单」弹窗：同上，官方 CustomContentDialog 标准对话框 */
+  private replaceCardPickerController: CustomDialogController | undefined = undefined;
 
   /**
    * 列表数组变化（@Watch 携带属性名）：同步对应数据源。
@@ -562,6 +580,47 @@ export struct HomePage {
       }
     }
     this.cardPlaylists = out;
+    this.loadUpArchiveCounts();
+  }
+
+  /**
+   * 快捷卡 UP 订阅投稿数重灌（PlaylistsPage.loadUpArchiveCounts 同款）：
+   * 读 UpSpaceCache 本地缓存（15~50KB/UP，订阅卡最多 9 张），不联网。
+   * 到货后顺手浅拷 cardPlaylists 一次 —— 新数组引用触发子组件 ForEach
+   * 重跑键值 diff，订阅卡键含投稿数（见 HomeQuickCards），数字到位即重建该卡。
+   */
+  private loadUpArchiveCounts(): void {
+    const mids: string[] = [];
+    const seen: Set<string> = new Set<string>();
+    for (let i = 0; i < this.cardPlaylists.length; i++) {
+      const p: Playlist = this.cardPlaylists[i];
+      if (!LibraryStore.isUpSubscription(p) || seen.has(p.upMid)) {
+        continue;
+      }
+      seen.add(p.upMid);
+      mids.push(p.upMid);
+    }
+    if (mids.length === 0) {
+      this.upArchiveCounts = new Map();
+      return;
+    }
+    const loads: Promise<UpSpaceCacheEntry | null>[] = [];
+    for (let i = 0; i < mids.length; i++) {
+      loads.push(getUpSpaceCache(mids[i]));
+    }
+    Promise.all<UpSpaceCacheEntry | null>(loads)
+      .then((entries: Array<UpSpaceCacheEntry | null>): void => {
+        const next: Map<string, number> = new Map<string, number>();
+        for (let i = 0; i < mids.length; i++) {
+          const entry: UpSpaceCacheEntry | null = entries[i];
+          next.set(mids[i], entry !== null ? entry.archiveCount : 0);
+        }
+        this.upArchiveCounts = next;
+        this.cardPlaylists = [...this.cardPlaylists];
+      })
+      .catch((e: Error): void => {
+        console.error(`load up archive counts failed: ${e.message}`);
+      });
   }
 
   /** 媒体库 / 首页歌单卡变更信号：快捷卡行重灌（幂等内存快照读，无 IO） */
@@ -597,6 +656,50 @@ export struct HomePage {
       this.toast('首页卡片已满', 1500);
     }
     this.addCardPickerController?.close();
+  }
+
+  /** 长按菜单「移出首页」（HomeQuickCards onRemoveCard 回调）：
+   *  HomeCardStore 内部 bump STORE_LIBRARY_REV → 卡行自动重灌 */
+  private removeHomeCard(p: Playlist): void {
+    HomeCardStore.removeHomePlaylist(p.id);
+    this.toast('已从首页移出', 1500);
+  }
+
+  /**
+   * 长按菜单「更换歌单」：候选 = 未加入首页的歌单（onAddCardClick 同口径，
+   * 含订阅歌单）。无候选给口令提示：有歌单但全在架 vs 一个歌单都没有，
+   * 指路不同 —— 与「+」卡的提示语风一致。
+   */
+  private openReplaceCardPicker(p: Playlist): void {
+    const all: Playlist[] = LibraryStore.getPlaylists();
+    const candidates: Playlist[] = [];
+    for (let i = 0; i < all.length; i++) {
+      if (!HomeCardStore.isHomePlaylist(all[i].id)) {
+        candidates.push(all[i]);
+      }
+    }
+    if (candidates.length === 0) {
+      this.toast(all.length > 0 ? '其他歌单都已加入首页'
+        : '还没有可更换的歌单，先去歌单页创建或订阅吧', 2000);
+      return;
+    }
+    this.replaceFromPlaylist = p;
+    this.replaceCandidates = candidates;
+    this.replaceCardPickerController?.open();
+  }
+
+  /** 更换选择器选中歌单：原位替换（卡片位置不变），HomeCardStore bump → 卡行重灌 */
+  private replaceHomeCardWith(p: Playlist): void {
+    const from: Playlist | null = this.replaceFromPlaylist;
+    this.replaceCardPickerController?.close();
+    if (from === null) {
+      return;
+    }
+    if (HomeCardStore.replaceHomePlaylist(from.id, p.id)) {
+      this.toast(`已更换为「${p.name}」`, 1600);
+    } else {
+      this.toast('更换失败，该歌单已在首页', 1600);
+    }
   }
 
   aboutToAppear(): void {
@@ -673,6 +776,26 @@ export struct HomePage {
         primaryTitle: '添加歌单到首页',
         contentBuilder: (): void => {
           this.AddCardPickerBody();
+        },
+        buttons: [
+          {
+            value: '取消',
+            buttonStyle: ButtonStyleMode.TEXTUAL,
+            action: (): void => {
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center
+    });
+    // 「更换首页歌单」：同款官方标准对话框（歌单卡长按菜单「更换歌单」入口，
+    // 候选 / 原歌单在 openReplaceCardPicker 里先定格再 open）。
+    this.replaceCardPickerController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: '更换首页歌单',
+        contentBuilder: (): void => {
+          this.ReplaceCardPickerBody();
         },
         buttons: [
           {
@@ -1817,6 +1940,81 @@ export struct HomePage {
   }
 
   /**
+   * 「更换首页歌单」弹窗正文：被替换的原歌单说明 + 候选歌单列表
+   * （封面 + 订阅徽标，AddCardPickerBody 同款版式）。标题在 primaryTitle；
+   * 取消在 buttons 槽（自动关闭）。
+   */
+  @Builder
+  ReplaceCardPickerBody(): void {
+    Column() {
+      Text(`将替换首页的「${this.replaceFromPlaylist?.name ?? ''}」`)
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+        .margin({ bottom: 12 })
+      List() {
+        ForEach(
+          this.replaceCandidates,
+          (p: Playlist): void => {
+            ListItem() {
+              Row({ space: 12 }) {
+                CoverImage({
+                  url: toThumbUrl(p.coverUrl, 88),
+                  imgWidth: 44,
+                  imgHeight: 44,
+                  imgRadius: 8,
+                  altText: p.name
+                })
+                Column({ space: 2 }) {
+                  Row({ space: 6 }) {
+                    Text(p.name)
+                      .fontSize(16)
+                      .fontColor($r('app.color.text_primary'))
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .layoutWeight(1)
+                    // 订阅歌单徽标：这种卡点开直达 UP 主页，提前告知
+                    if (LibraryStore.isUpSubscription(p)) {
+                      Text('订阅')
+                        .fontSize(10)
+                        .fontColor(Color.White)
+                        .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                        .borderRadius(4)
+                        .backgroundColor(this.themeDeep)
+                    }
+                  }
+                  .width('100%')
+                  Text(`${p.tracks.length} 首`)
+                    .fontSize(13)
+                    .fontColor($r('app.color.text_secondary'))
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .padding({ top: 8, bottom: 8 })
+              .stateStyles({
+                pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                normal: { .backgroundColor(Color.Transparent) }
+              })
+              .onClick((): void => {
+                this.replaceHomeCardWith(p);
+              })
+            }
+          },
+          // key 含渲染字段（与「添加歌单到首页」弹窗同因）：改名/数量变化后行才重渲染
+          (p: Playlist): string => `${p.id}_${p.name}_${p.tracks.length}`
+        )
+      }
+      .width('100%')
+      // 边界回弹：歌单多到可滚时，到边界的反馈动效（「加入歌单」弹窗同款）
+      .edgeEffect(EdgeEffect.Spring)
+      .constraintSize({ maxHeight: 320 })
+    }
+    .width('100%')
+  }
+
+  /**
    * 多列行渲染（RowOf N 槽，平板横屏铺满改造）：行内 ForEach 展开 N 槽，
    * 槽间 Blank 间隔（网格）/ 槽 left margin（长条，TrackItem 自带内边距不加
    * 额外页边距）；空槽（奇数末行尾部）Blank 占位保持满行列宽。
@@ -1834,21 +2032,27 @@ export struct HomePage {
           }
           if (slot !== null) {
             TrackCard({
-              track: slot,
-              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-            }).layoutWeight(1)
+               track: slot,
+               onPlay: (tr: Track): void => {
+                 // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                 openCollectionOrPlay(tr, this.player);
+               },
+               moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+             }).layoutWeight(1)
           } else {
             Blank().layoutWeight(1)
           }
         } else {
           if (slot !== null) {
             TrackItem({
-              track: slot,
-              entranceIndex: rowIndex * this.rowColumns() + slotIndex,
-              onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-            })
+               track: slot,
+               entranceIndex: rowIndex * this.rowColumns() + slotIndex,
+               onPlay: (tr: Track): void => {
+                 // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                 openCollectionOrPlay(tr, this.player);
+               },
+               moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+             })
               .layoutWeight(1)
               .margin({ left: slotIndex > 0 ? TWO_COL_GAP_VP : 0 })
           } else {
@@ -1940,8 +2144,15 @@ export struct HomePage {
               HomeQuickCards({
                 recentTracks: this.recentTracks,
                 cardPlaylists: this.cardPlaylists,
+                upArchiveCounts: this.upArchiveCounts,
                 onAddClick: (): void => {
                   this.onAddCardClick();
+                },
+                onRemoveCard: (p: Playlist): void => {
+                  this.removeHomeCard(p);
+                },
+                onReplaceCard: (p: Playlist): void => {
+                  this.openReplaceCardPicker(p);
                 }
               })
             }
@@ -1973,11 +2184,14 @@ export struct HomePage {
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
+                         track: t,
+                         entranceIndex: index,
+                         onPlay: (tr: Track): void => {
+                           // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                           openCollectionOrPlay(tr, this.player);
+                         },
+                         moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                       })
                     }
                   },
                   (t: Track): string => t.id
@@ -2001,11 +2215,14 @@ export struct HomePage {
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
+                         track: t,
+                         entranceIndex: index,
+                         onPlay: (tr: Track): void => {
+                           // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                           openCollectionOrPlay(tr, this.player);
+                         },
+                         moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                       })
                     }
                   },
                   (t: Track): string => t.id
@@ -2029,11 +2246,14 @@ export struct HomePage {
                   (t: Track, index: number): void => {
                     ListItem() {
                       TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        onPlay: (tr: Track): void => this.player.playOrToggle(tr),
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
+                         track: t,
+                         entranceIndex: index,
+                         onPlay: (tr: Track): void => {
+                           // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
+                           openCollectionOrPlay(tr, this.player);
+                         },
+                         moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+                       })
                     }
                   },
                   (t: Track): string => t.id

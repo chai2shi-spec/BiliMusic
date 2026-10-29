@@ -34,7 +34,7 @@ export interface FavPushIntent {
 }
 
 /** 队列容量上限（8192 字节 pref 预算内的安全条数） */
-export const FAV_PUSH_QUEUE_CAP: number = 120;
+const FAV_PUSH_QUEUE_CAP: number = 120;
 
 /** 读队列原始数组（坏数据 / 老版本缺 key 容错为空数组，逐条校验字段） */
 function loadQueue(): FavPushIntent[] {

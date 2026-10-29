@@ -20,7 +20,7 @@ import { Track } from '../model/MusicModels';
 import { decodeHtmlEntities } from './TextUtil';
 
 /** 智能判重的时长容差（秒）：同一首歌不同投稿的时长差异上限 */
-export const DEDUP_DURATION_TOLERANCE_SEC: number = 5;
+const DEDUP_DURATION_TOLERANCE_SEC: number = 5;
 
 /**
  * 标点统一剔除。两侧（歌名 / 视频标题）必须用同一套规则，

@@ -2,20 +2,38 @@
   "app": {
     "bundleName": "com.chai.bilimusic",
     "vendor": "Hanversion",
-    "versionCode": 1003001,
-    "versionName": "1.3.1",
+    "versionCode": 1003005,
+    "versionName": "1.3.5",
     // 2026-10-08 图标分层（应用市场审核要求）：改指分层描述 layered_image.json，
     // 前景 app_icon_fg / 背景 app_icon_bg 各 1024×1024，圆角由系统遮罩处理。
     "icon": "$media:layered_image",
     "label": "$string:app_name",
-    // 2026-10-25 备用图标（API 26 alternateIcons）：4 套预设设计（design/icon），
-    // 运行时经 bundleManager.setAlternateIcon(name) 切换桌面图标、传 '' 恢复默认。
-    // 分层组合：01/02 粉底 #FB7299，03/04 深粉底 #C2185B；仅 bundleType=app 生效。
+    // 2026-10-25 备用图标（API 26 alternateIcons）：运行时经
+    // bundleManager.setAlternateIcon(name) 切换桌面图标、传 '' 恢复默认。
+    // 第一组（design/icon，粉底）：01/02 粉底 #FB7299，03/04 深粉底 #C2185B；
+    // 第二组（design/app-icon-v2，彩色底避开品牌粉）：05 声波柱电蓝 / 06 播放环
+    // 橙红 / 07 音箱石板灰 / 08 黑胶靛蓝；
+    // 第三组（design/app-icon-v3，拟物设备）：09 复古 MP3 / 10 磁带深青 /
+    // 11 黑胶唱机米色 / 12 MD 深棕 / 13 小电视墨蓝。仅 bundleType=app 生效。
+    //（2026-10-28 曾试背景层全透明，真机被 Launcher 兜底渲染为黑底，已回滚。）
+    // 2026-10-29 新增 14 音乐小电视（design/app-icon-v4：满幅 1024² 不透明，
+    // 戴耳机小电视 + 音符 + 闪光；整图铺满、bg 层被完全遮盖仅占位，
+    // 圆角由系统遮罩裁切 —— 必须用满幅版，不可用圆角版否则裁两次出白边。）
     "alternateIcons": [
       { "name": "wave_bars", "icon": "$media:alt_icon_01" },
       { "name": "headphones", "icon": "$media:alt_icon_02" },
       { "name": "audio_ring", "icon": "$media:alt_icon_03" },
-      { "name": "vinyl", "icon": "$media:alt_icon_04" }
+      { "name": "vinyl", "icon": "$media:alt_icon_04" },
+      { "name": "music_tv", "icon": "$media:alt_icon_14" },
+      { "name": "wave_bars_v2", "icon": "$media:alt_icon_05" },
+      { "name": "play_circle", "icon": "$media:alt_icon_06" },
+      { "name": "speaker", "icon": "$media:alt_icon_07" },
+      { "name": "vinyl_v2", "icon": "$media:alt_icon_08" },
+      { "name": "retro_mp3", "icon": "$media:alt_icon_09" },
+      { "name": "cassette", "icon": "$media:alt_icon_10" },
+      { "name": "vinyl_v3", "icon": "$media:alt_icon_11" },
+      { "name": "md_walkman", "icon": "$media:alt_icon_12" },
+      { "name": "mini_tv", "icon": "$media:alt_icon_13" }
     ]
   }
 }

@@ -25,11 +25,11 @@ function createId(): string {
 
 /**
  * 最近播放的条数上限（分片存储后即为**真实**上限）。
- * 分片存储（每片 8 条 × 最多 13 片，同歌单 `pl_tracks_*` 模式）后单值上限
- * 不再约束总量，100 即真实封顶；读侧按 ceil(RECENT_MAX_ITEMS/8) 探测分片，
+ * 分片存储（每片 8 条 × 最多 25 片，同歌单 `pl_tracks_*` 模式）后单值上限
+ * 不再约束总量，200 即真实封顶；读侧按 ceil(RECENT_MAX_ITEMS/8) 探测分片，
  * 存量数据零迁移、扩容后自然读满。
  */
-const RECENT_MAX_ITEMS: number = 100;
+const RECENT_MAX_ITEMS: number = 200;
 
 /**
  * 最近播放**分片存储**：曲目按每片 8 条拆到 `recent_tracks_{n}` 独立 key。
@@ -38,7 +38,7 @@ const RECENT_MAX_ITEMS: number = 100;
  * value 有 8192 字节硬上限。slimTrack 后一条实测约 560 字节（含
  * pubdate / playedAt / lastPosSec）→ 整份列表塞一个 key 时超过约 11 条就
  * 写不进去，表现为「播得越多、重启后只剩 11 条」。8 × 560 ≈ 4.5KB，
- * 离 6000 字节预算有余量；最多 ceil(100/8)=13 片。
+ * 离 6000 字节预算有余量；最多 ceil(200/8)=25 片。
  */
 const RECENT_CHUNK_ITEMS: number = 8;
 const RECENT_CHUNK_PREFIX: string = 'recent_tracks_';
@@ -124,7 +124,7 @@ function loadRecentChunks(): Track[] | null {
   return found ? out : null;
 }
 
-export function getRecentTracks(): Track[] {
+function getRecentTracks(): Track[] {
   if (recentCache === null) {
     // 优先分片格式；无分片数据时回落旧格式
     // （PREF_RECENT 单键 Track[]），旧数据在下次落盘时迁入分片并清理旧键
@@ -156,7 +156,7 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
 
   try {
     // 分片落盘（同歌单 pl_tracks_* 模式）：每片 8 条 slimTrack 后的曲目
-    // ≈ 4.5KB，单值 8192 上限不再约束总量，100 条全部可持久化。
+    // ≈ 4.5KB，单值 8192 上限不再约束总量，200 条全部可持久化。
     // 分片攒进一个 Record 走 putMany（一次 flush），避免每片各自 put + flush
     // 造成十几次全量落盘。
     const slim: Track[] = capped.map((t: Track): Track => slimTrack(t));
@@ -206,7 +206,7 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
   }
 }
 
-export function addRecentTrack(track: Track): void {
+function addRecentTrack(track: Track): void {
   if (!isPersistableTrack(track)) {
     console.error('addRecentTrack ignored: invalid track');
     return;
@@ -223,13 +223,13 @@ export function addRecentTrack(track: Track): void {
   console.info(`recent track added: ${track.id} (total ${getRecentTracks().length})`);
 }
 
-export function removeRecentTrack(id: string): Track[] {
+function removeRecentTrack(id: string): Track[] {
   const next: Track[] = getRecentTracks().filter((t: Track): boolean => t.id !== id);
   persistRecentTracks(next);
   return getRecentTracks();
 }
 
-export function clearRecentTracks(): void {
+function clearRecentTracks(): void {
   persistRecentTracks([]);
 }
 
@@ -241,26 +241,29 @@ export function clearRecentTracks(): void {
  * （位置变化不需要重载列表页，避免播放中整表刷新闪动）。
  * 条目不在 7 天窗口内（缓存中找不到）时静默返回 —— 位置记忆只随
  * 「最近播放」条目存在，过期 / 移除 / 清空的清理随条目整体发生，零额外逻辑。
+ * 返回是否找到条目并已触发落盘：调用方据此决定是否消耗节流时间戳，
+ * 静默 no-op 白白消耗时间戳会拦掉后续 10s 内的合法写入。
  */
-export function updateRecentProgress(id: string, posSec: number): void {
+function updateRecentProgress(id: string, posSec: number): boolean {
   if (typeof id !== 'string' || id.length === 0) {
-    return;
+    return false;
   }
   const list: Track[] = getRecentTracks();
   for (let i = 0; i < list.length; i++) {
     if (list[i].id === id) {
       list[i].lastPosSec = Math.max(0, Math.round(posSec));
       persistRecentTracks(list, false);
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 /**
  * 读取某条最近播放记录的上次播放位置（秒）。
  * 无记录 / 不在 7 天窗口内 / 旧版本数据无该字段 → 一律返回 0（从头播）。
  */
-export function getRecentProgressSec(id: string): number {
+function getRecentProgressSec(id: string): number {
   const list: Track[] = getRecentTracks();
   for (let i = 0; i < list.length; i++) {
     if (list[i].id === id) {
@@ -324,7 +327,7 @@ function loadFavoriteChunks(): Track[] | null {
   return found ? out : null;
 }
 
-export function getFavoriteTracks(): Track[] {
+function getFavoriteTracks(): Track[] {
   if (favoriteCache === null) {
     // 优先分片格式；无分片数据时回落旧格式（PREF_FAVORITES 单键），
     // 旧数据在下次落盘时迁入分片并清理旧键（见 persistFavoriteTracks 的迁移收尾）
@@ -401,7 +404,7 @@ function persistFavoriteTracks(list: Track[]): void {
   notifyLibraryChanged();
 }
 
-export function toggleFavoriteTrack(track: Track): Track[] {
+function toggleFavoriteTrack(track: Track): Track[] {
   if (!isPersistableTrack(track)) {
     console.error('toggleFavoriteTrack ignored: invalid track');
     return getFavoriteTracks();
@@ -738,7 +741,7 @@ let prewarmPromise: Promise<void> | null = null;
  * 页面侧 `.then` 后刷新；预热完成本身也会 bump STORE_LIBRARY_REV，
  * 挂了 @Watch 的页面随之自动重灌 —— 双路刷新幂等（重灌只读内存快照）。
  */
-export function prewarmPlaylists(): Promise<void> {
+function prewarmPlaylists(): Promise<void> {
   if (playlistCache !== null) {
     return Promise.resolve();
   }
@@ -833,7 +836,7 @@ export function createPlaylist(input: {
   return playlist;
 }
 
-export function getPlaylist(id: string): Playlist | null {
+function getPlaylist(id: string): Playlist | null {
   return getPlaylists().find((p: Playlist): boolean => p.id === id) ?? null;
 }
 
@@ -846,7 +849,7 @@ export function getPlaylist(id: string): Playlist | null {
  * 同款纪律：传错下标最多影响 to 的 clamp，不会拖丢歌单。
  * @returns 是否发生了实际移动（id 找不到 / 原地 → false 且不落盘）。
  */
-export function movePlaylist(playlistId: string, toIndex: number): boolean {
+function movePlaylist(playlistId: string, toIndex: number): boolean {
   const list: Playlist[] = getPlaylists();
   const fromIndex: number = list.findIndex((p: Playlist): boolean => p.id === playlistId);
   if (fromIndex < 0) {
@@ -910,7 +913,7 @@ function playlistNameBaseFromTrack(track: Track): string {
  * @param track    要加进去的条目，名字取它的 `title`
  * @param existing 已存在的歌单（用于撞名检查；比较前先 trim，避免「起风了」与「起风了 」被判成不同）
  */
-export function nextPlaylistNameForTrack(track: Track, existing: Playlist[]): string {
+function nextPlaylistNameForTrack(track: Track, existing: Playlist[]): string {
   const names: Set<string> = new Set<string>();
   for (let i = 0; i < existing.length; i++) {
     names.add(existing[i].name.trim());
@@ -1009,7 +1012,7 @@ let favMirrorSkippedLast: number = 0;
  * 读走最近一次「加入双向夹」被跳过的非 B 站曲目数（读后清零）。
  * 调用方（加歌入口页）在 toast 里追加「N 首非 B 站曲目已跳过」。
  */
-export function consumeFavMirrorSkippedCount(): number {
+function consumeFavMirrorSkippedCount(): number {
   const n: number = favMirrorSkippedLast;
   favMirrorSkippedLast = 0;
   return n;
@@ -1096,7 +1099,7 @@ function hookTwowayRemoves(playlist: Playlist, removed: Track[]): void {
   }
 }
 
-export function deletePlaylist(id: string): void {
+function deletePlaylist(id: string): void {
   // 已加入首页快捷卡行的歌单被删：同步清掉 HomeCardStore 残留 id，
   // 否则死 id 占着 HOME_PLAYLIST_CARDS_MAX 配额（加满 9 → 删 1 →
   // 再也加不进新歌单）。removeHomePlaylist 不在架时无操作；bump 一次
@@ -1119,7 +1122,7 @@ export function deletePlaylist(id: string): void {
  * 重命名歌单。只改名字，其余字段（tracks / 封面 / 创建时间）原样保留，
  * 不能拿一个只有 name 的新对象去 updatePlaylist，否则曲目会被清空。
  */
-export function renamePlaylist(id: string, name: string): Playlist | null {
+function renamePlaylist(id: string, name: string): Playlist | null {
   const current: Playlist | null = getPlaylist(id);
   if (!current) {
     return null;
@@ -1129,7 +1132,7 @@ export function renamePlaylist(id: string, name: string): Playlist | null {
   return renamed;
 }
 
-export function addTrackToPlaylist(playlistId: string, track: Track): Playlist | null {
+function addTrackToPlaylist(playlistId: string, track: Track): Playlist | null {
   const playlists: Playlist[] = getPlaylists();
   let updatedPlaylist: Playlist | null = null;
   let dirty: boolean = false;
@@ -1190,7 +1193,7 @@ export function addTrackToPlaylist(playlistId: string, track: Track): Playlist |
  * I/O 纪律（见 importPlaylistsFromText 注释）对批量入口同样成立，
  * 整张歌单卡片入单时逐首调用 = 每首全量重写分片，大歌单会放大成 I/O 灾难。
  */
-export function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playlist | null {
+function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playlist | null {
   if (tracks.length === 0) {
     return getPlaylist(playlistId);
   }
@@ -1249,7 +1252,7 @@ export function addTracksToPlaylist(playlistId: string, tracks: Track[]): Playli
   return updatedPlaylist;
 }
 
-export function removeTracksFromPlaylist(playlistId: string, trackIds: string[]): Playlist | null {
+function removeTracksFromPlaylist(playlistId: string, trackIds: string[]): Playlist | null {
   const ids: Set<string> = new Set<string>(trackIds);
   if (ids.size === 0) {
     return getPlaylist(playlistId);
@@ -1333,7 +1336,7 @@ function mergeTracksOf(sources: Playlist[], smart: boolean): MergeTracksResult {
 }
 
 /** 合并预览：弹窗的汇总文案与风险提示都取这里（不落盘、不改状态） */
-export interface PlaylistMergePreview {
+interface PlaylistMergePreview {
   /** 有效的源歌单数（失效 / 重复 id 已剔除） */
   sources: number;
   /** 源曲目总数（去重前） */
@@ -1348,7 +1351,7 @@ export interface PlaylistMergePreview {
   subscriptionCount: number;
 }
 
-export function previewPlaylistMerge(ids: string[], smart: boolean): PlaylistMergePreview {
+function previewPlaylistMerge(ids: string[], smart: boolean): PlaylistMergePreview {
   const sources: Playlist[] = collectMergeSources(ids);
   const merged: MergeTracksResult = mergeTracksOf(sources, smart);
   let subscriptionCount: number = 0;
@@ -1371,7 +1374,7 @@ export function previewPlaylistMerge(ids: string[], smart: boolean): PlaylistMer
 }
 
 /** 合并结果：页面据此生成回执文案 */
-export interface PlaylistMergeResult {
+interface PlaylistMergeResult {
   playlist: Playlist;
   /** 参与的源歌单数 */
   sources: number;
@@ -1409,7 +1412,7 @@ function uniqueMergeName(rawName: string, taken: Set<string>): string {
  *                      （归一化标题 + 歌手一致 + 时长差 ≤ 5 秒或时长未知）
  * @returns 少于 2 个有效源时返回 null（页面已先校验，这里兜底）
  */
-export function mergePlaylists(ids: string[], name: string, deleteSources: boolean, smart: boolean): PlaylistMergeResult | null {
+function mergePlaylists(ids: string[], name: string, deleteSources: boolean, smart: boolean): PlaylistMergeResult | null {
   const sources: Playlist[] = collectMergeSources(ids);
   if (sources.length < 2) {
     return null;
@@ -1498,7 +1501,7 @@ export interface PlaylistDedupResult {
  * 投稿自动重建、收藏夹镜像由 B 站服务端决定，去重成果都会被下次同步覆盖。
  * 歌单不存在（打开菜单期间被删）返回 null。
  */
-export function dedupPlaylistTracks(playlistId: string): PlaylistDedupResult | null {
+function dedupPlaylistTracks(playlistId: string): PlaylistDedupResult | null {
   const playlists: Playlist[] = getPlaylists();
   for (let i = 0; i < playlists.length; i++) {
     if (playlists[i].id !== playlistId) {
@@ -1572,15 +1575,15 @@ export function getPlaylistByUpMid(upMid: string): Playlist | null {
 // 冒出错误的「拉取新投稿」入口、歌单页行点击错跳到 UP 主页）。
 
 /** 收藏夹镜像的来源 id 前缀（真实 UP mid 是纯数字，天然不冲突） */
-export const FAV_SOURCE_PREFIX: string = 'fav_';
+const FAV_SOURCE_PREFIX: string = 'fav_';
 
 /** 收藏夹 media_id → 本地镜像歌单的来源 id（`fav_{mediaId}`） */
-export function favSourceId(mediaId: number): string {
+function favSourceId(mediaId: number): string {
   return `${FAV_SOURCE_PREFIX}${mediaId}`;
 }
 
 /** 从来源 id（`fav_{mediaId}`）反解 media_id；非该形态 / 解析失败返回 0 */
-export function favMediaIdFromSourceId(sourceId: string): number {
+function favMediaIdFromSourceId(sourceId: string): number {
   if (!sourceId.startsWith(FAV_SOURCE_PREFIX)) {
     return 0;
   }
@@ -1590,7 +1593,7 @@ export function favMediaIdFromSourceId(sourceId: string): number {
 }
 
 /** 是否「订阅 UP 投稿」歌单（老数据无 sourceKind 时按 upMid 非空兜底） */
-export function isUpSubscription(p: Playlist): boolean {
+function isUpSubscription(p: Playlist): boolean {
   if (p.sourceKind === 'up') {
     return true;
   }
@@ -1607,22 +1610,22 @@ export function isUpSubscription(p: Playlist): boolean {
  * 所有「选目标歌单」的弹层/菜单统一用这份列表，订阅歌单不出现。
  * ⚠️ 判定必须用 isUpSubscription：收藏夹镜像（fav_x）有 upMid 但可正常加歌。
  */
-export function getAddablePlaylists(): Playlist[] {
+function getAddablePlaylists(): Playlist[] {
   return getPlaylists().filter((p: Playlist): boolean => !isUpSubscription(p));
 }
 
 /** 是否「B 站收藏夹镜像」歌单 */
-export function isFavMirror(p: Playlist): boolean {
+function isFavMirror(p: Playlist): boolean {
   return p.sourceKind === 'fav';
 }
 
 /** 按收藏夹 media_id 找本地镜像歌单；没同步过返回 null */
-export function getFavMirrorByMediaId(mediaId: number): Playlist | null {
+function getFavMirrorByMediaId(mediaId: number): Playlist | null {
   return getPlaylistByUpMid(favSourceId(mediaId));
 }
 
 /** 从镜像歌单反解出收藏夹 media_id；非镜像歌单 / 解析失败返回 0 */
-export function favMediaIdOf(p: Playlist): number {
+function favMediaIdOf(p: Playlist): number {
   if (p.sourceKind !== 'fav') {
     return 0;
   }
@@ -1640,7 +1643,7 @@ export function favMediaIdOf(p: Playlist): number {
  *
  * 超上限时从**尾部**截断（保留最新的），并回报 dropped 供界面提示。
  */
-export function mergeUpTracks(playlistId: string, incoming: Track[]): {
+function mergeUpTracks(playlistId: string, incoming: Track[]): {
   playlist: Playlist | null;
   added: number;
   dropped: number;
@@ -1707,7 +1710,7 @@ export type PlaylistSortKey = 'title' | 'duration' | 'playCount' | 'addedTime';
  * 与拖动排序手动顺序优先的原则一致：本函数会把 titleSorted 置 false
  *（旧的「按名插入」规则若还开着，下一次加歌会把刚拖好的顺序搅乱）。
  */
-export function movePlaylistTrack(playlistId: string, trackId: string, toIndex: number): boolean {
+function movePlaylistTrack(playlistId: string, trackId: string, toIndex: number): boolean {
   const current: Playlist | null = getPlaylist(playlistId);
   if (!current) {
     return false;
@@ -1782,7 +1785,7 @@ function materializeAddedAt(playlist: Playlist, indexed: { track: Track; index: 
  * 下标兜底，同 compareByTitle 的做法，不依赖引擎 sort 稳定性）。
  * @returns 排序后的歌单；id 不存在返回 null。
  */
-export function sortPlaylistTracks(playlistId: string, key: PlaylistSortKey): Playlist | null {
+function sortPlaylistTracks(playlistId: string, key: PlaylistSortKey): Playlist | null {
   const current: Playlist | null = getPlaylist(playlistId);
   if (!current) {
     return null;
@@ -1847,7 +1850,7 @@ export function sortPlaylistTracks(playlistId: string, key: PlaylistSortKey): Pl
  * 同一个 UP 重复订阅 → **复用**已有歌单并合并，不新建第二个（否则用户点几次就多出
  * 几个同名歌单，还互相不同步）。upName 之后被 B 站改名不影响已存歌单（名字只是展示）。
  */
-export function subscribeUpPlaylist(
+function subscribeUpPlaylist(
   upMid: string,
   upName: string,
   tracks: Track[],
@@ -1884,7 +1887,7 @@ export function subscribeUpPlaylist(
 // ===== 收藏夹镜像（B 站收藏夹 → 本地歌单）=====
 
 /** 收藏夹镜像应用结果：同步管理器据此汇总「新增 / 移除 / 复用」 */
-export interface FavMirrorResult {
+interface FavMirrorResult {
   playlist: Playlist | null;
   /** 本次新增（服务端有、本地没有）的条目数 */
   added: number;
@@ -1913,7 +1916,7 @@ export interface FavMirrorResult {
  * 落盘：一次性构造完整 Playlist 后单次 updatePlaylist。**禁止逐首 addTrackToPlaylist**
  * （它每次全量重写所有分片，N 首 = N 次全量重写）。
  */
-export function applyFavMirror(
+function applyFavMirror(
   favTitle: string,
   mediaId: number,
   serverTracks: Track[],
@@ -2059,7 +2062,7 @@ function removeFavoriteTombstone(id: string): void {
  * `audioUrl` 则本来就被 `slimTrack` 置空（直链带签名、会过期），所以导出后首次播放
  * 需要重新解析音源 —— 这是预期行为。
  */
-export function createPlaylistsExport(): object {
+function createPlaylistsExport(): object {
   const playlists: Playlist[] = getPlaylists();
   const out: object[] = [];
   for (let i = 0; i < playlists.length; i++) {
@@ -2105,7 +2108,7 @@ export interface PlaylistImportResult {
   skipped: number;
 }
 
-export function importPlaylistsFromText(text: string): PlaylistImportResult {
+function importPlaylistsFromText(text: string): PlaylistImportResult {
   const parsed = JSON.parse(text);
   const incoming: Playlist[] = Array.isArray(parsed) ? parsed : parsed?.playlists;
   if (!Array.isArray(incoming)) {

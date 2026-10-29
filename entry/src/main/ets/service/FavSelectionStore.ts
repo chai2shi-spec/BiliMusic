@@ -41,6 +41,15 @@ export function setFolderSelected(mediaId: number, selected: boolean): void {
   store.set(mediaId, selected);
 }
 
+/**
+ * 批量设置勾选态并整体落盘一次（同步页「全选/全不选」）：
+ * 只作用于传入的 id 集合（可见收藏夹），集合外的历史「未勾选」记录保持原样。
+ * 幂等：无变化不写盘。
+ */
+export function setAllFoldersSelected(mediaIds: Array<number>, selected: boolean): void {
+  store.setAll(mediaIds, selected);
+}
+
 /** 未勾选集合整体读出（FavSyncManager 一轮只读一次，避免逐夹反复读盘） */
 export function deselectedFolderIds(): Set<number> {
   return store.setOf();

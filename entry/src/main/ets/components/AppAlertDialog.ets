@@ -49,13 +49,13 @@ import { UIContext, CustomContentDialog } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 
 /** 弹窗按钮：字段名与系统 AlertDialog 的按钮保持一致，调用点迁移零成本 */
-export interface AppAlertButtonOptions {
+interface AppAlertButtonOptions {
   value: string;
   action?: () => void;
 }
 
 /** 确认弹窗参数：title / message / primaryButton（左）/ secondaryButton（右） */
-export interface AppAlertDialogOptions {
+interface AppAlertDialogOptions {
   title: string;
   message: string;
   primaryButton: AppAlertButtonOptions;
@@ -220,7 +220,7 @@ export function showAppAlertDialog(uiContext: UIContext, options: AppAlertDialog
 }
 
 /** 确认弹窗简化参数：标准「取消 / 确认」两键问句 */
-export interface AppConfirmOptions {
+interface AppConfirmOptions {
   title: string;
   message: string;
   /** 左侧取消键文案，默认「取消」 */

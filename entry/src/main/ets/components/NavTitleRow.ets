@@ -43,6 +43,19 @@ import {
 export struct NavTitleRow {
   /** 标题文案；空串 = 无标题变体（歌单详情 / UP 主空间，标题让给头部区大字） */
   @Prop title: string = '';
+  /**
+   * 标题行尾部插槽（可选；默认空）：如歌单详情页的「定位」按钮。
+   * · 有标题：标题 layoutWeight(1) 撑开，槽内容自然靠右；
+   * · 无标题：Blank().layoutWeight(1) 占位（纯空白，存量空标题页视觉零变化），槽内容靠右；
+   * · 不传：默认空 builder，什么都不渲染（存量使用点零改动）。
+   * 几何锚定（Center 居中 + 中间层 Column）不因插槽改变。
+   */
+  @BuilderParam trailing: () => void = this.emptyTrailing;
+
+  /** trailing 缺省实现：什么都不渲染 */
+  @Builder
+  emptyTrailing() {
+  }
 
   build() {
     // 宿主怪癖必需的中间层：height('100%') 撑满布局框 + Center 居中锚定，
@@ -61,7 +74,12 @@ export struct NavTitleRow {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
+        } else {
+          // 无标题：占位撑开，尾部插槽靠右（纯空白，空标题存量页视觉零变化）
+          Blank()
+            .layoutWeight(1)
         }
+        this.trailing()
       }
       .width('100%')
       .height(NAV_TITLE_BAR_HEIGHT)

@@ -41,19 +41,19 @@ import {
 } from '../service/FavPushRunner';
 import { PlaylistDetailRouteParam, NavRouteParamReader, UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
+import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP, SEARCH_FILTER_DEBOUNCE_MS } from '../common/constants/InteractionConstants';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { CustomContentDialog } from '@kit.ArkUI';
 import {
   ButtonMaterialModifier,
-  makeButtonMaterialModifier,
-  TextInputMaterialModifier,
-  makeTextInputMaterialModifier
+  makeButtonMaterialModifier
 } from '../utils/HeaderBarMaterial';
-import { MaterialCompat } from '../utils/MaterialCompat';
+import { SearchBox } from '../components/SearchBox';
+import { filterTracksByKeyword } from '../utils/TrackFilter';
 import {
   CONTENT_END_OFFSET,
+  STORE_CURRENT_TRACK,
   STORE_DOWNLOAD_TASKS,
   STORE_ITEM_DISPLAY_STYLE,
   STORE_LIBRARY_REV,
@@ -121,8 +121,13 @@ export struct PlaylistDetail {
   private listScroller: Scroller = new Scroller();
   /** 头部按钮（播放全部 / 拉取新投稿）沉浸光感材质修饰器：26+ 生效，低版本 no-op 显实色兜底 */
   private buttonMaterial: ButtonMaterialModifier = makeButtonMaterialModifier();
-  /** 搜索框（TextInput）沉浸光感材质修饰器：与 buttonMaterial 同档（THIN + interactive + lightEffect） */
-  private searchInputMaterial: TextInputMaterialModifier = makeTextInputMaterialModifier();
+  /**
+   * 搜索本地过滤防抖定时器 id：按键路径的过滤重算延迟 200ms（大歌单千级
+   * 条目每键同步全量过滤 + 列表 diff 有卡顿风险）；clearSearch / 数据刷新
+   * 路径直调 applyLocalFilter 不防抖。aboutToDisappear 清理，防回调打进
+   * 已销毁实例。
+   */
+  private filterDebounceTimer: number = -1;
   @State playlist: Playlist | null = null;
   @State titleText: string = '歌单';
   /** 「拉取新投稿」进行中：防止连点重复发请求 */
@@ -133,11 +138,26 @@ export struct PlaylistDetail {
    * 列表带着条目与初值一起挂载会让占位条目先按不含头部区的让位量排布、实测回来
    * 再整体下移（内容跳变）。列表挂载门控直接判 headerAreaHeight > 0（见 build 里的
    * if）——barTotalHeight() 恒 > 0 不能当门控。
+   * @Watch（onHeaderMeasured）：门控首次翻转是「定位」下钻入参的一次性消费点
+   * （pendingLocateTrackId 非空才做事；后续实测变化因 pending 已清空而空跑）。
    */
-  @State headerAreaHeight: number = 0;
+  @State @Watch('onHeaderMeasured') headerAreaHeight: number = 0;
 
   /** 目标歌单 id（路由参数 PlaylistDetailRouteParam 带入，aboutToAppear 取参一次） */
   private playlistId: string = '';
+
+  /**
+   * 「定位当前播放」延时滚动定时器 id：扩切片 / 入参定位改布局后
+   * 等一帧布局完成再滚；
+   * aboutToDisappear 清理，防回调打进已销毁实例。
+   */
+  private locateTimerId: number = -1;
+
+  /**
+   * 入参定位暂存（歌单页签「定位」下钻入口带入的曲目 id，空 = 无）：
+   * 列表挂载门控（headerAreaHeight）首次翻转时经 onHeaderMeasured 消费一次。
+   */
+  private pendingLocateTrackId: string = '';
 
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 头部区实测高。
@@ -277,6 +297,9 @@ export struct PlaylistDetail {
     const routeParam: PlaylistDetailRouteParam | null =
       NavRouteParamReader.readPlaylistDetailParam(NavStackHolder.stack);
     this.playlistId = routeParam !== null ? routeParam.playlistId : '';
+    // 「定位」下钻入口（歌单页签）：带入要定位的曲目 id，
+    // 等列表挂载门控翻转（onHeaderMeasured）后消费一次。
+    this.pendingLocateTrackId = routeParam !== null ? routeParam.locateTrackId : '';
     this.load();
     // @Watch 不为 @StorageLink 的初始同步触发（工程内已踩过两次的坑），
     // 这里必须补一次已下载集合的初算；ensureLoaded 幂等 —— AppContainer 启动链
@@ -308,6 +331,19 @@ export struct PlaylistDetail {
       autoCancel: true,
       alignment: DialogAlignment.Center
     });
+  }
+
+  aboutToDisappear(): void {
+    // 「定位」延时滚动定时器：销毁前清理，防回调打进已销毁实例。
+    if (this.locateTimerId >= 0) {
+      clearTimeout(this.locateTimerId);
+      this.locateTimerId = -1;
+    }
+    // 搜索过滤防抖定时器：同上清理。
+    if (this.filterDebounceTimer >= 0) {
+      clearTimeout(this.filterDebounceTimer);
+      this.filterDebounceTimer = -1;
+    }
   }
 
   /** 下载快照到达：重建「已下载完成」曲目 id 集合（COMPLETED 且文件还在才算数） */
@@ -415,11 +451,6 @@ export struct PlaylistDetail {
 
   // ===== 歌单内搜索（纯本地过滤，无远程搜索）=====
 
-  /** 搜索框底色：26+ 材质可用时**透明**（不透明底会盖住材质层玻璃，官方 FAQ「背景色遮挡材质效果」同款结论），低版本回落 bg_card 实色兜底（UpSpacePage.searchBoxBg 同款）。 */
-  private searchBoxBg(): ResourceColor {
-    return MaterialCompat.hasImmersiveMaterial() ? Color.Transparent : $r('app.color.bg_card');
-  }
-
   /** 当前切片源：有关键词 → 全量匹配数组；否则 → 歌单全量（歌单空给空数组）。 */
   private activeSource(): Track[] {
     if (this.searchKeyword.trim().length > 0) {
@@ -428,32 +459,121 @@ export struct PlaylistDetail {
     return this.playlist !== null ? this.playlist.tracks : [];
   }
 
-  /** 本地过滤（UpSpacePage.applyLocalFilter 同款）：标题 / 歌手包含关键词（小写化匹配），输入即生效、离线可用。空关键词 → 清空匹配（activeSource 退回歌单全量）。 */
+  /**
+   * 本地过滤：标题 / 歌手包含关键词（小写化匹配），输入即生效、离线可用。
+   * 过滤谓词收口在 filterTracksByKeyword（与 UpSpacePage / CollectionDetailPage
+   * 三页共用同一份实现）。空关键词 → 清空匹配（activeSource 退回歌单全量）。
+   * 过滤范围是歌单全量 playlist.tracks 而非已揭示切片 —— 歌单数据本就全量在本地，
+   * 未滚动到的曲目也要能搜到（UpSpacePage 只过滤已加载分页，那是远端分页；此处有意差异）。
+   */
   private applyLocalFilter(): void {
-    const kw: string = this.searchKeyword.trim().toLowerCase();
     const p: Playlist | null = this.playlist;
-    if (kw.length === 0 || p === null) {
-      this.filteredTracks = [];
-      return;
-    }
-    this.filteredTracks = p.tracks.filter((t: Track): boolean => {
-      return t.title.toLowerCase().indexOf(kw) >= 0
-        || t.artist.toLowerCase().indexOf(kw) >= 0;
-    });
+    this.filteredTracks = p !== null ? filterTracksByKeyword(p.tracks, this.searchKeyword) : [];
   }
 
-  /** 输入变化：重算过滤 + 切片重置到第一批（新关键词 = 新列表，从头揭示）。 */
+  /**
+   * 输入变化（按键路径）：过滤重算 + 切片重置走 200ms 防抖 —— 大歌单千级
+   * 条目每键同步全量过滤 + 列表 diff 有卡顿风险；新关键词 = 新列表，防抖
+   * 回调里从头揭示第一批。回调读当刻 this.searchKeyword（不捕获旧词），幂等。
+   */
   private onKeywordChanged(): void {
     // 关键词变化 = 用户切换任务，退出多选（搜索框在多选态本就淡出不可点，此处兜底）
     this.exitSelecting();
+    if (this.filterDebounceTimer >= 0) {
+      clearTimeout(this.filterDebounceTimer);
+    }
+    this.filterDebounceTimer = setTimeout((): void => {
+      this.filterDebounceTimer = -1;
+      this.applyLocalFilter();
+      this.tracks = this.activeSource().slice(0, PD_REVEAL_PAGE_SIZE);
+    }, SEARCH_FILTER_DEBOUNCE_MS);
+  }
+
+  /**
+   * 框内 × 清除：关键词置空 + 退回全量第一批（无远程态要清，UpSpacePage 简化版）。
+   * 取消在途防抖后立即执行 —— 防抖回调若不清，清态后 200ms 会拿旧词把过滤
+   * 结果复活回来。
+   */
+  private clearSearch(): void {
+    if (this.filterDebounceTimer >= 0) {
+      clearTimeout(this.filterDebounceTimer);
+      this.filterDebounceTimer = -1;
+    }
+    this.searchKeyword = '';
     this.applyLocalFilter();
     this.tracks = this.activeSource().slice(0, PD_REVEAL_PAGE_SIZE);
   }
 
-  /** 框内 × 清除：关键词置空 + 退回全量第一批（无远程态要清，UpSpacePage 简化版）。 */
-  private clearSearch(): void {
-    this.searchKeyword = '';
-    this.onKeywordChanged();
+  // ===== 定位当前播放（标题行「定位」按钮 + 歌单页签「定位」下钻入参） =====
+
+  /**
+   * 「定位当前播放」入口（标题行「定位」按钮）：取 AppStorage 在播曲目
+   * 转曲目级定位；没有在播曲目则 toast（PlaylistsPage / DownloadsPage 同一口径）。
+   */
+  private locateCurrentPlaying(): void {
+    const cur: Track | undefined = AppStorage.get<Track>(STORE_CURRENT_TRACK);
+    if (cur === undefined || cur === null) {
+      this.toast('还没有正在播放的曲目', 1500);
+      return;
+    }
+    this.locateTrackById(cur.id);
+  }
+
+  /**
+   * 按 id 定位曲目行（id 精确匹配，与 TrackItem「正在播放」高亮同一语义）：
+   * 在当前展示源（activeSource：搜索态 = 匹配数组，否则歌单全量）中找目标，
+   * 未揭示区先扩切片，再换算 List 下标延时居中滚动。
+   * 找不到：搜索态提示不在筛选结果，否则提示不在此歌单（toast 兜底，不跳转）。
+   */
+  private locateTrackById(trackId: string): void {
+    const all: Track[] = this.activeSource();
+    let target: number = -1;
+    for (let i: number = 0; i < all.length; i++) {
+      if (all[i].id === trackId) {
+        target = i;
+        break;
+      }
+    }
+    if (target < 0) {
+      this.toast(this.searchKeyword.trim().length > 0
+        ? '当前播放的曲目不在筛选结果中'
+        : '当前播放的曲目不在此歌单', 1800);
+      return;
+    }
+    // 目标在未揭示区（前端分页切片之外）：扩切片到含目标（+1 便于居中后有上下文；
+    // 增量 push 揭示区间，ForEach 只 diff 新增 key，onReachEnd 同款）。
+    if (target >= this.tracks.length) {
+      const next: number = Math.min(target + 1, all.length);
+      for (let i: number = this.tracks.length; i < next; i++) {
+        this.tracks.push(all[i]);
+      }
+    }
+    // List 下标换算：首项为顶部占位（+1）；网格 / 两列分支 makePairs 配对
+    //（每个 ListItem 两个曲目，÷2 取行）；单列直接用曲目下标。
+    const cols: number = (this.isGrid() || this.isTwoCol()) ? 2 : 1;
+    const listIndex: number = 1 + (cols > 1 ? Math.floor(target / cols) : target);
+    // 扩切片改变布局：等一帧布局完成再滚（DownloadsPage 同款 100ms 延时），
+    // 重复点击先清旧定时器（最后一次点击为准）。
+    if (this.locateTimerId >= 0) {
+      clearTimeout(this.locateTimerId);
+    }
+    this.locateTimerId = setTimeout((): void => {
+      this.locateTimerId = -1;
+      this.listScroller.scrollToIndex(listIndex, false, ScrollAlign.CENTER);
+    }, 100);
+  }
+
+  /**
+   * 头部区实测回写（@Watch onHeaderMeasured）：列表挂载门控首次翻转
+   * 且带入参定位（歌单页签「定位」下钻）→ 消费一次；
+   * pending 清空后后续实测变化（横竖屏切换等）空跑，不重复定位。
+   */
+  private onHeaderMeasured(): void {
+    if (this.headerAreaHeight > 0 && this.pendingLocateTrackId.length > 0) {
+      const trackId: string = this.pendingLocateTrackId;
+      this.pendingLocateTrackId = '';
+      this.locateTrackById(trackId);
+    }
   }
 
   /**
@@ -1260,15 +1380,24 @@ export struct PlaylistDetail {
       .alignItems(VerticalAlign.Top)
 
       // 操作按钮行：随头部区一起滚动（用户明确不要钉在顶部固定栏）。
-      // 单行排布：播放全部 + 选择 + 拉取新投稿 + 排序 + 搜索槽位。
+      // 行内 Stack 整行换层：常态行 = 播放全部 + 选择 + 拉取新投稿 + 排序 + 搜索框，
+      // 多选行 = 完成 + 全选 / 加入歌单 / 下载 / 移除。
       // · 播放全部：有曲目才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
-      // · 选择：多选入口；多选态变身「完成」退出，同一颗按钮承担进出，位置恒定不跳。
-      //   播放全部 / 拉取新投稿 / 排序在多选态用 visibility 摘出布局让位
-      //   （opacity 不摘布局会留空洞，不能用；属性摘出无过渡，DownloadsPage 同款可接受）。
       // · 拉取新投稿：订阅歌单（upMid 非空）才显示，空的订阅歌单也保留它 ——
       //   正好是一键填歌单的入口。
+      // ⚠️ 不用「按钮 visibility 摘布局 + 尾部槽位换层」旧结构：退出多选时常态
+      //   按钮瞬时回位，尾部槽位连同正在淡出的动作行一起被推向右侧（真机表现：
+      //   动作组「向右消失」而非淡出）。整行换层让两层几何在转场期间恒定，
+      //   交叉纯淡出（CollectionDetailPage 槽位行 B 同款模式）。
+      // ⚠️ 隐藏层必须条件渲染（不挂载），不能双层叠放 + 透明层：
+      //   HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
+      //   常态点搜索框位置误触透明的「加入歌单」/「移除」，搜索框要点多次）。
       Row({ space: 8 }) {
         if (this.playlist && this.playlist.tracks.length > 0) {
+        Stack() {
+        if (!this.selecting) {
+        // 常态行：播放全部 + 选择 + 拉取新投稿 + 排序 + 搜索框
+        Row({ space: 8 }) {
           // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
           Button('播放全部', { type: ButtonType.Normal })
             .fontSize(13)
@@ -1277,16 +1406,14 @@ export struct PlaylistDetail {
             .backgroundColor(this.themeSurface)
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
-            .visibility(this.selecting ? Visibility.None : Visibility.Visible)
             .onClick((): void => {
               if (this.playlist) {
                 this.player.playAll(this.playlist.tracks);
               }
             })
-        }
-        // 选择 / 完成：同一颗按钮承担多选进出（位置恒定不跳）
+        // 选择：多选入口（完成在多选行最前，两行整行交叉淡出）
         if (this.playlist && this.playlist.tracks.length > 0) {
-          Button(this.selecting ? '完成' : '选择', { type: ButtonType.Normal })
+          Button('选择', { type: ButtonType.Normal })
             .fontSize(13)
             .height(32)
             .borderRadius(BUTTON_RADIUS_VP)
@@ -1294,11 +1421,7 @@ export struct PlaylistDetail {
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
             .onClick((): void => {
-              if (this.selecting) {
-                this.exitSelecting();
-              } else {
-                this.enterSelecting();
-              }
+              this.enterSelecting();
             })
         }
         // 「拉取新投稿」只对订阅 UP 歌单开放；收藏夹镜像走同步页的「立即同步」，
@@ -1312,7 +1435,6 @@ export struct PlaylistDetail {
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
             .enabled(!this.upRefreshing)
-            .visibility(this.selecting ? Visibility.None : Visibility.Visible)
             .onClick((): void => {
               this.refreshUpTracks();
             })
@@ -1329,117 +1451,101 @@ export struct PlaylistDetail {
             .backgroundColor(this.themeSurface)
             .fontColor(this.themePrimary)
             .attributeModifier(this.buttonMaterial)
-            .visibility(this.selecting ? Visibility.None : Visibility.Visible)
             .bindMenu(this.sortMenuItems())
         }
-        // 尾部槽位（layoutWeight 1）if/else 换层：常态 = 搜索框（输入即本地过滤
-        // 歌单内曲目，标题 / 歌手，离线可用；框内右侧 × = 清除。无「搜索」按钮 ——
-        // 歌单数据全在本地，没有远程搜索），多选态 = 全选 / 加入歌单 / 下载 / 移除。
-        // ⚠️ 隐藏层必须用条件渲染（不挂载），不能双层叠放 + 透明层：
-        // HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
-        // 常态点搜索框位置误触透明的「加入歌单」/「移除」，搜索框要点多次）。
-        // 条件渲染让隐藏层根本不存在，从源头杜绝；淡入淡出走 transition
-        //（插入/移除动画，换层时旧层淡出新层淡入）。
-        // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）；
-        // 动作按钮左右 padding 收紧到 10vp：多选态一行 5 元素，
-        // 默认 16vp padding 在 360vp 窄屏放不下。
-        if (this.playlist && this.playlist.tracks.length > 0) {
-          Stack() {
-          if (!this.selecting) {
-          // 常态层：搜索框
-          Stack({ alignContent: Alignment.End }) {
-            TextInput({ placeholder: '搜索歌单内歌曲', text: this.searchKeyword })
-              .height(32)
-              .fontSize(14)
-              .fontColor($r('app.color.text_primary'))
-              .placeholderColor($r('app.color.text_tertiary'))
-              .placeholderFont({ size: 14 })
-              // 底色走 searchBoxBg()：26+ 材质可用时透明（不透明底会盖住材质层玻璃，
-              // 官方 FAQ 同款结论），低版本回落 bg_card 实色兜底。
-              .backgroundColor(this.searchBoxBg())
-              .borderRadius(BUTTON_RADIUS_VP)
-              // 沉浸光感材质：26+ 渲染 systemMaterial 玻璃底（与同行按钮同档），
-              // 低版本 no-op 走上方链式 bg_card 实色兜底。
-              .attributeModifier(this.searchInputMaterial)
-              // 右侧让位给框内 ×：文字滚动到最右时不被图标盖住
-              .padding({ left: 14, right: 34 })
-              .onChange((v: string): void => {
-                this.searchKeyword = v;
-                this.onKeywordChanged();
-              })
-            if (this.searchKeyword.trim().length > 0) {
-              Stack() {
-                SymbolGlyph($r('sys.symbol.xmark'))
-                  .fontSize(14)
-                  // SymbolGlyph.fontColor 按图层接收颜色数组，单色也传单元素数组
-                  .fontColor([$r('app.color.text_tertiary')])
-              }
-              .width(24)
-              .height(24)
-              .margin({ right: 8 })
-              .onClick((): void => {
-                this.clearSearch();
-              })
+        // 搜索框（尾部 layoutWeight 1 收窄适应）：输入即本地过滤歌单内曲目
+        //（标题 / 歌手，离线可用；过滤重算 200ms 防抖，见 onKeywordChanged）；
+        // 框内右侧 × = 清除。无「搜索」按钮 —— 歌单数据全在本地，没有远程搜索。
+        // UI 收口在 SearchBox 共享组件（材质 / × 清除逻辑三页同一份实现）。
+          SearchBox({
+            placeholder: '搜索歌单内歌曲',
+            keyword: this.searchKeyword,
+            clearVisible: this.searchKeyword.trim().length > 0,
+            onKeywordChange: (v: string): void => {
+              this.searchKeyword = v;
+              this.onKeywordChanged();
+            },
+            onClear: (): void => {
+              this.clearSearch();
             }
-          }
-          .width('100%')
-          .transition(TransitionEffect.OPACITY
-            .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
-          } else {
-          // 多选态层：全选 / 加入歌单 / 下载 / 移除（淡入替换搜索框）
-          Row({ space: 8 }) {
-            Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
-              .fontSize(13)
-              .height(32)
-              .borderRadius(BUTTON_RADIUS_VP)
-              .padding({ left: 10, right: 10 })
-              .backgroundColor(this.themeSurface)
-              .fontColor(this.themePrimary)
-              .attributeModifier(this.buttonMaterial)
-              .onClick((): void => {
-                this.toggleSelectAll();
-              })
-            Button('加入歌单', { type: ButtonType.Normal })
-              .fontSize(13)
-              .height(32)
-              .borderRadius(BUTTON_RADIUS_VP)
-              .padding({ left: 10, right: 10 })
-              .backgroundColor(this.themeSurface)
-              .fontColor(this.themePrimary)
-              .attributeModifier(this.buttonMaterial)
-              .onClick((): void => {
-                this.addSelectedToPlaylist();
-              })
-            Button('下载', { type: ButtonType.Normal })
-              .fontSize(13)
-              .height(32)
-              .borderRadius(BUTTON_RADIUS_VP)
-              .padding({ left: 10, right: 10 })
-              .backgroundColor(this.themeSurface)
-              .fontColor(this.themePrimary)
-              .attributeModifier(this.buttonMaterial)
-              .onClick((): void => {
-                this.confirmDownloadSelected();
-              })
-            // 移除放最后：破坏性操作与安全操作分开（trackMenuItems 同款原则）
-            Button('移除', { type: ButtonType.Normal })
-              .fontSize(13)
-              .height(32)
-              .borderRadius(BUTTON_RADIUS_VP)
-              .padding({ left: 10, right: 10 })
-              .backgroundColor(this.themeSurface)
-              .fontColor(this.themePrimary)
-              .attributeModifier(this.buttonMaterial)
-              .onClick((): void => {
-                this.confirmRemoveSelected();
-              })
-          }
-          .width('100%')
-          .transition(TransitionEffect.OPACITY
-            .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
-          }
-          }
+          })
           .layoutWeight(1)
+        }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY
+          .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
+        }
+        // 多选行：完成 + 全选 / 加入歌单 / 下载 / 移除（与常态行整行交叉淡出）。
+        // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）；
+        // 动作按钮左右 padding 收紧到 10vp：多选行 5 元素，
+        // 默认 16vp padding 在 360vp 窄屏放不下。
+        if (this.selecting) {
+        Row({ space: 8 }) {
+          Button('完成', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              this.exitSelecting();
+            })
+          Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 10, right: 10 })
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              this.toggleSelectAll();
+            })
+          Button('加入歌单', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 10, right: 10 })
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              this.addSelectedToPlaylist();
+            })
+          Button('下载', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 10, right: 10 })
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              this.confirmDownloadSelected();
+            })
+          // 移除放最后：破坏性操作与安全操作分开（trackMenuItems 同款原则）
+          Button('移除', { type: ButtonType.Normal })
+            .fontSize(13)
+            .height(32)
+            .borderRadius(BUTTON_RADIUS_VP)
+            .padding({ left: 10, right: 10 })
+            .backgroundColor(this.themeSurface)
+            .fontColor(this.themePrimary)
+            .attributeModifier(this.buttonMaterial)
+            .onClick((): void => {
+              this.confirmRemoveSelected();
+            })
+        }
+        .width('100%')
+        .transition(TransitionEffect.OPACITY
+          .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
+        }
+        }
+        // ⚠️ 固定高度（faqs-arkui-384 同款结论）：换层期间退场节点脱离布局，
+        // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 32 = 按钮高。
+        .layoutWeight(1)
+        .height(32)
         }
       }
       .width('100%')
@@ -1456,12 +1562,35 @@ export struct PlaylistDetail {
   /**
    * 标题行内容（titleBar 的 stackBuilder 承载，可用空间仅 56vp，不得超出——
    * 官方约束「不要超出标题栏的可用空间」，超出会溢出与内容区重叠）：
-   * 空占位，无标题 —— 歌单名只在头部区大标题显示一次（返回键为 HDS 默认键）。
+   * 无标题（歌单名只在头部区大标题显示一次，返回键为 HDS 默认键），
+   * 尾部插槽装「定位」按钮（滚动居中到正在播放的曲目行）。
    * 材质与滚动模糊由 HDS titleBar 负责。
    */
+  /** 标题行尾部「定位」按钮（trailing 插槽内容，样式与 PlaylistsTabBar「定位」一致） */
+  @Builder
+  LocateTrailing() {
+    Button('定位', { type: ButtonType.Normal })
+      .fontSize(13)
+      .height(32)
+      .borderRadius(BUTTON_RADIUS_VP)
+      .backgroundColor(this.themeSurface)
+      .fontColor(this.themePrimary)
+      .attributeModifier(this.buttonMaterial)
+      .onClick((): void => {
+        this.locateCurrentPlaying();
+      })
+  }
+
   @Builder
   playlistBar() {
-    NavTitleRow({ title: '' })
+    NavTitleRow({
+      title: '',
+      // 标题行右侧「定位」按钮：滚动居中到正在播放的曲目行
+      //（经 @Builder 委托，与上方「加入歌单」弹窗 contentBuilder 同款传法）。
+      trailing: (): void => {
+        this.LocateTrailing();
+      }
+    })
   }
 
   /**
@@ -1791,11 +1920,14 @@ export struct PlaylistDetail {
                     }
                     : undefined)
               }
-              // 空匹配提示：关键词激活且一条都不命中时给出人话
-              //（底部状态行门控 tracks.length > 0 此时天然隐藏，不用改）。
-              if (this.searchKeyword.trim().length > 0 && this.tracks.length === 0) {
+              // 搜索状态行（关键词激活时常驻，UpSpacePage footer 口径对齐）：
+              // 命中 N 首给计数，0 命中给人话提示。
+              //（底部状态行门控 tracks.length > 0，0 命中时不与「没有匹配」同现。）
+              if (this.searchKeyword.trim().length > 0) {
                 ListItem() {
-                  Text('没有匹配的歌曲')
+                  Text(this.filteredTracks.length > 0
+                    ? `命中 ${this.filteredTracks.length} 首歌曲`
+                    : '没有匹配的歌曲')
                     .fontSize(13)
                     .fontColor($r('app.color.text_tertiary'))
                 }

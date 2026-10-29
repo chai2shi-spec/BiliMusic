@@ -60,6 +60,8 @@ import { sleep } from '../utils/AsyncUtil';
 import { extractAudioFromVideo, expandVideoParts } from '../api/BilibiliApi';
 import {
   insertDownload,
+  insertDownloads,
+  withTransaction,
   getAllDownloads,
   deleteDownload,
   getDownloadByMusicId,
@@ -361,6 +363,10 @@ export class DownloadManager {
     try {
       const list: DownloadTask[] = await getAllDownloads();
       this.tasks.clear();
+      // 中断任务先改内存态，攒起来最后一把落库：
+      // 逐条 await updateDownloadStatus = N 次独立磁盘事务（各带一次
+      // journal 往返），断电重进（任务越多越明显）时把启动装载拖长。
+      const expired: DownloadTask[] = [];
       for (const t of list) {
         if (t.status === DownloadStatus.DOWNLOADING || t.status === DownloadStatus.PENDING) {
           // 上次进程被杀留下的中间态，文件多半不完整，标为失败以免永远停在“下载中”。
@@ -371,11 +377,20 @@ export class DownloadManager {
               // 文件可能不存在，忽略
             });
           }
-          await updateDownloadStatus(t.id, DownloadStatus.ERROR);
           t.status = DownloadStatus.ERROR;
           t.errorMessage = '下载已中断（重新下载即可）';
+          expired.push(t);
         }
         this.tasks.set(t.id, t);
+      }
+      if (expired.length > 0) {
+        // 单事务一次提交；此处位于启动装载（loadingPromise 单飞），
+        // 事务窗口内无其他并发写，回滚面可控。
+        await withTransaction(async (): Promise<void> => {
+          for (let i = 0; i < expired.length; i++) {
+            await updateDownloadStatus(expired[i].id, DownloadStatus.ERROR);
+          }
+        });
       }
       this.loaded = true;
       this.notify();
@@ -443,10 +458,14 @@ export class DownloadManager {
   /**
    * 下载入口。多 P 合集会被**展开成多个独立任务**，一起排队、再串行下载。
    *
+   * 展开仅对**合集入口条目**（cid 为空）生效，见 resolveDownloadTracks：
+   * 歌单 / 队列 / 最近播放里的具体分 P（cid 非空）只下它本身 —— 否则
+   * 「下载整个歌单」会把歌单里每首歌所属的整个合集都入队。
+   *
    * @param ignoreWifiLimit 用户在「仅 WiFi 下载」的询问里选了「继续下载」时传 true 重入。
    * @param singleOnly 只下载 track 本身、不展开合集（播放页下载当前 P 用）：
    *        正在播的是第几个 P 就只下那一 P 的音频。列表页入口保持默认 false——
-   *        列表条目代表整个合集，「点一下全下」是刻意的。
+   *        合集入口条目代表整个合集，「点一下全下」是刻意的。
    */
   async requestDownload(
     track: Track,
@@ -475,6 +494,10 @@ export class DownloadManager {
 
     const all: Track[] = await this.resolveDownloadTracks(track, singleOnly);
 
+    // 新建任务攒批：循环内只建对象 + 更新内存，循环外一把落库。
+    // 逐条 await insertDownload = N 次独立磁盘事务，整单/多 P 合集下载
+    // （百条量级）时是明显的 IO 放大；批量走 insertDownloads 单事务提交。
+    const batch: DownloadTask[] = [];
     for (let i = 0; i < all.length; i++) {
       const t: Track = all[i];
       const existing: DownloadTask | null = await getDownloadByMusicId(t.id);
@@ -506,11 +529,14 @@ export class DownloadManager {
       const created: DownloadTask | null = await this.createPendingTask(t, merged);
       if (created) {
         this.queue.push({ task: created, track: t });
+        batch.push(created);
         result.queued += 1;
       }
     }
 
     if (result.queued > 0) {
+      // 一把落库后再拉消费者：新任务自身的进度写不会与落库事务交错
+      await insertDownloads(batch);
       // 立刻把全部任务推给 UI：用户看到的是「排队中…」的 N 行（知道都排上了），
       // 而不是下完一条才冒出一条 —— 后者会让人以为只下载了一首。
       this.notify();
@@ -522,18 +548,23 @@ export class DownloadManager {
   /**
    * 算出这个条目要下载哪些曲目：多 P 合集展开成 N 条，单 P 就是它自己。
    *
+   * 展开**只对合集入口条目**（cid 为空、id 纯 bvid，来自搜索 / 榜单 / UP 主页）：
+   * 列表条目代表整个合集，「点一下全下」是刻意的。
+   * track 本身已是具体分 P（cid 非空，来自歌单 / 播放队列 / 最近播放）时
+   * **不展开**——下载它就是下载这一 P。否则「下载整个歌单」会把歌单里
+   * 每首歌所属的整个多 P 合集全部入队，下的远不止歌单里的那些歌。
+   * （附带收益：分 P 条目跳过 view 请求，整单下载不再逐首触发展开 API，
+   * B 站匿名限流压力同步减小。）
+   *
    * 展开失败**不影响下载本条**：多 P 展开只是「顺带把同合集的分 P 也下了」，
    * 不是下载的前置条件；为了它把整次下载判死是本末倒置。
-   *
-   * 代价：每次下载请求会多一次 `view` 请求（展开要读 pages）。一次请求换「合集点一下全下」，
-   * 相比用户手动点 12 次各 2 次请求，净开销只有 +1 次，划算。
    *
    * singleOnly（播放页下载当前 P）：跳过展开，只下 track 本身。正在播的分 P
    * track 自带 bvid/cid（id 形如 `BV…#cid`），runDownload 的 extractAudioFromVideo
    * 直接按 cid 取该 P 的音频流，不需要 view 展开这一步。
    */
   private async resolveDownloadTracks(track: Track, singleOnly: boolean = false): Promise<Track[]> {
-    if (singleOnly) {
+    if (singleOnly || track.cid.length > 0) {
       return [track];
     }
     const bvid: string = this.bvidOf(track);
@@ -583,7 +614,11 @@ export class DownloadManager {
     }
   }
 
-  /** 建一条「排队中」的任务记录并落库；返回 null = 建不出来（拿不到沙箱目录） */
+  /**
+   * 建一条「排队中」的任务记录（只建对象 + 入内存表，**不落库**：
+   * 调用方 requestDownload 攒批后经 insertDownloads 单事务写入）。
+   * 返回 null = 建不出来（拿不到沙箱目录）。
+   */
   private async createPendingTask(track: Track, source?: DownloadSource): Promise<DownloadTask | null> {
     if (!this.context) {
       return null;
@@ -625,7 +660,6 @@ export class DownloadManager {
     // 先入内存表并推送：用户点完立刻能在下载页看到条目
     this.tasks.set(task.id, task);
     this.notify();
-    await insertDownload(task);
     return task;
   }
 
@@ -1460,6 +1494,8 @@ export class DownloadManager {
     }
     this.paused = false;
     this.publishPaused();
+    // 攒批落库（同 requestDownload）：循环内只建对象 + 入内存，循环外一把写入
+    const batch: DownloadTask[] = [];
     for (let i = 0; i < ids.length; i++) {
       const t: DownloadTask | undefined = this.tasks.get(ids[i]);
       if (!t || t.status !== DownloadStatus.ERROR) {
@@ -1486,10 +1522,12 @@ export class DownloadManager {
       const created: DownloadTask | null = await this.createPendingTask(this.trackOfTask(t), source);
       if (created) {
         this.queue.push({ task: created, track: this.trackOfTask(t) });
+        batch.push(created);
         result.queued += 1;
       }
     }
     if (result.queued > 0) {
+      await insertDownloads(batch);
       this.notify();
       this.pump();
     }
@@ -1576,6 +1614,8 @@ export class DownloadManager {
       : undefined;
     const created: DownloadTask | null = await this.createPendingTask(track, source);
     if (created) {
+      // 单条路径：直接落库（createPendingTask 已不负责持久化）
+      await insertDownload(created);
       this.queue.push({ task: created, track: track });
       result.queued = 1;
       this.notify();

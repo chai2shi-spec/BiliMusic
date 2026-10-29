@@ -31,6 +31,7 @@ import {
   STORE_PL_BAR_ALL_SELECTED,
   STORE_PL_BAR_CAN_SELECT,
   STORE_PL_BAR_SELECTING,
+  STORE_PL_EXIT_SELECT_REQUEST,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
@@ -140,6 +141,13 @@ export struct PlaylistsPage {
    * 快照当前曲目进入点选模式（点选模式必须由本页承接，否则用户跳过来无从下手）。
    */
   @StorageProp(STORE_PICK_PLAYLIST_ADD) @Watch('onPickAddRequest') pickAddRequest: number = 0;
+  /**
+   * 根壳返回键退出多选请求（seq 递增，STORE_PL_EXIT_SELECT_REQUEST）：
+   * Index.onBackPress 在「歌单页签 + 多选态」时递增本键（吞掉返回不退出应用），
+   * 本页 @Watch 消费 → 退出选择模式并清空选区。对齐二级页
+   * （PlaylistDetail）.onBackPressed 的多选优先拦截。
+   */
+  @StorageProp(STORE_PL_EXIT_SELECT_REQUEST) @Watch('onExitSelectRequest') exitSelectRequest: number = 0;
   /** 点选加入模式中：整行点击 = 把快照曲目加入该歌单（单次点选即退出），顶部占位条目内嵌提示条 */
   @State picking: boolean = false;
   /** 点选加入的目标曲目（进入模式时快照，避免点选途中切歌错加） */
@@ -272,6 +280,9 @@ export struct PlaylistsPage {
     TabScrollerHolder.plDeleteSelected = (): void => {
       this.confirmDeleteSelected();
     };
+    TabScrollerHolder.plLocateCurrent = (): void => {
+      this.locateCurrentPlaying();
+    };
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
     // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
     this.syncTopBlurProgress();
@@ -329,6 +340,45 @@ export struct PlaylistsPage {
   /** 提示条曲目名（点选模式的横幅文案用） */
   private pickTrackTitle(): string {
     return this.pickTrack !== null ? this.pickTrack.title : '';
+  }
+
+  /**
+   * 「定位当前播放」（根栏「定位」按钮经 TabScrollerHolder.plLocateCurrent 进入）：
+   * 滚动到包含当前播放曲目的歌单（居中，返回本页时列表已就位），随后**下钻**——
+   * push 该歌单详情页并携带曲目 id，详情页自动定位到该曲目行
+   * （PlaylistDetail.locateTrackById，经路由参数 locateTrackId 传递）。
+   * 不在任何歌单 / 没有在播曲目则 toast（不下钻）。
+   */
+  private locateCurrentPlaying(): void {
+    const cur: Track | undefined = AppStorage.get<Track>(STORE_CURRENT_TRACK);
+    if (cur === undefined || cur === null) {
+      this.toast('还没有正在播放的曲目', 1500);
+      return;
+    }
+    let target: number = -1;
+    for (let i: number = 0; i < this.playlists.length && target < 0; i++) {
+      const tracks: Track[] = this.playlists[i].tracks;
+      for (let j: number = 0; j < tracks.length; j++) {
+        if (tracks[j].id === cur.id) {
+          target = i;
+          break;
+        }
+      }
+    }
+    if (target < 0) {
+      this.toast('当前播放的曲目不在歌单列表中', 1800);
+      return;
+    }
+    // 渲染分支 → List 下标换算：List 首项为顶部占位（+1）；
+    // 网格 / 多列按行配对（makeRows），同一行的歌单共享一个 ListItem（÷列数取行）。
+    const cols: number = this.isGrid() ? this.gridCols() : this.listCols();
+    const listIndex: number = 1 + (cols > 1 ? Math.floor(target / cols) : target);
+    TabScrollerHolder.playlists.scrollToIndex(listIndex, false, ScrollAlign.CENTER);
+    // 下钻：打开包含在播曲目的歌单详情页并定位到该曲目
+    //（NavStackHolder.push 带转场丢 push 自愈 + 同名防抖）。
+    const targetPlaylist: Playlist = this.playlists[target];
+    NavStackHolder.push('PlaylistDetail',
+      new PlaylistDetailRouteParam(targetPlaylist.id, cur.id));
   }
 
   private refresh(): void {
@@ -613,6 +663,18 @@ export struct PlaylistsPage {
     this.selectedIds = [];
   }
 
+  /**
+   * 返回键退出多选（Index.onBackPress 经 STORE_PL_EXIT_SELECT_REQUEST 派发）：
+   * 清空选区经 @Watch(syncBarState) 联动复位根栏「全选」镜像。
+   */
+  private onExitSelectRequest(): void {
+    if (!this.selecting) {
+      return;
+    }
+    this.selecting = false;
+    this.selectedIds = [];
+  }
+
   private isSelected(id: string): boolean {
     return this.selectedIds.indexOf(id) >= 0;
   }
@@ -767,7 +829,8 @@ export struct PlaylistsPage {
    * 下载整个歌单：先确认，再逐首入队。
    *
    * 为什么要「逐首 + 节流」而不是一次交给 DownloadManager：
-   * `requestDownload` 内部会对每首调 `expandVideoParts`（一次 view 请求）来识别分 P），
+   * 歌单里的歌是具体分 P 时 requestDownload 直接入队（不发 view 请求），
+   * 但混入的合集入口条目仍会逐首调 `expandVideoParts`（一次 view 请求）——
    * 100 首连着发就是 100 次密集请求 ——
    * B 站对匿名访问的密集请求**直接限流**
    * （实测连打 8 次 0/8 成功，见 BILI-API.md），表现为「下载到一半全失败」。

@@ -69,7 +69,6 @@ export const BILI_GATE_FULL_BACKOFF_MS: number = 200;
  * 任一干净成功复位到第 0 档。排队请求顺延不丢弃。
  */
 export const BILI_GATE_COOLDOWN_STEPS_MS: number[] = [2000, 5000, 12000];
-export const OIAPI_QQ_LYRIC: string = 'https://www.oiapi.net/api/QQMusicLyric';
 
 export const DB_NAME: string = 'bilimusic_rdb.db';
 export const TABLE_DOWNLOAD: string = 'download_task';
@@ -93,7 +92,7 @@ export const DEFAULT_PLAYLIST_NAME: string = '我的歌单';
  * 沉浸光感参数（底栏悬浮胶囊用，取值来自 Sumy 的 getBarFloatingStyle）。
  * GLOW_ALPHA 对应 HDS `lightColor` 的主题色光晕 alpha，集中定义避免魔数漂移。
  */
-/** 主题色光晕透明度（HDS 侧对应 `lightColor: withAlpha(themePrimary, 0.12)`） */
+/** 主题色光晕透明度（HDS 侧对应 `lightColor: withAlpha(themePrimary, GLOW_ALPHA)`） */
 export const GLOW_ALPHA: number = 0.12;
 
 /**
@@ -118,6 +117,12 @@ export const PREF_PLAYER_STATE: string = 'bilimusic_player_state';
 export const PREF_TOTAL_LISTEN_SECONDS: string = 'bilimusic_total_listen_seconds';
 /** 搜索历史：JSON 字符串数组，最近搜索的在前，最多 20 条（见 service/SearchHistoryStore.ts） */
 export const PREF_SEARCH_HISTORY: string = 'bilimusic_search_history';
+/**
+ * 最近一次已展示（或已判定无需展示）更新内容的版本号（= 当时 app.json5 的
+ * versionName）。与当前 versionName 不一致时首启触发 What's New 弹窗
+ * （见 components/WhatsNewDialog.ets 的 maybeShowWhatsNew）。
+ */
+export const PREF_LAST_SEEN_VERSION: string = 'bilimusic_last_seen_version';
 /** 常用搜索词：JSON 字符串数组，搜索初始页快捷入口的完整列表（默认词 + 用户新增，整体读写） */
 export const PREF_COMMON_WORDS: string = 'bilimusic_common_words';
 export const PREF_BUVID: string = 'bilimusic_buvid';
@@ -419,6 +424,45 @@ export const STORE_MINI_BAR_AUTO_EXPAND: string = 'miniBarAutoExpandOn';
 export const STORE_PLAYBACK_SPEED_ENABLED: string = 'playbackSpeedEnabled';
 
 /**
+ * 定时停止入口开关镜像（AppSettings.sleepTimerEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行定时停止入口是否渲染（默认关）。
+ */
+export const STORE_SLEEP_TIMER_ENTRY_ENABLED: string = 'sleepTimerEntryEnabled';
+
+/**
+ * 限定播放进度入口开关镜像（AppSettings.skipIntroEntryEnabled 的运行时镜像，
+ * 键名沿用「跳过开头」时代的字段名免迁移）：EntryAbility 启动首发、设置页切换时
+ * 重发，播放页 ControlAreaComponent @StorageProp 订阅 —— 控制功能行按曲
+ * 「限定播放进度」入口是否渲染（默认关）。
+ */
+export const STORE_SKIP_INTRO_ENTRY_ENABLED: string = 'skipIntroEntryEnabled';
+
+/**
+ * 「进入 UP 主页」入口开关镜像（AppSettings.upSpaceEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行「进入 UP 主页」跳转入口是否渲染（默认关）。
+ */
+export const STORE_UP_SPACE_ENTRY_ENABLED: string = 'upSpaceEntryEnabled';
+
+/**
+ * 歌词居中显示开关镜像（AppSettings.lyricCentered 的运行时镜像）：
+ * EntryAbility 启动首发、长按歌词面板切换时重发，LyricsComponent
+ * @StorageProp 订阅并透传 LrcView —— 控制每行歌词水平居中 / 左对齐绘制（默认关）。
+ */
+export const STORE_LYRIC_CENTERED: string = 'lyricCenteredShown';
+
+/**
+ * 沉浸光感材质档位镜像（AppSettings.immersiveMaterialTier 的运行时镜像）：
+ * EntryAbility 启动首发、外观页菜单切换时重发，MaterialTokens 档位感知
+ * 解析统一消费 —— exquisite 精美（EXQUISITE，设备能力门控）/ gentle 轻柔
+ * （GENTLE）/ smooth 流畅（SMOOTH），设备不支持沉浸材质时解析层统一回落
+ * ADAPTIVE 兜底。Index / SubPagePlayBar 的 @StorageProp 触发受控样式
+ * 重建即时生效；标题栏在页面下次重建（重新进入）时生效。
+ */
+export const STORE_IMMERSIVE_MATERIAL_TIER: string = 'immersiveMaterialTier';
+
+/**
  * 响度均衡开关镜像（AppSettings.loudnessNormalizationEnabled 的运行时镜像）：
  * EntryAbility 启动首发、设置页切换时重发，MusicPlayer prepared 挂点读取 ——
  * 开启后按 LoudnessStore 记录把偏响的歌衰减到目标响度（只衰减不放大，默认关）。
@@ -438,6 +482,15 @@ export const STORE_OPEN_IN_BILI_ENABLED: string = 'openInBilibiliEnabled';
  * ControlAreaComponent @StorageProp 订阅驱动倍速片标签与菜单 ✓ 刷新。
  */
 export const STORE_PLAYBACK_SPEED: string = 'playbackSpeed';
+
+/**
+ * 播放页功能行功能项顺序镜像（AppSettings.funcItemOrder 的运行时镜像，
+ * 取值域与默认序见 MusicModels.DEFAULT_FUNC_ITEM_ORDER）：EntryAbility 启动
+ * 首发、「自定义功能栏」排序页拖动落手后重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 前 4 位 = 功能行默认页图标，其余经左右滑动分页切换。
+ * ⚠️ 数组引用：发布与写穿两侧都必须 slice() 新数组，禁止原地改写共享引用。
+ */
+export const STORE_FUNC_ITEM_ORDER: string = 'playerFuncItemOrder';
 
 /**
  * 「与其他应用同时播放」开关镜像（AppSettings.audioMixEnabled 的运行时镜像）：
@@ -509,6 +562,19 @@ export const STORE_DL_BAR_QUEUE_PAUSED: string = 'dlBarQueueHasPaused';
 export const STORE_PL_BAR_SELECTING: string = 'plBarSelecting';
 export const STORE_PL_BAR_CAN_SELECT: string = 'plBarCanSelect';
 export const STORE_PL_BAR_ALL_SELECTED: string = 'plBarAllSelected';
+
+/**
+ * 根壳返回键「退出多选」请求（seq 递增）：Index.onBackPress 写，
+ * 歌单页签（PlaylistsPage）@StorageProp @Watch 消费 —— 选择模式下返回
+ * 先退多选留在应用，对齐二级页（PlaylistDetail）.onBackPressed 行为。
+ */
+export const STORE_PL_EXIT_SELECT_REQUEST: string = 'plExitSelectRequest';
+
+/**
+ * 同上，下载页签（DownloadsPage）。Index.onBackPress 写，
+ * 页内 @StorageProp @Watch 消费后退出选择模式并清空选区。
+ */
+export const STORE_DL_EXIT_SELECT_REQUEST: string = 'dlExitSelectRequest';
 
 /**
   * 搜索状态键（搜索独立成 'Search' 二级页，首页三 chip 化）。
@@ -783,7 +849,7 @@ export const AUDIO_Q_DOLBY: number = 30250;
 export const AUDIO_Q_HIRES: number = 30251;
 
 /** 音频档位 id → 展示文案（带宽字段不可信时用它做兜底落回） */
-export const AUDIO_QUALITY_LABEL: Record<number, string> = {
+const AUDIO_QUALITY_LABEL: Record<number, string> = {
   30216: '64kbps',
   30232: '132kbps',
   30280: '192kbps',
@@ -797,7 +863,7 @@ export const AUDIO_QUALITY_LABEL: Record<number, string> = {
  * ⚠️ 优先用 `bandwidth` 而不是档位标签：低码率源会给 30280 这个「192K」标签配上
  * 只有 66k 的实测带宽，直接显示标签就是在骗用户。实测值与标称值差太多时以实测为准。
  */
-export function formatAudioBitrate(bandwidth: number): string {
+function formatAudioBitrate(bandwidth: number): string {
   if (!(bandwidth > 0)) {
     return '';
   }
@@ -837,11 +903,31 @@ export function formatTrackQuality(quality: number, bandwidth: number): string {
 // 消费方 MusicPlayer.ts 是 .ts 文件，而 .ts 禁止 import .ets（会编译失败）；
 // RecentPage.ets 反方向 import .ts 则完全合法。两端共享、各写一份迟早漂移。
 /**
- * 最近播放条目记忆上次播放位置（Track.lastPosSec），点击单条时按这两个阈值
- * 决定是否续播（MusicPlayer.playRecentFromHistory）与是否显示
- * 「上次听到 x:xx」（RecentPage.heardTextOf）—— 判定逻辑必须两端一致。
+ * 最近播放条目记忆上次播放位置（Track.lastPosSec），按这两个阈值决定是否
+ * 续播（MusicPlayer.rememberedStartSec —— playRecentFromHistory 与
+ * playTrack 切歌续播共用）与是否显示「上次听到 x:xx」
+ * （RecentPage.heardTextOf）—— 判定逻辑必须各端一致。
  */
 /** 续播的最小已听位置（秒）：低于它视为没听过，从头播 */
 export const RESUME_MIN_SEC: number = 5;
 /** 续播的距结尾安全距离（秒）：距结尾小于它视为已听完，从头播 */
 export const RESUME_TAIL_SEC: number = 10;
+
+// ===== 按 UP 的默认起播规则 =====
+//
+// 指定 UP 的视频每次起播（点播 / 播放全部 / 队列自动切歌 / 听完重播 / 本地
+// 已下载文件）默认跳到指定秒数。生效点：MusicPlayer.replayStartSec ——
+// 优先级：显式续播位置（最近播放记忆）> 按曲「跳过开头」> 本规则。
+/** 按_UP 起播规则条目 */
+export interface UpStartRule {
+  /** UP 的 B 站用户 id（mid，即 space.bilibili.com/<mid>），主键 */
+  upMid: string;
+  /** UP 名：upMid 为空（音乐中心 / 已下载 slimTrack 存量）时的兜底匹配 */
+  upName: string;
+  /** 默认起播秒数 */
+  startSec: number;
+}
+/** 「不是词神」（mid=1712395）视频开头是固定口播，默认从第 5 秒起播 */
+export const UP_DEFAULT_START_RULES: UpStartRule[] = [
+  { upMid: '1712395', upName: '不是词神', startSec: 5 }
+];

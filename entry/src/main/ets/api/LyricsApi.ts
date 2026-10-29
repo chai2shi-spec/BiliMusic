@@ -1,22 +1,22 @@
 /**
- * 歌词服务（多源竞速版）。
+ * 歌词服务（多源竞速版，lx-music 链路）。
  *
  * 设计：
- *   1. **三个源并行竞速**：网易云 / QQ 音乐 / OIAPI，谁先给出可用结果用谁。
- *      网易云给「主歌词 + 中文翻译 + 罗马音」，QQ 给「主歌词 + 翻译」，
- *      OIAPI 只兜底（没有翻译轨）。
+ *   1. **五个源并行竞速**：wy（网易云）/ tx（QQ）/ kg（酷狗）/ kw（酷我）/ mg（咪咕），
+ *      搜索层与取词层整体移植自 lx-music-mobile（`api/lyricSdk/`），
+ *      统一输出 LX 四轨（lyric / tlyric / rlyric / lxlyric），
+ *      由 `lyric/LxLyricParser` 归一化成 `LyricLine[]`。
  *   2. **候选打分**：沿用 `TextUtil.scoreCandidate`（标题包含 / 歌手命中 /
- *      时长分档 / 伴奏·翻唱降权），从三源合并后的候选里挑最优；
+ *      时长分档 / 伴奏·翻唱降权），从五源合并后的候选里挑最优；
  *      自动搜索失败时还有第二轮「换关键词重搜」。
  *   3. **缓存走文件**：见 `service/LyricCacheStore.ts`（Preferences 单值有
  *      8192 字节上限，超限会静默失败）。
- *   4. **逐字 / 翻译 / 罗马音**：统一解析成 `LyricLine{ translation, romaji, words }`，
- *      显示层直接可用。
+ *   4. **B 站字幕兜底**：外部曲库全链落空时读视频 CC / AI 字幕当逐行 LRC
+ *      （自动链路内置）；长按面板可手动指定（`chooseBiliSubtitle`）。
  *   5. **用户可控**：手动指定候选（`chooseLyricCandidate`）、跳过（`skipLyricForTrack`）、
  *      整体偏移（`getLyricOffset` / `setLyricOffset`，单位 ms）。
  *
  * 失败语义：整个链路任何一种失败都返回 null（不抛错），由 UI 显示「暂无歌词」。
- * 因为歌词是锦上添花，不能因为它把播放页搞崩。
  */
 
 import { AppPreferences } from '../preferences/AppPreferences';
@@ -27,24 +27,31 @@ import {
   scoreCandidate,
   ScoreContext
 } from '../utils/TextUtil';
-import { LyricCandidate, LyricLine, LyricResult, LyricWord, Track } from '../model/MusicModels';
+import { LyricCandidate, LyricResult, Track } from '../model/MusicModels';
+import { parseLxLyric, ParsedLyricTrack } from '../lyric/LxLyricParser';
+import { fetchLxLyric, searchLxSource } from './lyricSdk/LyricSdk';
 import {
-  hasTimeTag,
-  LyricSpanItem,
-  parseAndMergeLyrics,
-  plainTextToSpl,
-  SplLyricLine
-} from '../lyric/SplLyrics';
+  LxLyricFetchInput,
+  LxLyricInfo,
+  LxSongCandidate,
+  SOURCE_KG,
+  SOURCE_KW,
+  SOURCE_MG,
+  SOURCE_TX,
+  SOURCE_WY
+} from './lyricSdk/LxLyricTypes';
 import {
-  fetchLyricBySource,
-  LyricSongCandidate,
-  RawLyricData,
-  searchSource,
-  SOURCE_NETEASE,
-  SOURCE_OIAPI,
-  SOURCE_QQ
-} from './LyricSourceApi';
-import { fetchSubtitleLyric, SOURCE_BILI_AI, SOURCE_BILI_CC } from './SubtitleLyricApi';
+  fetchSubtitleOutcome,
+  fetchSubtitleChoices,
+  fetchSubtitleByChoice,
+  probeBiliSubtitleAvailability,
+  SOURCE_BILI_AI,
+  SOURCE_BILI_CC,
+  SUBTITLE_KIND_AUTO,
+  SubtitleOutcome,
+  SubtitleChoice,
+  SubtitleChoicesOutcome
+} from './SubtitleLyricApi';
 import {
   deleteLyricCache,
   isMissFresh,
@@ -57,7 +64,7 @@ import {
 
 /** 滚动偏移（ms）存 Preferences：只有曲目 id → 偏移的小映射，不会超 8192 字节 */
 const OFFSET_KEY: string = 'bilimusic_lyric_offset_v1';
-/** 自动搜索用到的关键词个数（每个关键词 × 3 源；2 个 = 最多 6 次搜索请求） */
+/** 自动搜索用到的关键词个数（每个关键词 × 5 源；2 个 = 最多 10 次搜索请求） */
 const AUTO_QUERY_LIMIT: number = 2;
 /** 每源每次搜索取多少候选 */
 const SEARCH_LIMIT: number = 10;
@@ -65,16 +72,50 @@ const SEARCH_LIMIT: number = 10;
 const FETCH_RACE_WIDTH: number = 2;
 /** 候选打分低于此值且标题互不包含 → 判为「不是同一首歌」 */
 const MIN_ACCEPT_SCORE: number = 120;
-/** 最后一行歌词的兜底时长（ms）：只用于逐字进度，不影响判行 */
-const LAST_LINE_FALLBACK_MS: number = 8000;
-/**
- * 单源搜索超时（ms）。
- * 三源是 `Promise.all` 汇合的 —— 任何一个源卡住（OIAPI 这类第三方代理尤其容易
- * 挂到 15s 才超时）都会把整首歌的歌词搜索拖成十几秒。超时即当「该源没结果」。
- */
+/** 单源搜索超时（ms）：任何一个源卡住都不该拖累整首歌的歌词搜索 */
 const SEARCH_TIMEOUT_MS: number = 5000;
 /** 单次取歌词超时（ms）：竞速里全卡住时不能无限等 */
 const FETCH_TIMEOUT_MS: number = 6000;
+
+// ──────────────────── 字幕瞬时失败内存节流（F2b） ────────────────────
+
+/**
+ * 字幕链瞬时失败（超时 / 网络 / 风控）后的重试闸门：trackId → 上次尝试时刻。
+ * 不进 Preferences、不落盘 —— 进程重启自然清零，瞬时失败重试一次的代价本来就低。
+ */
+const subtitleRetryGate: Map<string, number> = new Map<string, number>();
+/** 瞬时失败后 10 分钟内不再尝试字幕链（期间命中节流时不发任何网络请求） */
+const SUBTITLE_RETRY_GATE_MS: number = 10 * 60 * 1000;
+/** 节流表条目上限：超过时清掉最早写入的一半，防长会话膨胀 */
+const SUBTITLE_GATE_MAX: number = 200;
+
+/** 节流表裁剪用的临时记录 */
+interface GateRecord {
+  key: string;
+  at: number;
+}
+
+/** 节流表超限时清掉最早写入的一半（按尝试时刻排序） */
+function trimSubtitleGate(): void {
+  const records: GateRecord[] = [];
+  subtitleRetryGate.forEach((at: number, key: string): void => {
+    records.push({ key: key, at: at });
+  });
+  records.sort((a: GateRecord, b: GateRecord): number => a.at - b.at);
+  const dropCount: number = Math.floor(records.length / 2);
+  for (let i = 0; i < dropCount; i++) {
+    subtitleRetryGate.delete(records[i].key);
+  }
+}
+
+/** 字幕链是否被瞬时失败节流闸住（闸住 = 本次直接跳过字幕环，不写 miss） */
+function isSubtitleGated(trackId: string): boolean {
+  const lastTry: number | undefined = subtitleRetryGate.get(trackId);
+  if (lastTry === undefined) {
+    return false;
+  }
+  return Date.now() - lastTry < SUBTITLE_RETRY_GATE_MS;
+}
 
 // ───────────────────────────── 偏移 ─────────────────────────────
 
@@ -92,7 +133,7 @@ export function getLyricOffset(trackId: string): number {
 }
 
 /** 设置歌词偏移（ms），夹在 ±30s 内防止误操作把歌词甩出可视区 */
-export function setLyricOffset(trackId: string, offsetMs: number): void {
+function setLyricOffset(trackId: string, offsetMs: number): void {
   const clamped: number = Math.max(-30000, Math.min(30000, Math.round(offsetMs)));
   const map: OffsetMap = readOffsets();
   // 不用 `delete map[key]`（ArkTS 对索引 delete 支持不完整），重建一份
@@ -112,8 +153,8 @@ export function setLyricOffset(trackId: string, offsetMs: number): void {
 // ───────────────────────────── 候选搜索 ─────────────────────────────
 
 /** 带超时的单源搜索：超时 / 抛错一律当「该源没结果」，绝不拖累其它源 */
-function searchSafely(source: string, keyword: string): Promise<LyricSongCandidate[]> {
-  return new Promise<LyricSongCandidate[]>((resolve: (v: LyricSongCandidate[]) => void): void => {
+function searchSafely(source: string, keyword: string): Promise<LxSongCandidate[]> {
+  return new Promise<LxSongCandidate[]>((resolve: (v: LxSongCandidate[]) => void): void => {
     let settled: boolean = false;
     const timer: number = setTimeout((): void => {
       if (settled) {
@@ -122,8 +163,8 @@ function searchSafely(source: string, keyword: string): Promise<LyricSongCandida
       settled = true;
       resolve([]);
     }, SEARCH_TIMEOUT_MS);
-    searchSource(source, keyword, SEARCH_LIMIT)
-      .then((rows: LyricSongCandidate[]): void => {
+    searchLxSource(source, keyword, SEARCH_LIMIT)
+      .then((rows: LxSongCandidate[]): void => {
         if (settled) {
           return;
         }
@@ -142,7 +183,7 @@ function searchSafely(source: string, keyword: string): Promise<LyricSongCandida
   });
 }
 
-function toCandidate(raw: LyricSongCandidate): LyricCandidate {
+function toCandidate(raw: LxSongCandidate): LyricCandidate {
   const cand: LyricCandidate = {
     id: `${raw.source}:${raw.remoteId}`,
     songId: raw.remoteId,
@@ -150,7 +191,7 @@ function toCandidate(raw: LyricSongCandidate): LyricCandidate {
     trackName: raw.title,
     artistName: raw.artist,
     albumName: raw.album,
-    duration: normalizeDuration(raw.duration),
+    duration: raw.duration,
     image: '',
     source: raw.source,
     remoteId: raw.remoteId
@@ -158,33 +199,18 @@ function toCandidate(raw: LyricSongCandidate): LyricCandidate {
   return cand;
 }
 
-/**
- * 时长归一化成「秒」。
- * 三源单位不一致（网易云已转秒，QQ 是秒，OIAPI 有时给毫秒）：
- * 落在 3600~3600000 区间的按毫秒处理（1 小时~1000 小时，歌曲不可能这么长）。
- */
-function normalizeDuration(d: number): number {
-  if (!Number.isFinite(d) || d <= 0) {
-    return 0;
-  }
-  if (d > 3600 && d < 3600000) {
-    return Math.round(d / 1000);
-  }
-  return Math.round(d);
-}
-
-/** 三源并行搜索指定关键词，合并去重 */
+/** 五源并行搜索指定关键词，合并去重 */
 async function searchAllSources(keyword: string): Promise<LyricCandidate[]> {
-  const sources: string[] = [SOURCE_NETEASE, SOURCE_QQ, SOURCE_OIAPI];
-  const tasks: Promise<LyricSongCandidate[]>[] = [];
+  const sources: string[] = [SOURCE_WY, SOURCE_TX, SOURCE_KG, SOURCE_KW, SOURCE_MG];
+  const tasks: Promise<LxSongCandidate[]>[] = [];
   for (let i = 0; i < sources.length; i++) {
     tasks.push(searchSafely(sources[i], keyword));
   }
-  const results: LyricSongCandidate[][] = await Promise.all(tasks);
+  const results: LxSongCandidate[][] = await Promise.all(tasks);
   const out: LyricCandidate[] = [];
   const seen: Set<string> = new Set<string>();
   for (let i = 0; i < results.length; i++) {
-    const rows: LyricSongCandidate[] = results[i];
+    const rows: LxSongCandidate[] = results[i];
     for (let k = 0; k < rows.length; k++) {
       const cand: LyricCandidate = toCandidate(rows[k]);
       if (seen.has(cand.id)) {
@@ -246,74 +272,21 @@ function isPlausible(cand: LyricCandidate, track: Track): boolean {
 
 // ───────────────────────────── 原始歌词 → 结果 ─────────────────────────────
 
-function toLyricResult(candidate: LyricCandidate, raw: RawLyricData): LyricResult | null {
-  const synced: boolean = hasTimeTag(raw.lrc);
-  // 没有任何时间标签：按 4s 均匀排布，让 LrcView 有东西可画（synced=false 供 UI 提示）
-  const lrc: string = synced ? raw.lrc : plainTextToSpl(raw.lrc);
-  if (lrc.length === 0) {
+function toLyricResult(candidate: LyricCandidate, info: LxLyricInfo): LyricResult | null {
+  const parsed: ParsedLyricTrack | null = parseLxLyric(info);
+  if (parsed === null || parsed.lines.length === 0) {
     return null;
   }
-  const merged: SplLyricLine[] = parseAndMergeLyrics({
-    lrc: lrc,
-    tlyric: raw.tlyric,
-    romalrc: raw.romalrc
-  });
-  if (merged.length === 0) {
-    return null;
-  }
-
-  const lines: LyricLine[] = [];
-  let hasTranslation: boolean = false;
-  let dynamic: boolean = false;
-  for (let i = 0; i < merged.length; i++) {
-    const src: SplLyricLine = merged[i];
-    const startSec: number = src.startTime / 1000;
-    const lineDurationMs: number = i < merged.length - 1
-      ? Math.max(1, merged[i + 1].startTime - src.startTime)
-      : LAST_LINE_FALLBACK_MS;
-
-    const words: LyricWord[] = [];
-    if (src.isDynamic && src.spans.length > 0) {
-      dynamic = true;
-      for (let k = 0; k < src.spans.length; k++) {
-        const span: LyricSpanItem = src.spans[k];
-        const offset: number = Math.max(0, span.startTime - src.startTime);
-        // 末段常被兜底成「行结束=很远」，夹到本行时长内，否则逐字渐变永远走不完
-        const dur: number = Math.max(1, Math.min(span.duration, lineDurationMs - offset));
-        const word: LyricWord = {
-          text: span.text,
-          offset: offset,
-          duration: dur
-        };
-        words.push(word);
-      }
-    }
-    if (src.translation.length > 0) {
-      hasTranslation = true;
-    }
-    const line: LyricLine = {
-      time: startSec,
-      text: src.content,
-      translation: src.translation,
-      romaji: src.romaji,
-      words: words
-    };
-    lines.push(line);
-  }
-  if (lines.length === 0) {
-    return null;
-  }
-
   const result: LyricResult = {
-    lines: lines,
-    synced: synced,
+    lines: parsed.lines,
+    synced: parsed.synced,
     instrumental: false,
     trackName: candidate.trackName,
     artistName: candidate.artistName,
     sourceId: candidate.remoteId === undefined ? String(candidate.songId) : candidate.remoteId,
     source: candidate.source,
-    hasTranslation: hasTranslation,
-    dynamic: dynamic
+    hasTranslation: parsed.hasTranslation,
+    dynamic: parsed.dynamic
   };
   return result;
 }
@@ -376,18 +349,24 @@ function fetchCandidateResult(candidate: LyricCandidate): Promise<LyricResult | 
       settled = true;
       resolve(null);
     }, FETCH_TIMEOUT_MS);
-    fetchLyricBySource(source, remoteId)
-      .then((raw: RawLyricData | null): void => {
+    const input: LxLyricFetchInput = {
+      remoteId: remoteId,
+      title: candidate.trackName,
+      artist: candidate.artistName,
+      duration: candidate.duration
+    };
+    fetchLxLyric(source, input)
+      .then((info: LxLyricInfo | null): void => {
         if (settled) {
           return;
         }
         settled = true;
         clearTimeout(timer);
-        if (raw === null) {
+        if (info === null) {
           resolve(null);
           return;
         }
-        resolve(toLyricResult(candidate, raw));
+        resolve(toLyricResult(candidate, info));
       })
       .catch((): void => {
         if (settled) {
@@ -468,7 +447,7 @@ function buildAutoQueries(track: Track): string[] {
 
 /**
  * 自动搜索最优歌词。
- * 第一轮用前 2 个关键词 × 3 源（优先「歌名+歌手」组合）；全空时第二轮换后面的关键词再试。
+ * 第一轮用前 2 个关键词 × 5 源（优先「歌名+歌手」组合）；全空时第二轮换后面的关键词再试。
  */
 async function autoSearch(track: Track): Promise<LyricResult | null> {
   const queries: string[] = buildAutoQueries(track);
@@ -542,11 +521,8 @@ async function autoSearch(track: Track): Promise<LyricResult | null> {
   return null;
 }
 
-/**
- * 取某曲目的歌词（缓存优先）。
- * 返回 null 表示「确实没有」—— 会写一条 miss 缓存，24h 内不再联网。
- */
-export async function getLyricForTrack(track: Track): Promise<LyricResult | null> {
+/** 实际取词链路（被 getLyricForTrack 的在途去重壳包住） */
+async function getLyricForTrackInner(track: Track): Promise<LyricResult | null> {
   if (track.id.length === 0) {
     return null;
   }
@@ -600,20 +576,57 @@ export async function getLyricForTrack(track: Track): Promise<LyricResult | null
 
   // B 站字幕兜底：外部曲库全链落空（VOCALOID 原创 / 二次创作 / 电台片段这类
   // 搜不到的歌）时，读视频 CC / AI 字幕当逐行 LRC —— 时间轴与音轨天然对齐。
-  // 未登录 / 无字幕 / 接口失败都落 null，同 miss 一起被 24h 缓存闸住。
-  const subtitle: LyricResult | null = await fetchSubtitleLyric(track);
-  if (subtitle !== null) {
-    void writeLyricCache(toEntry(track, key, subtitle, false, null));
-    return subtitle;
+  // 失败分级（F2b）：只有结论性失败（definitive，视频确实没字幕）才写 24h miss；
+  // 瞬时失败（超时 / 网络 / 风控）不写 miss —— 那些被钉 24h 是错误的 ——
+  // 改走 10 分钟内存节流，期间跳过字幕环但不产生任何缓存。
+  if (isSubtitleGated(track.id)) {
+    return null;
   }
-
-  void writeLyricCache(toEntry(track, key, null, false, null));
-  console.info(`[Lyric] miss track=${track.title} artist=${track.artist}`);
+  const subtitle: SubtitleOutcome = await fetchSubtitleOutcome(track, SUBTITLE_KIND_AUTO);
+  if (subtitle.result !== null) {
+    void writeLyricCache(toEntry(track, key, subtitle.result, false, null));
+    return subtitle.result;
+  }
+  if (subtitle.definitive) {
+    void writeLyricCache(toEntry(track, key, null, false, null));
+    console.info(`[Lyric] miss track=${track.title} artist=${track.artist} reason=${subtitle.reason}`);
+    return null;
+  }
+  subtitleRetryGate.set(track.id, Date.now());
+  if (subtitleRetryGate.size > SUBTITLE_GATE_MAX) {
+    trimSubtitleGate();
+  }
+  console.info(`[Lyric] subtitle transient skip miss reason=${subtitle.reason} track=${track.title}`);
   return null;
 }
 
-/** 手动搜索候选（三源合并，最多 20 条） */
-export async function searchLyricCandidates(query: string): Promise<LyricCandidate[]> {
+/**
+ * 在途请求去重表：播放页（LyricsComponent）/ 桌面卡片 / AVSession 歌词补报
+ * 同刻调用同一曲目时共享一次网络链（track.id 为键），避免五源搜索被并发
+ * 重复触发、多倍请求抢占音频首包带宽。
+ */
+const inflightLyricFetches: Map<string, Promise<LyricResult | null>> = new Map();
+
+/**
+ * 取某曲目的歌词（缓存优先）。
+ * 返回 null 表示「确实没有」—— 会写一条 miss 缓存，24h 内不再联网。
+ * 并发去重：同曲目在途请求未完成时，后到调用方直接复用同一次请求结果
+ * （首个调用者的曲目信息决定本次搜索口径，实践上是信息最全的播放链）。
+ */
+export function getLyricForTrack(track: Track): Promise<LyricResult | null> {
+  const existing: Promise<LyricResult | null> | undefined = inflightLyricFetches.get(track.id);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const task: Promise<LyricResult | null> = getLyricForTrackInner(track).finally((): void => {
+    inflightLyricFetches.delete(track.id);
+  });
+  inflightLyricFetches.set(track.id, task);
+  return task;
+}
+
+/** 手动搜索候选（五源合并，最多 20 条） */
+async function searchLyricCandidates(query: string): Promise<LyricCandidate[]> {
   const q: string = cleanTitle(query.trim());
   const keyword: string = q.length > 0 ? q : query.trim();
   if (keyword.length === 0) {
@@ -631,7 +644,7 @@ export async function searchLyricCandidates(query: string): Promise<LyricCandida
  * manual 缓存的语义：以后**自动搜索不会覆盖它**（只认用户的选择），
  * 直到用户再次手动选择或清理缓存。
  */
-export async function chooseLyricCandidate(
+async function chooseLyricCandidate(
   track: Track,
   record: LyricCandidate
 ): Promise<LyricResult | null> {
@@ -643,8 +656,68 @@ export async function chooseLyricCandidate(
   return result;
 }
 
+/**
+ * 手动改用 B 站字幕（长按面板入口），带失败分级。
+ * kind：`SUBTITLE_KIND_CC`（人工字幕）/ `SUBTITLE_KIND_AI`（AI 字幕）——
+ * 用户可强制指定用哪种；与自动链路的字幕兜底同一取数（`fetchSubtitleOutcome`），
+ * 但命中后写 **manual** 缓存 —— 用户的选择优先于自动搜索，直到再次手动选择或清缓存。
+ * 失败时返回 SubtitleOutcome（不写缓存），由 UI 按 reason / 登录态分型提示。
+ */
+async function chooseBiliSubtitleOutcome(track: Track, kind: string): Promise<SubtitleOutcome> {
+  const outcome: SubtitleOutcome = await fetchSubtitleOutcome(track, kind);
+  if (outcome.result !== null) {
+    await writeLyricCache(toEntry(track, cacheKeyOf(track), outcome.result, true, null));
+  }
+  return outcome;
+}
+
+/** 旧签名兼容入口：只取 result（命中写 manual 缓存的语义不变），避免动其它调用点 */
+async function chooseBiliSubtitle(track: Track, kind: string): Promise<LyricResult | null> {
+  const outcome: SubtitleOutcome = await chooseBiliSubtitleOutcome(track, kind);
+  return outcome.result;
+}
+
+/**
+ * 列出某曲目可手动选择的 B 站字幕（长按面板 CC / AI 按钮的取列表入口）。
+ * 单候选时 UI 直接应用（保持一步到位）；多候选时展示列表让用户挑 ——
+ * 多字幕视频上自动选优不确定（智能字幕内容不稳定），明确选择才确定。
+ * 失败时返回带 reason 的空列表，由 UI 按登录态 / definitive / 瞬时分型提示。
+ */
+async function listBiliSubtitleChoices(
+  track: Track,
+  kind: string
+): Promise<SubtitleChoicesOutcome> {
+  return await fetchSubtitleChoices(track, kind);
+}
+
+/**
+ * 手动选定某个 B 站字幕条目 → 取字幕、写 manual 缓存。
+ * manual 缓存语义同 chooseBiliSubtitleOutcome：用户的选择优先于自动搜索，
+ * 直到再次手动选择或清缓存。
+ */
+async function chooseBiliSubtitleItem(
+  track: Track,
+  choice: SubtitleChoice
+): Promise<SubtitleOutcome> {
+  const outcome: SubtitleOutcome = await fetchSubtitleByChoice(track, choice);
+  if (outcome.result !== null) {
+    await writeLyricCache(toEntry(track, cacheKeyOf(track), outcome.result, true, null));
+  }
+  return outcome;
+}
+
+/**
+ * 后台补全用：只把（已确认更优的）B 站字幕结果落 manual 缓存，不带网络取数。
+ * 与 chooseBiliSubtitleItem 的区别：补全流程先纯取数比对（fetchSubtitleByChoice），
+ * 行数增长才写缓存 —— 生成中的内容每次行数乱跳，无条件写会把缓存反复覆盖成
+ * 更差的半截快照。
+ */
+async function saveBiliSubtitleChoice(track: Track, result: LyricResult): Promise<void> {
+  await writeLyricCache(toEntry(track, cacheKeyOf(track), result, true, null));
+}
+
 /** 用户主动跳过这首歌的歌词（不再自动搜；手动选择 / 清缓存可解除） */
-export async function skipLyricForTrack(track: Track): Promise<void> {
+async function skipLyricForTrack(track: Track): Promise<void> {
   const entry: LyricCacheEntry = {
     trackId: track.id,
     cacheKey: cacheKeyOf(track),
@@ -660,7 +733,7 @@ export async function skipLyricForTrack(track: Track): Promise<void> {
 }
 
 /** 清掉某曲目的缓存（下次进播放页会重新搜）。同步删除，避免「删完立刻读还读到旧值」 */
-export function clearLyricCache(trackId: string): void {
+function clearLyricCache(trackId: string): void {
   deleteLyricCache(trackId);
 }
 
@@ -669,23 +742,51 @@ export const LyricsApi = {
   getLyricForTrack,
   searchLyricCandidates,
   chooseLyricCandidate,
+  chooseBiliSubtitle,
+  chooseBiliSubtitleOutcome,
+  listBiliSubtitleChoices,
+  chooseBiliSubtitleItem,
+  fetchSubtitleByChoice,
+  saveBiliSubtitleChoice,
   skipLyricForTrack,
   clearLyricCache,
   getLyricOffset,
-  setLyricOffset
+  setLyricOffset,
+  probeBiliSubtitleAvailability
 };
 
 /** 供 UI 显示用的源名称 */
 export function sourceLabel(source: string | undefined): string {
-  if (source === SOURCE_NETEASE) {
+  if (source === undefined || source.length === 0) {
+    return '';
+  }
+  // lx 五源
+  if (source === SOURCE_WY) {
     return '网易云';
   }
-  if (source === SOURCE_QQ) {
-    return 'QQ 音乐';
+  if (source === SOURCE_TX) {
+    return 'QQ音乐';
   }
-  if (source === SOURCE_OIAPI) {
-    return 'QQ 音乐（代理）';
+  if (source === SOURCE_KG) {
+    return '酷狗';
   }
+  if (source === SOURCE_KW) {
+    return '酷我';
+  }
+  if (source === SOURCE_MG) {
+    return '咪咕';
+  }
+  // 旧缓存里的历史源标识
+  if (source === 'netease') {
+    return '网易云';
+  }
+  if (source === 'qq') {
+    return 'QQ音乐';
+  }
+  if (source === 'oiapi') {
+    return 'QQ音乐（代理）';
+  }
+  // B 站字幕
   if (source === SOURCE_BILI_CC) {
     return 'B站字幕';
   }

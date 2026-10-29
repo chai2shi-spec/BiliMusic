@@ -216,15 +216,6 @@ export function parseLrc(lrc: string): LyricLine[] {
   return out;
 }
 
-function plainToLines(plain: string): LyricLine[] {
-  return plain
-    .split('\n')
-    .map((t: string): string => t.trim())
-    .filter((t: string): boolean => t.length > 0)
-    .filter((t: string): boolean => !META_LINE.test(t.replace(/^\[[^\]]+]/, '')))
-    .map((text: string): LyricLine => ({ time: -1, text: text }));
-}
-
 function norm(s: string): string {
   let out: string = '';
   const lower: string = (s || '').toLowerCase();
@@ -366,8 +357,6 @@ export function scoreCandidate(c: LyricCandidate, ctx: ScoreContext): number {
   }
   return score;
 }
-
-export { plainToLines };
 
 /**
  * 时长文本（秒 → `m:ss`，超过一小时给 `h:mm:ss`）。

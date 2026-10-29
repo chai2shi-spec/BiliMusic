@@ -101,51 +101,12 @@ export function makeTextInputMaterialModifier(): TextInputMaterialModifier {
 }
 
 /**
- * Search 标准搜索框沉浸光感材质的属性修饰器：与 TextInputMaterialModifier 同款
- * 通路（THIN + interactive + lightEffect），类型钉在 SearchAttribute 上 ——
- * 首页搜索框是 Search 组件（非 TextInput），需要本平行类。
- * ⚠️ 配套约束（官方 FAQ「背景色遮挡材质效果」）：挂本修饰器的 Search 链式
- * backgroundColor 必须在材质可用时取**透明**（调用方配 MaterialCompat.hasImmersiveMaterial()
- * 判断），不透明实色画在材质层之上会把玻璃完全盖住；材质不可用时修饰器 no-op，
- * 链式实色兜底。
- */
-export class SearchMaterialModifier implements AttributeModifier<SearchAttribute> {
-  private material: uiMaterial.ImmersiveMaterial | undefined;
-
-  constructor(material: uiMaterial.ImmersiveMaterial | undefined) {
-    this.material = material;
-  }
-
-  applyNormalAttribute(instance: SearchAttribute): void {
-    const m: uiMaterial.ImmersiveMaterial | undefined = this.material;
-    if (m === undefined) {
-      return;
-    }
-    try {
-      instance.systemMaterial(m);
-    } catch (e) {
-      console.error(`apply search systemMaterial failed: ${JSON.stringify(e)}`);
-    }
-  }
-}
-
-/**
- * 生成 Search 搜索框用 THIN 档交互材质修饰器：
- * 首页搜索行 SearchInputBar（根栏 titleBar 内，材质生效范围内）。
- */
-export function makeSearchMaterialModifier(): SearchMaterialModifier {
-  return new SearchMaterialModifier(
-    MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
-  );
-}
-
-/**
  * 解析颜色为 ColorMetrics（CapsuleSegmentButtonV2 / Chip 等标准组件的
  * 着色参数用）。入参放宽到 ResourceColor —— 主题切换后主色是 AppStorage 里的
  * hex 字符串而不是资源引用。解析失败返回 undefined —— 组件可空参数回落系统
  * 默认色，不抛错不崩溃。
  */
-export function loadColorMetrics(color: ResourceColor): ColorMetrics | undefined {
+function loadColorMetrics(color: ResourceColor): ColorMetrics | undefined {
   try {
     return ColorMetrics.resourceColor(color);
   } catch (e) {

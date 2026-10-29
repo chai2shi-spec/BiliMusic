@@ -40,13 +40,13 @@ import {
   STORE_DL_BAR_QUEUE_ACTIVE,
   STORE_DL_BAR_QUEUE_PAUSED,
   STORE_DL_BAR_SELECTING,
+  STORE_DL_EXIT_SELECT_REQUEST,
   STORE_DOWNLOAD_PAUSED,
   STORE_DOWNLOAD_TASKS,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP,
-  STORE_THEME_ON,
   STORE_WINDOW_WIDTH_VP,
   formatTrackQuality
 } from '../common/Constants';
@@ -65,12 +65,12 @@ import { CoverImage } from '../components/CoverImage';
 import { showConfirm } from '../components/AppAlertDialog';
 import { toThumbUrl } from '../utils/TextUtil';
 import fs from '@ohos.file.fs';
-import { Chip, ChipSize, CustomContentDialog } from '@kit.ArkUI';
+import { CustomContentDialog } from '@kit.ArkUI';
 // 「⋯」菜单：进入 UP 主页要 getVideoDetail 解析 mid，
 // 加入歌单要 LibraryStore / 弹层，跳转要 NavStackHolder —— 与歌单详情页同一套
 import * as BilibiliApi from '../api/BilibiliApi';
 import { NavStackHolder } from '../service/NavStackHolder';
-import { UpSpaceRouteParam } from '../service/NavRouteParams';
+import { UpSpaceRouteParam, CollectionDetailRouteParam } from '../service/NavRouteParams';
 import { LibraryStore } from '../service/LibraryStore';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
@@ -145,7 +145,6 @@ export struct DownloadsPage {
   /** 主题色运行时值：删除确认弹层与全选 Checkbox 跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
-  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /** 横竖屏（Index 常驻注册写入）：横屏宽屏时下载组两列显示 */
@@ -225,6 +224,14 @@ export struct DownloadsPage {
    * @Watch 同步顶栏派生镜像（选中数 / 全选态 / 可重试态），根栏工具条据此刷新。
    */
   @State @Watch('syncBarState') selectedIds: string[] = [];
+
+  /**
+   * 根壳返回键退出多选请求（seq 递增，STORE_DL_EXIT_SELECT_REQUEST）：
+   * Index.onBackPress 在「下载页签 + 多选态」时递增本键（吞掉返回不退出应用），
+   * 本页 @Watch 消费 → 退出选择模式并清空选区。对齐二级页
+   * （PlaylistDetail / UpSpacePage）.onBackPressed 的多选优先拦截。
+   */
+  @StorageProp(STORE_DL_EXIT_SELECT_REQUEST) @Watch('onExitSelectRequest') exitSelectRequest: number = 0;
   /** 已展开的合集分组键（bvid）。默认收起：列表里一个合集只占一行，点开才铺开分 P */
   @State expandedGroups: string[] = [];
   /**
@@ -798,7 +805,7 @@ export struct DownloadsPage {
 
   /**
    * 歌单组（`pl:` 键）是否按歌单卡片渲染：组内 >1 条时渲染为带组头的歌单卡片
-   * （标题=歌单名、徽标「歌单」、可展开子行）；只剩 1 条退回普通行，
+   * （标题=歌单名、可展开子行）；只剩 1 条退回普通行，
    * 保持单曲下载的既有观感。
    */
   private isPlaylistCard(g: DownloadGroup): boolean {
@@ -1076,12 +1083,24 @@ export struct DownloadsPage {
    * 把一条已下载任务转成可播放曲目。
    *
    * 关键是带上 `localFilePath` —— 播放内核看到它就完全跳过音源解析，直接播沙箱文件
-    * （断网也能放）。id 用 musicId 而不是任务 id，这样行点击的播放/暂停判定（isCurrent）、
+   * （断网也能放）。id 用 musicId 而不是任务 id，这样行点击的播放/暂停判定（isCurrent）、
    * 以及播放页显示的曲目都和下载条目的音乐身份对得上。
+   *
+   * 同时从 musicId 反推 bvid/cid 带上：播放仍走本地分支（localFilePath 优先），
+   * 但曲目身份不丢 —— 歌词面板的 B 站字幕探测/获取（LyricsComponent 门控看
+   * bvid/aid）、「进 UP 主页」等链路照常可用。单 P（musicId 纯 bvid）cid 留空，
+   * 由字幕 API 的 resolveSubtitleTarget 经 getVideoDetail 自动补；多 P
+   * （`bvid#cid`）直取对应分 P。BV 前缀守卫：musicId 缺失回落任务 id、
+   * 或音乐中心任务（musicId 非 BV）时留空，不产假 bvid。
    */
   private toLocalTrack(t: DownloadTask): Track {
+    const rawId: string = t.musicId.length > 0 ? t.musicId : t.id;
+    const hash: number = rawId.indexOf('#');
+    const isBv: boolean = rawId.indexOf('BV') === 0;
     return buildTrack({
-      id: t.musicId.length > 0 ? t.musicId : t.id,
+      id: rawId,
+      bvid: isBv ? (hash > 0 ? rawId.substring(0, hash) : rawId) : '',
+      cid: isBv && hash > 0 ? rawId.substring(hash + 1) : '',
       title: t.title,
       artist: t.artist,
       coverUrl: t.coverUrl,
@@ -1199,10 +1218,13 @@ export struct DownloadsPage {
   private toMenuTrack(t: DownloadTask): Track {
     const rawId: string = t.musicId.length > 0 ? t.musicId : t.id;
     const hash: number = rawId.indexOf('#');
+    // BV 前缀守卫：音乐中心任务（musicId 非 BV）/ musicId 缺失回落任务 id 时
+    // bvid 留空 —— 假 bvid 会错误通过字幕探测门控与双向收藏夹的「无 BV 号」过滤。
+    const isBv: boolean = rawId.indexOf('BV') === 0;
     return buildTrack({
       id: rawId,
-      bvid: hash > 0 ? rawId.substring(0, hash) : rawId,
-      cid: hash > 0 ? rawId.substring(hash + 1) : '',
+      bvid: isBv ? (hash > 0 ? rawId.substring(0, hash) : rawId) : '',
+      cid: isBv && hash > 0 ? rawId.substring(hash + 1) : '',
       title: t.title,
       artist: t.artist,
       coverUrl: t.coverUrl
@@ -1603,6 +1625,18 @@ export struct DownloadsPage {
     this.selectedIds = [];
   }
 
+  /**
+   * 返回键退出多选（Index.onBackPress 经 STORE_DL_EXIT_SELECT_REQUEST 派发）：
+   * 清空选区经 @Watch(syncBarState) 联动复位根栏「全选」镜像。
+   */
+  private onExitSelectRequest(): void {
+    if (!this.selecting) {
+      return;
+    }
+    this.selecting = false;
+    this.selectedIds = [];
+  }
+
   private toggleSelect(id: string): void {
     if (this.isSelected(id)) {
       this.selectedIds = this.selectedIds.filter((x: string): boolean => x !== id);
@@ -1700,12 +1734,20 @@ export struct DownloadsPage {
 
       Column() {
         Row() {
+          // 正在播放标记：主题色波形图标（QueueSheet 同款语言）；细粒度刷新
+          //（保留节点读 currentTrack @StorageLink，不编入 rowKey —— 编入会打断下载进度镜像动画）
+          if (this.isCurrent(t)) {
+            SymbolGlyph($r('sys.symbol.waveform'))
+              .fontSize(14)
+              .fontColor([this.themePrimary])
+              .margin({ right: 4 })
+          }
           // 合集子行带 P 序号前缀（见 taskTitleText）：与组头徽标一起构成「合集」的显式区分
           // 标题双行显示：maxLines(2) + 第二行省略号；
           // 显式 lineHeight(21) 锁行高（默认随字体浮动会破坏「信息 ≤ 封面」硬预算）。
           Text(this.taskTitleText(t, nested))
             .fontSize(16)
-            .fontColor($r('app.color.text_primary'))
+            .fontColor(this.isCurrent(t) ? this.themePrimary : $r('app.color.text_primary'))
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
@@ -1898,8 +1940,9 @@ export struct DownloadsPage {
   }
 
   /**
-   * 合集组头行：整组一个条目（封面 + 合集标题 + 聚合状态/进度），
-   * 点击展开/收起分 P 子行；选择模式下点击 = 整组全选/取消。
+   * 合集组头行：整组一个条目（封面 + 合集标题 + 聚合状态/进度）。
+   * 点击行为分三类：选择模式下点击 = 整组全选/取消；合集组点击 = 跳合集
+   * 详情页；歌单卡/其余组点击 = 展开/收起子行。
    */
   @Builder
   GroupHeader(g: DownloadGroup): void {
@@ -1946,29 +1989,7 @@ export struct DownloadsPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .lineHeight(21)
             .layoutWeight(1)
-          // 「合集/歌单」徽标：显式区分可展开组头与普通行
-          // （只差一个小箭头时用户分不清「这是可展开的合集」）。
-          // 品牌粉胶囊底 + 白字，10 号小字不抢标题视觉。
-          // isCollection 读归组缓存；歌单卡片（pl: 组）同款徽标、文案「歌单」。
-          if (g.isCollection || this.isPlaylistCard(g)) {
-            // 小字徽标用系统标准 Chip（实底品牌粉 + 白字，与「大会员」同款）
-            Row() {
-              Chip({
-                label: {
-                  text: this.isPlaylistCard(g) ? '歌单' : '合集',
-                  fontSize: 11,
-                  fontColor: this.themeOn
-                },
-                size: ChipSize.SMALL,
-                allowClose: false,
-                backgroundColor: this.themePrimary
-              })
-            }
-            .margin({ left: 6 })
-            .hitTestBehavior(HitTestMode.None)
-          }
         }
-        // 顶对齐（双行标题）：「合集」徽标对齐标题第一行
         .width('100%')
         .alignItems(VerticalAlign.Top)
 
@@ -2045,17 +2066,6 @@ export struct DownloadsPage {
       .accessibilityText('更多操作')
       .accessibilityLevel('yes')
       .bindMenu(this.groupMenuItems(g))
-
-      // 展开指示：复用 arrow_right，展开时旋转 90° 朝下（不引入未验证的新符号名）。
-      // fontSize 16：chevron 形箭头宽约为字号一半，14 时实际渲染 7×14vp 触发
-      // 「图标宽或高小于 8vp」合规检查；16 渲染 8×16vp 达标。
-      SymbolGlyph($r('sys.symbol.arrow_right'))
-        .fontSize(16)
-        .fontColor([$r('app.color.text_secondary')])
-        .rotate({ angle: this.isExpanded(g.key) ? 90 : 0 })
-        .margin({ right: 14 })
-        // 装饰性指示：展开/收起由整行点击触发，箭头本身不是独立控件
-        .accessibilityLevel('no')
     }
     .width('100%')
     .padding({ left: 16, right: 4, top: 10, bottom: 10 })
@@ -2070,8 +2080,32 @@ export struct DownloadsPage {
         this.toggleSelectGroup(g);
         return;
       }
+      // 合集组：整卡跳合集详情页（分 P 列表 / 播放全部 / 批量操作都在那边）；
+      // 歌单卡（pl: 组）整卡展开/收起。
+      if (g.isCollection) {
+        this.openCollectionDetail(g);
+        return;
+      }
       this.toggleGroup(g.key);
     })
+  }
+
+  /**
+   * 合集组卡 → 合集详情页（路由名 CollectionDetail）。
+   * bvid = 组键（BV 组键即 bvid）；标题 / 封面用组头聚合值（collectionTitle
+   * 优先，首 P 被删也不退化成分 P 名）；artist 取组头首条任务；upMid 任务
+   * 里没有（不落库），传空串由详情页经 view（带缓存）解析。
+   * 组键异常（非 BV 开头，理论不可达）兜底回原地展开，行为不缺失。
+   */
+  private openCollectionDetail(g: DownloadGroup): void {
+    const bvid: string = g.key.indexOf('BV') === 0 ? g.key : '';
+    if (bvid.length === 0) {
+      this.toggleGroup(g.key);
+      return;
+    }
+    const head: DownloadTask = g.tasks[0];
+    NavStackHolder.stack.pushPathByName('CollectionDetail',
+      new CollectionDetailRouteParam(bvid, g.title, g.coverUrl, head.artist, ''));
   }
 
   /**

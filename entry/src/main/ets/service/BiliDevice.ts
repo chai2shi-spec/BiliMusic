@@ -34,7 +34,7 @@ import {
  */
 let cachedBuvid: string = '';
 
-export function getBuvid(): string {
+function getBuvid(): string {
   if (cachedBuvid.length > 0) {
     return cachedBuvid;
   }

@@ -51,21 +51,38 @@ interface WbiCache {
 
 let wbiKeysCache: WbiCache | null = null;
 
+/**
+ * 进行中的 nav 请求去重：冷启动时搜索 / 字幕列表 / 热搜关键词并发签名，
+ * 缓存只在请求完成后填充，会把同一时刻的调用各打一次 /nav。
+ * 缓存 Promise 本身，全部调用方共享同一次请求；失败时清空以允许重试。
+ */
+let wbiKeysInflight: Promise<WbiCache> | null = null;
+
 async function getWbiKeys(): Promise<{ imgKey: string; subKey: string }> {
   if (wbiKeysCache && Date.now() - wbiKeysCache.ts < 6 * 3600 * 1000) {
     return { imgKey: wbiKeysCache.imgKey, subKey: wbiKeysCache.subKey };
   }
-  // 未登录时 nav 返回 code -101，但 wbi_img 仍有效，故单独解析
-  const json = await HttpUtil.requestJson<{
-    data?: { wbi_img?: { img_url?: string; sub_url?: string } };
-  }>(`${BILI_API}/x/web-interface/nav`, { headers: { Referer: BILI_REFERER } });
+  if (!wbiKeysInflight) {
+    wbiKeysInflight = (async (): Promise<WbiCache> => {
+      try {
+        // 未登录时 nav 返回 code -101，但 wbi_img 仍有效，故单独解析
+        const json = await HttpUtil.requestJson<{
+          data?: { wbi_img?: { img_url?: string; sub_url?: string } };
+        }>(`${BILI_API}/x/web-interface/nav`, { headers: { Referer: BILI_REFERER } });
 
-  const imgUrl: string = json?.data?.wbi_img?.img_url || '';
-  const subUrl: string = json?.data?.wbi_img?.sub_url || '';
-  const imgKey: string = imgUrl.slice(imgUrl.lastIndexOf('/') + 1).split('.')[0];
-  const subKey: string = subUrl.slice(subUrl.lastIndexOf('/') + 1).split('.')[0];
-  wbiKeysCache = { imgKey, subKey, ts: Date.now() };
-  return { imgKey, subKey };
+        const imgUrl: string = json?.data?.wbi_img?.img_url || '';
+        const subUrl: string = json?.data?.wbi_img?.sub_url || '';
+        const imgKey: string = imgUrl.slice(imgUrl.lastIndexOf('/') + 1).split('.')[0];
+        const subKey: string = subUrl.slice(subUrl.lastIndexOf('/') + 1).split('.')[0];
+        wbiKeysCache = { imgKey, subKey, ts: Date.now() };
+        return wbiKeysCache;
+      } finally {
+        wbiKeysInflight = null;
+      }
+    })();
+  }
+  const keys: WbiCache = await wbiKeysInflight;
+  return { imgKey: keys.imgKey, subKey: keys.subKey };
 }
 
 /** 对参数做 WBI 签名，返回拼好的 query 字符串（含 wts、w_rid）。 */

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Vinyl</title>
+  <desc id="desc">黑胶唱片：白盘 + 一道细沟槽 + 中心轴孔。只保留一条环线，避免多层同心圆读成靶心；也不加高光弧（小尺寸下会糊成涂鸦）。底色靛蓝 #4338CA。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#4338CA"/>
+  </g>
+
+  <g id="foreground-layer">
+    <mask id="vinyl-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect x="0" y="0" width="1024" height="1024" fill="#000000"/>
+      <circle cx="512" cy="512" r="296" fill="#FFFFFF"/>
+      <circle cx="512" cy="512" r="196" fill="none" stroke="#000000" stroke-width="16"/>
+      <circle cx="512" cy="512" r="46" fill="#000000"/>
+    </mask>
+    <rect id="glyph" x="0" y="0" width="1024" height="1024" fill="#FFFFFF" mask="url(#vinyl-mask)"/>
+  </g>
+</svg>

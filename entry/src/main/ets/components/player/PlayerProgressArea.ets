@@ -136,7 +136,8 @@ export struct PlayerProgressArea {
     if (this.duration > 0) {
       return this.duration;
     }
-    return this.currentTrack !== null ? this.currentTrack.duration : 0;
+    // ?. 同时兜住 null / undefined（@StorageLink 运行时可能送 undefined）
+    return this.currentTrack?.duration ?? 0;
   }
 
   // ===== 自绘进度条（流光 / 波点 / 频谱）的拖拽回调 =====

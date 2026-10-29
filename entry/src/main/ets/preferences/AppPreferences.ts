@@ -11,10 +11,14 @@ import common from '@ohos.app.ability.common';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import {
   DEFAULT_APP_SETTINGS,
+  DEFAULT_FUNC_ITEM_ORDER,
   AppSettings,
   ThemeMode,
   PLAYER_COVER_STYLE_DISC,
-  PLAYER_COVER_STYLE_SQUARE
+  PLAYER_COVER_STYLE_SQUARE,
+  IMMERSIVE_TIER_EXQUISITE,
+  IMMERSIVE_TIER_SMOOTH,
+  IMMERSIVE_TIER_OPTIONS
 } from '../model/MusicModels';
 import {
   PREF_SETTINGS,
@@ -51,13 +55,13 @@ export async function setString(key: string, value: string): Promise<void> {
   await p.flush();
 }
 
-export async function setBoolean(key: string, value: boolean): Promise<void> {
+async function setBoolean(key: string, value: boolean): Promise<void> {
   const p = ensure();
   await p.put(key, value);
   await p.flush();
 }
 
-export async function setObject<T>(key: string, value: T): Promise<void> {
+async function setObject<T>(key: string, value: T): Promise<void> {
   const p = ensure();
   await p.put(key, JSON.stringify(value));
   await p.flush();
@@ -67,11 +71,11 @@ export function getString(key: string, def: string = ''): string {
   return ensure().getSync(key, def) as string;
 }
 
-export function getBoolean(key: string, def: boolean = false): boolean {
+function getBoolean(key: string, def: boolean = false): boolean {
   return ensure().getSync(key, def) as boolean;
 }
 
-export function getObject<T>(key: string): T | null {
+function getObject<T>(key: string): T | null {
   const raw: string = ensure().getSync(key, '') as string;
   if (!raw) {
     return null;
@@ -83,7 +87,7 @@ export function getObject<T>(key: string): T | null {
   }
 }
 
-export async function remove(key: string): Promise<void> {
+async function remove(key: string): Promise<void> {
   const p = ensure();
   await p.delete(key);
   await p.flush();
@@ -95,7 +99,7 @@ export async function remove(key: string): Promise<void> {
  * 十几个 key；flush 是全量落盘操作，每 key 各自 put + flush 会重复全量刷盘。
  * 这里逐 key put（只动内存缓存层），最后一次 flush。
  */
-export async function putMany(values: Record<string, string>): Promise<void> {
+async function putMany(values: Record<string, string>): Promise<void> {
   const p = ensure();
   const keys: string[] = Object.keys(values);
   for (let i = 0; i < keys.length; i++) {
@@ -105,7 +109,7 @@ export async function putMany(values: Record<string, string>): Promise<void> {
 }
 
 /** 批量删（与 putMany 同理）：逐 key delete，最后一次 flush。 */
-export async function removeMany(keys: string[]): Promise<void> {
+async function removeMany(keys: string[]): Promise<void> {
   const p = ensure();
   for (let i = 0; i < keys.length; i++) {
     await p.delete(keys[i]);
@@ -120,10 +124,64 @@ function normalizeCoverStyle(style: string | undefined): string {
   return valid && style !== undefined ? style : DEFAULT_APP_SETTINGS.playerCoverStyle;
 }
 
-export function getSettings(): AppSettings {
-  const stored: Partial<AppSettings> | null = getObject<Partial<AppSettings>>(PREF_SETTINGS);
-  return {
-    sidebarState: stored?.sidebarState ?? DEFAULT_APP_SETTINGS.sidebarState,
+/**
+ * 沉浸光感材质档位白名单归一化（已取消档位的存量迁移）：
+ * - 'standard'（旧三档默认）→ 'exquisite'：旧标准档在支持设备上本就解析为
+ *   EXQUISITE，视觉零变化（升级无感知）；
+ * - 'adaptive'（已取消的自适应档）→ 'exquisite' 默认档；
+ * - 'off'（已取消的关闭档）→ 'smooth'：轻质流畅档最接近原「无材质」意图；
+ * - 未知 / 异常值回落默认档。
+ */
+function normalizeImmersiveTier(tier: string | undefined): string {
+  if (tier === 'standard' || tier === 'adaptive') {
+    return IMMERSIVE_TIER_EXQUISITE;
+  }
+  if (tier === 'off') {
+    return IMMERSIVE_TIER_SMOOTH;
+  }
+  const valid: boolean = tier !== undefined && IMMERSIVE_TIER_OPTIONS.includes(tier);
+  return valid ? tier : DEFAULT_APP_SETTINGS.immersiveMaterialTier;
+}
+
+/**
+ * 功能行功能项顺序白名单归一化：过滤未知 id、去重、按存量顺序保留已知 id、
+ * 缺失的已知 id 按默认序补尾；恒返回**全新数组**（不共享任何引用）。
+ * 老版本数据（无 funcItemOrder 字段 / 坏 JSON）→ 默认序副本（= 历史布局，升级零感知）。
+ */
+function normalizeFuncItemOrder(stored: string[] | undefined): string[] {
+  const result: string[] = [];
+  if (stored !== undefined && stored !== null) {
+    for (let i = 0; i < stored.length; i++) {
+      const id: string = stored[i];
+      if (DEFAULT_FUNC_ITEM_ORDER.indexOf(id) >= 0 && result.indexOf(id) < 0) {
+        result.push(id);
+      }
+    }
+  }
+  for (let i = 0; i < DEFAULT_FUNC_ITEM_ORDER.length; i++) {
+    const id: string = DEFAULT_FUNC_ITEM_ORDER[i];
+    if (result.indexOf(id) < 0) {
+      result.push(id);
+    }
+  }
+  return result;
+}
+
+/**
+ * getSettings 的内存缓存：播放切歌热路径（currentPlayQualityId / playTrack /
+ * handleEnded / prefetch）每次调用都会走 getSettings，此前每次都 getSync +
+ * JSON.parse + 30 字段重建。PREF_SETTINGS 的唯一写入方是本模块的 saveSettings
+ * （写入时同步刷新缓存），不存在第二写入者导致缓存失效的问题。
+ * getSettings 返回缓存的防御性拷贝（copyAppSettings，纯字段复制），
+ * 防止调用方原地改写共享缓存对象。
+ */
+let settingsCache: AppSettings | null = null;
+
+function getSettings(): AppSettings {
+  if (!settingsCache) {
+    const stored: Partial<AppSettings> | null = getObject<Partial<AppSettings>>(PREF_SETTINGS);
+    settingsCache = {
+      sidebarState: stored?.sidebarState ?? DEFAULT_APP_SETTINGS.sidebarState,
     playQuality: stored?.playQuality ?? DEFAULT_APP_SETTINGS.playQuality,
     downloadQuality: stored?.downloadQuality ?? DEFAULT_APP_SETTINGS.downloadQuality,
     downloadDir: stored?.downloadDir ?? DEFAULT_APP_SETTINGS.downloadDir,
@@ -145,15 +203,27 @@ export function getSettings(): AppSettings {
     audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled,
     loudnessNormalizationEnabled: stored?.loudnessNormalizationEnabled ?? DEFAULT_APP_SETTINGS.loudnessNormalizationEnabled,
     openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled,
+    sleepTimerEntryEnabled: stored?.sleepTimerEntryEnabled ?? DEFAULT_APP_SETTINGS.sleepTimerEntryEnabled,
+    skipIntroEntryEnabled: stored?.skipIntroEntryEnabled ?? DEFAULT_APP_SETTINGS.skipIntroEntryEnabled,
+    upSpaceEntryEnabled: stored?.upSpaceEntryEnabled ?? DEFAULT_APP_SETTINGS.upSpaceEntryEnabled,
+    lyricCentered: stored?.lyricCentered ?? DEFAULT_APP_SETTINGS.lyricCentered,
+    immersiveMaterialTier: normalizeImmersiveTier(stored?.immersiveMaterialTier),
     listenCacheEnabled: stored?.listenCacheEnabled ?? DEFAULT_APP_SETTINGS.listenCacheEnabled,
     saveToPublicDownloads: stored?.saveToPublicDownloads ?? DEFAULT_APP_SETTINGS.saveToPublicDownloads,
     publicDownloadsDirUri: stored?.publicDownloadsDirUri ?? DEFAULT_APP_SETTINGS.publicDownloadsDirUri,
-    publicDirMigrated: stored?.publicDirMigrated ?? DEFAULT_APP_SETTINGS.publicDirMigrated
-  };
+    publicDirMigrated: stored?.publicDirMigrated ?? DEFAULT_APP_SETTINGS.publicDirMigrated,
+      playCdnLine: stored?.playCdnLine ?? DEFAULT_APP_SETTINGS.playCdnLine,
+      autoPickedCdnLine: stored?.autoPickedCdnLine ?? DEFAULT_APP_SETTINGS.autoPickedCdnLine,
+      funcItemOrder: normalizeFuncItemOrder(stored?.funcItemOrder)
+    };
+  }
+  return copyAppSettings(settingsCache);
 }
 
-export async function saveSettings(s: AppSettings): Promise<void> {
+async function saveSettings(s: AppSettings): Promise<void> {
   await setObject<AppSettings>(PREF_SETTINGS, s);
+  // 落盘成功后同步缓存：getSettings 的唯一数据源与磁盘保持一致
+  settingsCache = s;
 }
 
 /**
@@ -162,7 +232,7 @@ export async function saveSettings(s: AppSettings): Promise<void> {
  * 设置页拆成主页面 + 多个二级子页后，逐字段拷贝逻辑被多处共用，
  * 集中到本文件统一维护 —— AppSettings 新增必填字段时只需改这一处。
  */
-export function copyAppSettings(s: AppSettings): AppSettings {
+function copyAppSettings(s: AppSettings): AppSettings {
   return {
     sidebarState: s.sidebarState,
     playQuality: s.playQuality,
@@ -182,6 +252,11 @@ export function copyAppSettings(s: AppSettings): AppSettings {
     audioMixEnabled: s.audioMixEnabled,
     loudnessNormalizationEnabled: s.loudnessNormalizationEnabled,
     openInBilibiliEnabled: s.openInBilibiliEnabled,
+    sleepTimerEntryEnabled: s.sleepTimerEntryEnabled,
+    skipIntroEntryEnabled: s.skipIntroEntryEnabled,
+    upSpaceEntryEnabled: s.upSpaceEntryEnabled,
+    lyricCentered: s.lyricCentered,
+    immersiveMaterialTier: s.immersiveMaterialTier,
     listenCacheEnabled: s.listenCacheEnabled,
     saveToPublicDownloads: s.saveToPublicDownloads,
     publicDownloadsDirUri: s.publicDownloadsDirUri,
@@ -189,7 +264,12 @@ export function copyAppSettings(s: AppSettings): AppSettings {
     progressStyle: s.progressStyle,
     closeAnimStyle: s.closeAnimStyle,
     playerCoverStyle: s.playerCoverStyle,
-    itemDisplayStyle: s.itemDisplayStyle
+    itemDisplayStyle: s.itemDisplayStyle,
+    playCdnLine: s.playCdnLine,
+    autoPickedCdnLine: s.autoPickedCdnLine,
+    // 数组字段防御性拷贝：隔离 AppStorage 镜像 / 排序页本地序与内存缓存的引用，
+    // 防任一侧原地改写污染另一侧（getSettings 返回值直连 settingsCache）。
+    funcItemOrder: s.funcItemOrder.slice()
   };
 }
 
@@ -200,10 +280,14 @@ export function copyAppSettings(s: AppSettings): AppSettings {
  * getSettings 底层是 preferences getSync（内存缓存读，不碰磁盘 IO），
  * 单次用户交互调用一次成本可忽略；saveSettings 落盘 fire-and-forget（写完不等待）。
  */
-export function updateSettings(mut: (s: AppSettings) => void): AppSettings {
+function updateSettings(mut: (s: AppSettings) => void): AppSettings {
   const next: AppSettings = copyAppSettings(getSettings());
   mut(next);
-  saveSettings(next);
+  // fire-and-forget 但必须接住 rejection：落盘失败（磁盘满 / 超限）若不接，
+  // 界面已显示新值而磁盘仍是旧值，且未处理的 rejection 完全不可见
+  saveSettings(next).catch((e: Error): void => {
+    console.error(`saveSettings failed: ${e.message}`);
+  });
   return next;
 }
 
@@ -213,7 +297,7 @@ export function updateSettings(mut: (s: AppSettings) => void): AppSettings {
  * COLOR_MODE_NOT_SET（-1）即「跟随系统」；setColorMode 是运行时设置，
  * 每次启动都要重新应用（EntryAbility 在 loadContent 前调用），不落盘。
  */
-export function applyThemeMode(context: common.Context, mode: ThemeMode): void {
+function applyThemeMode(context: common.Context, mode: ThemeMode): void {
   let target: number;
   if (mode === ThemeMode.DARK) {
     target = ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
@@ -236,7 +320,7 @@ export function applyThemeMode(context: common.Context, mode: ThemeMode): void {
  * 由 MusicPlayer 在播放中累计，每满 LISTEN_FLUSH_SECONDS 才落盘一次
  * （追加式写，读-改-写都在 UI 线程内串行，无并发竞争）。
  */
-export function getTotalListenSeconds(): number {
+function getTotalListenSeconds(): number {
   try {
     return ensure().getSync(PREF_TOTAL_LISTEN_SECONDS, 0) as number;
   } catch (e) {
@@ -244,7 +328,7 @@ export function getTotalListenSeconds(): number {
   }
 }
 
-export async function addListenSeconds(delta: number): Promise<void> {
+async function addListenSeconds(delta: number): Promise<void> {
   if (delta <= 0) {
     return;
   }
@@ -259,67 +343,67 @@ export async function addListenSeconds(delta: number): Promise<void> {
  * 最近播放读写走分片（LibraryStore 的 recent_tracks_* key），
  * 本函数仅作**升级迁移的数据源**保留（LibraryStore 无分片数据时回落到这里）。
  */
-export function getRecentTracks<T>(): T[] {
+function getRecentTracks<T>(): T[] {
   return getObject<T[]>(PREF_RECENT) ?? [];
 }
 
-export function getFavoriteTracks<T>(): T[] {
+function getFavoriteTracks<T>(): T[] {
   return getObject<T[]>(PREF_FAVORITES) ?? [];
 }
 
-export function getPlaylists<T>(): T[] {
+function getPlaylists<T>(): T[] {
   return getObject<T[]>(PREF_PLAYLISTS) ?? [];
 }
 
-export async function savePlaylists<T>(list: T[]): Promise<void> {
+async function savePlaylists<T>(list: T[]): Promise<void> {
   await setObject<T[]>(PREF_PLAYLISTS, list);
 }
 
-export function getPlaylistTombstones<T>(): T[] {
+function getPlaylistTombstones<T>(): T[] {
   return getObject<T[]>(PREF_PLAYLIST_TOMBSTONES) ?? [];
 }
 
-export async function savePlaylistTombstones<T>(list: T[]): Promise<void> {
+async function savePlaylistTombstones<T>(list: T[]): Promise<void> {
   await setObject<T[]>(PREF_PLAYLIST_TOMBSTONES, list);
 }
 
-export function getFavoriteTombstones<T>(): T[] {
+function getFavoriteTombstones<T>(): T[] {
   return getObject<T[]>(PREF_FAVORITE_TOMBSTONES) ?? [];
 }
 
-export async function saveFavoriteTombstones<T>(list: T[]): Promise<void> {
+async function saveFavoriteTombstones<T>(list: T[]): Promise<void> {
   await setObject<T[]>(PREF_FAVORITE_TOMBSTONES, list);
 }
 
-export function getSearchHistory(): string[] {
+function getSearchHistory(): string[] {
   return getObject<string[]>(PREF_SEARCH_HISTORY) ?? [];
 }
 
-export async function saveSearchHistory(list: string[]): Promise<void> {
+async function saveSearchHistory(list: string[]): Promise<void> {
   await setObject<string[]>(PREF_SEARCH_HISTORY, list);
 }
 
-export function getPlayerState<T>(): T | null {
+function getPlayerState<T>(): T | null {
   return getObject<T>(PREF_PLAYER_STATE);
 }
 
 // ===================== 登录态（扫码登录） =====================
 
 /** 登录 Cookie 串（SESSDATA / bili_jct / DedeUserID / DedeUserID__ckMd5），空 = 未登录 */
-export function getLoginCookie(): string {
+function getLoginCookie(): string {
   return getString(PREF_LOGIN_COOKIE, '');
 }
 
-export async function setLoginCookie(cookie: string): Promise<void> {
+async function setLoginCookie(cookie: string): Promise<void> {
   await setString(PREF_LOGIN_COOKIE, cookie);
 }
 
 /** 登录用户信息（mid / uname / face / vipStatus，泛型由调用方约束为 LoginUser） */
-export function getLoginUser<T>(): T | null {
+function getLoginUser<T>(): T | null {
   return getObject<T>(PREF_LOGIN_USER);
 }
 
-export async function setLoginUser<T>(user: T): Promise<void> {
+async function setLoginUser<T>(user: T): Promise<void> {
   await setObject<T>(PREF_LOGIN_USER, user);
 }
 
@@ -329,11 +413,11 @@ export async function setLoginUser<T>(user: T): Promise<void> {
  * ⚠️ **当前无调用方**：续期链路尚未开工，这个键只写不读。
  * 见 common/Constants.ts 里 PREF_LOGIN_REFRESH_TOKEN 的注释。
  */
-export function getLoginRefreshToken(): string {
+function getLoginRefreshToken(): string {
   return getString(PREF_LOGIN_REFRESH_TOKEN, '');
 }
 
-export async function setLoginRefreshToken(token: string): Promise<void> {
+async function setLoginRefreshToken(token: string): Promise<void> {
   await setString(PREF_LOGIN_REFRESH_TOKEN, token);
 }
 
@@ -344,13 +428,13 @@ export async function setLoginRefreshToken(token: string): Promise<void> {
  * 与 refresh_token 分开存：前者回答「现在还能用吗」，后者回答「将来能不能续」，
  * 两者在「Cookie 被拒但 token 仍在」时需要不同的处置。
  */
-export function getLoginVerifiedAt(): number {
+function getLoginVerifiedAt(): number {
   const raw: string = getString(PREF_LOGIN_VERIFIED_AT, '0');
   const n: number = Number(raw);
   return Number.isFinite(n) ? n : 0;
 }
 
-export async function setLoginVerifiedAt(ts: number): Promise<void> {
+async function setLoginVerifiedAt(ts: number): Promise<void> {
   await setString(PREF_LOGIN_VERIFIED_AT, String(ts));
 }
 

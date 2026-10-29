@@ -6,7 +6,8 @@
  *    （快照 + 歌词 + 封面 + 主色），覆盖「应用启动时桌面卡片还停在旧数据」；
  *  · 订阅 MusicPlayer.cardSyncListeners（setStore 对
  *    CURRENT_TRACK / IS_PLAYING / PROGRESS 三键通知）：
- *      换歌 → 全量刷新（歌词缓存重置）；
+ *      换歌 → 全量刷新（AppStorage 实时快照，歌词缓存重置）——
+ *        快照落盘晚于切歌通知数百 ms，读盘会慢一首，必须喂内存值；
  *      播放态 → 轻量推 isPlay（不重取封面）；
  *      进度（500ms 一拍）→ 1s 节流 + 歌词行索引变化才推动态歌词窗口
  *    （只影响 DynamicLyrics 卡；心动卡歌词固定随机 4 行，换歌才变）。
@@ -16,8 +17,14 @@
 
 import common from '@ohos.app.ability.common';
 import { MusicPlayer } from '../../player/MusicPlayer';
-import { Track, LyricResult } from '../../model/MusicModels';
-import { STORE_CURRENT_TRACK, STORE_IS_PLAYING, STORE_PROGRESS } from '../../common/Constants';
+import { Track, LyricResult, RepeatMode } from '../../model/MusicModels';
+import {
+  STORE_CURRENT_TRACK,
+  STORE_IS_PLAYING,
+  STORE_PROGRESS,
+  STORE_DURATION,
+  STORE_REPEAT_MODE
+} from '../../common/Constants';
 import { CardFormStore, CardFormRecord } from './CardFormStore';
 import { FormCardName } from '../../widget/model/CardFormConstant';
 import {
@@ -27,6 +34,7 @@ import {
   pushLyricWindowToForm,
   pushPlayStatusToForm
 } from './CardPayloadBuilder';
+import { PersistedPlayerState } from '../PlayerStateStore';
 
 const TAG: string = 'CardPublisher';
 /** 动态歌词推送节流（ms）：进度通知 500ms 一拍，卡片侧 1s 足够顺滑 */
@@ -67,7 +75,8 @@ export class CardPublisher {
     this.attached = true;
     this.context = context;
     MusicPlayer.getInstance().addCardSyncListener(this.listener);
-    this.refreshAll();
+    // 启动回填走盘读（MusicPlayer 恢复时序未定，盘是权威冷启数据）
+    this.refreshAll(false);
   }
 
   private onPlayerStoreChange(key: string): void {
@@ -78,7 +87,12 @@ export class CardPublisher {
       this.lyric = null;
       this.lyricTrackId = '';
       this.lastLineIndex = -1;
-      this.refreshAll();
+      // 换歌全量推必须喂内存实时快照：setStore 先写 AppStorage 后通知，
+      // 通知时刻内存已是新曲；而 player_state.json 要等 switchSource 完成
+      // （数百 ms）才由 savePlayerStateNow 落盘——此刻读盘只会拿到上一首，
+      // 且全量推仅此一次机会（后续 IS_PLAYING/PROGRESS 都是轻量推，不带曲目），
+      // 错过即「卡片慢一首」。
+      this.refreshAll(true);
     } else if (key === STORE_IS_PLAYING) {
       this.pushPlayStatusAll();
     } else if (key === STORE_PROGRESS) {
@@ -86,8 +100,39 @@ export class CardPublisher {
     }
   }
 
-  /** 全量回填：CardFormStore 里每张卡按类型推完整载荷 */
-  private refreshAll(): void {
+  /**
+   * AppStorage 实时快照（换歌全量推数据源）。无当前曲返回 null（调用方
+   * 传 null 给 pushCardToForm = 走盘兜底）。
+   * currentIndex / isShuffled / repeatMode 卡片载荷不消费，仅按接口形状给值。
+   * 已知无害残留：换歌瞬间 STORE_PROGRESS / STORE_IS_PLAYING 是切换前的旧值
+   * （isPreparing 守卫期），只影响动态歌词卡首帧窗口与播放态首帧，prepare
+   * 完成后 PROGRESS tick 与 IS_PLAYING 轻量推会在 ≤1s 内自我修正。
+   */
+  private liveState(): PersistedPlayerState | null {
+    const track: Track | undefined = AppStorage.get<Track>(STORE_CURRENT_TRACK);
+    if (track === undefined) {
+      return null;
+    }
+    const state: PersistedPlayerState = {
+      currentTrack: track,
+      currentIndex: 0,
+      progress: AppStorage.get<number>(STORE_PROGRESS) ?? 0,
+      duration: AppStorage.get<number>(STORE_DURATION) ?? 0,
+      repeatMode: AppStorage.get<RepeatMode>(STORE_REPEAT_MODE) ?? RepeatMode.NONE,
+      isShuffled: false,
+      isPlaying: AppStorage.get<boolean>(STORE_IS_PLAYING) ?? false,
+      savedAt: Date.now()
+    };
+    return state;
+  }
+
+  /**
+   * 全量回填：CardFormStore 里每张卡按类型推完整载荷。
+   * useLiveState = true 走 AppStorage 实时快照（换歌通知触发）；
+   * false 走盘读（启动回填——attach 时刻 MusicPlayer 恢复流程时序不确定，
+   * 盘是权威冷启数据，与历史行为等价）。
+   */
+  private refreshAll(useLiveState: boolean): void {
     const context: common.Context | null = this.context;
     if (context === null || this.refreshing) {
       return;
@@ -98,7 +143,8 @@ export class CardPublisher {
       .then(async (records: CardFormRecord[]): Promise<void> => {
         for (let i = 0; i < records.length; i++) {
           const record: CardFormRecord = records[i];
-          await pushCardToForm(context, record.formId, record.formName);
+          await pushCardToForm(context, record.formId, record.formName,
+            useLiveState ? this.liveState() : null);
         }
         console.info(`[${TAG}] refreshAll done, cards=${records.length}`);
       })

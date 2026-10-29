@@ -53,6 +53,7 @@ import {
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import {
+  CONTENT_END_OFFSET,
   STORE_IMPORT_STATE,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
@@ -1125,16 +1126,14 @@ export struct PlaylistImportPage {
                 this.reviewBody()
               }
             }
-            ListItem() {
-              Row()
-                .width('100%')
-                .height(this.safeBottom + 16)
-            }
           }
           .layoutWeight(1)
           .width('100%')
           .edgeEffect(EdgeEffect.Spring)
           .cachedCount(8)
+          // 末条避让二级页悬浮播放条（SubPagePlayBar，恒展开整行）+ 底部手势区：
+          // 与 SettingsPage / PlaylistsPage 同口径（CONTENT_END_OFFSET + safeBottom）。
+          .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
            // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
            // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
           .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {

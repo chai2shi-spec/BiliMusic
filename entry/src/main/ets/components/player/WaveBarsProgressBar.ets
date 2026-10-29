@@ -264,7 +264,8 @@ export struct WaveBarsProgressBar {
       return;
     }
     const n: number = Math.max(1, Math.floor((this.trackWidth + WAVE_GAP_VP) / (WAVE_BAR_VP + WAVE_GAP_VP)));
-    const seed: string = this.currentTrack !== null ? this.currentTrack.id : 'waveDefault';
+    // ?. 同时兜住 null / undefined / 缺 id 字段（@StorageLink 运行时可能送 undefined）
+    const seed: string = this.currentTrack?.id ?? 'waveDefault';
     const heights: number[] = [];
     for (let i: number = 0; i < n; i++) {
       heights.push(this.barHeightAt(seed, i));

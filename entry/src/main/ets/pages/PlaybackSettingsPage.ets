@@ -1,8 +1,9 @@
 /**
- * 播放设置页：
- * 内容：自动播放下一首 / 启动时自动播放 / 仅 WiFi 播放 / 与其他应用同时播放 /
- * 倍速播放 / 在 B 站打开原视频 / 累计听歌 / 最近播放 / 播放音质（SelectDialog 弹窗）/
- * 定时停止播放（bindSheet 半屏面板）。
+ * 播放设置页（按类别分四张分组卡片，SectionHeader 标类别）：
+ *   · 播放：自动播放下一首 / 启动时自动播放 / 与其他应用同时播放 / 响度均衡（实验性）
+ *   · 播放页入口：倍速播放 / 在 B 站打开原视频 / 定时停止入口 / 限定播放进度入口 / 进入 UP 主页入口
+ *   · 网络与音源：仅 WiFi 播放 / 播放音质（SelectDialog 弹窗）/ 播放线路（SelectDialog 弹窗）
+ *   · 记录与定时：累计听歌 / 最近播放 / 定时停止播放（bindSheet 半屏面板）
  *
  * 定时停止的轮询门控：本页是 NavDestination 子页，aboutToAppear /
  * aboutToDisappear 天然括起可见性 —— 进页起 ticker（定时活跃时）、离页必停。
@@ -23,6 +24,9 @@ import {
   STORE_AUDIO_MIX_ENABLED,
   STORE_LOUDNESS_NORM_ENABLED,
   STORE_OPEN_IN_BILI_ENABLED,
+  STORE_SLEEP_TIMER_ENTRY_ENABLED,
+  STORE_SKIP_INTRO_ENTRY_ENABLED,
+  STORE_UP_SPACE_ENTRY_ENABLED,
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP
 } from '../common/Constants';
@@ -38,22 +42,21 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
-import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider, SectionHeader } from '../components/InsetCardGroup';
 import { HdsListItemCard, SuffixSwitch, SuffixText, SuffixArrowIconText } from '@kit.UIDesignKit';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
+import { CDN_LINE_OPTIONS, CdnLineOption, cdnLineLabelOf } from '../utils/CdnLine';
 import {
   QUALITY_OPTIONS,
   QualityOption,
+  SLEEP_OPTIONS,
   formatSleepMinutes,
   formatRemain,
   formatListenDuration
 } from '../utils/SettingsShared';
-
-/** 定时停止的档位（分钟；0 = 关闭，不在面板选项里，走面板末尾「关闭定时」行） */
-const SLEEP_OPTIONS: number[] = [10, 20, 30, 60, 120];
 
 @Component
 export struct PlaybackSettingsPage {
@@ -100,6 +103,8 @@ export struct PlaybackSettingsPage {
    * 本弹窗是模态的，重新赋值只发生在行点击时 —— 那一刻弹窗必然已关。
    */
   private playQualityDialog: CustomDialogController | null = null;
+  /** 播放线路选择弹窗（SelectDialog，同播放音质弹窗的「每次打开重建 controller」口径） */
+  private cdnLineDialog: CustomDialogController | null = null;
   private sleepTicker: number = -1;
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
@@ -242,6 +247,61 @@ export struct PlaybackSettingsPage {
   }
 
   /**
+   * 选中播放线路。只写偏好 —— 线路在音源组装时（BilibiliApi 的 resolveAudioSelection
+   * 收口）施加，播放中的歌曲不强制重载，下一首生效。
+   * 任何选择（含切回「自动」）都清空上一次自动探测的命中结果：旧探测值对新选择
+   * 没有参考意义，「自动」重新从失败探测起步。
+   */
+  private pickCdnLine(id: string): void {
+    this.update((s: AppSettings): void => {
+      s.playCdnLine = id;
+      s.autoPickedCdnLine = '';
+    });
+    this.toast(`播放线路：${cdnLineLabelOf(id)}，下一首生效`, 1800);
+  }
+
+  /**
+   * 打开播放线路弹窗（SelectDialog，单选列表 + 取消）。
+   * 选中态按当前偏好预选；点选项即生效（写偏好 + toast）并关闭弹窗。
+   */
+  private openCdnLineDialog(): void {
+    const current: string = this.settings.playCdnLine;
+    const items: SheetInfo[] = [];
+    let selectedIndex: number = -1;
+    for (let i = 0; i < CDN_LINE_OPTIONS.length; i++) {
+      const opt: CdnLineOption = CDN_LINE_OPTIONS[i];
+      if (opt.id === current) {
+        selectedIndex = i;
+      }
+      items.push({
+        title: opt.label,
+        action: (): void => {
+          this.pickCdnLine(opt.id);
+          this.cdnLineDialog?.close();
+        }
+      });
+    }
+    const dialog: CustomDialogController = new CustomDialogController({
+      builder: SelectDialog({
+        title: '播放线路',
+        content: '在线音源的 CDN 线路。海外或部分网络播放失败时可尝试切换，下一首生效；「自动」会在失败时自动探测可用线路',
+        selectedIndex: selectedIndex,
+        confirm: {
+          value: '取消',
+          // 同播放音质弹窗：confirm.action 会替换默认关闭行为，必须显式 close
+          action: (): void => {
+            this.cdnLineDialog?.close();
+          }
+        },
+        radioContent: items
+      }),
+      autoCancel: true
+    });
+    this.cdnLineDialog = dialog;
+    dialog.open();
+  }
+
+  /**
    * 子页转场（customTransition 代理）：从右滑入 slow(400ms) EaseOut（AboutPage 同款）。
    * · push 入场：先把页面挪到屏幕右侧外（'100%'），event 闭包内回到 '0%'；
    * · pop 出场（含侧滑返回手势触发的返回）：反向滑回右侧，与手势方向一致；
@@ -355,6 +415,10 @@ export struct PlaybackSettingsPage {
         }
 
         ListItem() {
+          SectionHeader({ headerText: '播放' })
+        }
+
+        ListItem() {
           InsetCard() {
             HdsListItemCard({
               textItem: { primaryText: { text: '自动播放下一首' } },
@@ -391,29 +455,6 @@ export struct PlaybackSettingsPage {
                   });
                   if (turningOn) {
                     this.toast('已开启：启动应用时将从上次播放的曲目继续', 1800);
-                  }
-                }
-              }),
-              cardBackgroundColor: Color.Transparent,
-              cardPrefixMargin: 0,
-              cardSuffixMargin: 0
-            })
-
-            CardDivider()
-
-            HdsListItemCard({
-              textItem: { primaryText: { text: '仅 WiFi 播放' } },
-              suffixItem: new SuffixSwitch({
-                isCheck: this.settings.wifiOnlyPlay,
-                selectColor: this.themePrimary,
-                onChange: (v: boolean): void => {
-                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
-                  const turningOn: boolean = v && !this.settings.wifiOnlyPlay;
-                  this.update((s: AppSettings): void => {
-                    s.wifiOnlyPlay = v;
-                  });
-                  if (turningOn) {
-                    this.toast('已开启：移动网络下将不播放在线歌曲', 1800);
                   }
                 }
               }),
@@ -486,9 +527,15 @@ export struct PlaybackSettingsPage {
               cardPrefixMargin: 0,
               cardSuffixMargin: 0
             })
+          }
+        }
 
-            CardDivider()
+        ListItem() {
+          SectionHeader({ headerText: '播放页入口' })
+        }
 
+        ListItem() {
+          InsetCard() {
             // 倍速播放总开关：开启后播放页功能行出现倍速入口（ControlAreaComponent）。
             // 关闭时立即恢复 1.0x —— update 一次写两个字段（含 playbackSpeed=1.0），
             // 运行时归位走 setPlaybackSpeed(1.0, false)（persist=false：偏好已由
@@ -555,6 +602,186 @@ export struct PlaybackSettingsPage {
 
             CardDivider()
 
+            // 定时停止入口：开启后播放页功能行出现定时停止快捷入口
+            //（ControlAreaComponent 的 SleepTimerChip：未开启定时显时钟图标、
+            // 已开启显倒计时）。关闭只隐藏入口 —— 已设置的定时不受影响，
+            // 仍会到点暂停，下方「定时停止播放」面板随时可查可关。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '定时停止入口' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.sleepTimerEntryEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.sleepTimerEntryEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.sleepTimerEntryEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_SLEEP_TIMER_ENTRY_ENABLED, v);
+                  if (turningOn) {
+                    this.toast('已开启：播放页可快捷定时停止', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 限定播放进度入口：开启后播放页功能行出现按曲「限定播放进度」设置入口
+            //（ControlAreaComponent 文本片 + 双滑块区间条弹窗，片头/片尾秒数存
+            // IntroSkipStore）。关闭只隐藏入口 —— 已存的按曲限定秒数不受影响，仍继续生效。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '限定播放进度入口' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.skipIntroEntryEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.skipIntroEntryEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.skipIntroEntryEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_SKIP_INTRO_ENTRY_ENABLED, v);
+                  if (turningOn) {
+                    this.toast('已开启：播放页可按曲限定播放进度', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 进入 UP 主页入口：开启后播放页功能行出现「进入 UP 主页」跳转入口
+            //（ControlAreaComponent，点击收起播放页 overlay 并跳转当前曲 UP 的
+            // 站内主页 UpSpacePage；mid 缺失时经 getVideoDetail 解析）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '进入 UP 主页入口' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.upSpaceEntryEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.upSpaceEntryEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.upSpaceEntryEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_UP_SPACE_ENTRY_ENABLED, v);
+                  if (turningOn) {
+                    this.toast('已开启：播放页可进入 UP 主页', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 自定义功能栏：播放页功能行 9 个功能项整体排序 —— 前 4 位为默认页
+            // 图标，其余经左右滑动分页切换查看；进「自定义功能栏」页长按拖动
+            // 调整顺序（PlayerFuncOrderPage，AppSettings.funcItemOrder 持久化）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '自定义功能栏' }
+              },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: '前 4 位默认显示' },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                NavStackHolder.stack.pushPath({ name: 'PlayerFuncOrder' });
+              }
+            })
+          }
+        }
+
+        ListItem() {
+          SectionHeader({ headerText: '网络与音源' })
+        }
+
+        ListItem() {
+          InsetCard() {
+            HdsListItemCard({
+              textItem: { primaryText: { text: '仅 WiFi 播放' } },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.wifiOnlyPlay,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.wifiOnlyPlay;
+                  this.update((s: AppSettings): void => {
+                    s.wifiOnlyPlay = v;
+                  });
+                  if (turningOn) {
+                    this.toast('已开启：移动网络下将不播放在线歌曲', 1800);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 播放音质：控制的是在线播放的音源档位；Hi-Res / 杜比需登录（大会员）。
+            HdsListItemCard({
+              textItem: { primaryText: { text: '播放音质' } },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: this.settings.playQuality },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.openPlayQualityDialog();
+              }
+            })
+
+            CardDivider()
+
+            // 播放线路：在线音源的 CDN 直链 host（upos 镜像家族）。
+            // 海外网络对默认 host 不可达时整首歌「能搜不能播」，这里可手动切换
+            // 镜像线路；「自动」模式播放失败时自动探测可用线路（utils/CdnLine.ts）。
+            HdsListItemCard({
+              textItem: { primaryText: { text: '播放线路' } },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: cdnLineLabelOf(this.settings.playCdnLine) },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.openCdnLineDialog();
+              }
+            })
+          }
+        }
+
+        ListItem() {
+          SectionHeader({ headerText: '记录与定时' })
+        }
+
+        ListItem() {
+          InsetCard() {
             HdsListItemCard({
               textItem: { primaryText: { text: '累计听歌' } },
               suffixItem: new SuffixText({ text: this.listenText }),
@@ -578,23 +805,6 @@ export struct PlaybackSettingsPage {
               cardSuffixMargin: 0,
               onClick: (): void => {
                 NavStackHolder.stack.pushPath({ name: 'Recent' });
-              }
-            })
-
-            CardDivider()
-
-            // 播放音质：控制的是在线播放的音源档位；Hi-Res / 杜比需登录（大会员）。
-            HdsListItemCard({
-              textItem: { primaryText: { text: '播放音质' } },
-              suffixItem: new SuffixArrowIconText({
-                text: { text: this.settings.playQuality },
-                endArrow: {}
-              }),
-              cardBackgroundColor: Color.Transparent,
-              cardPrefixMargin: 0,
-              cardSuffixMargin: 0,
-              onClick: (): void => {
-                this.openPlayQualityDialog();
               }
             })
 

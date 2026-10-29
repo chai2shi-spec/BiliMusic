@@ -78,6 +78,36 @@ export class PrefStringSetStore {
     }
   }
 
+  /**
+   * 批量设置语义布尔并整体落盘一次（全选/全不选；幂等：无变化不写盘；
+   * 非法 id 静默跳过）。与逐条 set 的区别：单次 load + 单次 save，
+   * N 条只读写一次盘。
+   */
+  setAll(ids: Array<number>, value: boolean): void {
+    const wantMember: boolean = this.memberIsTrue ? value : !value;
+    const cur: number[] = this.load();
+    let changed: boolean = false;
+    for (let i = 0; i < ids.length; i++) {
+      const id: number = ids[i];
+      if (!(id > 0)) {
+        continue;
+      }
+      const idx: number = cur.indexOf(id);
+      if (wantMember) {
+        if (idx < 0) {
+          cur.push(id);
+          changed = true;
+        }
+      } else if (idx >= 0) {
+        cur.splice(idx, 1);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.save(cur);
+    }
+  }
+
   /** 集合整体读出（调用方一轮只读一次，避免逐条反复读盘） */
   setOf(): Set<number> {
     return new Set<number>(this.load());

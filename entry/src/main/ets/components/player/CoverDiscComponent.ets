@@ -71,7 +71,7 @@ export struct CoverDiscComponent {
   /**
    * 圆盘边长上限（vp），由宿主按「内容列高 − 标题块 − 控制区」实测预算后传入；
    * 0 = 不钳制，纯宽度驱动（仅瘦长屏成立）。
-   * 宽折叠（展开 1292×914vp / 折起 632×924vp）列宽接近列高，宽度驱动的圆盘
+   * 折叠屏（外屏 / 展开）列宽接近列高的形态，宽度驱动的圆盘
    * 会把进度条与三键控制整块挤出屏幕底部 —— 必须按高度预算钳。
    * 必须 @Prop：宿主在 onAreaChange 实测后才回填预算，普通成员变量只在
    * 创建时赋值一次、后续父组件更新不同步也不触发本组件重渲染。
@@ -95,7 +95,8 @@ export struct CoverDiscComponent {
   }
 
   private coverUrl(): string {
-    return this.currentTrack !== null ? this.currentTrack.coverUrl : '';
+    // ?. 同时兜住 null / undefined / 缺 coverUrl 字段（@StorageLink 运行时可能送 undefined）
+    return this.currentTrack?.coverUrl ?? '';
   }
 
   /** 钳制上限：discSize 有效取值，否则哨兵值（等效不钳制） */

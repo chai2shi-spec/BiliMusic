@@ -20,6 +20,7 @@ const REPEAT_CYCLE: RepeatMode[] = [
   RepeatMode.NONE,
   RepeatMode.ALL,
   RepeatMode.ONE,
+  RepeatMode.ONE_STOP,
   RepeatMode.SHUFFLE
 ];
 
@@ -30,6 +31,9 @@ export function repeatLabelOf(mode: RepeatMode): string {
   }
   if (mode === RepeatMode.ONE) {
     return '单曲循环';
+  }
+  if (mode === RepeatMode.ONE_STOP) {
+    return '单曲停止';
   }
   if (mode === RepeatMode.ALL) {
     return '列表循环';
@@ -44,6 +48,9 @@ export function modeIconOf(mode: RepeatMode): Resource {
   }
   if (mode === RepeatMode.ONE) {
     return $r('sys.symbol.repeat_1');
+  }
+  if (mode === RepeatMode.ONE_STOP) {
+    return $r('sys.symbol.stop_circle');
   }
   if (mode === RepeatMode.ALL) {
     return $r('sys.symbol.repeat');
@@ -279,8 +286,8 @@ export struct QueueSheet {
             }
             .onClick((): void => {
               // 点**当前曲** = 续播/暂停切换，不从头重播。
-              // 点他曲：保留队列顺序从 0 播（不用 playOrToggle/playNow ——
-              // 它们会把他曲挪到队首，队列弹层不该重排）。
+              // 点他曲：保留队列顺序播放，有上次听到记忆位置则续播（playTrack；
+              // 不用 playOrToggle/playNow —— 它们会把他曲挪到队首，队列弹层不该重排）。
               if (track.id === this.currentTrackId()) {
                 this.player.togglePlay();
               } else {

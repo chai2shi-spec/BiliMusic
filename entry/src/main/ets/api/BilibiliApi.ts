@@ -13,6 +13,8 @@ import { encodeWbi } from './WbiSign';
 import { gaiaWebParams } from '../utils/RiskShield';
 import { appSignQuery } from '../utils/AppSign';
 import { sleep } from '../utils/AsyncUtil';
+import { CdnLineOption, effectiveCdnLine, replaceUposHost } from '../utils/CdnLine';
+import { recordPlaybackLog, PLAYBACK_LOG_WARN } from '../service/PlaybackLogStore';
 import http from '@ohos.net.http';
 import {
   AUDIO_Q_64K,
@@ -137,7 +139,7 @@ async function biliPost<T>(path: string, form: Record<string, string | number>):
 /** 退避间隔（ms）：最多 3 次重试、合计约 2.45s，足以覆盖绝大多数瞬态抖动 */
 const SOURCE_RETRY_DELAYS_MS: number[] = [250, 700, 1500];
 /** 值得重试的业务码：B 站瞬时风控 / 限流，隔一会儿往往自行恢复 */
-const RETRYABLE_BIZ_CODES: number[] = [-352, -412, -509, -799];
+export const RETRYABLE_BIZ_CODES: number[] = [-352, -412, -509, -799];
 
 /**
  * 判定错误是否值得重试。
@@ -434,7 +436,7 @@ export interface SpaceVideo {
   author: string;
 }
 
-export interface SpaceArcSearchData {
+interface SpaceArcSearchData {
   list: { vlist: SpaceVideo[] };
   page: { pn: number; ps: number; count: number };
 }
@@ -456,7 +458,7 @@ const SPACE_PS_MAX: number = 50;
  *
  * 它不需要 wbi 签名 → 在 wbi 版被限的轮次里作为替补。
  */
-export async function getUserVideosLegacy(
+async function getUserVideosLegacy(
   mid: number,
   page: number = 1,
   pageSize: number = 30,
@@ -506,7 +508,7 @@ export interface UpVideosSearchResult {
  *   2. 最多翻 `maxSearchPages` 页；
  *   3. 排序用 `order=pubdate`（按发布时间）而不是默认的相关性 —— 对「找最近的投稿」更贴。
  */
-export async function getUserVideosViaSearch(
+async function getUserVideosViaSearch(
   targetMid: string,
   nickname: string,
   maxItems: number,
@@ -739,7 +741,7 @@ export async function searchSpaceVideosByKeyword(
  * 与 `searchVideo` 的区别只在这个参数，但对「找某个 UP 最近的投稿」影响很大：
  * 默认 `totalrank`（相关性）会把最相关的排在前面，热门旧稿容易挤掉新稿。
  */
-export async function searchVideoByDate(
+async function searchVideoByDate(
   keyword: string,
   page: number = 1,
   pageSize: number = 20
@@ -773,7 +775,7 @@ export async function searchVideoByDate(
  * `keyword` 非空时透传给空间接口做服务端搜索（见 searchSpaceVideosByKeyword）；
  * 不传 = 参数不带 keyword。
  */
-export async function fetchSpacePageWithRetry(
+async function fetchSpacePageWithRetry(
   mid: number,
   page: number = 1,
   pageSize: number = 30,
@@ -869,7 +871,7 @@ let lastArcSearchUsedLegacy: boolean = false;
  * 失败时**不在同一次调用里降级**（会连发两枪），只把错误抛给界面；
  * 下一次调用（用户点「重试」）会自动换用老接口，见 `getUserVideosLegacy`。
  */
-export async function getUserVideos(
+async function getUserVideos(
   mid: number,
   page: number = 1,
   pageSize: number = 30,
@@ -927,7 +929,7 @@ export async function getUserVideos(
 // 失败仍落回匿名态同款 ①→②→③ 顺序。
 
 /** 相关推荐条目（`x/web-interface/archive/related`） */
-export interface RelatedVideo {
+interface RelatedVideo {
   bvid: string;
   aid: number;
   title: string;
@@ -958,7 +960,7 @@ interface RelatedRawItem {
  * 条目带 `owner.mid` → 能过滤出同一 UP 的投稿。
  * 局限：它是「相关」不是「最新」，所以只作兜底，不拿来替代搜索反查。
  */
-export async function getRelatedVideos(bvid: string): Promise<RelatedVideo[]> {
+async function getRelatedVideos(bvid: string): Promise<RelatedVideo[]> {
   if (bvid.length === 0) {
     return [];
   }
@@ -1007,7 +1009,7 @@ function secondsToLength(seconds: number): string {
  * ⚠️ 种子来自调用方（已订阅歌单 / 当前列表），首次订阅时歌单是空的 → 无种子 → 返回空，
  * 由调用方继续退到空间接口。
  */
-export async function getUserVideosViaRelated(
+async function getUserVideosViaRelated(
   targetMid: string,
   seedBvids: string[],
   maxItems: number,
@@ -1064,8 +1066,8 @@ export async function getUserVideosViaRelated(
 
 /** `collectUpVideos` 的数据来源（ArkTS 不用 enum，用数字常量） */
 export const UP_VIA_NONE: number = 0;
-export const UP_VIA_SEARCH: number = 1;
-export const UP_VIA_RELATED: number = 2;
+const UP_VIA_SEARCH: number = 1;
+const UP_VIA_RELATED: number = 2;
 export const UP_VIA_SPACE: number = 3;
 
 /** 多源兜底的统一结果 */
@@ -1548,7 +1550,7 @@ export async function getVideoDetail(
  * 形状与 `VideoPageInfo` 一致，用它补全。失败向上抛（BiliApiError / 网络错误），
  * 由调用方决定是否降级——**绝不静默吞错**，补全失败必须留 hilog 现场（见 expandVideoParts）。
  */
-export async function getVideoPageList(bvid: string): Promise<VideoPageInfo[]> {
+async function getVideoPageList(bvid: string): Promise<VideoPageInfo[]> {
   const raw: VideoPageInfo[] = await biliFetch<VideoPageInfo[]>('/x/player/pagelist', { bvid: bvid });
   const list: VideoPageInfo[] = [];
   for (let i = 0; i < raw.length; i++) {
@@ -1571,7 +1573,7 @@ export async function getVideoPageList(bvid: string): Promise<VideoPageInfo[]> {
   return list;
 }
 
-export interface PartTitle {
+interface PartTitle {
   title: string;
   artist: string;
 }
@@ -1581,7 +1583,7 @@ const PART_INDEX: RegExp = /^\s*[Pp]?\d{1,3}\s*[.、:：\-_|]*\s*/;
 /** "周杰伦-晴天" → 歌手「周杰伦」+ 标题「晴天」 */
 const PART_SPLIT: RegExp = /^(.{1,16}?)\s*[-–—]\s*(.+)$/;
 
-export function splitPartTitle(part: string): PartTitle {
+function splitPartTitle(part: string): PartTitle {
   if (!part) {
     return { title: '', artist: '' };
   }
@@ -1942,7 +1944,7 @@ async function fetchPlayUrlData(
   throw lastError instanceof Error ? lastError : new Error('playurl failed on all channels');
 }
 
-export async function getPlayUrl(
+async function getPlayUrl(
   bvid: string,
   cid: number,
   preferredQuality: number = 0,
@@ -1976,7 +1978,7 @@ export async function getPlayUrl(
  * 例如只有 64K / 192K 的投稿，用户选「高品质(132K)」时应当退到 192K 而不是 64K。
  * 三个序列的最后几项互为兜底，保证只要有一条音轨就一定能选出东西。
  */
-export function audioQualityCandidates(preferredId: number): number[] {
+function audioQualityCandidates(preferredId: number): number[] {
   if (preferredId === AUDIO_Q_64K) {
     // 「省流量」：越小越好，逐级放大只在没有更小的档时发生
     return [AUDIO_Q_64K, AUDIO_Q_132K, AUDIO_Q_192K, AUDIO_Q_DOLBY, AUDIO_Q_HIRES];
@@ -1994,7 +1996,7 @@ export function audioQualityCandidates(preferredId: number): number[] {
  *
  * @param preferredQuality 首选档位 id；<= 0 表示「无所谓，取最高带宽」（播放侧的默认行为）
  */
-export function pickAudioStream(streams: AudioStream[], preferredQuality: number = 0): AudioStream {
+function pickAudioStream(streams: AudioStream[], preferredQuality: number = 0): AudioStream {
   if (preferredQuality > 0) {
     const order: number[] = audioQualityCandidates(preferredQuality);
     for (let i = 0; i < order.length; i++) {
@@ -2147,6 +2149,40 @@ interface AudioSelection {
 }
 
 /**
+ * 取流链路 warn 级诊断日志（写入 app 内日志页留档）。
+ * PlaybackLogStore 只采集 console.error 与 plog* 埋点、**不采集 console.warn**，
+ * 取流失败的关键证据（通道被拒 / durl 降级）以前只落在 hilog，用户反馈
+ * 「不能播」时日志页一片空白 —— 统一从这里补记。
+ */
+function blogWarn(message: string): void {
+  recordPlaybackLog(PLAYBACK_LOG_WARN, message);
+}
+
+/**
+ * 把当前生效的 CDN 播放线路（utils/CdnLine.ts）应用到音源选择结果：
+ * 主直链与备用直链一并替换 host（path + query 不动，签名与 host 无关）。
+ * 「默认」线路（uposHost 为空）原样返回 —— 行为与历史版本完全一致。
+ */
+function applyCdnLineToSelection(sel: AudioSelection): AudioSelection {
+  const line: CdnLineOption = effectiveCdnLine();
+  if (line.uposHost.length === 0) {
+    return sel;
+  }
+  const backups: string[] = [];
+  for (let i = 0; i < sel.backupUrls.length; i++) {
+    backups.push(replaceUposHost(sel.backupUrls[i], line));
+  }
+  return {
+    url: replaceUposHost(sel.url, line),
+    backupUrls: backups,
+    quality: sel.quality,
+    mimeType: sel.mimeType,
+    bandwidth: sel.bandwidth,
+    container: sel.container
+  };
+}
+
+/**
  * durl 兜底：老视频 / 服务端把 fnval 降级成 durl 时，响应里**一条 dash 音轨都没有**，
  * 只有整段 mp4 的分段地址。只认 dash 会在这里抛 `No audio stream available`，
  * 表现就是「这个视频怎么点都播不出来」—— 而它其实是能出声的。
@@ -2201,21 +2237,24 @@ function resolveAudioSelection(playData: PlayUrlData, preferredQuality: number):
   const streams: AudioStream[] = collectAudioStreams(playData);
   if (streams.length > 0) {
     const best: AudioStream = pickAudioStream(streams, preferredQuality);
-    return {
+    // 备用直链只取前 3 条：主直链被 CDN 拒绝 / 挂死时的快速回退用不了那么多，
+    // 多了只是白占 sourceCache 的内存。normalizeAudioStream 在 quality>0 的
+    // 早退分支里不补 backupUrl，这里必须真值判断，否则 slice 直接抛 undefined。
+    const rawBackups: string[] = Array.isArray(best.backupUrl) ? best.backupUrl.slice(0, 3) : [];
+    // CDN 播放线路在组装收口统一施加（主直链 + 备用直链一起换 host），
+    // 播放 / 下载 / 听后缓存三条取流链全部经由这里，一处生效。
+    return applyCdnLineToSelection({
       url: best.baseUrl,
-      // 备用直链只取前 3 条：主直链挂死 / 被拒时的快速回退用不了那么多，
-      // 多了只是白占 sourceCache 的内存。normalizeAudioStream 在 quality>0 的
-      // 早退分支里不补 backupUrl，这里必须真值判断，否则 slice 直接抛 undefined。
-      backupUrls: Array.isArray(best.backupUrl) ? best.backupUrl.slice(0, 3) : [],
+      backupUrls: rawBackups,
       quality: best.quality,
       mimeType: best.mimeType,
       bandwidth: best.bandwidth,
       container: 'dash'
-    };
+    });
   }
   const byDurl: AudioSelection | null = durlToAudioSelection(playData);
   if (byDurl !== null) {
-    return byDurl;
+    return applyCdnLineToSelection(byDurl);
   }
   throw new Error('No audio stream available');
 }
@@ -2612,7 +2651,7 @@ export interface FavResourceItem {
 }
 
 /** 收藏夹单页结果 */
-export interface FavResourcePage {
+interface FavResourcePage {
   items: FavResourceItem[];
   hasMore: boolean;
   /** 服务端 info.media_count；0 = 未知 */
@@ -2695,7 +2734,7 @@ function normalizeFavItem(raw: FavResourceRawItem): FavResourceItem {
  *
  * ⚠️ 必须带 SESSDATA（HttpUtil 登录后自动附加）；匿名调用会返回 -101 或空。
  */
-export async function getFavResources(mediaId: number, pn: number = 1): Promise<FavResourcePage> {
+async function getFavResources(mediaId: number, pn: number = 1): Promise<FavResourcePage> {
   const path: string = '/x/v3/fav/resource/list';
   const params: Record<string, string | number> = {
     media_id: mediaId,
@@ -2750,7 +2789,7 @@ interface FavIdRawItem {
 }
 
 /** ids 通道的一行（已过滤非视频） */
-export interface FavIdEntry {
+interface FavIdEntry {
   bvid: string;
   aid: number;
 }
@@ -2768,7 +2807,7 @@ export interface FavIdEntry {
  * ⚠️ 风控时 `data` 会变成对象（`{v_voucher}`）而不是数组 → 必须判 `Array.isArray`，
  * 否则会拿到空数组被误判成「这个收藏夹空了」。
  */
-export async function getFavResourceIds(mediaId: number): Promise<FavIdEntry[]> {
+async function getFavResourceIds(mediaId: number): Promise<FavIdEntry[]> {
   const path: string = '/x/v3/fav/resource/ids';
   const raw: FavIdRawItem[] = await biliFetch<FavIdRawItem[]>(path, { media_id: mediaId });
   if (!Array.isArray(raw)) {
@@ -3284,7 +3323,7 @@ export async function getFollowings(vmid: number, pn: number = 1): Promise<Follo
 const HISTORY_RISK_CODES: number[] = [-352, -412, -509, -799];
 
 /** 历史条目内嵌的 history 对象：标识具体视频与看过的分 P */
-export interface BiliHistoryEntry {
+interface BiliHistoryEntry {
   /** 视频 aid */
   oid: number;
   bvid: string;
@@ -3427,7 +3466,7 @@ export async function getWatchHistory(max: number, ps: number = 20): Promise<Bil
 }
 
 /** 稍后再看条目的 UP 主信息 */
-export interface BiliToViewOwner {
+interface BiliToViewOwner {
   mid: number;
   name: string;
   face: string;
@@ -3522,7 +3561,10 @@ export async function extractAudioFromVideo(
   // 但同一组入参的解析结果是确定的，重复调用（预取后播放、重播）直接复用即可。
   // 换通道重试（见下方 catch）与正常解析共用该键：换通道解析成功的音源同样可播，
   // 缓存命中后无需每次都重走「被拒 → 换通道」的弯路。
-  const cacheKey: string = `${bvid}|${fallback && fallback.cid ? fallback.cid : 0}|${preferredQuality}`;
+  // 键尾追加当前生效的 CDN 线路 id：切线路（自动探测命中 / 手动切换）后旧线路的
+  // 直链必须整体失效，否则缓存命中会把已判死的主机再喂给播放器一轮。
+  const lineId: string = effectiveCdnLine().id;
+  const cacheKey: string = `${bvid}|${fallback && fallback.cid ? fallback.cid : 0}|${preferredQuality}|${lineId}`;
   if (!refresh) {
     const hit: TrackSource | null = cacheGet<TrackSource>(sourceCache, cacheKey, SOURCE_CACHE_TTL_MS);
     if (hit !== null) {
@@ -3583,9 +3625,12 @@ export async function extractAudioFromVideo(
     // 也要能带着登录态试一次。两个方向都只试一次，不来回震荡。
     if (loggedIn && isChannelSwitchWorthy(e)) {
       const flipAnonymous: boolean = !preferAnonymous;
+      const rejectDetail: string = e instanceof Error ? e.message : JSON.stringify(e);
       console.warn(`track source rejected on ${preferAnonymous ? 'anonymous' : 'login'} channel ` +
-        `(${e instanceof Error ? e.message : JSON.stringify(e)}), ` +
+        `(${rejectDetail}), ` +
         `retrying ${flipAnonymous ? 'anonymously' : 'with login cookie'}`);
+      // 通道被拒（风控 / 限流）是海外「能搜不能播」的第一现场，入日志页留档
+      blogWarn(`playurl rejected on ${preferAnonymous ? 'anonymous' : 'login'} channel: ${rejectDetail}`);
       try {
         const alt: TrackSource =
           await resolveTrackSource(bvid, fallback, preferredQuality, refresh, flipAnonymous);
@@ -3593,6 +3638,8 @@ export async function extractAudioFromVideo(
         return alt;
       } catch (e2) {
         console.warn(`channel-switch track source retry also failed: ${
+          e2 instanceof Error ? e2.message : JSON.stringify(e2)}`);
+        blogWarn(`playurl failed on both channels: ${
           e2 instanceof Error ? e2.message : JSON.stringify(e2)}`);
         // 两个通道都被拒：最后走 avid+cid 直取（用 preferAnonymous —— 刚失败的是
         // 另一条通道，这条还没试过，不预先假设它也会被拒）。
@@ -4041,7 +4088,7 @@ export async function loginWithSmsCode(tel: string, cid: string, code: string,
 }
 
 /** 登录用户信息（nav 接口归一化后的形态） */
-export interface NavUserInfo {
+interface NavUserInfo {
   isLogin: boolean;
   mid: number;
   uname: string;

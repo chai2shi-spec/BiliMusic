@@ -5,6 +5,8 @@
  *
  * ⚠️ 产品决策：**登录成功后不再自动同步**，收藏夹只在本页手动触发；
  * 且每个收藏夹可勾选是否参与同步（默认全选，勾选状态持久化，见 FavSelectionStore）。
+ * 「收藏夹」区块标题行右侧提供「全选/全不选」批量入口：只改勾选态（一次落盘），
+ * 不自动触发同步，需再点「立即同步」（与单夹「勾选即同步」语义有意不同）。
  *
  * 数据来源：`service/FavSyncManager`（编排一轮同步）+ `service/FavSyncStore`
  * （每夹上次同步结果）+ `api/BilibiliApi.getFavoriteFolders`（进页拉收藏夹列表，
@@ -33,13 +35,13 @@
 
 import { FavSyncManager, FavSyncSummary } from '../service/FavSyncManager';
 import { FavFolderSyncState, FAV_SYNC_OK, FAV_SYNC_PARTIAL, FAV_SYNC_FAILED, loadFavSyncStates, getFavSyncState } from '../service/FavSyncStore';
-import { isFolderSelected, setFolderSelected } from '../service/FavSelectionStore';
+import { isFolderSelected, setFolderSelected, setAllFoldersSelected } from '../service/FavSelectionStore';
 import { isFolderTwoway, setFolderTwoway } from '../service/FavTwowayStore';
 import { FavoriteFolder, FavoriteFoldersResult, getFavoriteFolders } from '../api/BilibiliApi';
 import { getLoginUser, LoginUser } from '../service/LoginStore';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { showAppToast } from '../components/AppToast';
-import { InsetCard, CardDivider, SectionHeader } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider } from '../components/InsetCardGroup';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import {
   ButtonMaterialModifier,
@@ -48,6 +50,7 @@ import {
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import {
+  CONTENT_END_OFFSET,
   STORE_LOGIN_REV,
   STORE_FAV_SYNC_REV,
   STORE_SAFE_BOTTOM,
@@ -369,6 +372,53 @@ export struct FavSyncPage {
         state: r.state
       };
     });
+  }
+
+  /** 所有可见收藏夹是否都已勾选（空列表返回 false——按钮此时不渲染） */
+  private isAllRowsSelected(): boolean {
+    if (this.rows.length === 0) {
+      return false;
+    }
+    for (let i = 0; i < this.rows.length; i++) {
+      if (!this.rows[i].selected) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 全选/全不选所有**可见**收藏夹：批量持久化（一次落盘）+ 整表刷新。
+   * 只改勾选态，不自动触发同步（用户需再点「立即同步」——与单夹「勾选即同步」
+   * 语义有意不同：批量操作的影响面大，交给用户显式确认）。
+   * 全不选后点「立即同步」由 startSync 既有校验拦下（「请先勾选要同步的收藏夹」）。
+   * 同步进行中不禁用：管理器每轮开始快照一次勾选集合，中途改不影响本轮。
+   * 仅作用于当前列表里的夹；不在列表中的历史「未勾选」记录保持原样（不可见即不操作）。
+   */
+  private onToggleAllRows(): void {
+    const selectAll: boolean = !this.isAllRowsSelected();
+    const ids: number[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      ids.push(this.rows[i].mediaId);
+    }
+    setAllFoldersSelected(ids, selectAll);
+    const refreshed: FavRowItem[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r: FavRowItem = this.rows[i];
+      refreshed.push({
+        mediaId: r.mediaId,
+        title: r.title,
+        mediaCount: r.mediaCount,
+        selected: selectAll,
+        twoway: r.twoway,
+        state: r.state
+      });
+    }
+    this.rows = refreshed;
+    if (selectAll) {
+      // 与单夹勾选「自动开跑」不同，这里给一句指路提示，避免用户以为全选即同步
+      this.toast('已全选，点「立即同步」开始同步', 2000);
+    }
   }
 
   /** 按 mediaId 原位替换一行（其余行保持引用不变） */
@@ -762,6 +812,35 @@ export struct FavSyncPage {
     })
   }
 
+  /**
+   * 「收藏夹」区块标题行：原 SectionHeader 文案 + 右挂「全选/全不选」主题色
+   * 文本按钮（44vp 触达，同本页「重试」按钮规格）。按钮随整表勾选态互为切换；
+   * 列表为空（拉取失败/无收藏夹）不渲染按钮。
+   * 外层右 padding 4 + 按钮右 padding 16 = 20，文案右缘与原 SectionHeader 对齐。
+   */
+  @Builder
+  folderSectionHeader() {
+    Row() {
+      Text('收藏夹')
+        .fontSize(13)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+      if (this.rows.length > 0) {
+        Text(this.isAllRowsSelected() ? '全不选' : '全选')
+          .fontSize(13)
+          .fontColor(this.themePrimary)
+          .height(44)
+          .padding({ left: 16, right: 16 })
+          .onClick((): void => {
+            this.onToggleAllRows();
+          })
+      }
+    }
+    .width('100%')
+    .padding({ left: 20, right: 4, top: 20, bottom: 8 })
+    .alignItems(VerticalAlign.Center)
+  }
+
   build() {
     HdsNavDestination() {
       Stack() {
@@ -833,7 +912,7 @@ export struct FavSyncPage {
                 .padding({ top: 8 })
               }
               ListItem() {
-                SectionHeader({ headerText: '收藏夹' })
+                this.folderSectionHeader()
               }
               if (this.foldersLoading && this.rows.length === 0) {
                 ListItem() {
@@ -954,16 +1033,14 @@ export struct FavSyncPage {
                   }
                 }
               }
-              ListItem() {
-                Row()
-                  .width('100%')
-                  .height(this.safeBottom + 16)
-              }
             }
             .layoutWeight(1)
             .width('100%')
             .edgeEffect(EdgeEffect.Spring)
             .cachedCount(8)
+            // 末条避让二级页悬浮播放条（SubPagePlayBar，恒展开整行）+ 底部手势区：
+            // 与 SettingsPage / PlaylistsPage 同口径（CONTENT_END_OFFSET + safeBottom）。
+            .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
             // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用
             // 后回调，onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
             .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {

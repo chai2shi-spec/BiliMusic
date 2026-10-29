@@ -119,6 +119,43 @@ export async function insertDownload(task: DownloadTask): Promise<void> {
   }
 }
 
+/**
+ * 事务包裹：fn 内的 RDB 写一次性提交。N 条逐条 await = N 次独立磁盘事务
+ * （各带一次 journal/fsync 往返），是启动装载（loadFromDb 中断任务批修）与
+ * 批量入队（整单/合集下载 N 条 insert）路径的 IO 放大主源。
+ * fn 抛错整体回滚并继续抛出；调用方需保证 fn 短小（纯 RDB 操作，
+ * 不夹网络/文件等长 await），且避免与其他并发写在事务窗口内交错 ——
+ * 事务打开期间经同一 RdbStore 的其他写会并入本事务，一起被 commit/回滚。
+ */
+export async function withTransaction(fn: () => Promise<void>): Promise<void> {
+  const rdb: relationalStore.RdbStore = getRdb();
+  await rdb.beginTransaction();
+  try {
+    await fn();
+    await rdb.commit();
+  } catch (e) {
+    try {
+      await rdb.rollBack();
+    } catch (rollbackErr) {
+      console.error(`rollback transaction failed: ${JSON.stringify(rollbackErr)}`);
+    }
+    throw e;
+  }
+}
+
+/** 批量插入下载任务：单事务一次提交；冲突语义与 insertDownload 一致（REPLACE） */
+export async function insertDownloads(tasks: DownloadTask[]): Promise<void> {
+  if (tasks.length === 0) {
+    return;
+  }
+  await withTransaction(async (): Promise<void> => {
+    for (let i = 0; i < tasks.length; i++) {
+      await getRdb().insert(TABLE_DOWNLOAD, toRow(tasks[i]),
+        relationalStore.ConflictResolution.ON_CONFLICT_REPLACE);
+    }
+  });
+}
+
 export async function getAllDownloads(): Promise<DownloadTask[]> {
   try {
     const rs: relationalStore.ResultSet = await getRdb().query(

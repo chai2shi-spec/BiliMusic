@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Play Circle</title>
+  <desc id="desc">64 描边圆环内嵌圆角播放三角，三角按视觉重量向左偏 3px 校正。底色橙红 #C2410C。</desc>
+
+
+  <g id="foreground-layer" fill="#FFFFFF" stroke="#FFFFFF" stroke-linejoin="round">
+    <circle id="ring" cx="512" cy="512" r="286" fill="none" stroke-width="64"/>
+    <polygon id="play" points="443,384 443,640 651,512" stroke-width="24"/>
+  </g>
+</svg>

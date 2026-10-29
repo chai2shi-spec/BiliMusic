@@ -42,9 +42,16 @@ export class UpSpaceRouteParam {
  */
 export class PlaylistDetailRouteParam {
   playlistId: string;
+  /**
+   * 进入歌单详情后自动定位到该曲目（空 = 不定位）。
+   * 歌单页签「定位」下钻入口传当前播放曲目 id；
+   * 存量调用点不传走构造默认值，行为不变。
+   */
+  locateTrackId: string;
 
-  constructor(playlistId: string) {
+  constructor(playlistId: string, locateTrackId: string = '') {
     this.playlistId = playlistId;
+    this.locateTrackId = locateTrackId;
   }
 }
 
@@ -71,6 +78,30 @@ export class SeasonSeriesDetailRouteParam {
     this.title = title;
     this.cover = cover;
     this.upName = upName;
+    this.upMid = upMid;
+  }
+}
+
+/**
+ * 「合集详情」（路由名 CollectionDetail）入参：多 P 合集（同一视频的
+ * 多个分 P，B 站音乐「N 首精选」这类）详情页。
+ *
+ * bvid 为定位符（必填，空 = 页面进失败态）；title/cover/artist/upMid 是
+ * 入口条目已有数据的首帧兜底 —— 真值（视频标题/封面/UP 资料/分 P 列表）
+ * 由页面内 view 请求现拉并覆盖。
+ */
+export class CollectionDetailRouteParam {
+  bvid: string;
+  title: string;
+  cover: string;
+  artist: string;
+  upMid: string;
+
+  constructor(bvid: string, title: string, cover: string, artist: string, upMid: string) {
+    this.bvid = bvid;
+    this.title = title;
+    this.cover = cover;
+    this.artist = artist;
     this.upMid = upMid;
   }
 }
@@ -133,6 +164,18 @@ export class NavRouteParamReader {
     if (Array.isArray(params) && params.length > 0) {
       const first: ESObject = params[0];
       if (first instanceof SeasonSeriesDetailRouteParam) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  /** 取 CollectionDetail 路由参数；栈上没有 / 类型不符返回 null（按无参兜底） */
+  static readCollectionDetailParam(stack: NavPathStack): CollectionDetailRouteParam | null {
+    const params: ESObject = stack.getParamByName('CollectionDetail');
+    if (Array.isArray(params) && params.length > 0) {
+      const first: ESObject = params[0];
+      if (first instanceof CollectionDetailRouteParam) {
         return first;
       }
     }

@@ -12,15 +12,21 @@
  *     歌手 + 三键，居中）+ 右列纯歌词（封面预算挂弹性壳实测）；
  *   · 折叠屏展开竖屏（isFoldFull 且非 isWideFoldFull，STORE_FOLD_EXPANDED）→
  *     封面 / 歌词左右分栏（md/lg 宽度均 8 列 4+4）—— 只留常规折叠展开竖屏
- *     （md，Mate X 类），展开横屏已上移紧凑横屏分支；
- *   · 阔折叠外屏（deviceFoldable && !isFoldFull && 竖屏 && md，如 Pura X 折起
- *     632×924vp）→ 封面右上出血裁切 + 左下信息/三键 + 滑动歌词页
- *     （横屏排除：外屏横屏高度充足，走下方栅格分栏）；
+ *     （Mate X 类），展开横屏已上移紧凑横屏分支；
+ *   · 阔折叠外屏（deviceFoldable && !isFoldFull && 竖屏 && 外屏宽高比 ≥
+ *     WIDE_FOLD_OUTER_ASPECT_MIN，如 Pura X 折起外屏）→ 封面右上出血裁切 +
+ *     左下信息/三键，无歌词无翻页（用户拍板：外屏不放歌词、信息只显示一次）；
  *   · MD/LG 断点（真平板 / 大窗口 / 阔折叠外屏横屏；!isFoldFull 守卫）→
  *     栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
- *   · SM 断点 / 阔折叠展开竖屏（isWideFoldFull：isFoldFull && lg && 竖屏，
- *     Pura X 展开 ≥840vp；用户拍板去分栏、全宽铺满、仅阔折叠）→
- *     Swiper 双页（封面页 | 歌词页）+ 顶栏叠加，版式与直板机一致。
+ *   · SM 断点 / 阔折叠展开竖屏（isWideFoldFull：isFoldFull && 竖屏 &&
+ *     内屏宽高比 ≥ WIDE_FOLD_INNER_ASPECT_MIN，如 Pura X 展开；用户拍板去分栏、
+ *     全宽铺满、仅阔折叠）→ Swiper 双页（封面页 | 歌词页）+ 顶栏叠加，
+ *     版式与直板机一致。
+ *
+ * ⚠️ 真机实测结论（Pura X）：折起外屏落 sm 断点（<600vp）、展开内屏落 md
+ * 断点（600~840vp）—— 与早期注释里「外屏 632×924vp 落 md / 展开 ≥840vp 落 lg」
+ * 的假设不符，故阔折叠判定不卡断点，改按窗口宽高比（阔折叠外屏 ≈0.62 /
+ * 展开内屏 ≈1.04，常规折叠 ≈0.49 / ≈0.89，宽高比与密度换算无关）。
  *
  * 安全区：STORE_SAFE_TOP / STORE_SAFE_BOTTOM（全屏布局方案，见 Constants.ts 注释）。
  *
@@ -75,6 +81,7 @@ import {
   STORE_PLAYER_SLIDE_OFFSET,
   STORE_PLAYER_SLIDE_ALPHA,
   STORE_DEVICE_FOLDABLE,
+  STORE_WINDOW_WIDTH_VP,
   STORE_WINDOW_HEIGHT_VP,
   STORE_SAFE_LEFT,
   STORE_SAFE_RIGHT,
@@ -101,7 +108,7 @@ interface CoverPixelPair {
   full: image.PixelMap;
   small: image.PixelMap;
 }
-/** 阔折叠外屏（Pura X 折起 632×924vp → md 断点）封面圆盘宽度预算比例 */
+/** 阔折叠外屏（Pura X 折起，宽高比门控）封面圆盘宽度预算比例 */
 const COMPACT_DISC_W_RATIO: number = 0.63;
 /** 阔折叠外屏圆盘高度预算比例（矮屏兜底，防宽度驱动的圆盘纵向溢出） */
 const COMPACT_DISC_H_RATIO: number = 0.62;
@@ -109,8 +116,6 @@ const COMPACT_DISC_H_RATIO: number = 0.62;
 const COMPACT_DISC_BLEED_RATIO: number = 0.25;
 /** 阔折叠外屏封面出血位距内容域顶部的间距（vp） */
 const COMPACT_DISC_TOP_VP: number = 12;
-/** 阔折叠外屏翻页时封面淡出/淡入时长（ms） */
-const COMPACT_COVER_FADE_MS: number = 200;
 // ⚠️ 这里**不要**定义整块内容层的延迟淡入常量（如 CONTENT_FADE_IN_DELAY_MS /
 // CONTENT_FADE_IN_MS）：整块淡入会把封面（CoverDisc，geometryTransition 一镜到底）
 // 一起压成透明 —— 转场头 60ms 封面完全不可见，观感变成「一块背景矩形从迷你栏长开、
@@ -267,11 +272,7 @@ export struct PlayerInfoComponent {
     this.lgDiscSize = budget > 0 ? Math.min(this.lgColW, budget) : this.lgColW;
   }
 
-  /**
-   * 阔折叠外屏判定：折叠屏设备 && 非展开态 &&
-   * md 断点 —— 精准锁定阔折叠外屏（折起 632×924vp 落 md）。普通手机（sm）、
-   * 平板（非折叠设备）、折叠展开（isFoldFull 分支优先）均不命中。
-   */
+  /** 折叠屏设备标志（FormFactorHolder 写入）：外屏出血版式（isCompactFold）的判定输入之一 */
   @StorageProp(STORE_DEVICE_FOLDABLE) deviceFoldable: boolean = false;
 
   /** 外屏内容域实测尺寸（onAreaChange 回写，驱动封面圆盘预算） */
@@ -279,28 +280,37 @@ export struct PlayerInfoComponent {
   private compactAreaH: number = 0;
   /** 外屏封面圆盘边长（vp）：0 = 首帧未实测（与 lgDiscSize 同一套实测回填思路） */
   @State compactDiscSize: number = 0;
-  /** 外屏 Swiper 当前页下标（0 封面页 / 1 歌词页）：封面随翻页淡出/淡入 */
-  @State compactPageIndex: number = 0;
 
+  /**
+   * 阔折叠外屏判定：折叠屏设备 && 非展开态 && 竖屏 &&
+   * 外屏宽高比 ≥ WIDE_FOLD_OUTER_ASPECT_MIN —— 精准锁定阔折叠外屏
+   * （Pura X 折起 ≈0.62，近方偏宽）。常规折叠外屏（≈0.49，窄长）、普通手机、
+   * 平板（非折叠设备）、折叠展开（isFoldFull 分支优先）均不命中。
+   * 不卡断点：真机 Pura X 外屏落 sm（早期假设的「外屏 632×924vp 落 md」
+   * 与实测不符），宽高比门控在任意断点下都成立。
+   */
   private isCompactFold(): boolean {
-    // 横屏排除：外屏横屏（924×632vp）误入本竖屏
-    // 出血版式会破版 —— 横屏高度充足，落下方 md/lg 栅格分栏。
+    // 横屏排除：外屏横屏误入本竖屏出血版式会破版 ——
+    // 横屏高度充足，落下方 md/lg 栅格分栏。
     return this.deviceFoldable && !this.isFoldFull && !this.isLandscape
-      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD;
+      && this.windowAspect() >= PlayerConstants.WIDE_FOLD_OUTER_ASPECT_MIN;
   }
 
   /**
-   * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开（isFoldFull）且宽度落 lg（≥840vp，
-    * 阔折叠 Pura X 类展开落 lg，常规折叠
-   * Mate X 类展开落 md 仍走分栏）且竖屏。命中时 build() 的 isFoldFull 分栏
-   * 分支放行，穿透到 SM Swiper 双页分支（直板机版式）。横屏排除：直板机
-   * Swiper 版式不处理横屏，展开横屏命中 isCompactLandscape（isFoldFull &&
-   * isLandscape）。PlayerPage.dragDismissEnabled
-   * 为同口径双份实现（morph_swipe 下拉手势扩展），改判定口径时两处同步。
+   * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开
+   * （isFoldFull）且竖屏且内屏宽高比 ≥ WIDE_FOLD_INNER_ASPECT_MIN（阔折叠
+   * Pura X 类展开 ≈1.04 近方；常规折叠 Mate X 类展开 ≈0.89 偏长方，不命中
+   * 仍走分栏）。不卡断点：真机 Pura X 展开落 md（差一点未到早期假设的
+   * lg≥840），md 断点下两类折叠屏均出现，只能按宽高比区分。
+   * 命中时 build() 的 isFoldFull 分栏分支放行，穿透到 SM Swiper 双页分支
+   * （直板机版式）。横屏排除：直板机 Swiper 版式不处理横屏，展开横屏命中
+   * isCompactLandscape（isFoldFull && isLandscape）。
+   * PlayerPage.dragDismissEnabled 为同口径双份实现（morph_swipe 下拉手势
+   * 扩展），改判定口径时两处同步。
    */
   private isWideFoldFull(): boolean {
     return this.isFoldFull && !this.isLandscape
-      && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG;
+      && this.windowAspect() >= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MIN;
   }
 
   /** 外屏圆盘预算：min(内容域宽×0.63, 高×0.62) —— 宽度驱动为主，矮屏高度兜底 */
@@ -324,16 +334,26 @@ export struct PlayerInfoComponent {
    * 本组件只读订阅。
    */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
-  /** 窗口内容区高度（vp）：EntryAbility 首发 + Index HdsTabs.onAreaChange 持续回写（旋转后新鲜） */
+  /** 窗口内容区宽 / 高（vp）：EntryAbility 首发 + Index HdsTabs.onAreaChange 持续回写（折展开/旋转后新鲜） */
+  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
   @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
+
+  /**
+   * 窗口宽高比（宽/高）：阔折叠判定（isCompactFold / isWideFoldFull）的
+   * 机型分档依据。宽高比与 px/vp 密度换算无关（比例恒定）。高度未就位时
+   * 返回 0（任何正阈值判定均不命中，兜底走既有分支，不误入新版式）。
+   */
+  private windowAspect(): number {
+    return this.windowHeightVp > 0 ? this.windowWidthVp / this.windowHeightVp : 0;
+  }
   /** 水平安全区（vp）：横屏下状态栏侧边条带避让；竖屏两值为 0，padding 不生效 */
   @StorageProp(STORE_SAFE_LEFT) safeLeft: number = 0;
   @StorageProp(STORE_SAFE_RIGHT) safeRight: number = 0;
 
   /**
    * 紧凑横屏判定：横屏且窗口高低于
-   * LANDSCAPE_COMPACT_MAX_WINDOW_H_VP 才命中 —— 阔折叠外屏横屏 632vp /
-   * 平板横屏 ≥600vp 均不命中，维持既有分支。
+   * LANDSCAPE_COMPACT_MAX_WINDOW_H_VP 才命中 —— 阔折叠外屏横屏 /
+   * 平板横屏（高 ≥600vp）均不命中，维持既有分支。
    * 折叠屏展开横屏（Pura X 展开横屏 ~721vp 高，用户拍板）复用本版式 ——
    * isFoldFull && isLandscape 直进，不卡高度阈值；常规折叠 Mate X 类展开
    * 横屏一并纳入（折叠展开横屏统一口径）。
@@ -553,7 +573,11 @@ export struct PlayerInfoComponent {
 
   onTrackChanged(): void {
     const track: Track | null = this.currentTrack;
-    if (track === null || track.coverUrl.length === 0) {
+    // 类型保护：@StorageLink 的 Track | null 运行时可能是 undefined（=== null 拦不住，
+    // 见 MusicInfoComponent.qualityText 同款结论），且持久化恢复的旧快照可能缺
+    // coverUrl 字段 —— aboutToAppear 同步路径上一旦抛 TypeError 即 jscrash 闪退
+    // （点迷你条进播放页瞬间退出的根因），必须一并判掉再读字段。
+    if (track === null || track === undefined || (track.coverUrl ?? '').length === 0) {
       this.colorToken++;
       this.themedId = '';
       this.replaceBgCover('');
@@ -939,7 +963,7 @@ export struct PlayerInfoComponent {
               // 右列：纯歌词。双约束缺一不可：layoutWeight(1) 限宽（Row 上下文作用于主轴），补
               // .height(FULL_HEIGHT) 限高 —— 仅宽度权重时内部 LrcView 按歌词
               // 全长测量（无界高），列内容 ~900vp 被 Row 垂直居中上下溢出屏外。
-              LyricsComponent({ isShowControl: false })
+              LyricsComponent({ isShowControl: false, pageActive: true })
                 .layoutWeight(1)
                 .height(StyleConstants.FULL_HEIGHT)
             }
@@ -956,10 +980,11 @@ export struct PlayerInfoComponent {
             right: this.safeRight
           })
         } else if (this.isFoldFull && !this.isWideFoldFull()) {
-          // isWideFoldFull（展开落 lg + 竖屏，Pura X 类）
+          // isWideFoldFull（阔折叠展开竖屏，Pura X 类，宽高比门控）
           // 命中时放行本分支、穿透到下方 SM Swiper 双页（直板机版式，用户拍板
-          // 全宽铺满）—— 本分栏只留常规折叠展开竖屏（md，Mate X 类）；折叠展开
-          // 横屏（isFoldFull && isLandscape）命中上方紧凑横屏分支。
+          // 全宽铺满）—— 本分栏只留常规折叠展开竖屏（Mate X 类，宽高比 < 阈值
+          // 不命中 isWideFoldFull）；折叠展开横屏（isFoldFull && isLandscape）
+          // 命中上方紧凑横屏分支。
           Column() {
             TopAreaComponent()
               .margin({
@@ -995,7 +1020,7 @@ export struct PlayerInfoComponent {
                   lg: BreakpointConstants.SPAN_SM
                 }
               }) {
-                LyricsComponent({ isShowControl: false })
+                LyricsComponent({ isShowControl: false, pageActive: true })
               }
               .padding({
                 left: $r('app.float.twenty_four')
@@ -1012,9 +1037,10 @@ export struct PlayerInfoComponent {
             right: $r('app.float.common_padding')
           })
         } else if (this.isCompactFold()) {
-          // 阔折叠外屏（Pura X 折起 632×924vp → md）专属版式（用户拍板）：
+          // 阔折叠外屏（Pura X 折起，宽高比门控）专属版式（用户拍板）：
           // 封面右上角出血裁切（约 1/4 出屏，可见 3/4）；无进度条无时间；
-          // 歌名/歌手 + 三键收缩左下；保留左右滑歌词页（歌词占中部）。
+          // 歌名/歌手 + 三键收缩左下；**无歌词无翻页**（用户拍板：外屏不放
+          // 歌词、封面/歌名/歌手只显示一次）。
           Column() {
             TopAreaComponent()
               .padding({
@@ -1022,59 +1048,27 @@ export struct PlayerInfoComponent {
                 right: $r('app.float.common_padding')
               })
 
-            // 内容域：Swiper 双页（封面页 | 歌词页）+ 封面出血叠加层。
+            // 内容域：封面出血层独占（歌词页已按用户决策移除，无 Swiper）。
             Stack({ alignContent: Alignment.TopEnd }) {
-              Swiper() {
-                // 页1 封面页：视觉由下方叠加的出血封面层负责，本页留白
-                //（指示点保留，用户才知道能左滑翻页）。
-                Column()
-                  .width(StyleConstants.FULL_WIDTH)
-                  .height(StyleConstants.FULL_HEIGHT)
-
-                // 页2 歌词页：占内容域主体（用户决策「歌词占中部」）。
-                LyricsComponent({ isShowControl: false })
-                  .margin({ top: $r('app.float.margin_lyric') })
-                  .padding({
-                    left: $r('app.float.common_padding'),
-                    right: $r('app.float.common_padding')
-                  })
-              }
-              .width(StyleConstants.FULL_WIDTH)
-              .height(StyleConstants.FULL_HEIGHT)
-              // 指示点顶部居中：圆盘出血位左缘 ≈ 内容域宽 − 可见 3/4 宽，
-              // 632vp 外屏上指示点（居中 ±10vp）落在圆盘左侧空档，无遮挡。
-              .indicator(this.contentHidden ? false : new DotIndicator()
-                .top($r('app.float.options_padding'))
-                .selectedColor($r('app.color.select_swiper'))
-                .color($r('app.color.slider_track')))
-              .loop(false)
-              .onChange((index: number): void => {
-                this.compactPageIndex = index;
-              })
-              .onAreaChange((_old: Area, n: Area): void => {
-                this.compactAreaW = this.toVp(n.width);
-                this.compactAreaH = this.toVp(n.height);
-                this.recomputeCompactDisc();
-                console.info(`[PlayerInfo] compact area ${this.compactAreaW}x${this.compactAreaH} disc=${this.compactDiscSize}`);
-              })
-
-              // 封面出血层（叠加在 Swiper 之外）：封面若留在 Swiper 页内，翻页时
-              // 会被带走、且 Swiper 可能裁切横向溢出 —— 叠加层用页下标驱动
-              // opacity 200ms 淡出/淡入，行为完全可控。
               // 出血用**负 margin**而非 translate：translate 是纯视觉偏移，
               // geometryTransition 配对框不含偏移量、开合飞行末端会跳变；负
               // margin 参与布局，飞行终点即出血位。hitTestBehavior(None)：
-              // 圆盘占右上大块区域，不穿透会挡住其下方的 Swiper 翻页手势。
+              // 圆盘占右上大块区域，不穿透会挡住下方整页下拉收起手势。
               CoverDiscComponent({ discSize: this.compactDiscSize })
                 .margin({
                   top: COMPACT_DISC_TOP_VP,
                   right: -this.compactBleed()
                 })
-                .opacity(this.compactPageIndex === 0 ? 1 : 0)
-                .animation({ duration: COMPACT_COVER_FADE_MS })
                 .hitTestBehavior(HitTestMode.None)
             }
+            .width(StyleConstants.FULL_WIDTH)
             .layoutWeight(1)
+            .onAreaChange((_old: Area, n: Area): void => {
+              this.compactAreaW = this.toVp(n.width);
+              this.compactAreaH = this.toVp(n.height);
+              this.recomputeCompactDisc();
+              console.info(`[PlayerInfo] compact area ${this.compactAreaW}x${this.compactAreaH} disc=${this.compactDiscSize}`);
+            })
 
             // 左下信息 + 控制块（用户决策「信息和控制收缩至左下方」）：
             // 标题/歌手 inline（与 LG 左列标题块同源取数、同字号口径）；
@@ -1117,9 +1111,9 @@ export struct PlayerInfoComponent {
         } else if (!this.isFoldFull
           && (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG
           || this.currentBreakpoint === BreakpointConstants.BREAKPOINT_MD)) {
-          // !isFoldFull 守卫放行 isWideFoldFull（展开
-          // 落 lg + 竖屏）穿透到下方 SM Swiper 双页，不得落平板分栏；真平板 /
-          // 直板横屏 / 阔折叠外屏横屏（非展开态）不受影响。
+          // !isFoldFull 守卫放行 isWideFoldFull（阔折叠
+          // 展开竖屏，宽高比门控）穿透到下方 SM Swiper 双页，不得落平板分栏；
+          // 真平板 / 直板横屏 / 阔折叠外屏横屏（非展开态）不受影响。
           // MD 不落手机 Swiper —— LG 栅格分栏
           // 的 GridRow 本就定义了 md 的列数/跨度（左列 span 4 | 歌词 span 4），
           // 600~840vp 窗口直接进分栏，与 LG 同一套布局逻辑。
@@ -1157,8 +1151,6 @@ export struct PlayerInfoComponent {
                       .opacity(0.95)
                       .fontWeight(FontWeight.Bold)
                       .fontFamily(PlayerConstants.FONT_FAMILY_BOLD)
-                      .maxLines(2)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
 
                     Text(this.artistText())
                       .textAlign(TextAlign.Start)
@@ -1219,7 +1211,7 @@ export struct PlayerInfoComponent {
                 span: { md: BreakpointConstants.SPAN_SM, lg: BreakpointConstants.SPAN_MD },
                 offset: { lg: BreakpointConstants.OFFSET_MD }
               }) {
-                LyricsComponent({ isShowControl: false })
+                LyricsComponent({ isShowControl: false, pageActive: true })
               }
             }
             .layoutWeight(1)
@@ -1232,10 +1224,13 @@ export struct PlayerInfoComponent {
           }
         } else {
           // 本分支除直板机（sm）外，亦承接阔折叠展开
-          // 竖屏（isWideFoldFull 穿透至此）—— 版式与直板机一致、全宽铺满（用户
-          // 拍板）：子组件守卫已就位（MusicInfo/Lyrics 的 !isFoldFull 字号与栅格
-          // 门控 → 直板机口径；MusicInfo 内 ComponentSize 栅格在 ≥840vp 落
-          // component-lg 回落默认 12 列满跨度 = 全宽列），尺寸随断点放大，不居中限宽。
+          // 竖屏（isWideFoldFull 穿透至此，宽高比门控）—— 版式与直板机一致、
+          // 全宽铺满（用户拍板）：子组件守卫已就位（MusicInfo/Lyrics 的
+          // !isFoldFull 字号与栅格门控 → 直板机口径；MusicInfo 内 ComponentSize
+          // 栅格在 isFoldFull 时 md 档落满 8 列零偏移 = 全宽列，lg 档回落默认
+          // 12 列满跨度同为全宽），尺寸随断点放大，不居中限宽。
+          // 常规折叠折起外屏（sm、窄长，不命中 isCompactFold）亦落此分支，维持
+          // 既有双页行为。
           Stack({ alignContent: Alignment.TopStart }) {
             // SM 固定控制区：控制区移出 Swiper 固定在底部 ——
             // 右滑切歌词页时只有封面区↔歌词区滑动，控制区静止（不能两页
@@ -1252,7 +1247,7 @@ export struct PlayerInfoComponent {
                     left: $r('app.float.common_padding'),
                     right: $r('app.float.common_padding')
                   })
-                LyricsComponent({ isShowControl: false })
+                LyricsComponent({ isShowControl: false, pageActive: this.smIndex === 1 })
                   .margin({
                     top: $r('app.float.margin_lyric')
                   })

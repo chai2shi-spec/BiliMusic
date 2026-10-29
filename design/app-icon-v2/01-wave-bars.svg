@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Wave Bars</title>
+  <desc id="desc">五根白色圆头竖条构成非对称波形包络：低、高、中、最高、最低，故意不对称以避免读成信号强度。底色电蓝 #2563EB。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#2563EB"/>
+  </g>
+
+  <g id="foreground-layer" fill="#FFFFFF">
+    <rect id="bar-1" x="210" y="380" width="76" height="264" rx="38"/>
+    <rect id="bar-2" x="342" y="284" width="76" height="456" rx="38"/>
+    <rect id="bar-3" x="474" y="352" width="76" height="320" rx="38"/>
+    <rect id="bar-4" x="606" y="218" width="76" height="588" rx="38"/>
+    <rect id="bar-5" x="738" y="396" width="76" height="232" rx="38"/>
+  </g>
+</svg>

@@ -19,6 +19,7 @@ import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
 import { initLoudnessStore } from './LoudnessStore';
+import { initIntroSkipStore } from './IntroSkipStore';
 import { initPlayerStateStore } from './PlayerStateStore';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
@@ -85,6 +86,10 @@ export class AppContainer {
     // 同步读一次小 JSON（2000 条上限 ≈ 60KB），毫秒级；
     // 未装载时 record 静默跳过、lookup 返回 null，无害降级。
     initLoudnessStore(context);
+    // 按曲「跳过开头」秒数表：filesDir/intro_skip.json 装载进内存 Map。
+    // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
+    // 查询返回 0，无害降级为「该曲目不跳过」。
+    initIntroSkipStore(context);
 
     // buvid：缺它首页推荐接口会被 412 拦下，必须早于任何页面请求装填
     initBuvidCookie();

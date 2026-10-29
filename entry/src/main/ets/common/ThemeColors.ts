@@ -58,7 +58,7 @@ export const THEME_PALETTES: ThemePalette[] = [
 ];
 
 /** 按 id 取调色板；未知 id 回落粉（THEME_PALETTES[0]） */
-export function getThemePalette(id: string): ThemePalette {
+function getThemePalette(id: string): ThemePalette {
   const found: ThemePalette | undefined =
     THEME_PALETTES.find((p: ThemePalette): boolean => p.id === id);
   return found ?? THEME_PALETTES[0];

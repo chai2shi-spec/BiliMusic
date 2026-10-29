@@ -22,12 +22,12 @@ const builders: Map<string, LazyBuilder> = new Map<string, LazyBuilder>();
 const inflight: Map<string, Promise<void>> = new Map<string, Promise<void>>();
 
 /** 取已加载页面的 builder；未加载时返回 undefined。 */
-export function getLazyBuilder(name: string): LazyBuilder | undefined {
+function getLazyBuilder(name: string): LazyBuilder | undefined {
   return builders.get(name);
 }
 
 /** 确保某路由的页面模块已加载；并发调用共用同一 Promise。 */
-export function ensureLazyPage(name: string): Promise<void> {
+function ensureLazyPage(name: string): Promise<void> {
   if (builders.has(name)) {
     return Promise.resolve<void>(undefined);
   }
@@ -76,6 +76,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.SeasonSeriesDetailPageWrapped);
       break;
     }
+    case 'CollectionDetail': {
+      const m = await import('../pages/CollectionDetailPage');
+      builders.set(name, m.CollectionDetailPageWrapped);
+      break;
+    }
     case 'WatchHistory': {
       const m = await import('../pages/WatchHistoryPage');
       builders.set(name, m.WatchHistoryPageWrapped);
@@ -99,6 +104,11 @@ async function loadByName(name: string): Promise<void> {
     case 'PlaybackSettings': {
       const m = await import('../pages/PlaybackSettingsPage');
       builders.set(name, m.PlaybackSettingsPageWrapped);
+      break;
+    }
+    case 'PlayerFuncOrder': {
+      const m = await import('../pages/PlayerFuncOrderPage');
+      builders.set(name, m.PlayerFuncOrderPageWrapped);
       break;
     }
     case 'DownloadSettings': {
@@ -143,8 +153,8 @@ async function loadByName(name: string): Promise<void> {
 
 /** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
 const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'Recent', 'Follows',
-  'UpSpace', 'SeasonSeriesDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
-  'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'PlaylistBackup', 'PlaybackLog', 'Reward', 'About', 'Login'];
+  'UpSpace', 'SeasonSeriesDetail', 'CollectionDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
+  'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'PlaylistBackup', 'PlaybackLog', 'Reward', 'About', 'Login'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

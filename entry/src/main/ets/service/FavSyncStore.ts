@@ -65,7 +65,7 @@ export function loadFavSyncStates(): FavFolderSyncState[] {
 }
 
 /** 整体覆盖写入（fire-and-forget，与项目既有落盘风格一致） */
-export function saveFavSyncStates(list: FavFolderSyncState[]): void {
+function saveFavSyncStates(list: FavFolderSyncState[]): void {
   AppPreferences.setObject<FavFolderSyncState[]>(PREF_FAV_SYNC_STATE, list)
     .catch((e: Error): void => {
       console.error(`saveFavSyncStates failed: ${e.message}`);

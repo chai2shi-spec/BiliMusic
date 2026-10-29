@@ -43,7 +43,7 @@ function sanitize(raw: string[]): string[] {
 }
 
 /** 读取加入首页的歌单 id 列表（返回副本：调用方改它不影响内部真源） */
-export function getHomePlaylistIds(): string[] {
+function getHomePlaylistIds(): string[] {
   if (idsCache === null) {
     const stored: string[] | null = AppPreferences.getObject<string[]>(PREF_HOME_PLAYLIST_CARDS);
     idsCache = sanitize(stored !== null ? stored : []);
@@ -52,7 +52,7 @@ export function getHomePlaylistIds(): string[] {
 }
 
 /** 该歌单是否已加入首页（歌单 ⋯ 菜单「加入首页 / 移出首页」文案切换依据） */
-export function isHomePlaylist(id: string): boolean {
+function isHomePlaylist(id: string): boolean {
   return getHomePlaylistIds().indexOf(id) >= 0;
 }
 
@@ -72,7 +72,7 @@ function bumpLibraryRev(): void {
  * 加入首页（追加到列表尾 = 卡行最右）。
  * @returns false = 已在首页 或 已满上限（调用方按 isHomePlaylist 先行分支自行区分提示）
  */
-export function addHomePlaylist(id: string): boolean {
+function addHomePlaylist(id: string): boolean {
   const cur: string[] = getHomePlaylistIds();
   if (cur.indexOf(id) >= 0 || cur.length >= HOME_PLAYLIST_CARDS_MAX) {
     return false;
@@ -86,7 +86,7 @@ export function addHomePlaylist(id: string): boolean {
 }
 
 /** 从首页移出（不在首页则无操作） */
-export function removeHomePlaylist(id: string): void {
+function removeHomePlaylist(id: string): void {
   const cur: string[] = getHomePlaylistIds();
   if (cur.indexOf(id) < 0) {
     return;
@@ -102,10 +102,31 @@ export function removeHomePlaylist(id: string): void {
   bumpLibraryRev();
 }
 
+/**
+ * 原位更换首页歌单卡（首页卡长按菜单「更换歌单」）：新歌单顶掉旧歌单的槽位，
+ * 卡片在行内的位置不变。remove + add 组合会把卡挪到行尾且 bump 两次 rev，
+ * 这里一次快照改写 + 一次 bump。
+ * @returns false = 旧歌单不在首页 或 新歌单已在首页
+ */
+function replaceHomePlaylist(oldId: string, newId: string): boolean {
+  const cur: string[] = getHomePlaylistIds();
+  const idx: number = cur.indexOf(oldId);
+  if (idx < 0 || cur.indexOf(newId) >= 0) {
+    return false;
+  }
+  const next: string[] = cur.slice();
+  next[idx] = newId;
+  idsCache = next;
+  persistIds();
+  bumpLibraryRev();
+  return true;
+}
+
 /** 命名空间导出：与 `SearchHistoryStore` / `LibraryStore` 保持一致的调用风格 */
 export const HomeCardStore = {
   getHomePlaylistIds,
   isHomePlaylist,
   addHomePlaylist,
-  removeHomePlaylist
+  removeHomePlaylist,
+  replaceHomePlaylist
 };

@@ -24,7 +24,7 @@ import { initLogStore, flushLogStoreNow } from '../service/PlaybackLogStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
 import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
-import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_LOUDNESS_NORM_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_CARD_OPEN_PLAYER_SEQ } from '../common/Constants';
+import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_LOUDNESS_NORM_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER } from '../common/Constants';
 
 /**
  * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
@@ -196,20 +196,24 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 应用退后台时立即把播放快照落盘。
+   * 前后台标志发布：PlayBar/CoverDisc/PlayButton 动画门控与 MusicPlayer 落盘节流
+   * （5s/30s）的依据。启动时系统也会回调本钩子，
+   * 组件 @StorageProp 默认 true 与之双保险；标志缺失一律按前台处理。
+   */
+  onForeground(): void {
+    AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
+  }
+
+  /**
+   * 应用退后台时立即把播放快照 + 最近播放进度强制落盘。
    *
    * 为什么必须有这个钩子：播放中的进度落盘走 timeUpdate 的 5s 粗节流，
    * 「正在播放 → 直接划卡杀进程」会丢最后一拍；且 onDestroy 在划卡时
    * **不保证被调**（进程可能直接被杀），onBackground 是最后一个可靠时机。
-   * savePlayerStateNow 内部 fire-and-forget，偶发失败只记日志不阻塞退后台。
+   * persistPlaybackSnapshotNow 内部 fire-and-forget，偶发失败只记日志不阻塞退后台；
+   * 最近播放进度（条目的「上次听到」位置）不走 savePlayerStateNow 里的 10s 节流，
+   * 而是 force 立写 —— 否则距上次节流写不足 10s 划走，最后一拍照样丢。
    */
-  onForeground(): void {
-    // 前后台标志：PlayBar/CoverDisc/PlayButton 动画门控与 MusicPlayer 落盘节流
-    // （5s/30s）的依据。启动时系统也会回调本钩子，
-    // 组件 @StorageProp 默认 true 与之双保险；标志缺失一律按前台处理。
-    AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
-  }
-
   onBackground(): void {
     // 退后台：动画门控关闭（animator/呼吸链冻结，回前台续转）
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, false);
@@ -220,7 +224,7 @@ export default class EntryAbility extends UIAbility {
       flushPendingLibraryPersist();
       // 应用日志同款冲刷：去抖窗口内的错误记录立即落盘。
       flushLogStoreNow();
-      MusicPlayer.getInstance().savePlayerStateNow();
+      MusicPlayer.getInstance().persistPlaybackSnapshotNow();
     } catch (e) {
       console.error(`save player state on background failed: ${JSON.stringify(e)}`);
     }
@@ -298,6 +302,15 @@ export default class EntryAbility extends UIAbility {
         // MusicPlayer.init 恢复 playbackSpeed 字段的数据源。
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED_ENABLED, settings.speedEnabled);
         AppStorage.setOrCreate(STORE_PLAYBACK_SPEED, settings.playbackSpeed);
+        // 定时停止入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_SLEEP_TIMER_ENTRY_ENABLED, settings.sleepTimerEntryEnabled);
+        // 跳过开头入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_SKIP_INTRO_ENTRY_ENABLED, settings.skipIntroEntryEnabled);
+        // 「进入 UP 主页」入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_UP_SPACE_ENTRY_ENABLED, settings.upSpaceEntryEnabled);
         // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
         // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);
@@ -308,6 +321,18 @@ export default class EntryAbility extends UIAbility {
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则关掉开关的
         // 用户启动时会先看到跳转图标再消失。
         AppStorage.setOrCreate(STORE_OPEN_IN_BILI_ENABLED, settings.openInBilibiliEnabled);
+        // 功能行功能项顺序（「自定义功能栏」排序页可改）同批首发：slice 新数组
+        // 防止 AppStorage 镜像与 Preferences 内存缓存共享引用（任一侧原地改写
+        // 会污染另一侧）；播放页 ControlAreaComponent 的 @StorageProp 初值只是占位，
+        // 真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_FUNC_ITEM_ORDER, settings.funcItemOrder.slice());
+        // 歌词居中显示开关（长按歌词面板可切）同批首发：LyricsComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则开居中的
+        // 用户启动时会先看到左对齐再跳成居中。
+        AppStorage.setOrCreate(STORE_LYRIC_CENTERED, settings.lyricCentered);
+        // 沉浸光感材质档位（外观页菜单三档选择）同批首发：MaterialTokens 档位感知
+        // 解析 + Index / SubPagePlayBar 的 @StorageProp 订阅同据此键取值。
+        AppStorage.setOrCreate(STORE_IMMERSIVE_MATERIAL_TIER, settings.immersiveMaterialTier);
         // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
         //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
         AppContainer.initRest(this.context)

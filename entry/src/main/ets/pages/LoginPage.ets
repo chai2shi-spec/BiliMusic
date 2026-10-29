@@ -613,6 +613,13 @@ export struct LoginPage {
 
   /** 第 1 步：校验手机号 → 取图形验证信息 → 进极验页 */
   private requestCaptcha(): void {
+    // 重入守卫（JS_ERROR 根因）：busy（取凭据在途，按钮禁用要等重渲染，
+    // 同帧双击可穿透）或已在极验阶段时再开一轮，会在挂载中的 Web 节点底下
+    // 把 webController 换成未关联的新实例 —— Web 仍绑旧实例，onPageEnd 的
+    // probePage 拿新实例调 runJavaScript 即抛 17100001。
+    if (this.busy || this.phase === PHASE_GEETEST) {
+      return;
+    }
     const tel: string = this.phone.trim();
     if (tel.length === 0) {
       this.phoneError = '请输入手机号';
@@ -841,17 +848,25 @@ export struct LoginPage {
    */
   private probePage(url: string): void {
     console.info(`geetest web: end ${url}`);
-    this.webController.runJavaScript(
-      'JSON.stringify({href:location.href,origin:location.origin,' +
-      'init:typeof window.initGeetest,Geetest:typeof window.Geetest,' +
-      'proxy:typeof window.appProxy,' +
-      'captchaH:(document.getElementById("captcha")||{offsetHeight:0}).offsetHeight,' +
-      'bodyH:(document.body?document.body.offsetHeight:0)})'
-    ).then((result: string): void => {
-      console.info(`geetest web: probe ${result}`);
-    }).catch((e: BusinessError): void => {
-      console.warn(`geetest web: probe failed ${e.message}`);
-    });
+    // 探针是纯诊断，绝不能炸成 JS_ERROR：runJavaScript 在 controller 未关联
+    // Web（页面切走/报错态卸载的收尾事件、或 controller 被换新实例）时同步抛
+    // 17100001，必须 try-catch 吞掉只留痕（同 fallbackLoadData 的处理）。
+    try {
+      this.webController.runJavaScript(
+        'JSON.stringify({href:location.href,origin:location.origin,' +
+        'init:typeof window.initGeetest,Geetest:typeof window.Geetest,' +
+        'proxy:typeof window.appProxy,' +
+        'captchaH:(document.getElementById("captcha")||{offsetHeight:0}).offsetHeight,' +
+        'bodyH:(document.body?document.body.offsetHeight:0)})'
+      ).then((result: string): void => {
+        console.info(`geetest web: probe ${result}`);
+      }).catch((e: BusinessError): void => {
+        console.warn(`geetest web: probe failed ${e.message}`);
+      });
+    } catch (e) {
+      const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.warn(`geetest web: probe skipped ${msg}`);
+    }
   }
 
   /**

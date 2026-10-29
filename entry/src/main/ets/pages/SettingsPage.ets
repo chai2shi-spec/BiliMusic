@@ -6,8 +6,8 @@
  *      （收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
  *   2. 设置入口卡（iOS 设置风格彩色圆角图标行，两张分组卡片）：
  *      卡 1：播放设置 / 下载与存储 / 外观设置 / 应用图标 / 歌单导入；
- *      卡 2：日志记录 / 打赏作者 / 关于本项目 / 反馈Q群（点按复制群号），
- *      点击分别推入对应二级页或执行复制。
+ *      卡 2：日志记录 / 查看更新日志 / 打赏作者 / 关于本项目 / 反馈Q群
+ *      （点按复制群号），点击分别推入对应二级页、弹更新日志弹窗或执行复制。
  *
  * 二级页（各自独立文件，懒加载注册见 service/LazyPageRegistry.ets）：
  *   · PlaybackSettingsPage（'PlaybackSettings'）—— 播放设置；
@@ -50,6 +50,7 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { showFullChangelog } from '../components/WhatsNewDialog';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
@@ -651,6 +652,14 @@ export struct SettingsPage {
               // 环形缓冲留档，三方读不到 hilog 的替代方案，详见 PlaybackLogStore）。
               this.IconEntryRow('日志记录', $r('sys.symbol.doc_text_fill'), ICON_BG_ORANGE, (): void => {
                 NavStackHolder.stack.pushPath({ name: 'PlaybackLog' });
+              })
+
+              CardDivider()
+
+              // 「查看更新日志」：原地弹全量 CHANGELOG 弹窗（WhatsNewDialog
+              // 复用，2026-10-29 自「关于」页迁入；不推二级页，即看即关）。
+              this.IconEntryRow('查看更新日志', $r('sys.symbol.list_bullet'), ICON_BG_INDIGO, (): void => {
+                showFullChangelog();
               })
 
               CardDivider()

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Headphones</title>
+  <desc id="desc">头戴耳机：半圆头梁 + 两个竖长耳垫。耳垫 140×240、圆角 56（不是全圆角胶囊，否则读成小方块），头梁加粗到 84 且端点落在耳垫内部——耳垫一旦比头梁窄就会被读成提手。底色深棕 #7C2D12。</desc>
+
+
+  <g id="foreground-layer" fill="#FFFFFF">
+    <path id="band" d="M 264 550 A 248 248 0 0 1 760 550" fill="none" stroke="#FFFFFF" stroke-width="84" stroke-linecap="round"/>
+    <rect id="cup-left" x="194" y="490" width="140" height="240" rx="56"/>
+    <rect id="cup-right" x="690" y="490" width="140" height="240" rx="56"/>
+  </g>
+</svg>

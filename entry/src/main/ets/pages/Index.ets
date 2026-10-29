@@ -110,6 +110,7 @@ import { PlayBar } from '../components/PlayBar';
 import { SubPagePlayBar } from '../components/SubPagePlayBar';
 import { AppToast, showAppToast } from '../components/AppToast';
 import { AppDialogHost, showAppAlertDialog } from '../components/AppAlertDialog';
+import { WhatsNewDialogHost, maybeShowWhatsNew } from '../components/WhatsNewDialog';
 import { abilityAccessCtrl, bundleManager, Permissions } from '@kit.AbilityKit';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { MaterialTokens } from '../common/style/MaterialTokens';
@@ -133,6 +134,9 @@ import {
   STORE_BAR_LAYOUT,
   STORE_DL_BAR_HAS_TASKS,
   STORE_DL_BAR_SELECTING,
+  STORE_DL_EXIT_SELECT_REQUEST,
+  STORE_PL_BAR_SELECTING,
+  STORE_PL_EXIT_SELECT_REQUEST,
   GLOW_ALPHA,
   STORE_THEME_PRIMARY,
   STORE_MINI_BAR_ANIM_PHASE,
@@ -166,10 +170,11 @@ import {
   STORE_STARTUP_HINT_MSG,
   STORE_STARTUP_HINT_SEQ,
   STORE_BT_PERM_REQ_SEQ,
-  STORE_CARD_OPEN_PLAYER_SEQ
+  STORE_CARD_OPEN_PLAYER_SEQ,
+  STORE_IMMERSIVE_MATERIAL_TIER
 } from '../common/Constants';
 import { PLAYER_MAIN_CURVE, PLAYER_SLIDE_CURVE, SLIDE_CLOSE_MS } from '../common/constants/InteractionConstants';
-import { PLAYER_CLOSE_STYLE_SLIDE } from '../model/MusicModels';
+import { PLAYER_CLOSE_STYLE_SLIDE, IMMERSIVE_TIER_EXQUISITE } from '../model/MusicModels';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
@@ -353,6 +358,14 @@ struct Index {
    * 显式交互不受影响。默认开（保持手势上线以来的既有行为）。
    */
   @StorageProp(STORE_MINI_BAR_AUTO_EXPAND) miniBarAutoExpand: boolean = true;
+
+  /**
+   * 沉浸光感材质档位（设置 → 外观「沉浸光感材质」三档选择，AppSettings.
+   * immersiveMaterialTier 的运行时镜像，EntryAbility 首帧前首发真值）：
+   * exquisite / gentle / smooth。@StorageProp 变化触发重渲染，
+   * barFloatingStyle 内容键含它 → 受控重建即时生效。
+   */
+  @StorageProp(STORE_IMMERSIVE_MATERIAL_TIER) materialTier: string = IMMERSIVE_TIER_EXQUISITE;
 
   /**
    * ══════════ 播放页组件状态切换动画 ══════════
@@ -771,6 +784,14 @@ struct Index {
   @StorageProp(STORE_DL_BAR_SELECTING) dlSelecting: boolean = false;
 
   /**
+   * 歌单页多选态镜像（机制同 dlSelecting）：onBackPress 据此判定
+   * 「当前页签处于选择模式」—— 选择模式下系统/手势返回先退多选留在应用，
+   * 对齐二级页（PlaylistDetail / UpSpacePage）.onBackPressed 的多选优先拦截。
+   * 写入口在 PlaylistsPage，本组件只读。
+   */
+  @StorageProp(STORE_PL_BAR_SELECTING) plSelecting: boolean = false;
+
+  /**
    * 下载页顶栏镜像：有无任务 —— 决定标题行「选择」按钮显隐
    * 与 bottomBuilder 工具条的门控。写入口在 DownloadsPage.syncBarState，
    * 本组件只读（@StorageProp 单向）。
@@ -812,16 +833,6 @@ struct Index {
   /** 本次屏幕滑动是否已消费（一次手势只触发一次收/放） */
   private screenPanConsumed: boolean = false;
 
-  /**
-   * 设备是否支持 HDS 的 IMMERSIVE 材质类型。
-   *
-   * ⚠️ 官方要求：未查询设备材质能力就直接选 EXQUISITE 精美档，在不支持的设备上会卡顿发热。
-   * 所以先探测，不支持就用 ADAPTIVE 交给系统自适应。
-   * 取值只在 aboutToAppear 里算一次（构造期调系统能力有失败风险），之后不变，
-   * 因此用普通成员而非 @State —— 它不参与刷新（render 时读到的一定是探测后的值）。
-   */
-  private useExquisiteMaterial: boolean = false;
-
   /** 主窗口句柄，只用于注销 avoidAreaChange 监听 */
   private mainWindow: window.Window | null = null;
 
@@ -855,8 +866,6 @@ struct Index {
     // 「信号先写、本页后挂」场景，@StorageProp 初值同步不触发 @Watch。
     this.btPermReqSeq = AppStorage.get<number>(STORE_BT_PERM_REQ_SEQ) ?? 0;
     this.consumeBtPermRequest();
-    // 先探测材质能力：barFloatingStyle() 在首帧 build 时就要用到它
-    this.useExquisiteMaterial = MaterialCompat.supportsImmersiveMaterial();
     // 断点要先于子页注册：register 会同步把当前断点写进 AppStorage，
     // 各 Tab 页 aboutToAppear 时的 @StorageProp 初始值就是正确断点，首帧不跳变。
     this.breakpointSystem.register(this.getUIContext());
@@ -913,6 +922,12 @@ struct Index {
     setTimeout((): void => {
       preloadAllLazyPages();
     }, 1500);
+    // 新版本首启更新内容弹窗：同样延迟 1.5s 避让冷启动（断网 toast、miniBar
+    // 补刀、首页骨架屏），首帧稳定后再弹；maybeShowWhatsNew 内部比对
+    // PREF_LAST_SEEN_VERSION，未升级 / 已看过 / 全量 try-catch 静默返回。
+    setTimeout((): void => {
+      maybeShowWhatsNew();
+    }, 1500);
     // 一次性启动提示补播：MSG 已写而本组件后挂的场景；
     // @StorageProp 初值同步不触发 @Watch，见 startupHintSeq 注释
     this.onStartupHint();
@@ -954,13 +969,29 @@ struct Index {
   }
 
   /**
-   * 系统返回拦截：播放页 overlay 开启时返回 = 收起播放页（逆向镜像），
-   * 不走路由栈（播放页不是 NavDestination）。
-   * 收起进行中（mounted 但未 open）也吞掉返回 —— closePlayer 内部幂等。
+   * 系统返回拦截（优先级从高到低）：
+   *   · 播放页 overlay 打启时返回 = 收起播放页（逆向镜像），不走路由栈
+   *     （播放页不是 NavDestination）。收起进行中（mounted 但未 open）也吞掉
+   *     返回 —— closePlayer 内部幂等；
+   *   · 当前页签（歌单 / 下载）处于选择模式：派发退出多选请求
+   *     （STORE_PL/DL_EXIT_SELECT_REQUEST seq 递增，页签页 @Watch 消费 →
+   *     selecting=false + 清空选区），留在本页签 —— 二级页
+   *     （PlaylistDetail / UpSpacePage）.onBackPressed 同款行为；
+   *   · 其余走默认（根页返回 = 退出应用）。
    */
   onBackPress(): boolean {
     if (this.playerOpen || this.playerOverlayMounted) {
       this.closePlayer();
+      return true;
+    }
+    if (this.activeTab === TAB_PLAYLISTS && this.plSelecting) {
+      AppStorage.setOrCreate(STORE_PL_EXIT_SELECT_REQUEST,
+        (AppStorage.get<number>(STORE_PL_EXIT_SELECT_REQUEST) ?? 0) + 1);
+      return true;
+    }
+    if (this.activeTab === TAB_DOWNLOADS && this.dlSelecting) {
+      AppStorage.setOrCreate(STORE_DL_EXIT_SELECT_REQUEST,
+        (AppStorage.get<number>(STORE_DL_EXIT_SELECT_REQUEST) ?? 0) + 1);
       return true;
     }
     return false;
@@ -1146,7 +1177,7 @@ struct Index {
       sideMargin = BAR_SIDE_MARGIN_LG;
     }
     const key: string = `${this.navBarBottom}|${this.navIndicatorBottom}`
-      + `|${this.useExquisiteMaterial ? 1 : 0}`
+      + `|${this.materialTier}`
       + `|${this.themePrimary}|${this.barLayout}|${this.queue.length > 0 ? 1 : 0}`
       + `|${expandedNow ? 1 : 0}|${sideMargin ?? 0}`
       + `|${this.subPageActive ? 1 : 0}`;
@@ -1182,11 +1213,13 @@ struct Index {
         }
         : undefined,
       systemMaterialEffect: {
-        // 材质类型/档位抽入 MaterialTokens 令牌，
+        // 材质类型/档位抽入 MaterialTokens 令牌（档位感知：exquisite / gentle /
+        // smooth 三档，设备不支持时解析层回落自适应兜底），
         // 与 SubPagePlayBar / HdsTitleBarStyle 同源。
-        materialType: MaterialTokens.BAR_MATERIAL_TYPE,
+        materialType: MaterialTokens.barMaterialType(),
         materialLevel: MaterialTokens.materialLevel()
       },
+      // 光晕：固定主题色 12%（GLOW_ALPHA），随材质透出。
       lightColor: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA)
     };
     // 互斥：二级页在顶时摘除 miniBar（反正被 push 出的 NavDestination 盖住），
@@ -1681,6 +1714,10 @@ struct Index {
       // 全局弹窗宿主：本身不渲染任何内容，只承载两个 CustomDialogController
       //（controller 必须在 @Component 内定义才有效，见 components/AppAlertDialog.ets）
       AppDialogHost()
+
+      // 版本更新内容弹窗宿主（What's New）：同 AppDialogHost，仅承载 controller
+      //（首启触发与「关于」页历史入口都经 components/WhatsNewDialog.ets 的模块级函数）
+      WhatsNewDialogHost()
     }
     .width('100%')
     .height('100%')

@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>听歌日记 · 页面设计原型（BiliMusic）</title>
+<style>
+/* ══════════════════════════════════════════════════════════
+   外壳沿用 design/搜索页视觉优化-交互原型.html 的既定惯例：
+   深色舞台 + 手机原型。原型内部色值全部来自
+   entry/src/main/resources/{base,dark}/element/color.json 与
+   common/ThemeColors.ts 的 8 套主题。
+   ══════════════════════════════════════════════════════════ */
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:#17171B;color:#E8E8EC;
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  line-height:1.5;padding:0 0 70px;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+.doc-head{padding:38px 0 20px}
+.doc-head h1{font-size:24px;font-weight:600;letter-spacing:.2px}
+.doc-head .sub{font-size:13px;color:#93939E;margin-top:8px;max-width:820px}
+.doc-head .meta{font-size:11px;color:#6E6E7A;margin-top:12px;font-family:ui-monospace,Consolas,monospace}
+.tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:6px}
+.tag{font-size:11px;padding:3px 10px;border-radius:999px;background:#26262E;color:#B9B9C4;border:1px solid #33333D}
+.tag.pk{background:rgba(251,114,153,.14);color:#FB7299;border-color:rgba(251,114,153,.3)}
+
+.toolbar{position:sticky;top:0;z-index:60;background:rgba(23,23,27,.9);backdrop-filter:blur(18px);
+  border-top:1px solid #2A2A32;border-bottom:1px solid #2A2A32}
+.toolbar-in{max-width:1180px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.tgroup{display:flex;align-items:center;gap:8px}
+.tlabel{font-size:11px;color:#6E6E7A;letter-spacing:.4px}
+.segctl{display:flex;background:#22222A;border-radius:9px;padding:2px;gap:2px}
+.segctl button{font:inherit;font-size:12px;color:#A9A9B4;background:transparent;border:0;cursor:pointer;
+  padding:5px 11px;border-radius:7px;transition:background .16s,color .16s}
+.segctl button.on{background:#FB7299;color:#3D0018;font-weight:600}
+.swatches{display:flex;gap:6px}
+.sw{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;
+  outline:1px solid rgba(255,255,255,.14);outline-offset:-1px;transition:transform .14s,border-color .14s}
+.sw:hover{transform:scale(1.14)}
+.sw.on{border-color:#fff;transform:scale(1.14)}
+
+.stage{display:flex;gap:52px;justify-content:center;align-items:flex-start;margin-top:26px;flex-wrap:wrap}
+.pane{display:flex;flex-direction:column;align-items:center;gap:12px}
+.pane-head{display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;letter-spacing:.3px}
+.badge.b-a{background:rgba(251,114,153,.16);color:#FB7299}
+.badge.b-b{background:#2E2E37;color:#9C9CA8}
+.pane-title{font-size:13px;color:#C9C9D2}
+
+/* ── 手机外壳 ── */
+.phone{
+  width:356px;height:760px;position:relative;overflow:hidden;
+  border-radius:34px;background:#000;border:8px solid #2A2A31;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  --n-bgpage:#F5F5F5;--n-bgcard:#FFFFFF;--n-divider:#E8E8EC;
+  --n-tp:#1A1A1A;--n-ts:#6B6B70;--n-tt:#8A8A90;--n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06);--n-glass:rgba(255,255,255,.72);
+  --deep:var(--deepL);--surface:var(--surL);
+}
+.phone[data-mode="dark"]{
+  --n-bgpage:#121216;--n-bgcard:#1E1E24;--n-divider:#33333C;
+  --n-tp:#F5F5F7;--n-ts:#ABABB5;--n-tt:#83838F;--n-td:#55555F;
+  --n-press:rgba(255,255,255,.08);--n-glass:rgba(30,30,36,.74);
+  --deep:var(--deepD);--surface:var(--surD);
+}
+
+.statusbar{position:absolute;top:0;left:0;right:0;height:40px;z-index:14;
+  display:flex;align-items:center;justify-content:space-between;padding:0 22px 0 26px;
+  font-size:12px;font-weight:600;color:var(--n-tp);background:var(--n-bgpage)}
+.statusbar .ic{display:flex;align-items:center;gap:4px}
+.statusbar svg{display:block}
+
+.titlebar{position:absolute;top:40px;left:0;right:0;height:56px;z-index:13;
+  display:flex;align-items:center;padding:0 16px;background:var(--n-bgpage)}
+.backbtn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--n-tp);margin-left:-10px}
+.title{font-size:20px;font-weight:700;color:var(--n-tp);letter-spacing:.2px;margin-left:6px}
+
+/* 内容区 */
+.screen{position:absolute;inset:0;padding-top:96px;background:var(--n-bgpage);
+  overflow-y:auto;overflow-x:hidden;scrollbar-width:none}
+.screen::-webkit-scrollbar{display:none}
+
+/* ── 周期分段（CapsuleSegmentButtonV2 口径：底 divider，选中实底 brand） ── */
+.segwrap{padding:4px 16px 0}
+.seg{width:268px;margin:0 auto;height:32px;border-radius:8px;background:var(--n-divider);
+  display:flex;align-items:center;padding:2px;gap:2px}
+.segitem{flex:1;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:var(--n-ts);cursor:pointer;transition:background .18s,color .18s;border:0;background:transparent;font-family:inherit}
+.segitem.on{background:var(--brand);color:var(--on);font-weight:500}
+
+/* ── 周期翻页行 ── */
+.pager{height:44px;display:flex;align-items:center;justify-content:center;gap:2px;position:relative}
+.pager .arrow{width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--n-ts);cursor:pointer}
+.pager .arrow.dim{color:var(--n-td);cursor:default}
+.pager .range{font-size:13px;color:var(--n-ts);letter-spacing:.2px}
+
+/* ── 主视觉封面（B 站封面是 16:9 横图，单张满宽 + 指示点，不用三卡出血） ── */
+.hero{position:relative;margin:4px 16px 0;height:152px;border-radius:12px;overflow:hidden;
+  background:#2A2A32;box-shadow:0 10px 26px rgba(0,0,0,.26)}
+.hero .art{position:absolute;inset:0}
+.hero .scrim{position:absolute;left:0;right:0;bottom:0;height:62%;
+  background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0))}
+.hero .chip{position:absolute;left:10px;top:10px;font-size:11px;font-weight:600;color:#fff;
+  background:rgba(0,0,0,.42);border-radius:999px;padding:2px 9px;backdrop-filter:blur(6px)}
+.hero .ht{position:absolute;left:12px;right:12px;bottom:26px;color:#fff;font-size:16px;font-weight:600;
+  line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px rgba(0,0,0,.5)}
+.hero .hs{position:absolute;left:12px;right:12px;bottom:8px;color:rgba(255,255,255,.82);font-size:11px;line-height:15px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dots{display:flex;justify-content:center;gap:5px;padding-top:11px}
+.dots i{width:5px;height:5px;border-radius:50%;background:var(--n-td);opacity:.6}
+.dots i.on{background:var(--brand);opacity:1;width:14px;border-radius:3px}
+
+/* ── 一句话 ── */
+.line{font-size:13px;color:var(--n-ts);text-align:center;padding:12px 32px 0;line-height:18px}
+
+/* ── 四个数字 ── */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);padding:16px 12px 4px}
+.kpi{text-align:center;min-width:0}
+.kpi .num{font-size:24px;font-weight:600;color:var(--n-tp);line-height:32px;letter-spacing:-.4px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.kpi .lab{font-size:11px;color:var(--n-tt);line-height:15px;margin-top:1px;white-space:nowrap}
+
+/* ── 卡片 ── */
+.card{margin:16px 16px 0;border-radius:12px;padding:14px 14px 10px;background:var(--surface)}
+.cardhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px}
+.cardhead h3{font-size:16px;font-weight:600;color:var(--n-tp);letter-spacing:.1px}
+.cardhead .hint{font-size:13px;color:var(--deep);font-weight:500}
+
+/* 柱状图 */
+.chart{position:relative;height:92px;display:flex;align-items:flex-end;gap:0}
+.bar{flex:1;display:flex;justify-content:center;align-items:flex-end;height:100%}
+.bar i{width:14px;border-radius:8px;background:var(--brand);opacity:.24;transition:height .35s cubic-bezier(.3,.9,.3,1)}.bar.peak i{opacity:1}
+.avgs{position:absolute;left:0;right:0;border-top:1px dashed;border-color:var(--brand);opacity:.55}
+.axis{display:flex;margin-top:8px}
+.axis span{flex:1;text-align:center;font-size:11px;color:var(--n-tt);line-height:15px}
+.fn{font-size:11px;color:var(--n-tt);line-height:15px;padding-top:7px}
+
+/* ── 区块标题 ── */
+.sec{padding:22px 16px 0}
+.sechead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px}
+.sechead h3{font-size:18px;font-weight:600;color:var(--n-tp);letter-spacing:.1px}
+.sechead .more{font-size:13px;color:var(--deep);padding:4px 0 4px 12px;cursor:pointer}
+
+/* 循环榜 */
+.rankrow{display:flex;align-items:center;gap:12px;height:60px;cursor:pointer;position:relative}
+.rankrow::after{content:"";position:absolute;left:56px;right:0;bottom:0;height:1px;background:var(--n-divider)}
+.rankrow:last-child::after{display:none}
+.rk{width:24px;flex:none;font-size:24px;font-weight:600;line-height:28px;color:var(--n-tt);opacity:.72;
+  letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.rk.top{color:var(--brand);opacity:1}
+.rcover{width:44px;height:44px;border-radius:8px;flex:none;position:relative;overflow:hidden;background:#2A2A32}
+.rtxt{flex:1;min-width:0}
+.rtitle{font-size:16px;color:var(--n-tp);line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rsub{font-size:13px;color:var(--n-ts);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rcnt{flex:none;text-align:right;font-size:18px;font-weight:600;color:var(--n-tp);line-height:25px;font-variant-numeric:tabular-nums}
+.rcnt em{font-style:normal;font-size:11px;font-weight:400;color:var(--n-tt);margin-left:2px}
+
+/* 常听 UP 主 */
+.ups{display:flex;gap:8px;padding-top:8px}
+.up{flex:1;min-width:0;text-align:center}
+.up .av{width:60px;height:60px;border-radius:50%;margin:0 auto;position:relative;overflow:hidden;background:#2A2A32}
+.up .nm{font-size:13px;color:var(--n-tp);line-height:18px;margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.up .hr{font-size:11px;color:var(--n-tt);line-height:15px}
+
+/* 新面孔 */
+.face{display:flex;align-items:center;gap:12px;margin:22px 16px 0;padding:12px 14px;
+  border-radius:12px;background:var(--n-bgcard);cursor:pointer}
+.avs{display:flex}
+.avs i{width:28px;height:28px;border-radius:50%;border:2px solid var(--n-bgcard);margin-left:-8px}
+.avs i:first-child{margin-left:0}
+.avs i:nth-child(1){background:linear-gradient(135deg,#0891B2,#22D3EE 60%,#A7F3D0)}
+.avs i:nth-child(2){background:linear-gradient(135deg,#B45309,#F59E0B 60%,#FDE68A)}
+.avs i:nth-child(3){background:linear-gradient(135deg,#4338CA,#818CF8 60%,#C7D2FE)}
+.face .ft{flex:1;min-width:0}
+.face .f1{font-size:16px;color:var(--n-tp);line-height:22px}
+.face .f2{font-size:13px;color:var(--n-ts);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.face .go{color:var(--n-td);display:flex}
+
+/* 底部主按钮 */
+.cta{margin:22px 16px 0;width:calc(100% - 32px);height:44px;border-radius:999px;border:0;
+  background:var(--brand);color:var(--on);font-size:16px;font-weight:500;font-family:inherit;cursor:pointer}
+.tail{height:170px}
+
+/* ── 悬浮播放条（SubPagePlayBar 简化示意） ── */
+.playbar{position:absolute;left:12px;right:12px;bottom:14px;height:54px;z-index:20;
+  border-radius:27px;background:var(--n-glass);backdrop-filter:blur(20px) saturate(160%);
+  box-shadow:0 8px 24px rgba(0,0,0,.18),0 0 0 1px var(--n-divider) inset;
+  display:flex;align-items:center;gap:10px;padding:0 8px 0 7px}
+.playbar .pc{width:40px;height:40px;border-radius:50%;overflow:hidden;flex:none;position:relative;background:#2A2A32}
+.playbar .pt{flex:1;min-width:0}
+.playbar .p1{font-size:13px;color:var(--n-tp);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.playbar .p2{font-size:11px;color:var(--n-tt);line-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.playbar .pp{width:40px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--n-tp)}
+
+/* 封面配色（占位渐变，替代真实视频封面；取中间调，缩到 44px 仍能读出「是一张图」而不是黑块） */
+.art{position:absolute;inset:0}
+.art.a1{background:linear-gradient(135deg,#7A1F45,#C2255E 48%,#F472B6 82%,#FBCFE8)}
+.art.a2{background:linear-gradient(135deg,#0891B2,#22D3EE 55%,#A7F3D0)}
+.art.a3{background:linear-gradient(135deg,#EA580C,#FB923C 55%,#FDE68A)}
+.art.a4{background:linear-gradient(135deg,#1D4ED8,#60A5FA 55%,#BFDBFE)}
+.art.a5{background:linear-gradient(135deg,#BE185D,#F472B6 55%,#FBCFE8)}
+.art.a6{background:linear-gradient(135deg,#15803D,#4ADE80 55%,#BBF7D0)}
+.art.a7{background:linear-gradient(135deg,#B45309,#F59E0B 55%,#FDE68A)}
+.art.a8{background:linear-gradient(135deg,#4338CA,#818CF8 55%,#C7D2FE)}
+
+/* 底部渐隐：机身下沿会硬裁切正在滚动的行，加一层与页底同色的渐隐让收边自然 */
+.phone::after{content:'';position:absolute;left:0;right:0;bottom:0;height:26px;z-index:15;
+  pointer-events:none;background:linear-gradient(to top,var(--n-bgpage) 54%,transparent)}
+.phone.long::after{display:none}
+
+/* 长图模式：同一份 DOM，去掉滚动裁切，一次看完整页 */
+.phone.long{height:auto;overflow:visible}
+.phone.long .screen{position:relative;inset:auto;height:auto;overflow:visible;padding-bottom:8px}
+.phone.long .playbar{display:none}
+.phone.long .tail{height:26px}
+.longstage{margin-top:44px;display:none;justify-content:center}
+/* 只看长图（#long）：供逐像素复核用 */
+body.onlylong{padding:0;background:#F5F5F5}
+body.onlylong .doc-head,body.onlylong .toolbar,
+body.onlylong .stage:not(.longstage),body.onlylong .notes{display:none}
+body.onlylong .longstage{margin-top:0;display:block;width:356px;margin-left:auto;margin-right:auto}
+body.onlylong .pane{width:356px;align-items:stretch;display:block}
+body.onlylong .pane-head{display:none}
+body.onlylong .phone{border:0;border-radius:0;box-shadow:none}
+
+/* ── 下方说明区 ── */
+.notes{max-width:1180px;margin:46px auto 0;padding:0 24px}
+.notes h2{font-size:15px;font-weight:600;margin-bottom:12px;color:#D9D9E2}
+.ncards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.ncard{background:#1D1D24;border:1px solid #2A2A32;border-radius:12px;padding:14px 16px}
+.ncard h4{font-size:13px;font-weight:600;color:#E8E8EC;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.ncard p{font-size:12px;color:#9C9CA8;line-height:1.75}
+.ncard code{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:#26262E;padding:1px 5px;border-radius:4px;color:#C9C9D2}
+.ncard b{color:#E0E0E8;font-weight:600}
+.k{color:#FB7299}
+</style>
+</head>
+<body data-mode="light">
+
+<div class="wrap">
+  <div class="doc-head">
+    <h1>听歌日记 · 页面设计原型</h1>
+    <div class="sub">
+      BiliMusic 的本地听歌数据回顾页。数据全部来自本机播放行为（<code>Track.playedAt</code> / <code>lastPosSec</code> / <code>duration</code>），
+      不依赖账号、不做云端聚合。图形沿用 App 既有令牌，8 套主题色、深浅双模式自动适配。
+    </div>
+    <div class="meta">画布 360×780vp（原型按 356×760 呈现） · 字号仅取 24/20/18/16/13/11 · 区块间距 24 · 页边距 16 · 卡圆角 12</div>
+    <div class="tags">
+      <span class="tag pk">周 / 日 / 月 / 年 四周期</span>
+      <span class="tag">16:9 横版封面墙</span>
+      <span class="tag">节奏柱状图（柱数随周期变）</span>
+      <span class="tag">8 主题色适配</span>
+      <span class="tag">底部避让 160vp</span>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar-in">
+      <div class="tgroup"><span class="tlabel">主题色</span><div class="swatches" id="sw"></div></div>
+      <div class="tgroup"><span class="tlabel">明暗</span>
+        <div class="segctl" id="modeCtl">
+          <button data-m="light" class="on">浅色</button>
+          <button data-m="dark">深色</button>
+        </div>
+      </div>
+      <div class="tgroup"><span class="tlabel">周期</span>
+        <div class="segctl" id="periodCtl">
+          <button data-p="day">日</button>
+          <button data-p="week" class="on">周</button>
+          <button data-p="month">月</button>
+          <button data-p="year">年</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="pane">
+      <div class="pane-head"><span class="badge b-a">浅色模式</span><span class="pane-title">听歌日记 · 周</span></div>
+      <div class="phone" data-mode="light" id="phLight"></div>
+    </div>
+    <div class="pane">
+      <div class="pane-head"><span class="badge b-b">深色模式</span><span class="pane-title">同一套令牌，深色自动取值</span></div>
+      <div class="phone" data-mode="dark" id="phDark"></div>
+    </div>
+  </div>
+</div>
+
+  <div class="stage longstage">
+    <div class="pane">
+      <div class="pane-head"><span class="badge b-b">完整页面 · 长图</span><span class="pane-title">周视图全貌（含底部播放条避让）</span></div>
+      <div class="phone long" data-mode="light" id="phLong"></div>
+    </div>
+  </div>
+
+  <div class="notes" style="margin-top:34px">
+    <h2>三处关键取舍</h2>
+  <div class="ncards">
+    <div class="ncard">
+      <h4>① 封面墙必须横着放</h4>
+      <p>参考稿是三张<b>竖版人像</b>，那是专辑封面逻辑。B 站音乐封面来自视频缩略图，全部是 <b>16:9 横图</b>。照搬竖版只能裁掉两侧，
+      人像、字幕、构图全毁。所以改成<b>横卡轮播</b>：中间 216×122 主卡，左右各露 38px 侧卡降到 45% 不透明度，
+      既是轮播语义，也保住了封面的原始构图。</p>
+    </div>
+    <div class="ncard">
+      <h4>② 柱状图的柱数要跟着周期变</h4>
+      <p>参考稿固定 7 根。但选了「日」就是 24 根（按小时）、「月」5 根（按周）、「年」12 根（按月）。
+      柱宽固定 14，<b>柱数变、坐标轴标签按密度抽稀</b>（24 根时只标 0/6/12/18），
+      峰值柱实心、其余 24% 不透明度——一根柱子就能读出「哪天最多」。</p>
+    </div>
+    <div class="ncard">
+      <h4>③ 品牌色只落在四个地方</h4>
+      <p>按设计规范，<code>#FB7299</code> 自身对比度仅 2.20:1，白底小字禁止使用。全页只有：<b>分段选中块</b>、
+      <b>柱状图</b>、<b>榜单第 1 名序号</b>、<b>底部主按钮</b>。所有 13px 的「全部 ›」「周五最多」一律走
+      <code>brand_deep</code>（5.81:1），深色模式自动切 <code>#FF8BAC</code>。</p>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════ 8 套主题（逐字来自 common/ThemeColors.ts） ══════════ */
+const THEMES = [
+  {id:'pink',  label:'粉', primary:'#FB7299', deepL:'#C2185B', deepD:'#FF8BAC', surL:'#FFF1F5', surD:'#33222B', on:'#3D0018'},
+  {id:'red',   label:'红', primary:'#E5484D', deepL:'#C62828', deepD:'#FF8A80', surL:'#FFF3F3', surD:'#332020', on:'#3D0006'},
+  {id:'orange',label:'橙', primary:'#F57C00', deepL:'#C05600', deepD:'#FFB74D', surL:'#FFF5EC', surD:'#33261A', on:'#3D1F00'},
+  {id:'yellow',label:'黄', primary:'#F5A623', deepL:'#B07C00', deepD:'#FFD54F', surL:'#FFF9E6', surD:'#33301A', on:'#3D2E00'},
+  {id:'green', label:'绿', primary:'#43A047', deepL:'#2E7D32', deepD:'#81C995', surL:'#F0F7F0', surD:'#1F3320', on:'#00330D'},
+  {id:'cyan',  label:'青', primary:'#00A5B5', deepL:'#00707F', deepD:'#4DD0E1', surL:'#EDF8F9', surD:'#1A2E33', on:'#00303A'},
+  {id:'blue',  label:'蓝', primary:'#00AEEC', deepL:'#00688F', deepD:'#64C8F0', surL:'#EDF7FC', surD:'#1A2733', on:'#002A3D'},
+  {id:'purple',label:'紫', primary:'#8E24AA', deepL:'#6A1B9A', deepD:'#CE93D8', surL:'#F7F0FA', surD:'#2C1F33', on:'#2E0033'}
+];
+
+/* ══════════ 四套周期数据（口径见设计文档 §5） ══════════ */
+const DATA = {
+  day: {
+    range:'10月25日 周六',
+    chip:'今日封面',
+    line:'这一天你把《夜行》听了 4 遍',
+    kpis:[['2.1','小时'],['38','次播放'],['24','首歌曲'],['9','位 UP 主']],
+    axisLabel:'小时',
+    chart:{n:24, labels:{0:'0',6:'6',12:'12',18:'18',23:'23'}, vals:[0,0,0,0,0,0,0,0,12,18,10,6,26,34,22,40,52,68,96,100,84,58,30,14], peak:19, avg:38, avgLabel:'日均 2.1h'},
+    top:[['夜行','三无 Marblue · 听了 4 次','4'],['Lemon','泠鸢 yousa · 听了 3 次','3'],['打上花火','Hanser · 听了 2 次','2']],
+    ups:[['三无 Marblue','1.1 小时'],['泠鸢 yousa','0.6 小时'],['Hanser','0.4 小时']],
+    face:['今天新听到 2 位 UP 主','第一次听 · 已加入推荐']
+  },
+  week: {
+    range:'10月19日 — 10月25日',
+    chip:'本周封面',
+    line:'这一周，你反复遇见了 3 首歌',
+    kpis:[['12.4','小时'],['186','次播放'],['74','首歌曲'],['5','天听歌']],
+    axisLabel:'星期',
+    chart:{n:7, labels:{0:'一',1:'二',2:'三',3:'四',4:'五',5:'六',6:'日'}, vals:[44,20,66,38,100,74,58], peak:4, avg:57, avgLabel:'日均 1.8h'},
+    top:[['夜行','三无 Marblue · 听了 6 天','28'],['Lemon','泠鸢 yousa · 听了 5 天','24'],['打上花火','Hanser · 听了 4 天','19']],
+    ups:[['三无 Marblue','4.2 小时'],['泠鸢 yousa','3.1 小时'],['Hanser','2.4 小时']],
+    face:['本周新面孔','6 位 UP 主 · 第一次出现在你的列表']
+  },
+  month: {
+    range:'2026 年 10 月',
+    chip:'本月封面',
+    line:'这个月你听了 213 首歌，41 首只听过一次',
+    kpis:[['48.6','小时'],['742','次播放'],['213','首歌曲'],['18','天听歌']],
+    axisLabel:'周',
+    chart:{n:5, labels:{0:'第1周',1:'第2周',2:'第3周',3:'第4周',4:'第5周'}, vals:[62,88,100,74,46], peak:2, avg:74, avgLabel:'周均 12.2h'},
+    top:[['夜行','三无 Marblue · 听了 14 天','96'],['Lemon','泠鸢 yousa · 听了 11 天','83'],['打上花火','Hanser · 听了 9 天','71']],
+    ups:[['三无 Marblue','16.8 小时'],['泠鸢 yousa','12.4 小时'],['Hanser','9.6 小时']],
+    face:['本月新面孔','23 位 UP 主 · 第一次出现在你的列表']
+  },
+  year: {
+    range:'2026 年',
+    chip:'年度封面',
+    line:'这一年你听了 1,284 首歌，最长的一天 6.2 小时',
+    kpis:[['512','小时'],['8,932','次播放'],['1,284','首歌曲'],['214','天听歌']],
+    axisLabel:'月',
+    chart:{n:12, labels:{0:'1',3:'4',6:'7',9:'10',11:'12'}, vals:[38,44,52,48,62,74,88,96,100,72,58,46], peak:8, avg:65, avgLabel:'月均 42.7h'},
+    top:[['夜行','三无 Marblue · 听了 132 天','864'],['Lemon','泠鸢 yousa · 听了 98 天','712'],['打上花火','Hanser · 听了 76 天','538']],
+    ups:[['三无 Marblue','126 小时'],['泠鸢 yousa','94 小时'],['Hanser','78 小时']],
+    face:['今年新面孔','218 位 UP 主 · 第一次出现在你的列表']
+  }
+};
+
+const state = { theme:'pink', period:'week' };
+
+/* 支持 #day / #month / #year / #long 直达（复核用，不影响交互） */
+(function () {
+  const h = (location.hash || '').toLowerCase();
+  if (h.indexOf('day') >= 0) state.period = 'day';
+  else if (h.indexOf('month') >= 0) state.period = 'month';
+  else if (h.indexOf('year') >= 0) state.period = 'year';
+})();
+
+/* ══════════ 骨架模板 ══════════ */
+const ICON_BACK = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>';
+const ICON_CHEV = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>';
+const ICON_PREV = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>';
+const ICON_PAUSE = '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.6"/><rect x="14" y="5" width="4" height="14" rx="1.6"/></svg>';
+
+function shellHTML(){
+  return `
+  <div class="statusbar">
+    <span>9:41</span>
+    <span class="ic">
+      <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 9.2l2.2-2.4a3.1 3.1 0 00-4.4 0L8 9.2zM8 5.6a5.7 5.7 0 014 1.7l1.4-1.5A7.7 7.7 0 008 3.4a7.7 7.7 0 00-5.4 2.4L4 7.3a5.7 5.7 0 014-1.7z"/></svg>
+      <svg width="25" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0.5" y="0.5" width="20" height="11" rx="3" stroke="currentColor" fill="none" opacity=".4"/><rect x="2" y="2" width="15" height="8" rx="2"/><path d="M22.4 4.2v3.6c1.1-.3 1.6-1 1.6-1.8s-.5-1.5-1.6-1.8z"/></svg>
+    </span>
+  </div>
+  <div class="titlebar">
+    <div class="backbtn">${ICON_BACK}</div>
+    <div class="title">听歌日记</div>
+  </div>
+  <div class="screen">
+    <div class="segwrap">
+      <div class="seg">
+        <button class="segitem" data-p="day">日</button>
+        <button class="segitem on" data-p="week">周</button>
+        <button class="segitem" data-p="month">月</button>
+        <button class="segitem" data-p="year">年</button>
+      </div>
+    </div>
+    <div class="pager">
+      <div class="arrow">${ICON_PREV}</div>
+      <div class="range"></div>
+      <div class="arrow">${ICON_CHEV}</div>
+    </div>
+    <div class="hero">
+      <div class="art a1"></div>
+      <div class="scrim"></div>
+      <div class="chip">本周封面</div>
+      <div class="ht"></div>
+      <div class="hs"></div>
+    </div>
+    <div class="dots"><i class="on"></i><i></i><i></i></div>
+    <div class="line"></div>
+    <div class="kpis"></div>
+    <div class="card">
+      <div class="cardhead"><h3>听歌节奏</h3><div class="hint"></div></div>
+      <div class="chart"><div class="avgs"></div></div>
+      <div class="axis"></div>
+      <div class="fn"></div>
+    </div>
+    <div class="sec">
+      <div class="sechead"><h3 class="rankTitle">本周循环</h3><div class="more">全部 ›</div></div>
+      <div class="ranklist"></div>
+    </div>
+    <div class="sec">
+      <div class="sechead"><h3 class="upTitle">本周常听</h3><div class="more">全部 ›</div></div>
+      <div class="ups"></div>
+    </div>
+    <div class="face">
+      <div class="avs"><i></i><i></i><i></i></div>
+      <div class="ft"><div class="f1"></div><div class="f2"></div></div>
+      <div class="go">${ICON_CHEV}</div>
+    </div>
+    <button class="cta">生成本周回顾卡片</button>
+    <div class="tail"></div>
+  </div>
+  <div class="playbar">
+    <div class="pc"><div class="art a1"></div></div>
+    <div class="pt"><div class="p1">夜行</div><div class="p2">三无 Marblue</div></div>
+    <div class="pp">${ICON_PAUSE}</div>
+  </div>`;
+}
+
+/* ══════════ 渲染一个周期 ══════════ */
+function render(phone){
+  const d = DATA[state.period];
+  const q = s => phone.querySelector(s);
+
+  q('.range').textContent = d.range;
+  q('.line').textContent = d.line;
+
+  // 四个数字（数字在上、单位在下，避免 4 位数被单位挤爆）
+  q('.kpis').innerHTML = d.kpis.map(k =>
+    `<div class="kpi"><div class="num">${k[0]}</div><div class="lab">${k[1]}</div></div>`).join('');
+
+  // 主视觉封面文案
+  q('.hero .chip').textContent = d.chip;
+  q('.hero .ht').textContent = d.top[0][0];
+  q('.hero .hs').textContent = d.top[0][1].split(' · ')[0] + ' · ' + d.top[0][2] + ' 次';
+
+  // 柱状图
+  const c = d.chart;
+  const ch = q('.chart');
+  ch.querySelectorAll('.bar').forEach(n => n.remove());
+  const peakVal = Math.max.apply(null, c.vals);
+  /* 柱宽随柱数收窄：7 根 14、12 根 9、24 根 6 —— 柱数变了视觉密度不能崩 */
+  const bw = c.n <= 7 ? 14 : (c.n <= 12 ? 9 : 6);
+  c.vals.forEach((v, i) => {
+    const b = document.createElement('div');
+    b.className = 'bar' + (v === peakVal ? ' peak' : '');
+    const pct = Math.max(4, Math.round(v / peakVal * 100));
+    b.innerHTML = `<i style="height:${pct}%;width:${bw}px"></i>`;
+    ch.appendChild(b);
+  });
+  const avg = ch.querySelector('.avgs');
+  avg.style.bottom = Math.round(c.avg / peakVal * 92) + 'px';
+  q('.fn').textContent = '虚线 = ' + c.avgLabel;
+
+  // 峰值提示：周/月/年的星期名，日的「21:00」
+  const peakIdx = c.vals.indexOf(peakVal);
+  const hint = state.period === 'day' ? '21:00 最多' :
+               (state.period === 'week' ? ['周一','周二','周三','周四','周五','周六','周日'][peakIdx] + '最多' :
+               (state.period === 'month' ? '第' + (peakIdx+1) + '周最多' : (peakIdx+1) + ' 月最多'));
+  q('.cardhead .hint').textContent = hint;
+
+  // X 轴标签
+  q('.axis').innerHTML = c.vals.map((_, i) =>
+    `<span>${c.labels[i] !== undefined ? c.labels[i] : ''}</span>`).join('');
+
+  // 榜单
+  q('.ranklist').innerHTML = d.top.map((t, i) => `
+    <div class="rankrow">
+      <div class="rk ${i === 0 ? 'top' : ''}">0${i + 1}</div>
+      <div class="rcover"><div class="art a${[1,4,3][i]}"></div></div>
+      <div class="rtxt"><div class="rtitle">${t[0]}</div><div class="rsub">${t[1]}</div></div>
+      <div class="rcnt">${t[2]}<em>次</em></div>
+    </div>`).join('');
+
+  // 常听 UP 主
+  q('.ups').innerHTML = d.ups.map((u, i) => `
+    <div class="up">
+      <div class="av"><div class="art a${[5,7,8][i]}"></div></div>
+      <div class="nm">${u[0]}</div><div class="hr">${u[1]}</div>
+    </div>`).join('');
+
+  // 新面孔
+  q('.face .f1').textContent = d.face[0];
+  q('.face .f2').textContent = d.face[1];
+
+  // 标题随周期变
+  const map = {day:'今日循环', week:'本周循环', month:'本月循环', year:'年度循环'};
+  const map2 = {day:'今日常听', week:'本周常听', month:'本月常听', year:'年度常听'};
+  q('.rankTitle').textContent = map[state.period];
+  q('.upTitle').textContent = map2[state.period];
+  q('.cta').textContent = state.period === 'week' ? '生成本周回顾卡片' :
+                          state.period === 'day' ? '生成今日回顾卡片' :
+                          state.period === 'month' ? '生成本月回顾卡片' : '生成年度回顾卡片';
+
+  // 分段选中态
+  phone.querySelectorAll('.segitem').forEach(b =>
+    b.classList.toggle('on', b.dataset.p === state.period));
+}
+
+/* ══════════ 实例化 ══════════ */
+const phones = ['phLight', 'phDark', 'phLong'].map(id => document.getElementById(id));
+phones.forEach(p => {
+  p.innerHTML = shellHTML();
+  p.querySelectorAll('.segitem').forEach(b => {
+    b.onclick = () => { state.period = b.dataset.p; syncPeriodBtns(); phones.forEach(render); };
+  });
+  render(p);
+});
+
+function syncPeriodBtns(){
+  document.querySelectorAll('#periodCtl button').forEach(b =>
+    b.classList.toggle('on', b.dataset.p === state.period));
+}
+syncPeriodBtns();
+
+/* 周期按钮 */
+document.querySelectorAll('#periodCtl button').forEach(b => {
+  b.onclick = () => { state.period = b.dataset.p; syncPeriodBtns(); phones.forEach(render); };
+});
+
+/* 明暗 */
+document.querySelectorAll('#modeCtl button').forEach(b => {
+  b.onclick = () => {
+    document.body.dataset.mode = b.dataset.m;
+    document.querySelectorAll('#modeCtl button').forEach(x => x.classList.toggle('on', x === b));
+  };
+});
+
+/* 主题色 */
+const swBox = document.getElementById('sw');
+THEMES.forEach(t => {
+  const b = document.createElement('button');
+  b.className = 'sw' + (t.id === state.theme ? ' on' : '');
+  b.style.background = t.primary;
+  b.title = t.label;
+  b.onclick = () => { state.theme = t.id; applyTheme(); };
+  swBox.appendChild(b);
+});
+function applyTheme(){
+  const t = THEMES.find(x => x.id === state.theme);
+  const r = document.documentElement.style;
+  r.setProperty('--brand', t.primary);
+  r.setProperty('--deepL', t.deepL);
+  r.setProperty('--deepD', t.deepD);
+  r.setProperty('--surL',  t.surL);
+  r.setProperty('--surD',  t.surD);
+  r.setProperty('--on',    t.on);
+  [...swBox.children].forEach((b, i) => b.classList.toggle('on', THEMES[i].id === state.theme));
+}
+applyTheme();
+
+/* 只渲染长图（逐像素复核用，不影响交付） */
+if (location.hash.indexOf('long') >= 0) { document.body.classList.add('onlylong'); }
+</script>
+</body>
+</html>

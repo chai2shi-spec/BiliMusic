@@ -36,7 +36,7 @@
 import { audio } from '@kit.AudioKit';
 
 /** 蓝牙输出设备断开时的回调（由播放内核注入，内部负责暂停） */
-export type BluetoothLostHandler = () => void;
+type BluetoothLostHandler = () => void;
 
 /**
  * 手表 / 手环设备名关键词（小写匹配）。

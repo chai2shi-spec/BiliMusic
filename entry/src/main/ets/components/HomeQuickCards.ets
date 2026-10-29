@@ -9,9 +9,13 @@
  *   · 收藏歌单卡（原「每日30首」位）：用户在歌单列表 ⋯ 菜单「加入首页」
  *     自选（HomeCardStore 持久化，加入顺序即显示顺序）；点播放按钮 =
  *     playAll(整个歌单)；点卡 = 订阅歌单进 UP 主页 / 普通歌单进详情
- *     （PlaylistsPage.openPlaylist 同款双分支）。
+ *     （PlaylistsPage.openPlaylist 同款双分支）。小标按来源显示
+ *     「订阅 / 收藏歌单」，副题「N 个投稿 / N 首」与歌单页口径一致。
  *   · 「+」添加卡（尾部顺延）：点开宿主 HomePage 的歌单选择器，选中即
  *     等效歌单页 ⋯ 菜单「加入首页」；歌单卡满 HOME_PLAYLIST_CARDS_MAX 张隐藏。
+ *   · 歌单卡长按：显式 LongPressGesture 驱动 bindMenu(isShow) 菜单
+ *     （移出首页 / 更换歌单，动作经 onRemoveCard / onReplaceCard 回宿主）；
+ *     最近播放卡 / 「+」卡不挂（固定卡无此语义）。
  *   · 上限 10 卡：最近播放 1 + 歌单 9（HOME_PLAYLIST_CARDS_MAX）。
  *
  * 数据由宿主 HomePage 持有（refreshQuickCards 经 STORE_LIBRARY_REV 驱动重灌），
@@ -47,8 +51,8 @@ const QUICK_CARD_RADIUS_VP: number = 16;
 /** 封面缩略图请求宽（px）：156vp 卡宽下约 2x 余量 */
 const QUICK_CARD_THUMB_PX: number = 320;
 
-/** 单卡视图参数（最近播放卡 / 收藏歌单卡同构，仅数据与行为注入不同） */
-interface QuickCardView {
+/** 单卡内容参数（纯视觉，供 QuickCardContent）：封面 + 信息条数据 */
+interface QuickCardContentView {
   /** 封面原图 URL；空 = 渐变占位 */
   coverUrl: string;
   /** 封面加载失败的无障碍描述 */
@@ -67,6 +71,10 @@ interface QuickCardView {
   playA11y: string;
   /** 点播放按钮的播放列表 */
   playTracks: Track[];
+}
+
+/** 单卡外壳参数（最近播放卡用）：内容 + 交互（按压 key / 点卡导航） */
+interface QuickCardView extends QuickCardContentView {
   /** 按压高亮 / 触摸归属 key */
   key: string;
   /** 点整卡导航 */
@@ -79,13 +87,25 @@ export struct HomeQuickCards {
   @Prop recentTracks: Track[] = [];
   /** 已加入首页的歌单卡（加入顺序即显示顺序；已删歌单由宿主 refresh 过滤） */
   @Prop cardPlaylists: Playlist[] = [];
+  /** UP 订阅投稿数缓存（upMid → archiveCount，0 = 未知）：宿主 HomePage 读
+   * UpSpaceCache 后下发；订阅卡副题「N 个投稿」的 N 优先取它，未知回退曲目数 */
+  @Prop upArchiveCounts: Map<string, number> = new Map();
   /** 「+」卡点击：宿主弹选择器（本组件纯展示，对话框由 HomePage 持有） */
   onAddClick: () => void = (): void => {};
+  /** 歌单卡长按菜单「移出首页」：宿主执行移出并提示（最近播放卡不挂菜单） */
+  onRemoveCard: (p: Playlist) => void = (_p: Playlist): void => {};
+  /** 歌单卡长按菜单「更换歌单」：宿主弹更换选择器（原位替换语义） */
+  onReplaceCard: (p: Playlist) => void = (_p: Playlist): void => {};
   /** 主题色深 / 主：空封面渐变占位跟随切色刷新 */
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   /** 按压中的卡 key（'recent' 或歌单 id）：单指同一时刻只按一卡，一个变量驱动任意卡缩放 */
   @State pressedKey: string = '';
+  /**
+   * 歌单卡长按菜单在架的卡 id（'' = 无）：显式 LongPressGesture 置位驱动
+   * bindMenu(isShow) 弹菜单，onDisappear 复位（见 PlaylistCard 注释）。
+   */
+  @State contextMenuId: string = '';
   private player: MusicPlayer = MusicPlayer.getInstance();
 
   /** 按压状态回写（歌单页 / 搜索页同款）：Down 记录、Up/Cancel 只清自己 */
@@ -144,105 +164,192 @@ export struct HomeQuickCards {
     })
   }
 
-  /** 收藏歌单卡：点播放 = playAll(整个歌单)；点卡 = 订阅进 UP 主页 / 普通进详情 */
+  /** 歌单卡小标：UP 订阅显示「订阅」，其余（普通歌单 / 收藏夹镜像）维持「收藏歌单」 */
+  private cardBadgeTextOf(p: Playlist): string {
+    return LibraryStore.isUpSubscription(p) ? '订阅' : '收藏歌单';
+  }
+
+  /**
+   * 歌单卡副题：UP 订阅显示「N 个投稿」（N 优先取 UP 投稿总数缓存，未知回退
+   * 已落库曲目数），其余维持「N 首」—— 口径与歌单页 subLineOf 一致。
+   */
+  private cardSubtitleOf(p: Playlist): string {
+    if (LibraryStore.isUpSubscription(p)) {
+      const cached: number | undefined = this.upArchiveCounts.get(p.upMid);
+      const count: number = (cached !== undefined && cached > 0) ? cached : p.tracks.length;
+      return `${count} 个投稿`;
+    }
+    return `${p.tracks.length} 首`;
+  }
+
+  /** 收藏歌单卡：点播放 = playAll(整个歌单)；点卡 = 订阅进 UP 主页 / 普通进详情；
+   * 长按弹菜单（移出首页 / 更换歌单）。小标 / 副题按来源分流（订阅 → 「订阅」/
+   * 「N 个投稿」），数字与歌单页一致。
+   * ⚠️ 长按触发不能走 bindContextMenu(ResponseType.LongPress)：其内部长按在手
+   * 机/模拟器触屏上均不触发（真机 + 模拟器 uinput 长按实测：无菜单、松手照常
+   * 点击跳转；对照组 SearchPage 常用词胶囊的显式 LongPressGesture 正常触发，
+   * 排除注入与仲裁因素）。故用显式 LongPressGesture 驱动 bindMenu(isShow,
+   * MenuElement[])（歌单页 ⋯ 菜单同款、本工程已验证）。
+   * ⚠️ LongPressGesture 与内置 click 并行：长按触发后松手 click 仍会 fire
+   * （SearchPage 编辑态被松手 click 关闭即此因），onClick 里按 contextMenuId
+   * 守卫吞掉，否则菜单刚弹出就跳转歌单页。 */
   @Builder
   private PlaylistCard(p: Playlist) {
-    this.QuickCard({
-      coverUrl: p.coverUrl,
-      altText: p.name,
-      badgeGlyph: $r('sys.symbol.waveform'),
-      badgeText: '收藏歌单',
-      title: p.name,
-      subtitle: `${p.tracks.length} 首`,
-      showPlay: p.tracks.length > 0,
-      playA11y: `播放${p.name}`,
-      playTracks: p.tracks,
-      key: p.id,
-      onOpen: (): void => {
-        // PlaylistsPage.openPlaylist 同款双分支：订阅歌单进 UP 主页（⚠️ helper
-        // 判定，收藏夹镜像也有 upMid 但没有「UP 主页」可去），普通进详情
-        if (LibraryStore.isUpSubscription(p)) {
-          NavStackHolder.push('UpSpace', new UpSpaceRouteParam(p.upMid, p.upName, ''));
-          return;
-        }
-        NavStackHolder.push('PlaylistDetail', new PlaylistDetailRouteParam(p.id));
+    Stack({ alignContent: Alignment.Bottom }) {
+      this.QuickCardContent({
+        coverUrl: p.coverUrl,
+        altText: p.name,
+        badgeGlyph: $r('sys.symbol.waveform'),
+        badgeText: this.cardBadgeTextOf(p),
+        title: p.name,
+        subtitle: this.cardSubtitleOf(p),
+        showPlay: p.tracks.length > 0,
+        playA11y: `播放${p.name}`,
+        playTracks: p.tracks
+      })
+    }
+    .width(QUICK_CARD_WIDTH_VP)
+    .height(QUICK_CARD_HEIGHT_VP)
+    .borderRadius(QUICK_CARD_RADIUS_VP)
+    .clip(true)
+    .scale({
+      x: this.pressedKey === p.id ? PRESS_SCALE : 1,
+      y: this.pressedKey === p.id ? PRESS_SCALE : 1
+    })
+    .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
+    .onTouch((event: TouchEvent): void => {
+      this.setPressed(event.type, p.id);
+    })
+    .onClick((): void => {
+      // 长按已弹菜单的这次松手 click 吞掉（菜单开期间点卡也不再跳转，等菜单关闭）
+      if (this.contextMenuId === p.id) {
+        return;
+      }
+      this.openPlaylistCard(p);
+    })
+    .gesture(
+      LongPressGesture({ repeat: false, duration: 500 })
+        .onAction((): void => {
+          this.contextMenuId = p.id;
+        })
+    )
+    .bindMenu(this.contextMenuId === p.id, this.cardMenuItems(p), {
+      onDisappear: (): void => {
+        // 菜单关闭（选中 / 点外部）即复位，否则 isShow 恒真、下次长按弹不出
+        this.contextMenuId = '';
       }
     })
   }
 
-  /** 快捷卡共用版式：封面（空则渐变占位）+ 底部半透明信息条（小标 + 标题/副题 + 播放按钮） */
+  /** 歌单卡长按菜单项（移出首页 / 更换歌单）：MenuElement 数组与歌单页 ⋯ 菜单
+   * 同语言；动作经 onRemoveCard / onReplaceCard 回宿主 */
+  private cardMenuItems(p: Playlist): MenuElement[] {
+    return [
+      {
+        value: '移出首页',
+        action: (): void => {
+          this.onRemoveCard(p);
+        }
+      },
+      {
+        value: '更换歌单',
+        action: (): void => {
+          this.onReplaceCard(p);
+        }
+      }
+    ];
+  }
+
+  /** 歌单卡点卡导航：订阅歌单进 UP 主页（⚠️ helper 判定，收藏夹镜像也有
+   * upMid 但没有「UP 主页」可去），普通进详情（PlaylistsPage.openPlaylist 同款双分支） */
+  private openPlaylistCard(p: Playlist): void {
+    if (LibraryStore.isUpSubscription(p)) {
+      NavStackHolder.push('UpSpace', new UpSpaceRouteParam(p.upMid, p.upName, ''));
+      return;
+    }
+    NavStackHolder.push('PlaylistDetail', new PlaylistDetailRouteParam(p.id));
+  }
+
+  /** 快捷卡内容（Stack 子内容，纯视觉）：封面（空则渐变占位）+ 底部半透明信息条
+   * （小标 + 标题/副题 + 播放按钮）。QuickCard / PlaylistCard 两个外壳复用。 */
+  @Builder
+  private QuickCardContent(v: QuickCardContentView) {
+    if (v.coverUrl.length > 0) {
+      CoverImage({
+        url: toThumbUrl(v.coverUrl, QUICK_CARD_THUMB_PX),
+        imgRadius: 0,
+        fillParent: true,
+        altText: v.altText
+      })
+    } else {
+      this.EmptyCover()
+    }
+
+    Column() {
+      Row({ space: 4 }) {
+        SymbolGlyph(v.badgeGlyph)
+          .fontSize(12)
+          .height(12)
+          .fontColor(['#FFFFFF'])
+        Text(v.badgeText)
+          .fontSize(11)
+          .lineHeight(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+      }
+      .padding({ left: 12, top: 10 })
+      .alignItems(VerticalAlign.Center)
+
+      Row() {
+        Column({ space: 2 }) {
+          Text(v.title)
+            .fontSize(13)
+            .lineHeight(17)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFFFFF')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(v.subtitle)
+            .fontSize(11)
+            .lineHeight(14)
+            .fontColor('rgba(255, 255, 255, 0.72)')
+            .maxLines(1)
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        if (v.showPlay) {
+          Row() {
+            SymbolGlyph($r('sys.symbol.play_fill'))
+              .fontSize(16)
+              .fontColor([Color.White])
+          }
+          .width(34)
+          .height(34)
+          .borderRadius(17)
+          .backgroundColor('rgba(255, 255, 255, 0.22)')
+          .justifyContent(FlexAlign.Center)
+          .accessibilityText(v.playA11y)
+          .accessibilityLevel('yes')
+          .onClick((): void => {
+            this.player.playAll(v.playTracks);
+          })
+        }
+      }
+      .padding({ left: 12, right: 10, top: 6, bottom: 10 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .backgroundColor('rgba(0, 0, 0, 0.30)')
+    .backgroundBlurStyle(BlurStyle.BACKGROUND_ULTRA_THICK)
+  }
+
+  /** 快捷卡外壳（最近播放卡）：内容 + 尺寸圆角 + 按压缩放 + 点卡导航 */
   @Builder
   private QuickCard(v: QuickCardView) {
     Stack({ alignContent: Alignment.Bottom }) {
-      if (v.coverUrl.length > 0) {
-        CoverImage({
-          url: toThumbUrl(v.coverUrl, QUICK_CARD_THUMB_PX),
-          imgRadius: 0,
-          fillParent: true,
-          altText: v.altText
-        })
-      } else {
-        this.EmptyCover()
-      }
-
-      Column() {
-        Row({ space: 4 }) {
-          SymbolGlyph(v.badgeGlyph)
-            .fontSize(12)
-            .height(12)
-            .fontColor(['#FFFFFF'])
-          Text(v.badgeText)
-            .fontSize(11)
-            .lineHeight(14)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#FFFFFF')
-        }
-        .padding({ left: 12, top: 10 })
-        .alignItems(VerticalAlign.Center)
-
-        Row() {
-          Column({ space: 2 }) {
-            Text(v.title)
-              .fontSize(13)
-              .lineHeight(17)
-              .fontWeight(FontWeight.Medium)
-              .fontColor('#FFFFFF')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(v.subtitle)
-              .fontSize(11)
-              .lineHeight(14)
-              .fontColor('rgba(255, 255, 255, 0.72)')
-              .maxLines(1)
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-
-          if (v.showPlay) {
-            Row() {
-              SymbolGlyph($r('sys.symbol.play_fill'))
-                .fontSize(16)
-                .fontColor([Color.White])
-            }
-            .width(34)
-            .height(34)
-            .borderRadius(17)
-            .backgroundColor('rgba(255, 255, 255, 0.22)')
-            .justifyContent(FlexAlign.Center)
-            .accessibilityText(v.playA11y)
-            .accessibilityLevel('yes')
-            .onClick((): void => {
-              this.player.playAll(v.playTracks);
-            })
-          }
-        }
-        .padding({ left: 12, right: 10, top: 6, bottom: 10 })
-        .alignItems(VerticalAlign.Center)
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-      .backgroundColor('rgba(0, 0, 0, 0.30)')
-      .backgroundBlurStyle(BlurStyle.BACKGROUND_ULTRA_THICK)
+      this.QuickCardContent(v)
     }
     .width(QUICK_CARD_WIDTH_VP)
     .height(QUICK_CARD_HEIGHT_VP)
@@ -303,7 +410,9 @@ export struct HomeQuickCards {
           (p: Playlist): void => {
             this.PlaylistCard(p)
           },
-          (p: Playlist): string => `qcard_${p.id}`
+          // 内容键（歌单页 / 下载页同款）：键含名称与副题（曲目数 / 投稿数），
+          // 数据变化即重建对应卡 —— 纯 id 键会让已挂载卡的数字停在首次挂载值
+          (p: Playlist): string => `qcard_${p.id}_${p.name}_${this.cardSubtitleOf(p)}`
         )
         // 「+」添加卡尾部顺延：满额（HOME_PLAYLIST_CARDS_MAX）隐藏
         if (this.cardPlaylists.length < HOME_PLAYLIST_CARDS_MAX) {

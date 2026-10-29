@@ -10,15 +10,17 @@ import util from '@ohos.util';
  * 「随机播放」在华为音乐 / 网易云等主流播放器里是播放模式的一种（与顺序/循环同级，
  * 而不是一个独立开关），因此并入本枚举，UI 上统一由同一个按钮轮换。
  * 语义：
- *   NONE    顺序播放 —— 放到列表末尾即停
- *   ALL     列表循环 —— 放到末尾回到第一首
- *   ONE     单曲循环 —— 单曲播完从头重放
- *   SHUFFLE 随机播放 —— 走洗牌后的队列，永不「放到末尾」
+ *   NONE     顺序播放 —— 放到列表末尾即停
+ *   ALL      列表循环 —— 放到末尾回到第一首
+ *   ONE      单曲循环 —— 单曲播完从头重放
+ *   ONE_STOP 单曲停止 —— 单曲播完即停，不自动续播
+ *   SHUFFLE  随机播放 —— 走洗牌后的队列，永不「放到末尾」
  */
 export enum RepeatMode {
   NONE = 'none',
   ALL = 'all',
   ONE = 'one',
+  ONE_STOP = 'one_stop',
   SHUFFLE = 'shuffle'
 }
 
@@ -31,7 +33,7 @@ export enum DownloadStatus {
 }
 
 /** 设置页「仅 WiFi 下载」开关未开启时的默认值（默认不限制） */
-export const DEFAULT_WIFI_ONLY_DOWNLOAD: boolean = false;
+const DEFAULT_WIFI_ONLY_DOWNLOAD: boolean = false;
 
 export enum ThemeMode {
   SYSTEM = 'system',
@@ -183,6 +185,31 @@ export function buildTrack(partial: Partial<Track>): Track {
   };
 }
 
+/**
+ * 持久化反序列化边界消毒。
+ *
+ * 为什么需要：PlayerStateStore 的 `JSON.parse(raw) as T` 没有运行时类型校验，
+ * 旧版本落盘 / 损坏快照 / 旧 Preferences 迁移产出的 Track 可能缺必填字段
+ * （`coverUrl: undefined` 之类）。这类坏数据流进 `STORE_CURRENT_TRACK` 后，
+ * 播放页组件的 `track.coverUrl.length`（PlayerInfoComponent.onTrackChanged）
+ * 会抛未捕获 TypeError —— 点迷你条进播放页瞬间 jscrash 闪退的直接根因之一。
+ *
+ * 快路径（五个核心字段类型完好）原对象返回：万首队列冷启动只有每条 ~5 次
+ * typeof 判断，近零开销；坏条目才走 buildTrack 全字段兜底重建，并回填
+ * buildTrack 不覆盖的两个可选字段（addedAt / audioBackupUrls）。
+ */
+export function sanitizePersistedTrack(track: Track): Track {
+  if (typeof track.id === 'string' && typeof track.title === 'string'
+    && typeof track.artist === 'string' && typeof track.coverUrl === 'string'
+    && typeof track.duration === 'number') {
+    return track;
+  }
+  const fixed: Track = buildTrack(track);
+  fixed.addedAt = track.addedAt;
+  fixed.audioBackupUrls = track.audioBackupUrls;
+  return fixed;
+}
+
 // ⚠️ `@ohos.data.preferences` 对 **string 类型的 value 有 8192 字节硬上限**，
 // 超限时 `put()` 直接抛错。Track 里最大的字段 audioUrl 是带签名 token 的 B 站
 // 音频直链（动辄 400~600 字符），曲目列表整体 JSON.stringify 很容易超限 →
@@ -191,8 +218,7 @@ export function buildTrack(partial: Partial<Track>): Track {
 // 因此凡是要落到 Preferences 的曲目列表，都先 slimTrack 去掉当次播放才用的字段。
 // 列表层面：最近播放、歌单、收藏走**分片存储**（每片 8 条独立 key，总量不受
 // 单值上限约束）；播放器状态（含队列）走**文件存储**（PlayerStateStore），
-// 同样不受单值上限约束。fitByByteBudget 是「单键 + 按字节预算从头截断」的
-// 通用工具，存量调用方已全部迁往上述两种存储，保留备用。
+// 同样不受单值上限约束。
 
 /** Preferences 单值上限为 8192 字节，留出余量按 6000 收口 */
 export const PREF_VALUE_BUDGET_BYTES: number = 6000;
@@ -255,22 +281,6 @@ export function slimTrack(track: Track): Track {
     // 它只有几十字节，对 8192 字节的 Preferences 上限没有实质影响。
     localFilePath: track.localFilePath
   };
-}
-
-/**
- * 按字节预算截断列表：从头保留，直到再加一条就超出预算为止。
- * 宁可少存几条，也不能让整次写入失败（失败等于一条不剩）。
- */
-export function fitByByteBudget<T>(list: T[], budget: number): T[] {
-  const out: T[] = [];
-  for (let i = 0; i < list.length; i++) {
-    out.push(list[i]);
-    if (utf8Length(JSON.stringify(out)) > budget) {
-      out.pop();
-      break;
-    }
-  }
-  return out;
 }
 
 export interface Playlist {
@@ -353,6 +363,62 @@ export const ITEM_DISPLAY_LIST: string = 'list';
 /** 条目展示（AppSettings.itemDisplayStyle）：大封面 —— 双列网格、大封面 + 小字标题 */
 export const ITEM_DISPLAY_GRID: string = 'grid';
 
+/** 沉浸光感材质档位（AppSettings.immersiveMaterialTier）：精美 —— MaterialLevel.EXQUISITE 最高规格玻璃光感（默认档；设备能力门控，不支持时外观页拦截不可选、解析层回落自适应兜底） */
+export const IMMERSIVE_TIER_EXQUISITE: string = 'exquisite';
+/** 沉浸光感材质档位（AppSettings.immersiveMaterialTier）：轻柔 —— MaterialLevel.GENTLE 中档固定玻璃（比精美更省算力） */
+export const IMMERSIVE_TIER_GENTLE: string = 'gentle';
+/** 沉浸光感材质档位（AppSettings.immersiveMaterialTier）：流畅 —— MaterialLevel.SMOOTH 低算力档 */
+export const IMMERSIVE_TIER_SMOOTH: string = 'smooth';
+/**
+ * 沉浸光感材质档位全集（亦即设置页菜单顺序）：精美 / 轻柔 / 流畅。
+ * 单一出处：外观页菜单遍历、偏好归一化白名单、令牌解析兜底共用本数组。
+ * 历史「自适应」（adaptive）/「关闭」（off）两档已取消，存量值经
+ * normalizeImmersiveTier 迁移（off → 轻质流畅档、其余 → 默认精美档）。
+ */
+export const IMMERSIVE_TIER_OPTIONS: string[] = [
+  IMMERSIVE_TIER_EXQUISITE,
+  IMMERSIVE_TIER_GENTLE,
+  IMMERSIVE_TIER_SMOOTH
+];
+
+// ===== 播放页功能行功能项 id（AppSettings.funcItemOrder 的取值域）=====
+// 功能行共 9 个功能项：核心 4 项恒显示，5 个开关入口项受各自入口开关控制
+//（关 = 不渲染该槽位）。funcItemOrder 存整体顺序，前 4 位 = 播放页默认页。
+/** 播放模式（核心，恒显示） */
+export const PLAYER_FUNC_REPEAT: string = 'repeat';
+/** 下载当前曲（核心，恒显示） */
+export const PLAYER_FUNC_DOWNLOAD: string = 'download';
+/** 加入歌单（核心，恒显示；bindMenu 弹歌单选择菜单） */
+export const PLAYER_FUNC_ADD_PLAYLIST: string = 'addPlaylist';
+/** 播放列表 / 队列（核心，恒显示；bindSheet 弹队列弹层） */
+export const PLAYER_FUNC_QUEUE: string = 'queue';
+/** 倍速（开关入口：AppSettings.speedEnabled） */
+export const PLAYER_FUNC_SPEED: string = 'speed';
+/** 限定播放进度（开关入口：AppSettings.skipIntroEntryEnabled；需有当前曲） */
+export const PLAYER_FUNC_SKIP: string = 'skipIntro';
+/** 定时停止（开关入口：AppSettings.sleepTimerEntryEnabled） */
+export const PLAYER_FUNC_SLEEP: string = 'sleepTimer';
+/** 在 B 站打开原视频（开关入口：AppSettings.openInBilibiliEnabled） */
+export const PLAYER_FUNC_BILI: string = 'openInBili';
+/** 进入 UP 主页（开关入口：AppSettings.upSpaceEntryEnabled） */
+export const PLAYER_FUNC_UP_SPACE: string = 'upSpace';
+/**
+ * 功能行默认顺序（AppSettings.funcItemOrder 缺省值）：
+ * 前 4 位（核心键）= 默认页，5 个开关入口项顺延其后 —— 与历史版本布局逐位
+ * 一致，老版本升级（无该字段）归一化回落到本序，零迁移零感知。
+ */
+export const DEFAULT_FUNC_ITEM_ORDER: string[] = [
+  PLAYER_FUNC_REPEAT,
+  PLAYER_FUNC_DOWNLOAD,
+  PLAYER_FUNC_ADD_PLAYLIST,
+  PLAYER_FUNC_QUEUE,
+  PLAYER_FUNC_SPEED,
+  PLAYER_FUNC_SKIP,
+  PLAYER_FUNC_SLEEP,
+  PLAYER_FUNC_BILI,
+  PLAYER_FUNC_UP_SPACE
+];
+
 export interface AppSettings {
   sidebarState: string; // 手机端固定为 'auto'
   playQuality: string;
@@ -400,6 +466,26 @@ export interface AppSettings {
   loudnessNormalizationEnabled: boolean;
   /** 在 B 站打开原视频（设置 → 播放；默认开）：开启后播放页功能行出现跳转 B 站客户端入口 */
   openInBilibiliEnabled: boolean;
+  /** 定时停止入口（设置 → 播放；默认关）：开启后播放页功能行出现定时停止快捷入口（图标 / 倒计时） */
+  sleepTimerEntryEnabled: boolean;
+  /**
+   * 限定播放进度入口（设置 → 播放；默认关）：开启后播放页功能行出现按曲「限定播放进度」
+   * 设置入口（文本片 + 双滑块区间条弹窗，片头/片尾秒数存 IntroSkipStore）。
+   * 键名保留 skipIntroEntryEnabled 历史字段名（旧版「跳过开头」升级而来，免数据迁移）。
+   */
+  skipIntroEntryEnabled: boolean;
+  /** 进入 UP 主页入口（设置 → 播放；默认关）：开启后播放页功能行出现「进入 UP 主页」跳转入口 */
+  upSpaceEntryEnabled: boolean;
+  /** 歌词居中显示（长按歌词面板可切，默认关）：开启后每行歌词水平居中绘制（Apple Music 风格） */
+  lyricCentered: boolean;
+  /**
+   * 沉浸光感材质档位（设置 → 外观，三档；默认 IMMERSIVE_TIER_EXQUISITE）：
+   * exquisite 精美（MaterialLevel.EXQUISITE，设备能力门控）/ gentle 轻柔
+   * （GENTLE）/ smooth 流畅（SMOOTH）。生效面：底部胶囊 + 二级页播放栏
+   * （@StorageProp 即时）+ 各页标题栏（页面下次重建时）。
+   * 运行时镜像 STORE_IMMERSIVE_MATERIAL_TIER。
+   */
+  immersiveMaterialTier: string;
   /**
    * 听后缓存（设置 → 播放；默认开）：自然听完的
    * 歌曲后台缓存整首音频到独立 listen_cache 目录（512MB LRU），重播秒开、
@@ -420,6 +506,25 @@ export interface AppSettings {
    * 残留文件经设置页「手动同步」补齐。
    */
   publicDirMigrated: boolean;
+  /**
+   * CDN 播放线路（设置 → 播放；默认 'auto'）：upos 直链的镜像 host 替换策略。
+   * 'auto' = 播放失败时自动探测镜像线路（见 utils/CdnLine.ts）；
+   * 'default' / 具体线路 id = 不替换 / 手动指定。
+   */
+  playCdnLine: string;
+  /**
+   * 「自动」线路模式下探测命中的线路 id（'' = 尚未命中）。持久化的目的：
+   * 探测一次全网可用线路后，后续解析直接沿用，不用每首都「先失败再探测」。
+   * 用户切手动线路时清空。
+   */
+  autoPickedCdnLine: string;
+  /**
+   * 播放页功能行功能项顺序（取值域与默认序见 DEFAULT_FUNC_ITEM_ORDER）：
+   * 前 4 位 = 播放页默认页图标，其余经左右滑动分页切换查看；5 个开关入口项
+   * 仍受各自入口开关控制（关 = 不渲染该槽位，但占位顺序保留）。
+   * 运行时镜像 STORE_FUNC_ITEM_ORDER（EntryAbility 启动首发、排序页拖动后重发）。
+   */
+  funcItemOrder: string[];
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -445,10 +550,18 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   audioMixEnabled: false,
   loudnessNormalizationEnabled: false,
   openInBilibiliEnabled: true,
+  sleepTimerEntryEnabled: false,
+  skipIntroEntryEnabled: false,
+  upSpaceEntryEnabled: false,
+  lyricCentered: false,
+  immersiveMaterialTier: IMMERSIVE_TIER_EXQUISITE,
   listenCacheEnabled: true,
   saveToPublicDownloads: false,
   publicDownloadsDirUri: '',
-  publicDirMigrated: false
+  publicDirMigrated: false,
+  playCdnLine: 'auto',
+  autoPickedCdnLine: '',
+  funcItemOrder: DEFAULT_FUNC_ITEM_ORDER
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -495,6 +608,17 @@ export function coverStyleLabelOf(style: string): string {
 /** 条目展示显示标签（设置页后缀 / toast 用；未知值回落「长条」） */
 export function itemDisplayLabelOf(style: string): string {
   return style === ITEM_DISPLAY_GRID ? '大封面' : '长条';
+}
+
+/** 沉浸光感材质档位显示标签（设置页后缀 / toast 用；未知值回落默认档标签「精美」） */
+export function immersiveTierLabelOf(tier: string): string {
+  if (tier === IMMERSIVE_TIER_GENTLE) {
+    return '轻柔';
+  }
+  if (tier === IMMERSIVE_TIER_SMOOTH) {
+    return '流畅';
+  }
+  return '精美';
 }
 
 /** 逐字片段（卡拉 OK 高亮用） */
@@ -673,7 +797,7 @@ export interface VideoDetail {
 }
 
 /** 合集条目的分 P 信息（episode.page，结构与 VideoPageInfo 同源的精简版） */
-export interface SeasonEpisodePage {
+interface SeasonEpisodePage {
   cid: number;
   part: string;
   duration: number;
@@ -693,7 +817,7 @@ export interface SeasonEpisode {
   page?: SeasonEpisodePage;
 }
 
-export interface UgcSeasonSection {
+interface UgcSeasonSection {
   episodes: SeasonEpisode[];
 }
 
@@ -779,32 +903,11 @@ export interface PlayUrlData {
 }
 
 /** playurl 响应 volume 对象的直译：B 站服务端对音轨的响度预测结果 */
-export interface BiliVolumeData {
+interface BiliVolumeData {
   /** 整合响度实测值（LUFS，通常为负数；0 视为「无数据」） */
   measured_i: number;
   /** 目标响度（LUFS；0 视为缺失，应用侧兜 -14） */
   target_i: number;
-}
-
-export interface MusicCenterItem {
-  musicId: string;
-  musicTitle: string;
-  author: string;
-  bvid: string;
-  aid: string;
-  cid: string;
-  cover: string;
-  album?: string;
-  score?: number;
-  publishTime?: string;
-  relatedArchive?: {
-    aid: string;
-    bvid: string;
-    cid: string;
-    cover: string;
-    title: string;
-    duration?: number;
-  };
 }
 
 export interface TrackSource {

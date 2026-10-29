@@ -1,8 +1,11 @@
 /**
  * 应用图标页（2026-10-25 桌面图标切换）：
  * 利用 API 26 的 alternateIcons 备用图标机制（app.json5 声明 + bundleManager
- * 运行时切换），让用户在默认图标与 4 套预设设计（design/icon：声波柱 / 耳机 /
- * 音频环 / 黑胶）之间切换桌面图标，立即生效、无需发版。
+ * 运行时切换），让用户在默认图标与 14 套预设设计（第一组 design/icon 粉底 5 套：
+ * 声波柱 / 耳机 / 音频环 / 黑胶 / 音乐小电视；第二组 design/app-icon-v2 彩色底
+ * 4 套：电蓝声波柱 / 橙红播放环 / 石板灰音箱 / 靛蓝黑胶；第三组
+ * design/app-icon-v3 拟物 5 套：复古 MP3 / 磁带随身听 / 黑胶唱机 / MD 随身听 /
+ * 小电视）之间切换桌面图标，立即生效、无需发版。
  *
  *   · 数据模型 AppIconOption：key 对应 app.json5 alternateIcons 的 name
  *     （'' = 恢复默认），bg / fg 为预览分层资源；
@@ -36,6 +39,8 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { BarNarrowShell } from '../components/BarNarrowShell';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
  * 备选图标数据模型：key 为 app.json5 alternateIcons 的 name 字段（'' = 默认，
@@ -81,13 +86,23 @@ export struct AppIconSettingsPage {
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
 
+  /** 自绘顶栏渐变模糊层进度更新器（AboutPage 同款命令式驱动，高频回调零重建） */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.pageScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
   /**
-   * 5 个选项：默认（'' 恢复）+ 4 套预设设计。key 与 AppScope/app.json5
-   * alternateIcons 的 name 一一对应；副标题沿用 design/app-icon/README.md
-   * 的小尺寸可读性结论（04 黑胶 32px 纹理退化需提示）。
+   * 15 个选项：默认（'' 恢复）+ 14 套预设设计。key 与 AppScope/app.json5
+   * alternateIcons 的 name 一一对应；01–04 副标题沿用 design/app-icon/README.md
+   * 的小尺寸可读性结论（04 黑胶 32px 纹理退化需提示），05–08 沿用
+   * design/app-icon-v2/README.md 的对比度 / 32px 结论，09–13 沿用
+   * design/app-icon-v3/README.md 的使用建议（11 唱臂小尺寸会糊需提示）。
    */
   private readonly options: AppIconOption[] = [
     new AppIconOption('', '默认', '原始粉环图标',
@@ -99,10 +114,34 @@ export struct AppIconSettingsPage {
     new AppIconOption('audio_ring', '音频环', '延续现有环造型',
       $r('app.media.alt_icon_bg_deep'), $r('app.media.alt_icon_fg_03')),
     new AppIconOption('vinyl', '黑胶', '小尺寸下纹理会简化',
-      $r('app.media.alt_icon_bg_deep'), $r('app.media.alt_icon_fg_04'))
+      $r('app.media.alt_icon_bg_deep'), $r('app.media.alt_icon_fg_04')),
+    // 2026-10-29 新增（design/app-icon-v4）：满幅不透明整图（bg 层仅占位），
+    // 预览与真机圆角均由遮罩裁切；32px 下音符与闪光线条消失属正常降级
+    new AppIconOption('music_tv', '音乐小电视', '小电视戴耳机 · 趣味',
+      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_14')),
+    new AppIconOption('wave_bars_v2', '声波柱 · 电蓝', '第二组 · 32px 最稳',
+      $r('app.media.alt_icon_bg_blue'), $r('app.media.alt_icon_fg_05')),
+    new AppIconOption('play_circle', '播放环 · 橙红', '第二组 · 最通用',
+      $r('app.media.alt_icon_bg_orange'), $r('app.media.alt_icon_fg_06')),
+    new AppIconOption('speaker', '音箱 · 石板灰', '第二组 · 对比度最高',
+      $r('app.media.alt_icon_bg_slate'), $r('app.media.alt_icon_fg_07')),
+    new AppIconOption('vinyl_v2', '黑胶 · 靛蓝', '第二组 · 小尺寸纹理会简化',
+      $r('app.media.alt_icon_bg_indigo'), $r('app.media.alt_icon_fg_08')),
+    new AppIconOption('retro_mp3', '复古 MP3', '第三组 · 复古感最强',
+      $r('app.media.alt_icon_bg_mint'), $r('app.media.alt_icon_fg_09')),
+    new AppIconOption('cassette', '磁带随身听', '第三组 · 磁带怀旧',
+      $r('app.media.alt_icon_bg_teal'), $r('app.media.alt_icon_fg_10')),
+    new AppIconOption('vinyl_v3', '黑胶唱机', '第三组 · 小尺寸唱臂会简化',
+      $r('app.media.alt_icon_bg_cream'), $r('app.media.alt_icon_fg_11')),
+    new AppIconOption('md_walkman', 'MD 随身听', '第三组 · 差异化高级感',
+      $r('app.media.alt_icon_bg_cocoa'), $r('app.media.alt_icon_fg_12')),
+    new AppIconOption('mini_tv', '小电视', '第三组 · B 站识别推荐',
+      $r('app.media.alt_icon_bg_ink'), $r('app.media.alt_icon_fg_13'))
   ];
 
   aboutToAppear(): void {
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier 补上）
+    this.syncTopBlurProgress();
     this.refreshEnabledState();
   }
 
@@ -275,6 +314,7 @@ export struct AppIconSettingsPage {
 
   build() {
     HdsNavDestination() {
+      Stack() {
       List({ scroller: this.pageScroller }) {
         // 顶部空白占位条目（官方沉浸口径）：高度 = safeTop + 56（MINI 标题栏），
         // 静止位首个真实条目恰从栏底起排，滚动时从材质下方穿过。
@@ -317,6 +357,46 @@ export struct AppIconSettingsPage {
               CardDivider()
 
               this.optionRow(this.options[4])
+
+              CardDivider()
+
+              this.optionRow(this.options[5])
+
+              CardDivider()
+
+              this.optionRow(this.options[6])
+
+              CardDivider()
+
+              this.optionRow(this.options[7])
+
+              CardDivider()
+
+              this.optionRow(this.options[8])
+
+              CardDivider()
+
+              this.optionRow(this.options[9])
+
+              CardDivider()
+
+              this.optionRow(this.options[10])
+
+              CardDivider()
+
+              this.optionRow(this.options[11])
+
+              CardDivider()
+
+              this.optionRow(this.options[12])
+
+              CardDivider()
+
+              this.optionRow(this.options[13])
+
+              CardDivider()
+
+              this.optionRow(this.options[14])
             }
           }
         }
@@ -331,11 +411,26 @@ export struct AppIconSettingsPage {
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
       // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 自绘渐变模糊层驱动：逐帧更新 + 停止校准终态（渐变软边由 overlay 承担）
+      .onDidScroll((xOffset: number, yOffset: number): void => {
+        this.syncTopBlurProgress();
+      })
+      .onScrollStop((): void => {
+        this.syncTopBlurProgress();
+      })
+
+      // 顶栏渐变模糊层：盖 List 内容之上（z 序低于 HDS titleBar），进度命令式驱动
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
+      }
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
+    //（HDS 内置滚动效果关闭：渐变模糊由自绘 TopGradientBlurOverlay 承担，防双重模糊）
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this）
         stackBuilder: (): void => {

@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Vintage console TV</title>
+  <desc id="desc">拟物风格 · 竖版落地电视。机身 400×520、圆角 40——唯一一张竖机型（0.77 宽高比），与 04 的 1:1、05 的 1.36 拉开轮廓差异。顶部两根金属天线 47° 外张、球头，球顶落在 y193。屏幕 352×288、圆角 52——比 04 的 28 大得多，做出老式 CRT 的大圆角屏。屏内 3 根粗柱（42 宽、圆角 21、底部对齐 y540），是三张里的第三种可视化：04 五根细柱 / 05 平滑波形 / 10 三根粗柱。控制区左右对称：中间大旋钮（r 52），两侧各三条短格栅。玻璃质感与 04/05 同一套（深色渐变 + 顶部凹陷 + 径向暗角 + 斜向柔光）。底色墨青绿 #0F766E。</desc>
+
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.46" stop-color="#F2F2F7"/>
+      <stop offset="1" stop-color="#CDCDDA"/>
+    </linearGradient>
+    <linearGradient id="bodySheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bodyBottom" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.09"/>
+    </linearGradient>
+    <linearGradient id="screenGrad" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#2C3A32"/>
+      <stop offset="1" stop-color="#070D0A"/>
+    </linearGradient>
+    <linearGradient id="screenShade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.55"/>
+      <stop offset="0.26" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.42" r="0.78">
+      <stop offset="0.40" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.46"/>
+    </radialGradient>
+    <linearGradient id="glassGrad" x1="0" y1="0" x2="0.95" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.085"/>
+      <stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0.022"/>
+      <stop offset="0.75" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="knobGrad" cx="0.36" cy="0.28" r="0.80">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#E8E8F0"/>
+      <stop offset="1" stop-color="#A9A9B9"/>
+    </radialGradient>
+    <linearGradient id="metalGrad" x1="0" y1="0" x2="1" y2="0.4">
+      <stop offset="0" stop-color="#9E9FB0"/>
+      <stop offset="0.28" stop-color="#F2F2F7"/>
+      <stop offset="0.50" stop-color="#FFFFFF"/>
+      <stop offset="0.72" stop-color="#D6D6E1"/>
+      <stop offset="1" stop-color="#8C8D9E"/>
+    </linearGradient>
+    <radialGradient id="ballGrad" cx="0.34" cy="0.26" r="0.85">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.60" stop-color="#E2E2EC"/>
+      <stop offset="1" stop-color="#9696A8"/>
+    </radialGradient>
+
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#03241F" flood-opacity="0.30"/>
+      <feDropShadow dx="0" dy="22" stdDeviation="26" flood-color="#03241F" flood-opacity="0.34"/>
+    </filter>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="15" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <clipPath id="screenClip">
+      <rect x="348" y="312" width="328" height="288" rx="46"/>
+    </clipPath>
+  </defs>
+
+
+  <g id="foreground-layer">
+    <g id="antennas">
+      <line id="rod-left" x1="424" y1="308" x2="332" y2="210" stroke="url(#metalGrad)" stroke-width="23" stroke-linecap="round"/>
+      <line id="rod-right" x1="600" y1="308" x2="692" y2="210" stroke="url(#metalGrad)" stroke-width="23" stroke-linecap="round"/>
+      <circle id="ball-left" cx="332" cy="210" r="17" fill="url(#ballGrad)"/>
+      <circle id="ball-right" cx="692" cy="210" r="17" fill="url(#ballGrad)"/>
+    </g>
+
+    <rect id="body" x="312" y="280" width="400" height="520" rx="40" fill="url(#bodyGrad)" stroke="#B5B5C3" stroke-opacity="0.5" stroke-width="2" filter="url(#shadow)"/>
+    <rect id="body-top-sheen" x="324" y="290" width="376" height="146" rx="32" fill="url(#bodySheen)" opacity="0.58"/>
+    <rect id="body-bottom-shade" x="324" y="660" width="376" height="128" rx="32" fill="url(#bodyBottom)"/>
+
+    <rect id="screen-well" x="340" y="304" width="344" height="304" rx="54" fill="#000000" opacity="0.30"/>
+    <rect id="screen" x="348" y="312" width="328" height="288" rx="46" fill="url(#screenGrad)"/>
+
+    <g id="screen-content" clip-path="url(#screenClip)">
+      <g filter="url(#glow)">
+        <rect id="bar-1" x="422" y="450" width="40" height="86" rx="20" fill="#FB7299"/>
+        <rect id="bar-2" x="492" y="388" width="40" height="148" rx="20" fill="#FB7299"/>
+        <rect id="bar-3" x="562" y="424" width="40" height="112" rx="20" fill="#FB7299"/>
+      </g>
+      <rect id="screen-inner-shade" x="348" y="312" width="328" height="288" fill="url(#screenShade)"/>
+      <rect id="screen-vignette" x="348" y="312" width="328" height="288" fill="url(#vignette)"/>
+      <rect id="glass-sheen" x="348" y="312" width="328" height="288" fill="url(#glassGrad)"/>
+    </g>
+
+    <g id="grille-left">
+      <rect id="gl-1" x="352" y="668" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+      <rect id="gl-2" x="352" y="688" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+      <rect id="gl-3" x="352" y="708" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+    </g>
+    <g id="grille-right">
+      <rect id="gr-1" x="588" y="668" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+      <rect id="gr-2" x="588" y="688" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+      <rect id="gr-3" x="588" y="708" width="84" height="8" rx="4" fill="#A0A0B2" opacity="0.88"/>
+    </g>
+
+    <circle id="knob" cx="512" cy="692" r="46" fill="url(#knobGrad)" stroke="#ABABBB" stroke-opacity="0.65" stroke-width="2"/>
+    <circle id="knob-hole" cx="512" cy="692" r="12" fill="#8A8A9C"/>
+    <rect id="knob-mark" x="508" y="652" width="9" height="20" rx="4.5" fill="#787888"/>
+  </g>
+</svg>

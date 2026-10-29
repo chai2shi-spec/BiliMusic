@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Single Note</title>
+  <desc id="desc">八分音符：斜置椭圆符头 + 42 宽符干 + 实心符尾。符头倾角 -18°，重心略低以符合乐谱视觉习惯。底色墨绿 #15803D。</desc>
+
+
+  <g id="foreground-layer" fill="#FFFFFF">
+    <ellipse id="head" cx="430" cy="690" rx="118" ry="94" transform="rotate(-18 430 690)"/>
+    <rect id="stem" x="506" y="242" width="42" height="452"/>
+    <path id="flag" d="M 548 242 C 650 272 710 348 692 446 C 674 374 618 330 548 322 Z"/>
+  </g>
+</svg>

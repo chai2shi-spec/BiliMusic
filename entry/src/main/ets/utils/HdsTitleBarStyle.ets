@@ -12,7 +12,6 @@ import { TitleBarStyleOptions, ScrollEffectOptions, ScrollEffectType, BlurStrate
 import { LengthMetrics } from '@kit.ArkUI';
 import { MaterialCompat } from './MaterialCompat';
 import { MaterialTokens } from '../common/style/MaterialTokens';
-
 /**
  * 生成 HdsNavDestination.titleBar({ style }) 的样式选项（材质 + 兜底样式）。
  *
@@ -22,13 +21,17 @@ import { MaterialTokens } from '../common/style/MaterialTokens';
  * 惯性滚动阶段被渲染管线丢弃渐变 pass（真机实证，与帧负载无关），自绘层是
  * 唯一可用的渐进模糊方案（见 MaterialTokens.TITLE_SCROLL_EFFECT_TYPE 注释）。
  *
- * 现状两档：
- * - 沉浸档（supportsImmersiveMaterial() 为真）：滚动模糊叠加
- *   IMMERSIVE + EXQUISITE/ADAPTIVE 材质光感（与底部胶囊
+ * 现状两档（设备能力分流，MaterialCompat.supportsImmersiveMaterial() 判定）：
+ * - 沉浸档（设备支持沉浸材质）：滚动模糊叠加
+ *   IMMERSIVE + 材质光感（档位 MaterialTokens.materialLevel()，与底部胶囊
  *   同源）—— originalStyle / scrollEffectStyle 均透明，让模糊与
  *   材质透出，可读性由模糊背板承担。
- * - 兜底档：滚动模糊 + 弱→标准玻璃色随偏移线性插值
+ * - 兜底档（设备不支持）：滚动模糊 + 弱→标准玻璃色随偏移线性插值
  *   （header_glass_tint_weak → header_glass_tint）。
+ *
+ * ⚠️ 档位切换的生效时机：已挂载页面的标题栏不随 AppStorage 即时刷新，
+ * 在页面下次重建（重新进入）时生效 —— Navigation 子页 pop 即销毁，实际
+ * 下次进入即应用；底部两表面经 @StorageProp 即时生效。
  *
  * blurStrategy: ENABLE（FAQ faqs-arkui-1095：部分设备默认 ADAPTIVE 下动态
  * 模糊不渲染，ENABLE 强制开启）；thermoCtrl: false = 不主动申请发热降级
@@ -144,6 +147,8 @@ export class HdsTitleBarStyle {
    *   键 / 日志带 off 标记，与滚动效果开启的样式分缓存互不干扰。
    */
   static styleOptions(blurStartVp?: number, blurEndVp?: number, scrollEffectEnabled?: boolean): TitleBarStyleOptions {
+    // 沉浸光感材质档位（设备能力分流沉浸/兜底；档位感知，底部表面同源）
+    const tier: string = MaterialTokens.materialTier();
     const immersive: boolean = MaterialCompat.supportsImmersiveMaterial();
     const effectOn: boolean = scrollEffectEnabled !== false;
     // 滚动联动模糊：滚动效果类型经 MaterialTokens 令牌（COMMON_BLUR，
@@ -157,9 +162,11 @@ export class HdsTitleBarStyle {
       blurEffectiveEndOffset: LengthMetrics.vp(blurEndVp ?? MaterialTokens.TITLE_BLUR_END_VP)
     };
     // 内容键（见 styleCache 注释）：是否沉浸档 + 起糊/完糊区间（归一化后）
-    // + 是否开滚动效果（关 / 开两档分缓存）。
+    // + 是否开滚动效果（关 / 开两档分缓存）+ 材质档位（exquisite / gentle /
+    // smooth 三档分缓存 —— 档位切换时标题栏样式随之换档，
+    // 键不变就复用不重建）。
     const key: string = `gb|${blurStartVp ?? MaterialTokens.TITLE_BLUR_START_VP}` +
-      `|${blurEndVp ?? MaterialTokens.TITLE_BLUR_END_VP}|${immersive ? 1 : 0}|${effectOn ? 1 : 0}`;
+      `|${blurEndVp ?? MaterialTokens.TITLE_BLUR_END_VP}|${immersive ? 1 : 0}|${effectOn ? 1 : 0}|${tier}`;
     const hit: TitleBarStyleOptions | undefined = HdsTitleBarStyle.styleCache.get(key);
     if (hit !== undefined) {
       return hit;
@@ -188,10 +195,10 @@ export class HdsTitleBarStyle {
         systemMaterialEffect: {
           // materialType 用 IMMERSIVE（强制沉浸材质，与底部同源，不被
           // 系统策略解析成非沉浸）；materialLevel 用
-          // MaterialTokens.materialLevel()（supportsImmersiveMaterial
-          // ? EXQUISITE : ADAPTIVE，与底部同一表达式）。⚠️ 这里的
-          // MaterialLevel.ADAPTIVE 是**显式探测后的兜底档**（设备不支持
-          // EXQUISITE 时交给系统自适应），与「没探测就随手写 ADAPTIVE」不同。
+          // MaterialTokens.materialLevel()（三档与 MaterialLevel 一一对应，
+          // 与底部同一表达式）。⚠️ 这里的
+          // MaterialLevel.ADAPTIVE 只出现在设备不支持沉浸材质的
+          // **显式探测后兜底**一处，与「没探测就随手写 ADAPTIVE」不同。
           materialType: MaterialTokens.TITLE_MATERIAL_TYPE,
           materialLevel: level
         },

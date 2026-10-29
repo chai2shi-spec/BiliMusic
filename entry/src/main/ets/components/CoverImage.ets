@@ -102,6 +102,10 @@ export struct CoverImage {
         .borderRadius(this.imgRadius)
         .objectFit(ImageFit.Cover)
         .backgroundColor(this.themeSurface)
+        // Image 默认启用长按拖拽，会抢占宿主 bindContextMenu 的长按菜单手势
+        //（首页歌单卡长按「移出首页 / 更换歌单」弹不出来即此因，官方 FAQ
+        // faqs-arkui-61）。全工程无图片拖拽需求，统一禁用（CoverDiscComponent 先例）。
+        .draggable(false)
         .onError((): void => {
           this.loadFailed = true;
         })

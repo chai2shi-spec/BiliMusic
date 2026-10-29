@@ -30,7 +30,7 @@ const PL_SELECT_FADE_MS: number = 250;
 /**
  * 标题行右侧按钮组（Index.tabTitleRow 歌单页分支槽入）。
  * 多选模式：完成 + 全选 + 删除选中 + 合并选中（「歌单」标题此时被摘出）；
- * 常规模式：选择（歌单 ≥2 才出现）+ 新建。
+ * 常规模式：定位（滚动到当前播放曲目所在的歌单）+ 选择（歌单 ≥2 才出现）+ 新建。
  */
 @Component
 export struct PlTitleActions {
@@ -98,6 +98,18 @@ export struct PlTitleActions {
       .transition(TransitionEffect.OPACITY
         .animation({ duration: PL_SELECT_FADE_MS, curve: Curve.EaseInOut }))
     } else {
+      // 「定位当前播放」：滚动到包含当前播放曲目的歌单（不在则页面 toast 兜底）
+      Button('定位', { type: ButtonType.Normal })
+        .fontSize(13)
+        .height(32)
+        .borderRadius(BUTTON_RADIUS_VP)
+        .backgroundColor(this.themeSurface)
+        .fontColor(this.themePrimary)
+        .attributeModifier(this.buttonMaterial)
+        .margin({ right: 8 })
+        .onClick((): void => {
+          TabScrollerHolder.plLocateCurrent();
+        })
       if (this.canSelect) {
         // 「选择」与同排其它按钮同一套视觉语言（浅粉底 + 粉字 + 光感材质）
         Button('选择', { type: ButtonType.Normal })

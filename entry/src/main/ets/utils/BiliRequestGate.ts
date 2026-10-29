@@ -83,6 +83,11 @@ export class BiliRequestGate {
     return false;
   }
 
+  /** 是否处于风控冷却期（可预期超时的探测类请求应跳过——冷却期排队必白耗超时壳） */
+  static isCoolingDown(): boolean {
+    return Date.now() < BiliRequestGate.cooldownUntil;
+  }
+
   /**
    * 排队取发送权：非 B 站 URL 直接放行（返回 false，调用方不必 release）。
    * B 站 URL 返回 true 并在获得名额时 resolve —— 调用方必须在 finally 里

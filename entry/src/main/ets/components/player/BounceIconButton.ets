@@ -34,6 +34,8 @@ export struct BounceIconButton {
     }
     .width(this.buttonSize)
     .height(this.buttonSize)
+    // 图标在命中区内垂直居中：功能行各槽位统一「内容居中到同一中线」的对齐口径
+    .justifyContent(FlexAlign.Center)
     .onClick((): void => {
       this.bounceTrigger++;
       if (this.onTap !== undefined) {

@@ -63,8 +63,10 @@ import {
   STORE_NAV_INDICATOR_BOTTOM,
   STORE_THEME_PRIMARY,
   STORE_MAIN_MINI_BAR_WIDTH,
+  STORE_IMMERSIVE_MATERIAL_TIER,
   GLOW_ALPHA
 } from '../common/Constants';
+import { IMMERSIVE_TIER_EXQUISITE } from '../model/MusicModels';
 
 /**
  * miniBar 宽度预算里的左右边距分量（vp，对齐首页内容区 NAV_H_PADDING 口径）。
@@ -116,20 +118,19 @@ export struct SubPagePlayBar {
   /** 载体实铺宽度（vp，onAreaChange 回写）：折叠开合 / 分屏 / 转屏自动更新 */
   @State hostWidthVp: number = 0;
 
+  /**
+   * 沉浸光感材质档位（设置 → 外观三档选择，AppSettings.immersiveMaterialTier
+   * 的运行时镜像）：exquisite / gentle / smooth。
+   */
+  @StorageProp(STORE_IMMERSIVE_MATERIAL_TIER) materialTier: string = IMMERSIVE_TIER_EXQUISITE;
+
   /** HDS 控制器：onBarStyleChange 里把意外收起的 miniBar 拉回 EXPAND */
   private tabController: HdsTabsController = new HdsTabsController();
-
-  /** 设备是否支持 HDS IMMERSIVE 精美档（不支持回落 ADAPTIVE 自适应，防低配卡顿） */
-  private useExquisiteMaterial: boolean = false;
 
   /** 悬浮样式缓存（键不变直接复用，避免每次重渲染重放配置触发 HDS 内部重建） */
   private cachedStyle: HdsTabsFloatingStyle | null = null;
   /** 样式缓存的内容键（见 cachedStyle 注释） */
   private cachedStyleKey: string = '';
-
-  aboutToAppear(): void {
-    this.useExquisiteMaterial = MaterialCompat.supportsImmersiveMaterial();
-  }
 
   /** 载体有效宽（vp）：onAreaChange 首帧即回写真实值，占位值仅首测前生效 */
   private hostWidthOrFallback(): number {
@@ -164,7 +165,7 @@ export struct SubPagePlayBar {
   private floatingStyle(): HdsTabsFloatingStyle {
     const key: string = `${this.navBarBottom}|${this.navIndicatorBottom}`
       + `|${this.themePrimary}|${this.hostWidthVp}`
-      + `|${this.useExquisiteMaterial ? 1 : 0}`
+      + `|${this.materialTier}`
       + `|${this.mainMiniBarWidthVp}`;
     if (this.cachedStyle !== null && this.cachedStyleKey === key) {
       return this.cachedStyle;
@@ -219,9 +220,10 @@ export struct SubPagePlayBar {
       // 两种模型同解）。宽屏 600 收窄后公式自动给出对称大边距，无需分支。
       barSideMargin: sideMargin,
       // 沉浸光感（与首页胶囊完全同源的真机已验证配方）：材质类型/档位用
-      // MaterialTokens 令牌，与 Index.barFloatingStyle 同源。
+      // MaterialTokens 令牌（档位感知：exquisite / gentle / smooth 三档，
+      // 设备不支持时解析层回落自适应兜底），光晕固定主题色 12%（GLOW_ALPHA）。
       systemMaterialEffect: {
-        materialType: MaterialTokens.BAR_MATERIAL_TYPE,
+        materialType: MaterialTokens.barMaterialType(),
         materialLevel: MaterialTokens.materialLevel()
       },
       lightColor: MaterialCompat.withAlpha(this.themePrimary, GLOW_ALPHA)

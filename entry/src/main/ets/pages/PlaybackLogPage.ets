@@ -17,7 +17,7 @@
  * 日志列表用 List（复用回收，200 条文本上限 ForEach 即可，无需 LazyForEach）。
  */
 
-import { STORE_SAFE_BOTTOM, STORE_SAFE_TOP } from '../common/Constants';
+import { CONTENT_END_OFFSET, STORE_SAFE_BOTTOM, STORE_SAFE_TOP } from '../common/Constants';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
@@ -379,8 +379,9 @@ export struct PlaybackLogPage {
         .cachedCount(10)
         // 大屏适配：内容列收窄居中（Stack 默认居中对齐，与 AboutPage 同口径）
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
-        // 底部安全区让位：列表末尾可滚至手势区上方不被遮挡（SettingsPage 同款）
-        .contentEndOffset(this.safeBottom + 16)
+        // 末条避让二级页悬浮播放条（SubPagePlayBar，恒展开整行）+ 底部手势区
+        //（SettingsPage / PlaylistsPage 同口径）。
+        .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
         .onDidScroll((xOffset: number, yOffset: number): void => {
           this.syncTopBlurProgress();
         })

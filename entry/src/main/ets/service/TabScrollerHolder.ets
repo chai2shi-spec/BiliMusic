@@ -55,6 +55,8 @@ export class TabScrollerHolder {
   static plOpenMergeEditor: () => void = (): void => {};
   /** 「删除选中」：确认后批量删除选中的歌单（收藏夹镜像仅删本地） */
   static plDeleteSelected: () => void = (): void => {};
+  /** 「定位当前播放」：滚动到包含当前播放曲目的歌单（不在则页面 toast 兜底） */
+  static plLocateCurrent: () => void = (): void => {};
 
   /** 首页列表控制器（HomePage 的 List 直挂此实例；Index 根栏绑定它驱动顶栏滚动模糊） */
   static home: Scroller = new Scroller();

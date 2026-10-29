@@ -162,7 +162,6 @@ export struct DlQueueActions {
           ? this.themeSurface : $r('app.color.bg_divider'))
         .fontColor(this.themePrimary)
         .attributeModifier(this.buttonMaterial)
-        .margin({ left: 8 })
         .onClick((): void => {
           if (this.queuePaused || this.queueHasPaused) {
             TabScrollerHolder.dlResumeAll();
@@ -185,5 +184,7 @@ export struct DlQueueActions {
           }
         })
     }
+    // 与左侧「选择」按钮拉开间距（组内按钮同为 8vp）
+    .margin({ left: 8 })
   }
 }

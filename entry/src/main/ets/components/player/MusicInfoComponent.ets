@@ -180,18 +180,21 @@ export struct MusicInfoComponent {
 
   private titleText(): string {
     const t: Track | null = this.currentTrack;
-    if (t === null) {
+    // 类型保护：@StorageLink 运行时可能送 undefined（见 qualityText 同款结论）
+    if (t === null || t === undefined) {
       return '暂无播放内容';
     }
-    return t.title.length > 0 ? t.title : '未知歌曲';
+    const title: string = t.title ?? '';
+    return title.length > 0 ? title : '未知歌曲';
   }
 
   private artistText(): string {
     const t: Track | null = this.currentTrack;
-    if (t === null) {
+    if (t === null || t === undefined) {
       return '—';
     }
-    return t.artist.length > 0 ? t.artist : '未知歌手';
+    const artist: string = t.artist ?? '';
+    return artist.length > 0 ? artist : '未知歌手';
   }
 
   /**
@@ -258,12 +261,16 @@ export struct MusicInfoComponent {
       breakpoints: { reference: BreakpointsReference.ComponentSize }
     }) {
       GridCol({
+        // isFoldFull（阔折叠展开竖屏，走 SM 直板机分支）：md 档落满 8 列零偏移
+        // = 全宽铺满（用户拍板「跟直板机一样」）；非折叠 md 无实际消费方
+        // （分栏分支的常规折叠展开时组件宽 ~415vp 落 component-sm），保留
+        // 原直板机收中口径不变。component-lg 档回落默认 12 列满跨度 = 全宽。
         span: {
           xs: BreakpointConstants.SPAN_SM,
           sm: BreakpointConstants.SPAN_SM,
-          md: BreakpointConstants.SPAN_MD
+          md: this.isFoldFull ? BreakpointConstants.COLUMN_MD : BreakpointConstants.SPAN_MD
         },
-        offset: { md: BreakpointConstants.OFFSET_MD }
+        offset: { md: this.isFoldFull ? 0 : BreakpointConstants.OFFSET_MD }
       }) {
         Column() {
           this.CoverInfo()
@@ -326,8 +333,6 @@ export struct MusicInfoComponent {
         .opacity(0.95)
         .fontWeight(FontWeight.Bold)
         .fontFamily(PlayerConstants.FONT_FAMILY_BOLD)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
 
       Text(this.artistText())
         .textAlign(TextAlign.Start)

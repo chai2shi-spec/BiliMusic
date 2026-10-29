@@ -27,7 +27,7 @@ import { FormCardName } from '../../widget/model/CardFormConstant';
 
 const TAG: string = 'CardPayloadBuilder';
 /** 无歌词 / 纯音乐时的固定文案 */
-export const LYRIC_FALLBACK: string = '纯音乐，请欣赏';
+const LYRIC_FALLBACK: string = '纯音乐，请欣赏';
 /** 默认品牌色（封面取色失败 / 无封面时的卡片底色） */
 const DEFAULT_COLOR_HEX: string = 'fb7299';
 const DEFAULT_COLOR_RGBA: string = 'rgba(251, 114, 153, 1)';
@@ -35,19 +35,19 @@ const DEFAULT_COLOR_RGBA: string = 'rgba(251, 114, 153, 1)';
 const HEART_LYRIC_LINE_COUNT: number = 4;
 
 /** 封面取色结果 */
-export class CoverColor {
+class CoverColor {
   hex: string = DEFAULT_COLOR_HEX;
   rgba: string = DEFAULT_COLOR_RGBA;
 }
 
 /** 歌词窗口（动态歌词卡推送单元） */
-export class LyricWindow {
+class LyricWindow {
   lines: string[] = [LYRIC_FALLBACK];
   index: number = 0;
 }
 
 /** 卡片全量载荷（formBindingData 直接消费；字段名即卡片页 LocalStorage 键名） */
-export class CardPayload {
+class CardPayload {
   formId: string = '';
   isPlay: boolean = false;
   title: string = '';
@@ -64,7 +64,7 @@ export class CardPayload {
 }
 
 /** 构建结果：payload + 待关闭的封面 fd（-1 = 无封面） */
-export class CardBuildResult {
+class CardBuildResult {
   payload: CardPayload = new CardPayload();
   coverFd: number = -1;
 }
@@ -116,7 +116,7 @@ function toHex2(value: number): string {
  * HSB 沉浸色算法（移植示例 ImageUtils.dealColor）：压亮度 + 保色相，
  * 输出适合做卡片渐变底色的 [r, g, b]。
  */
-export function dealColor(rRGB: number, gRGB: number, bRGB: number): number[] {
+function dealColor(rRGB: number, gRGB: number, bRGB: number): number[] {
   const max: number = Math.max(Math.max(rRGB, gRGB), bRGB);
   const min: number = Math.min(Math.min(rRGB, gRGB), bRGB);
   const sHSB: number = max === 0 ? 0 : (max - min) / max;
@@ -188,7 +188,7 @@ export function dealColor(rRGB: number, gRGB: number, bRGB: number): number[] {
 }
 
 /** 封面取色（失败回落品牌色，绝不抛出） */
-export async function computeCoverColor(buffer: ArrayBuffer): Promise<CoverColor> {
+async function computeCoverColor(buffer: ArrayBuffer): Promise<CoverColor> {
   const result: CoverColor = new CoverColor();
   let pixelMap: image.PixelMap | undefined = undefined;
   try {
@@ -268,7 +268,7 @@ export async function readCardSnapshot(): Promise<PersistedPlayerState | null> {
 }
 
 /** 溢出页（liveForm）封面结果：临时文件路径 + 主色 */
-export class OverflowCoverResult {
+class OverflowCoverResult {
   path: string = '';
   color: CoverColor = new CoverColor();
 }
@@ -320,7 +320,7 @@ export async function downloadCoverToTemp(context: common.Context,
 }
 
 /** 心动歌词卡：当前曲目歌词随机连续 4 行 */
-export async function pickRandomLyricLines(track: Track): Promise<string[]> {
+async function pickRandomLyricLines(track: Track): Promise<string[]> {
   const lyric: LyricResult | null = await getLyricForTrack(track);
   if (lyric === null || lyric.instrumental || lyric.lines.length === 0) {
     return [LYRIC_FALLBACK];
@@ -376,18 +376,23 @@ export function fetchCardLyric(track: Track): Promise<LyricResult | null> {
 
 /**
  * 构建指定卡片的完整载荷（快照 + 歌词 + 封面 fd + 主色）。
+ * state 注入实时快照（主进程 CardPublisher 换歌全量推专用——换歌瞬间
+ * player_state.json 落盘晚于切歌通知数百 ms，盘上还是旧曲，必须喂内存值）；
+ * 默认 null = 走盘自给（Form 扩展进程冷起 / 主进程启动回填场景）。
  * 无播放快照（首次安装 / 从未播放）返回 null，调用方跳过推送。
  */
-export async function buildCardPayload(context: common.Context, formName: string): Promise<CardBuildResult | null> {
+async function buildCardPayload(context: common.Context, formName: string,
+  state: PersistedPlayerState | null = null): Promise<CardBuildResult | null> {
   await ensureCardEnv(context);
-  const state: PersistedPlayerState | null = await readCardSnapshot();
-  if (state === null || state.currentTrack === null) {
+  // 注入优先、盘读兜底：Form 进程无主进程 AppStorage，只能读盘
+  const snapshot: PersistedPlayerState | null = state !== null ? state : await readCardSnapshot();
+  if (snapshot === null || snapshot.currentTrack === null) {
     return null;
   }
-  const track: Track = state.currentTrack;
+  const track: Track = snapshot.currentTrack;
   const result: CardBuildResult = await prepareCover(context, track);
   const payload: CardPayload = result.payload;
-  payload.isPlay = state.isPlaying;
+  payload.isPlay = snapshot.isPlaying;
   payload.title = track.title;
   payload.singer = track.artist;
   payload.songId = track.id;
@@ -396,18 +401,19 @@ export async function buildCardPayload(context: common.Context, formName: string
     payload.lrcArray = await pickRandomLyricLines(track);
   } else if (formName === FormCardName.DYNAMIC_LYRICS) {
     const lyric: LyricResult | null = await getLyricForTrack(track);
-    const win: LyricWindow = buildLyricWindow(lyric, track, state.progress);
+    const win: LyricWindow = buildLyricWindow(lyric, track, snapshot.progress);
     payload.lrcArray = win.lines;
     payload.currentLyricIndex = 0;
   }
   return result;
 }
 
-/** 全量推送一张卡片（推送后关闭封面 fd） */
-export async function pushCardToForm(context: common.Context, formId: string, formName: string): Promise<void> {
+/** 全量推送一张卡片（推送后关闭封面 fd）；state 语义见 buildCardPayload */
+export async function pushCardToForm(context: common.Context, formId: string, formName: string,
+  state: PersistedPlayerState | null = null): Promise<void> {
   let coverFd: number = -1;
   try {
-    const result: CardBuildResult | null = await buildCardPayload(context, formName);
+    const result: CardBuildResult | null = await buildCardPayload(context, formName, state);
     if (result === null) {
       return;
     }

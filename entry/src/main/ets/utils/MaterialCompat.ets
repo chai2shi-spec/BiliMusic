@@ -6,8 +6,10 @@
  *
  * 两条并列的「沉浸材质」通路，用途不同、别混用：
  * - **HDS 通路**（`hdsMaterial` + `systemMaterialEffect`）：给 HdsTabs 等 HDS 组件用。
- *   材质由 HDS 自己施加，我们只通过 `MaterialCompat.supportsImmersiveMaterial()`
- *   决定材质档位（EXQUISITE 精美 / ADAPTIVE 自适应）。
+ *   材质由 HDS 自己施加，我们通过 `MaterialCompat.supportsImmersiveMaterial()`
+ *   门控精美档，档位解析统一收在 `MaterialTokens.materialLevel()`
+ *   （三档与 MaterialLevel 一一对应：EXQUISITE 精美 / GENTLE 轻柔 /
+ *   SMOOTH 流畅，设备不支持时统一兜底 ADAPTIVE）。
  * - **uiMaterial 通路**（`uiMaterial.ImmersiveMaterial` + `.systemMaterial()`）：
  *   给自绘组件（Row / Column 等）用。低版本或运行时能力缺失时返回 undefined。
  *   ⚠️ 官方《沉浸光感常见问题》生效范围（真机实证）：「其他组件」的
@@ -34,12 +36,12 @@ export enum MaterialCompatStyle {
   ULTRA_THICK = 4
 }
 
-export interface MaterialImmersiveOptions {
+interface MaterialImmersiveOptions {
   interactive?: boolean;
   lightEffect?: boolean;
 }
 
-export class CompatUtils {
+class CompatUtils {
   private static supportImmersive: boolean | null = null;
 
   static isImmersiveSupported(): boolean {

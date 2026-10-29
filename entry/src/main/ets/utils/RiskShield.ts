@@ -21,7 +21,7 @@
 import util from '@ohos.util';
 
 /** 随机字节数 → base64 串（用于伪造 dm_img_str / 图片指纹尾部） */
-export function randomBase64(byteLen: number): string {
+function randomBase64(byteLen: number): string {
   const bytes: Uint8Array = new Uint8Array(byteLen);
   for (let i = 0; i < byteLen; i++) {
     bytes[i] = Math.floor(Math.random() * 256);

@@ -13,10 +13,12 @@ import { NavStackHolder } from '../service/NavStackHolder';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
 import { bundleManager } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@ohos.base';
-import { HdsNavDestination } from '@kit.UIDesignKit';
+import { HdsNavDestination, HdsListItemCard, SuffixArrowIconText } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
-import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
+import { showAppToast } from '../components/AppToast';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -26,6 +28,11 @@ import { BarNarrowShell } from '../components/BarNarrowShell';
 /** App 图标显示边长（vp）与圆角（vp）：圆角比例对齐系统图标遮罩 */
 const APP_ICON_SIZE: number = 88;
 const APP_ICON_RADIUS: number = 22;
+
+/** 上游项目主页（「移植自」长条点击经 openLink 打开，https 交给系统浏览器） */
+const SOURCE_URL_BILIMUSIC: string = 'https://github.com/HanversionOvO/BiliMusic';
+const SOURCE_URL_BBPLAYER: string = 'https://github.com/bbplayer-app/BBPlayer';
+const SOURCE_URL_LX_MUSIC: string = 'https://github.com/lyswhut/lx-music-mobile';
 
 @Component
 export struct AboutPage {
@@ -71,6 +78,21 @@ export struct AboutPage {
         // 拿不到就空着，不影响其它内容展示
         console.error(`getBundleInfoForSelf failed: ${e.code} ${e.message}`);
       });
+  }
+
+  /**
+   * 打开上游项目主页（openLink 对 https 链接交给系统浏览器，
+   * UpSpacePage.openInBilibili 同款模式）；失败弹 toast，不影响页面其它内容。
+   */
+  private async openExternal(url: string): Promise<void> {
+    try {
+      // openLink 挂在 UIAbilityContext 上（不是基类 Context），所以要转一下
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await ctx.openLink(url);
+    } catch (e) {
+      console.error(`openLink failed: ${JSON.stringify(e)}`);
+      showAppToast('无法打开链接', 1800);
+    }
   }
 
   /**
@@ -183,15 +205,7 @@ export struct AboutPage {
                   .fontSize(13)
                   .fontColor($r('app.color.text_secondary'))
                   .margin({ top: 4 })
-                Text('转译自 github.com/HanversionOvO/BiliMusic')
-                  .fontSize(13)
-                  .fontColor($r('app.color.text_secondary'))
-                  .margin({ top: 4 })
-                Text('github.com/bbplayer-app/BBPlayer')
-                  .fontSize(13)
-                  .fontColor($r('app.color.text_secondary'))
-                  .margin({ top: 4 })
-                Text('一款基于 HarmonyOS 的 B 站第三方音乐播放器，默认匿名访问 B 站音频资源，也可扫码登录解锁更高音质。')
+                Text('一款基于 HarmonyOS 的 B 站第三方音乐播放器，默认匿名访问 B 站音频资源，可选扫码登录解锁更高音质，数据全部保存在设备本地。')
                   .fontSize(13)
                   .fontColor($r('app.color.text_secondary'))
                   .lineHeight(18)
@@ -208,10 +222,56 @@ export struct AboutPage {
             .width('100%')
             .padding({ left: 16, right: 16 })
 
+            // ── 移植自（三条可点击长条：onClick 经 openLink 打开 GitHub）──
+            SectionHeader({ headerText: '移植自' })
+            InsetCard() {
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: 'BiliMusic' },
+                  secondaryText: { text: '把 B 站变成音乐资料库的桌面播放器' }
+                },
+                suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  this.openExternal(SOURCE_URL_BILIMUSIC);
+                }
+              })
+              CardDivider()
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: 'BBPlayer' },
+                  secondaryText: { text: '简约、好用的 BiliBili 音乐播放器' }
+                },
+                suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  this.openExternal(SOURCE_URL_BBPLAYER);
+                }
+              })
+              CardDivider()
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: 'LX Music 移动版' },
+                  secondaryText: { text: '基于 React Native 的开源音乐软件' }
+                },
+                suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  this.openExternal(SOURCE_URL_LX_MUSIC);
+                }
+              })
+            }
+
             // ── 项目说明 ──
             SectionHeader({ headerText: '项目说明' })
             InsetCard() {
-              Text('本项目为开源的学习交流项目，界面与交互针对 HarmonyOS 手机端设计，播放、下载、歌单等数据均保存在设备本地。应用默认以匿名 + buvid 身份访问 B 站接口（可选扫码登录，凭据仅保存在本机），不收集、不上传任何用户数据。')
+              Text('开源学习交流项目，界面与交互针对 HarmonyOS 手机端设计。默认以匿名 + buvid 身份访问 B 站接口，可选扫码登录（凭据仅保存在本机）；播放、下载、歌单等数据全部保存在设备本地，不收集、不上传任何用户数据。')
                 .fontSize(13)
                 .fontColor($r('app.color.text_secondary'))
                 .lineHeight(18)

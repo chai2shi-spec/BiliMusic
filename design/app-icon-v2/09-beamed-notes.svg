@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">BiliMusic app icon — Beamed Notes</title>
+  <desc id="desc">双符杠音符：两枚椭圆符头 + 两根符干 + 顶部横向符杠，符杠两端与符干外缘对齐。底色紫 #7E22CE。</desc>
+
+  <g id="background-layer">
+    <rect x="0" y="0" width="1024" height="1024" fill="#7E22CE"/>
+  </g>
+
+  <g id="foreground-layer" fill="#FFFFFF">
+    <ellipse id="head-left" cx="356" cy="685" rx="104" ry="86" transform="rotate(-16 356 685)"/>
+    <ellipse id="head-right" cx="668" cy="685" rx="104" ry="86" transform="rotate(-16 668 685)"/>
+    <rect id="beam" x="406" y="253" width="354" height="76" rx="20"/>
+    <rect id="stem-left" x="406" y="285" width="42" height="400"/>
+    <rect id="stem-right" x="718" y="285" width="42" height="400"/>
+  </g>
+</svg>
