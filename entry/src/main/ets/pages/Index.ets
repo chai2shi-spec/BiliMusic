@@ -97,7 +97,7 @@ import { BusinessError } from '@ohos.base';
 import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
 import { HomePage } from './HomePage';
 import { PlaylistsPage } from './PlaylistsPage';
-import { DownloadsPage } from './DownloadsPage';
+import { ListenDiaryPage } from './ListenDiaryPage';
 import { SettingsPage } from './SettingsPage';
 // 导航子页面（PlayerPage / PlaylistDetail / RecentPage / FollowsPage /
 // UpSpacePage / WatchHistoryPage / FavSyncPage 等）统一为懒加载 ——
@@ -120,6 +120,7 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 // 根顶栏收窄上限与各页内容列统一走 840 口径
 //（TwoColumnLayout.contentMaxWidth，见 immersiveTitleBarNarrow 注释）。
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
+import { dayGreeting } from '../common/DaySegments';
 import {
   STORE_QUEUE,
   STORE_MINI_BAR_EXPANDED,
@@ -132,10 +133,9 @@ import {
   STORE_TAB_SWITCH_REQUEST,
   STORE_TAB_SWITCH_TARGET,
   STORE_BAR_LAYOUT,
-  STORE_DL_BAR_HAS_TASKS,
-  STORE_DL_BAR_SELECTING,
-  STORE_DL_EXIT_SELECT_REQUEST,
   STORE_PL_BAR_SELECTING,
+  STORE_PL_BAR_SELECTED_COUNT,
+  STORE_PL_BAR_SUBTITLE,
   STORE_PL_EXIT_SELECT_REQUEST,
   GLOW_ALPHA,
   STORE_THEME_PRIMARY,
@@ -178,7 +178,6 @@ import { PLAYER_CLOSE_STYLE_SLIDE, IMMERSIVE_TIER_EXQUISITE } from '../model/Mus
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
-import { DlSelectToggle, DlQueueActions } from '../components/DownloadsTabBar';
 import { PlTitleActions } from '../components/PlaylistsTabBar';
 import { HOME_CATEGORY_CHIPS, CategoryChipUi } from '../components/HomeCategoryChips';
 
@@ -215,7 +214,7 @@ const BAR_FLOATING_BAR_WIDTH: number = 304;
  */
 const TAB_SEARCH: number = 0;
 const TAB_PLAYLISTS: number = 1;
-const TAB_DOWNLOADS: number = 2;
+const TAB_DIARY: number = 2;
 /**
  * 屏幕竖向滑动（parallelGesture）判定收/放意图的触发阈值（vp）：
  * 上滑超过 → 展开、下滑超过 → 收起；一次手势只触发一次。
@@ -727,7 +726,7 @@ struct Index {
    *
    * 手机壳：HdsTabs 是非受控 index（见 onChange 注释），外部写 activeTab 不会
    * 切换可见页签 —— 必须走 tabController.changeIndex，由 HDS 内部状态切页，
-   * onChange 再回写 activeTab（驱动标题 / 下载页门控 / 顶栏 stackBuilder）。
+    * onChange 再回写 activeTab（驱动标题 / 拾音页门控 / 顶栏 stackBuilder）。
    */
   @StorageProp(STORE_TAB_SWITCH_REQUEST) @Watch('onTabSwitchRequest') tabSwitchRequest: number = 0;
 
@@ -743,11 +742,11 @@ struct Index {
   /**
    * 当前页签下标。HdsTabs 用**非受控 index**（受控 index 会致「切页签迷你栏闪烁/
    * 唱片重置」）：切页签由 HDS 内部状态驱动，onChange 只负责回写本字段，
-   * 驱动页签标题 / 下载页优化 / 冷启动恢复，**不再回灌进 HdsTabs 属性**。
+   * 驱动页签标题 / 拾音页冷启动门控 / 冷启动恢复，**不再回灌进 HdsTabs 属性**。
    *
-   * @StorageLink 写穿 AppStorage（STORE_ACTIVE_TAB），下载页据此在非活动页签时
-   * 跳过下载快照的全量重算（TabContent 常驻，不看这个的话切走页签后重算照跑，
-   * 拖慢全局）。onChange 的回写语句无需任何改动。
+   * @StorageLink 写穿 AppStorage（STORE_ACTIVE_TAB），拾音页（ListenDiaryPage）
+   * 据此门控全量会话查询到页签首次激活（TabContent 常驻，不看这个的话查询
+   * 照跑在启动路径上，拖冷启动）。onChange 的回写语句无需任何改动。
    */
   @StorageLink(STORE_ACTIVE_TAB) activeTab: number = 0;
 
@@ -778,13 +777,7 @@ struct Index {
   @State tabSwitchDuration: number = TAB_SWITCH_BASE_MS;
 
   /**
-   * 下载页多选态镜像：多选态 DlQueueActions 让位、DlSelectToggle 变身
-   * 标题行内多选动作组。写入口在 DownloadsPage，本组件只读。
-   */
-  @StorageProp(STORE_DL_BAR_SELECTING) dlSelecting: boolean = false;
-
-  /**
-   * 歌单页多选态镜像（机制同 dlSelecting）：onBackPress 据此判定
+   * 歌单页多选态镜像：onBackPress 据此判定
    * 「当前页签处于选择模式」—— 选择模式下系统/手势返回先退多选留在应用，
    * 对齐二级页（PlaylistDetail / UpSpacePage）.onBackPressed 的多选优先拦截。
    * 写入口在 PlaylistsPage，本组件只读。
@@ -792,11 +785,12 @@ struct Index {
   @StorageProp(STORE_PL_BAR_SELECTING) plSelecting: boolean = false;
 
   /**
-   * 下载页顶栏镜像：有无任务 —— 决定标题行「选择」按钮显隐
-   * 与 bottomBuilder 工具条的门控。写入口在 DownloadsPage.syncBarState，
-   * 本组件只读（@StorageProp 单向）。
+   * 歌单页标题行镜像（PlaylistsPage.syncBarState 唯一写入口，本组件只读）：
+   * - plSelectedCount：已选歌单数，多选态标题「已选 N」用；
+    * - plSubtitle：常规态标题右侧同行统计副行（「N 个歌单 · M 首」，空库空串）。
    */
-  @StorageProp(STORE_DL_BAR_HAS_TASKS) dlBarHasTasks: boolean = false;
+  @StorageProp(STORE_PL_BAR_SELECTED_COUNT) plSelectedCount: number = 0;
+  @StorageProp(STORE_PL_BAR_SUBTITLE) plSubtitle: string = '';
 
   /**
    * 首页搜索入口按钮激活镜像：首页列表停在顶部（搜索框可见）时为 true，
@@ -973,8 +967,8 @@ struct Index {
    *   · 播放页 overlay 打启时返回 = 收起播放页（逆向镜像），不走路由栈
    *     （播放页不是 NavDestination）。收起进行中（mounted 但未 open）也吞掉
    *     返回 —— closePlayer 内部幂等；
-   *   · 当前页签（歌单 / 下载）处于选择模式：派发退出多选请求
-   *     （STORE_PL/DL_EXIT_SELECT_REQUEST seq 递增，页签页 @Watch 消费 →
+   *   · 当前页签（歌单）处于选择模式：派发退出多选请求
+   *     （STORE_PL_EXIT_SELECT_REQUEST seq 递增，页签页 @Watch 消费 →
    *     selecting=false + 清空选区），留在本页签 —— 二级页
    *     （PlaylistDetail / UpSpacePage）.onBackPressed 同款行为；
    *   · 其余走默认（根页返回 = 退出应用）。
@@ -987,11 +981,6 @@ struct Index {
     if (this.activeTab === TAB_PLAYLISTS && this.plSelecting) {
       AppStorage.setOrCreate(STORE_PL_EXIT_SELECT_REQUEST,
         (AppStorage.get<number>(STORE_PL_EXIT_SELECT_REQUEST) ?? 0) + 1);
-      return true;
-    }
-    if (this.activeTab === TAB_DOWNLOADS && this.dlSelecting) {
-      AppStorage.setOrCreate(STORE_DL_EXIT_SELECT_REQUEST,
-        (AppStorage.get<number>(STORE_DL_EXIT_SELECT_REQUEST) ?? 0) + 1);
       return true;
     }
     return false;
@@ -1443,36 +1432,58 @@ struct Index {
     if (this.activeTab === TAB_PLAYLISTS) {
       return TabScrollerHolder.playlists;
     }
-    if (this.activeTab === TAB_DOWNLOADS) {
-      return TabScrollerHolder.downloads;
+    if (this.activeTab === TAB_DIARY) {
+      return TabScrollerHolder.diary;
     }
     return TabScrollerHolder.settings;
   }
 
   /**
-   * 标题行（歌单 / 下载 / 设置三页签共用，行 1）：
-   * 视觉与各页原自绘栏逐字一致（20fp Bold + padding left 20/right 16、
-   * 行高 NAV_TITLE_BAR_HEIGHT）。下载页右侧按钮组（DlSelectToggle：
-   * 常规「选择」/ 多选动作组）、队列控制（DlQueueActions，常规态），
-   * 歌单页右侧按钮组（PlTitleActions），均读页内状态镜像 + 经持有器回调页面。
-    * 歌单页多选态：「歌单」标题保留，标题 layoutWeight(1) 把 PlTitleActions
-    * 的多选动作组（完成 / 全选 / 删除选中 / 合并选中）挤到标题行右侧。
-    */
+   * 标题行（歌单 / 拾音 / 设置三页签共用，行 1）：
+   * 视觉与各页原自绘栏逐字一致（22fp Bold、行高 NAV_TITLE_BAR_HEIGHT）。
+   * 歌单页右侧按钮组（PlTitleActions），读页内状态镜像 + 经持有器回调页面。
+   * 歌单页分支（严格 activeTab === TAB_PLAYLISTS 门控）：
+   * - 多选态：左侧标题换「已选 N」（右侧 PlTitleActions 换全选/完成/删除合并组）；
+   * - 常规态：标题右侧同行统计副行（plSubtitle：N 个歌单 · M 首，14fp 二级色），
+   *   版式对齐首页标题行 homeTitleRow（22fp Bold 标题 + 右侧 14fp 小字同行）。
+   */
   @Builder
   tabTitleRow() {
     Row() {
-      Text(this.tabTitleText())
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-      if (this.activeTab === TAB_DOWNLOADS && this.dlBarHasTasks) {
-        DlSelectToggle()
-        if (!this.dlSelecting) {
-          DlQueueActions()
+      if (this.activeTab === TAB_PLAYLISTS && this.plSelecting) {
+        Text(`已选 ${this.plSelectedCount}`)
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+      } else if (this.activeTab === TAB_PLAYLISTS) {
+        Row({ space: 6 }) {
+          Text(this.tabTitleText())
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .maxLines(1)
+          if (this.plSubtitle.length > 0) {
+            Text(this.plSubtitle)
+              .fontSize(14)
+              .fontColor($r('app.color.text_secondary'))
+              .maxLines(1)
+              .flexShrink(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
         }
+        .layoutWeight(1)
+        .alignItems(VerticalAlign.Center)
+      } else {
+        Text(this.tabTitleText())
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
       }
       if (this.activeTab === TAB_PLAYLISTS) {
         PlTitleActions()
@@ -1489,27 +1500,13 @@ struct Index {
   /**
    * 时间段问候语：首页标题「BiliMusic」后缀，按当前小时分段 ——
    * 早上 [5,11) / 中午 [11,13) / 下午 [13,17) / 晚上 [17,23) /
-   * 深夜 [23,24)∪[0,1) / 凌晨 [1,5)。构建时求值：标题行随 homeChipsActive /
-   * 切页等状态变化重渲染时刷新，应用长时间停留跨段的边界误差由下一次重渲染自愈。
+   * 深夜 [23,24)∪[0,1) / 凌晨 [1,5)。分段规则与拾音页「听歌时段」
+   * 统计共用同一真源（common/DaySegments），两处永远同口径。
+   * 构建时求值：标题行随 homeChipsActive / 切页等状态变化重渲染时刷新，
+   * 应用长时间停留跨段的边界误差由下一次重渲染自愈。
    */
   private timeGreeting(): string {
-    const h: number = new Date().getHours();
-    if (h >= 5 && h < 11) {
-      return '早上好~';
-    }
-    if (h >= 11 && h < 13) {
-      return '中午好~';
-    }
-    if (h >= 13 && h < 17) {
-      return '下午好~';
-    }
-    if (h >= 17 && h < 23) {
-      return '晚上好~';
-    }
-    if (h >= 23 || h < 1) {
-      return '深夜好~';
-    }
-    return '凌晨好~';
+    return dayGreeting(new Date().getHours());
   }
 
   /**
@@ -1578,16 +1575,20 @@ struct Index {
 
   /**
    * 导航栏单个分类 tab 图标按钮（homeTitleRow 三图标之一）：
-   * 与右上搜索按钮同几何语言（40×40 圆按钮 + 20 号 SymbolGlyph），
-   * 图标复用 chip 条同款（HOME_CATEGORY_CHIPS 单一来源）；
+   * 与右上搜索按钮同几何语言（40×40 圆按钮 + 20×20 Template 图标），
+   * 图标复用 chip 条同款（HOME_CATEGORY_CHIPS 单一来源，方案 B 面性 SVG：
+   * renderMode(Template) + fillColor 上色，见 HomeCategoryChips 头注释）；
    * 选中态主题粉、未选中次级文字色，点击写 homeTab 切 tab。
    */
   @Builder
   private HomeNavTabIcon(item: CategoryChipUi) {
     Button() {
-      SymbolGlyph(item.icon)
-        .fontSize(20)
-        .fontColor([this.homeTab === item.key ? this.themePrimary : $r('app.color.text_secondary')])
+      Image(item.icon)
+        .width(20)
+        .height(20)
+        .renderMode(ImageRenderMode.Template)
+        .fillColor(this.homeTab === item.key ? this.themePrimary : $r('app.color.text_secondary'))
+        .interpolation(ImageInterpolation.High)
     }
     .type(ButtonType.Circle)
     .width(40)
@@ -1600,11 +1601,11 @@ struct Index {
 
   /**
    * 根栏 stackBuilder 全量内容：
-    * 首页 = homeTitleRow（「BiliMusic」+ 右上搜索按钮）；歌单 / 下载 / 设置
-    * 页签 = 标题行 —— 歌单页多选动作组由 PlTitleActions 渲染在标题行内
-    * （「歌单」标题 layoutWeight(1) 把动作组挤到行右侧），下载页多选动作组
-    * 由 DlSelectToggle 同款承载，标题行下方不再有第二行工具条。
-    * 外层 Stack：hitTestBehavior(Transparent) 让未覆盖的空白区点击穿透到下方列表。
+     * 首页 = homeTitleRow（「BiliMusic」+ 右上搜索按钮）；歌单 / 拾音 / 设置
+     * 页签 = 标题行 —— 歌单页多选动作组由 PlTitleActions 渲染在标题行内
+     * （「歌单」标题 layoutWeight(1) 把动作组挤到行右侧），
+     * 标题行下方不再有第二行工具条。
+     * 外层 Stack：hitTestBehavior(Transparent) 让未覆盖的空白区点击穿透到下方列表。
     */
   @Builder
   immersiveTitleBarContent() {
@@ -1624,7 +1625,7 @@ struct Index {
       .height('100%')
       .clip(false)
       .hitTestBehavior(HitTestMode.Transparent)
-    } else if (this.activeTab === TAB_DOWNLOADS) {
+    } else if (this.activeTab === TAB_DIARY) {
       Stack() {
         this.tabTitleRow()
       }
@@ -1672,11 +1673,11 @@ struct Index {
   }
 
   /**
-   * 当前页签的标题文案（歌单 / 下载 / 设置；搜索页签行 1 是搜索行，不取文案）。
+   * 当前页签的标题文案（歌单 / 拾音 / 设置；搜索页签行 1 是搜索行，不取文案）。
    */
   private tabTitleText(): string {
-    if (this.activeTab === TAB_DOWNLOADS) {
-      return '下载';
+    if (this.activeTab === TAB_DIARY) {
+      return '拾音';
     }
     if (this.activeTab === TAB_PLAYLISTS) {
       return '歌单';
@@ -1753,8 +1754,8 @@ struct Index {
             }.tabBar(this.tabItem(1, '歌单', $r('sys.symbol.list_bullet')))
 
             TabContent() {
-              DownloadsPage()
-            }.tabBar(this.tabItem(2, '下载', $r('sys.symbol.circle_and_arrow_down')))
+              ListenDiaryPage()
+            }.tabBar(this.tabItem(2, '拾音', $r('sys.symbol.waveform_path_ecg_heart')))
 
             TabContent() {
               SettingsPage()
@@ -1775,7 +1776,7 @@ struct Index {
           // 整条悬浮栏（含 miniBar 槽位）→ PlayBar 销毁重建（唱片 animator
           // 重建回正 + 胶囊闪动；barFloatingStyle 内容键缓存只挡住了样式对象
           // 重建那条路，挡不住这条）。切页签完全交给 HDS 内部状态，onChange 只
-          // 回写 activeTab 驱动页签标题 / 下载页优化，不再回灌属性 → HdsTabs
+          // 回写 activeTab 驱动页签标题 / 拾音页门控，不再回灌属性 → HdsTabs
           // 属性恒定 → 悬浮栏不重排。冷启动恢复上次页签由 aboutToAppear 的
           // 100ms 延迟块一次性 changeIndex()。
           .onChange((index: number): void => {

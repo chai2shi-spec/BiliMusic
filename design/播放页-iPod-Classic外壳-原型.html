@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>播放页 · iPod Classic 外壳</title>
+<style>
+  :root{
+    --panel:#F4F2ED; --ring:#E7E3DB; --btn:#F7F5F0;
+    --engrave:#A8A49C; --screen:#0A0A0C; --blue:#4A90D9;
+    --card:#121216; --line:#26262C; --txt:#E8E8EE; --dim:#8A8A94;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0B0B0E;color:var(--txt);
+    font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:40px 46px 56px}
+  h1{font-size:19px;font-weight:700;letter-spacing:.4px}
+  h1 small{font-size:12px;font-weight:400;color:var(--dim);margin-left:10px;letter-spacing:0}
+  .row{display:flex;gap:40px;margin-top:26px;align-items:flex-start}
+  .col{display:flex;flex-direction:column;align-items:center;gap:12px}
+  .cap{font-size:11px;color:var(--dim);letter-spacing:.3px}
+  .cap b{color:#C8C8D2;font-weight:600}
+
+  /* 手机舞台 */
+  .phone{position:relative;width:390px;height:844px;border-radius:46px;overflow:hidden;
+    background:radial-gradient(ellipse 300px 240px at 50% 88%,#141821 0%,#0B0D12 48%,#06060A 100%);
+    box-shadow:0 0 0 1px #34343C, 0 0 0 7px #141418, 0 32px 76px rgba(0,0,0,.8)}
+  .pool{position:absolute;left:50%;bottom:40px;transform:translateX(-50%);
+    width:430px;height:420px;
+    background:radial-gradient(ellipse at 50% 100%,
+      rgba(140,175,225,.26) 0%,rgba(110,150,205,.13) 34%,rgba(70,105,155,.04) 62%,
+      transparent 78%);
+    filter:blur(6px)}
+  .glowline{position:absolute;left:50%;bottom:146px;transform:translateX(-50%);
+    width:300px;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(160,195,240,.30) 30%,
+      rgba(190,215,255,.42) 50%,rgba(160,195,240,.30) 70%,transparent)}
+  .floorshadow{position:absolute;left:50%;bottom:138px;transform:translateX(-50%);
+    width:326px;height:26px;border-radius:50%;
+    background:radial-gradient(ellipse,rgba(0,0,0,.85) 0%,rgba(0,0,0,.4) 46%,transparent 72%);
+    filter:blur(7px)}
+
+  /* 机身 */
+  .device{position:absolute;left:50%;top:96px;transform:translateX(-50%)}
+  .bezel{padding:1.5px;border-radius:43.5px;
+    background:linear-gradient(158deg,#FAFAFC 0%,#9A9AA2 18%,#E8E8EE 38%,
+      #6E6E78 62%,#D8D8DE 82%,#8A8A94 100%);
+    box-shadow:0 34px 70px rgba(0,0,0,.72), 0 6px 16px rgba(0,0,0,.5),
+      0 0 0 .5px rgba(255,255,255,.14)}
+  .device.dark .bezel{background:linear-gradient(158deg,#6E6E76 0%,#33333A 20%,
+      #5A5A62 40%,#242428 64%,#4E4E56 84%,#2A2A30 100%)}
+  .shell{position:relative;width:358px;height:600px;border-radius:42px;
+    background:linear-gradient(176deg,#FBFAF6 0%,#F5F3EE 30%,#EFEDE7 62%,#E7E5DE 100%);
+    overflow:hidden;
+    box-shadow:inset 2px 0 7px rgba(0,0,0,.05), inset -2px 0 7px rgba(0,0,0,.05),
+      inset 0 1px 1px rgba(255,255,255,.9)}
+  .shell::before{content:"";position:absolute;left:0;right:0;top:0;height:52%;
+    background:linear-gradient(180deg,rgba(255,255,255,.72) 0%,
+      rgba(255,255,255,.30) 40%,rgba(255,255,255,0) 100%);pointer-events:none}
+  .shell::after{content:"";position:absolute;left:0;right:0;bottom:0;height:14%;
+    background:linear-gradient(0deg,rgba(0,0,0,.055),rgba(0,0,0,0));pointer-events:none}
+  .device.dark .shell{background:linear-gradient(176deg,#2A2A2E 0%,#202024 34%,#191919 68%,#141416 100%)}
+  .device.dark .shell::before{background:linear-gradient(180deg,rgba(255,255,255,.11) 0%,
+      rgba(255,255,255,.05) 40%,rgba(255,255,255,0) 100%)}
+  .device.dark .shell::after{background:linear-gradient(0deg,rgba(0,0,0,.35),rgba(0,0,0,0))}
+
+  /* 屏幕 */
+  .disp{position:absolute;left:32px;top:66px;width:294px;height:221px;
+    border-radius:3px;background:var(--screen);overflow:hidden;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.13),
+      inset 0 1.5px 4px rgba(0,0,0,.95), 0 0 0 1px rgba(0,0,0,.62),
+      0 1px 0 rgba(255,255,255,.55), 0 -1px 0 rgba(0,0,0,.12)}
+  .glare{position:absolute;left:-70px;top:-46px;width:132px;height:330px;
+    transform:rotate(12deg);
+    background:linear-gradient(90deg,rgba(255,255,255,0) 0%,
+      rgba(255,255,255,.082) 40%,rgba(255,255,255,.038) 100%);
+    pointer-events:none;z-index:9}
+
+  .hbar{height:18px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 12px;background:#141418;font-size:7.5px;color:#8C8C94;letter-spacing:.2px}
+  .hbar .l{display:flex;align-items:center;gap:4px}
+  .hbar .tri{width:0;height:0;border-left:4px solid #8C8C94;
+    border-top:3px solid transparent;border-bottom:3px solid transparent}
+  .hbar .r{display:flex;align-items:center;gap:5px}
+  .bat{width:13px;height:6px;border:1px solid #5A5A62;border-radius:1px;position:relative}
+  .bat::after{content:"";position:absolute;left:1px;top:1px;bottom:1px;width:8px;background:#7A7A82}
+  .bat::before{content:"";position:absolute;right:-3px;top:1.5px;width:1.5px;height:3px;background:#5A5A62}
+
+  .dbody{height:203px;display:flex;align-items:center;padding:0 15px;gap:15px}
+
+  .art{width:104px;height:104px;border-radius:2px;overflow:hidden;flex:none;
+    box-shadow:0 0 0 1px #202026, 0 2px 8px rgba(0,0,0,.6)}
+  .art svg{display:block;width:100%;height:100%}
+  .info{flex:1;min-width:0;display:flex;flex-direction:column}
+  .t1{font-size:15px;font-weight:700;color:#fff;line-height:1.25;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .t2{font-size:11.5px;color:#A0A0A6;margin-top:5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .t3{font-size:10px;color:#6E6E76;margin-top:4px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prog{margin-top:15px}
+  .bar{width:100%;height:2.5px;background:#2A2A30;border-radius:2px;overflow:hidden}
+  .bar i{display:block;height:100%;width:33%;background:var(--blue);border-radius:2px}
+  .trow{margin-top:6px;display:flex;justify-content:space-between;
+    font-size:8.5px;color:#7A7A82;letter-spacing:.2px}
+
+  .lrc{height:203px;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:15px;padding:0 26px;text-align:center}
+  .lrc .o{font-size:12px;color:#5A5A62;line-height:1.4}
+  .lrc .c{font-size:17px;font-weight:700;color:#fff;line-height:1.35;
+    padding-bottom:7px;border-bottom:2px solid var(--blue)}
+
+  .list{height:203px;overflow:hidden}
+  .li{height:27px;display:flex;align-items:center;padding:0 12px;font-size:11px;
+    color:#A8A8AE;gap:9px}
+  .li .n{width:22px;text-align:right;color:#5E5E66;font-size:10px;flex:none}
+  .li .s{margin-left:auto;font-size:9.5px;color:#6E6E76}
+  .li.on{background:linear-gradient(180deg,#5AA9E6 0%,#2F6DB5 100%);color:#fff;
+    border-top:.5px solid #9ACCFF;border-bottom:.5px solid #9ACCFF}
+  .li.on .n,.li.on .s{color:rgba(255,255,255,.85)}
+
+  .wordmark{position:absolute;left:0;right:0;top:287px;height:52px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:10px;letter-spacing:5.5px;color:rgba(0,0,0,.24);font-weight:600;
+    text-indent:5.5px}
+  .device.dark .wordmark{color:rgba(255,255,255,.26)}
+
+  /* 转盘 ⌀206 */
+  .wheel{position:absolute;left:76px;top:339px;width:206px;height:206px;border-radius:50%;
+    background:radial-gradient(circle at 50% 42%,#EFEDE7 0%,#E7E3DB 62%,#DEDAD1 100%);
+    box-shadow:
+      0 0 0 1px rgba(0,0,0,.155),
+      0 1px 2px rgba(0,0,0,.10),
+      inset 0 3px 9px rgba(0,0,0,.135),
+      inset 0 -2.5px 5px rgba(255,255,255,.92),
+      inset 0 0 0 1px rgba(0,0,0,.055),
+      0 1px 1px rgba(255,255,255,.6)}
+  .device.dark .wheel{background:radial-gradient(circle at 50% 42%,#2E2E33 0%,#26262B 62%,#202024 100%);
+    box-shadow:0 0 0 1px rgba(0,0,0,.65), inset 0 2.5px 8px rgba(0,0,0,.55),
+      inset 0 -2px 4px rgba(255,255,255,.055), 0 1px 1px rgba(255,255,255,.05)}
+
+  .sector{position:absolute;inset:0;border-radius:50%;pointer-events:none;filter:blur(2.5px);
+    -webkit-mask-image:radial-gradient(circle at 50% 50%,transparent 0 41%,
+      #000 45% 96%,transparent 100%);
+    mask-image:radial-gradient(circle at 50% 50%,transparent 0 41%,
+      #000 45% 96%,transparent 100%)}
+
+  .btn{position:absolute;left:59px;top:59px;width:88px;height:88px;border-radius:50%;
+    background:radial-gradient(circle at 50% 38%,#FCFAF6 0%,#F7F5F0 58%,#EDEAE3 100%);
+    box-shadow:
+      0 0 0 1px rgba(0,0,0,.10),
+      inset 0 1.5px 2px rgba(255,255,255,.95),
+      inset 0 -1.5px 3px rgba(0,0,0,.055),
+      0 2px 4px rgba(0,0,0,.10)}
+  .device.dark .btn{background:radial-gradient(circle at 50% 38%,#343439 0%,#2C2C31 58%,#232327 100%);
+    box-shadow:0 0 0 1px rgba(0,0,0,.7), inset 0 1.5px 2px rgba(255,255,255,.09),
+      inset 0 -1.5px 3px rgba(0,0,0,.3), 0 2px 4px rgba(0,0,0,.4)}
+  .btn span{position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;font-size:6.5px;letter-spacing:1.8px;color:rgba(0,0,0,.16);
+    text-indent:1.8px;font-weight:600}
+  .device.dark .btn span{color:rgba(255,255,255,.16)}
+
+  .eng{position:absolute;color:var(--engrave);font-weight:600;line-height:1;
+    text-align:center;text-shadow:0 .5px 0 rgba(255,255,255,.55)}
+  .device.dark .eng{color:#5E5E64;text-shadow:0 -.5px 0 rgba(0,0,0,.6)}
+  .eng.n{left:50%;top:29.5px;transform:translate(-50%,-50%);font-size:11.5px;letter-spacing:2px}
+  .eng.s{left:50%;top:176.5px;transform:translate(-50%,-50%);font-size:15px;letter-spacing:-1px}
+  .eng.w{left:29.5px;top:50%;transform:translate(-50%,-50%);font-size:15px;letter-spacing:-1px}
+  .eng.e{left:176.5px;top:50%;transform:translate(-50%,-50%);font-size:15px;letter-spacing:-1px}
+
+  /* 底部卡片 */
+  .cards{display:grid;grid-template-columns:1.05fr 1.25fr 1fr;gap:18px;margin-top:38px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .card h3{font-size:12.5px;font-weight:600;margin-bottom:11px;color:#C8C8D2;letter-spacing:.3px}
+  table{width:100%;border-collapse:collapse;font-size:10.5px}
+  td{padding:4.5px 0;color:#9A9AA4;border-bottom:1px solid rgba(255,255,255,.045)}
+  td:last-child{text-align:right;color:#D8D8E0;font-family:"Cascadia Mono",Consolas,monospace;font-size:10px}
+  tr:last-child td{border-bottom:none}
+  .k{color:#6E6E78;font-size:10px;margin-top:9px;line-height:1.65}
+  code{font-family:"Cascadia Mono",Consolas,monospace;font-size:9.8px;
+    background:#1C1C22;padding:1px 4px;border-radius:3px;color:#A8B8D8}
+</style>
+</head>
+<body>
+
+<h1>播放页 · iPod Classic 外壳<small>机身 358×600 · 屏幕 294×221 · 转盘 ⌀206 —— 由 103.5×61.8mm 等比换算（s=5.79）</small></h1>
+
+<div class="row">
+
+  <div class="col">
+    <div class="phone">
+      <div class="pool"></div><div class="glowline"></div><div class="floorshadow"></div>
+      <div class="device">
+        <div class="bezel"><div class="shell">
+          <div class="disp">
+            <div class="hbar">
+              <div class="l"><span class="tri"></span><span>正在播放</span></div>
+              <div class="r"><span>♪</span><div class="bat"></div></div>
+            </div>
+            <div class="dbody">
+              <div class="art"><svg viewBox="0 0 104 104"><use href="#art1"/></svg></div>
+              <div class="info">
+                <div class="t1">夜航星</div>
+                <div class="t2">不才</div>
+                <div class="t3">《夜航星》</div>
+                <div class="prog">
+                  <div class="bar"><i></i></div>
+                  <div class="trow"><span>1:24</span><span>-2:48</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="glare"></div>
+          </div>
+          <div class="wordmark">iPod</div>
+          <div class="wheel">
+            <div class="sector" style="background:conic-gradient(from 318deg,
+              transparent 0deg,rgba(255,255,255,.85) 12deg,
+              rgba(255,255,255,.35) 26deg,transparent 40deg)"></div>
+            <div class="btn"><span>SELECT</span></div>
+            <div class="eng n">MENU</div>
+            <div class="eng w">◀◀</div>
+            <div class="eng e">▶▶</div>
+            <div class="eng s">▶❙❙</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div class="cap"><b>白 · 正在播放</b>　默认态，屏幕 4:3 横排</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="pool"></div><div class="glowline"></div><div class="floorshadow"></div>
+      <div class="device">
+        <div class="bezel"><div class="shell">
+          <div class="disp">
+            <div class="hbar">
+              <div class="l"><span class="tri"></span><span>歌词</span></div>
+              <div class="r"><span>♪</span><div class="bat"></div></div>
+            </div>
+            <div class="lrc">
+              <div class="o">穿过无边黑夜的旅人</div>
+              <div class="c">把星光别在胸口</div>
+              <div class="o">听见远方传来的回答</div>
+            </div>
+            <div class="glare"></div>
+          </div>
+          <div class="wordmark">iPod</div>
+          <div class="wheel">
+            <div class="btn"><span>SELECT</span></div>
+            <div class="eng n">MENU</div>
+            <div class="eng w">◀◀</div>
+            <div class="eng e">▶▶</div>
+            <div class="eng s">▶❙❙</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div class="cap"><b>白 · 歌词</b>　只放 3 行，Select 循环切屏</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="pool"></div><div class="glowline"></div><div class="floorshadow"></div>
+      <div class="device dark">
+        <div class="bezel"><div class="shell">
+          <div class="disp">
+            <div class="hbar">
+              <div class="l"><span class="tri"></span><span>队列 · 4/12</span></div>
+              <div class="r"><span>♪</span><div class="bat"></div></div>
+            </div>
+            <div class="list">
+              <div class="li"><span class="n">02</span><span>星河滚烫</span><span class="s">3:48</span></div>
+              <div class="li"><span class="n">03</span><span>水星记</span><span class="s">4:32</span></div>
+              <div class="li on"><span class="n">04</span><span>夜航星</span><span class="s">4:12</span></div>
+              <div class="li"><span class="n">05</span><span>像风一样</span><span class="s">4:05</span></div>
+              <div class="li"><span class="n">06</span><span>光年之外</span><span class="s">3:55</span></div>
+              <div class="li"><span class="n">07</span><span>溯</span><span class="s">4:20</span></div>
+              <div class="li"><span class="n">08</span><span>海底</span><span class="s">4:16</span></div>
+            </div>
+            <div class="glare"></div>
+          </div>
+          <div class="wordmark">iPod</div>
+          <div class="wheel">
+            <div class="sector" style="background:conic-gradient(from 96deg,
+              transparent 0deg,rgba(74,144,217,.95) 12deg,
+              rgba(74,144,217,.4) 26deg,transparent 40deg)"></div>
+            <div class="btn"><span>SELECT</span></div>
+            <div class="eng n">MENU</div>
+            <div class="eng w">◀◀</div>
+            <div class="eng e">▶▶</div>
+            <div class="eng s">▶❙❙</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div class="cap"><b>黑 · 队列</b>　蓝渐变选中条；扇区高光转蓝＝寻轨模式</div>
+  </div>
+
+</div>
+
+<div class="cards">
+
+  <div class="card">
+    <h3>几何 · 从 61.8 × 103.5 mm 换算</h3>
+    <table>
+      <tr><td>机身</td><td>358 × 600</td></tr>
+      <tr><td>机身圆角</td><td>42</td></tr>
+      <tr><td>屏幕（4:3）</td><td>294 × 221</td></tr>
+      <tr><td>屏幕位置</td><td>y 66 · x 32</td></tr>
+      <tr><td>转盘直径</td><td>206</td></tr>
+      <tr><td>环宽</td><td>59</td></tr>
+      <tr><td>中心按钮</td><td>88</td></tr>
+      <tr><td>屏 → 盘 空白</td><td>52</td></tr>
+    </table>
+    <div class="k">比例因子 <code>s = 358/61.8 = 5.79</code>。机身<b>不拉伸</b>填满屏，上下各 122 交给舞台光。</div>
+  </div>
+
+  <div class="card">
+    <h3>交互 · 一个环扛两个连续量</h3>
+    <table>
+      <tr><td>环上顺时针拖</td><td>音量 +（3° 一档）</td></tr>
+      <tr><td>环上逆时针拖</td><td>音量 −</td></tr>
+      <tr><td>按住 600ms 后拖</td><td>切「寻轨」· 扇区转蓝</td></tr>
+      <tr><td>MENU（上）</td><td>退一级 / 长按收起</td></tr>
+      <tr><td>◀◀ / ▶▶</td><td>上 / 下一首 · 长按快进退</td></tr>
+      <tr><td>▶❙❙（下）</td><td>播放 / 暂停</td></tr>
+      <tr><td>中心 Select</td><td>切屏：播放→歌词→队列</td></tr>
+    </table>
+    <div class="k">判方向键：角度落在 12/3/6/9 的 <code>±22°</code> 且位移 <code>&lt; 10vp</code>，抬手时触发。</div>
+  </div>
+
+  <div class="card">
+    <h3>材质 · 六层</h3>
+    <table>
+      <tr><td>S0 舞台</td><td>#06060A + 底光</td></tr>
+      <tr><td>S1 投影</td><td>0 34 70 / .72</td></tr>
+      <tr><td>S2 不锈钢边</td><td>1.5 四段渐变</td></tr>
+      <tr><td>S3 面板</td><td>#F4F2ED</td></tr>
+      <tr><td>S4 屏幕</td><td>#0A0A0C + 12° 反光</td></tr>
+      <tr><td>S5 转盘</td><td>#E7E3DB + 内阴影</td></tr>
+    </table>
+    <div class="k">中心按钮比环<b>略亮</b>＝视觉凸起，这是 iPod 手感的关键误读。</div>
+  </div>
+
+</div>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A2233"/><stop offset=".55" stop-color="#123A4E"/>
+      <stop offset="1" stop-color="#061521"/></linearGradient>
+    <radialGradient id="g2" cx=".72" cy=".26" r=".58">
+      <stop offset="0" stop-color="#8FD8E8" stop-opacity=".85"/>
+      <stop offset=".6" stop-color="#2E7A96" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#0A2233" stop-opacity="0"/></radialGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#03101A"/><stop offset="1" stop-color="#0A2432"/></linearGradient>
+  </defs>
+  <symbol id="art1" viewBox="0 0 104 104">
+    <rect width="104" height="104" fill="url(#g1)"/>
+    <rect width="104" height="104" fill="url(#g2)"/>
+    <path d="M0 74 L28 56 L48 67 L74 43 L104 63 L104 104 L0 104 Z" fill="url(#g3)"/>
+    <circle cx="76" cy="28" r="8" fill="#EAF6FA" opacity=".92"/>
+    <circle cx="76" cy="28" r="13" fill="#BFE8F4" opacity=".16"/>
+    <g fill="#EAF6FA" opacity=".7">
+      <circle cx="24" cy="20" r=".9"/><circle cx="37" cy="33" r=".7"/>
+      <circle cx="56" cy="15" r=".8"/><circle cx="91" cy="44" r=".7"/>
+      <circle cx="13" cy="42" r=".6"/>
+    </g>
+  </symbol>
+</svg>
+
+</body>
+</html>

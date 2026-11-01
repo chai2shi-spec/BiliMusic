@@ -117,7 +117,7 @@ async function removeMany(keys: string[]): Promise<void> {
   await p.flush();
 }
 
-/** 封面风格白名单归一化：历史存量已删档（黑胶/磁带/全屏沉浸 immersive）及未知值回落默认唱片档 */
+/** 封面风格白名单归一化：历史存量已删档（黑胶/磁带/全屏沉浸 immersive/满幅 full）及未知值回落默认唱片档 */
 function normalizeCoverStyle(style: string | undefined): string {
   const valid: boolean = style === PLAYER_COVER_STYLE_DISC
     || style === PLAYER_COVER_STYLE_SQUARE;
@@ -187,6 +187,7 @@ function getSettings(): AppSettings {
     downloadDir: stored?.downloadDir ?? DEFAULT_APP_SETTINGS.downloadDir,
     autoPlay: stored?.autoPlay ?? DEFAULT_APP_SETTINGS.autoPlay,
     autoPlayOnStart: stored?.autoPlayOnStart ?? DEFAULT_APP_SETTINGS.autoPlayOnStart,
+    resumeFromProgress: stored?.resumeFromProgress ?? DEFAULT_APP_SETTINGS.resumeFromProgress,
     wifiOnlyDownload: stored?.wifiOnlyDownload ?? DEFAULT_APP_SETTINGS.wifiOnlyDownload,
     wifiOnlyPlay: stored?.wifiOnlyPlay ?? DEFAULT_APP_SETTINGS.wifiOnlyPlay,
     themeMode: stored?.themeMode ?? DEFAULT_APP_SETTINGS.themeMode,
@@ -201,11 +202,11 @@ function getSettings(): AppSettings {
     speedEnabled: stored?.speedEnabled ?? DEFAULT_APP_SETTINGS.speedEnabled,
     playbackSpeed: stored?.playbackSpeed ?? DEFAULT_APP_SETTINGS.playbackSpeed,
     audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled,
-    loudnessNormalizationEnabled: stored?.loudnessNormalizationEnabled ?? DEFAULT_APP_SETTINGS.loudnessNormalizationEnabled,
     openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled,
     sleepTimerEntryEnabled: stored?.sleepTimerEntryEnabled ?? DEFAULT_APP_SETTINGS.sleepTimerEntryEnabled,
     skipIntroEntryEnabled: stored?.skipIntroEntryEnabled ?? DEFAULT_APP_SETTINGS.skipIntroEntryEnabled,
     upSpaceEntryEnabled: stored?.upSpaceEntryEnabled ?? DEFAULT_APP_SETTINGS.upSpaceEntryEnabled,
+    trackVolumeEntryEnabled: stored?.trackVolumeEntryEnabled ?? DEFAULT_APP_SETTINGS.trackVolumeEntryEnabled,
     lyricCentered: stored?.lyricCentered ?? DEFAULT_APP_SETTINGS.lyricCentered,
     immersiveMaterialTier: normalizeImmersiveTier(stored?.immersiveMaterialTier),
     listenCacheEnabled: stored?.listenCacheEnabled ?? DEFAULT_APP_SETTINGS.listenCacheEnabled,
@@ -240,6 +241,7 @@ function copyAppSettings(s: AppSettings): AppSettings {
     downloadDir: s.downloadDir,
     autoPlay: s.autoPlay,
     autoPlayOnStart: s.autoPlayOnStart,
+    resumeFromProgress: s.resumeFromProgress,
     wifiOnlyDownload: s.wifiOnlyDownload,
     wifiOnlyPlay: s.wifiOnlyPlay,
     themeMode: s.themeMode,
@@ -250,11 +252,11 @@ function copyAppSettings(s: AppSettings): AppSettings {
     speedEnabled: s.speedEnabled,
     playbackSpeed: s.playbackSpeed,
     audioMixEnabled: s.audioMixEnabled,
-    loudnessNormalizationEnabled: s.loudnessNormalizationEnabled,
     openInBilibiliEnabled: s.openInBilibiliEnabled,
     sleepTimerEntryEnabled: s.sleepTimerEntryEnabled,
     skipIntroEntryEnabled: s.skipIntroEntryEnabled,
     upSpaceEntryEnabled: s.upSpaceEntryEnabled,
+    trackVolumeEntryEnabled: s.trackVolumeEntryEnabled,
     lyricCentered: s.lyricCentered,
     immersiveMaterialTier: s.immersiveMaterialTier,
     listenCacheEnabled: s.listenCacheEnabled,

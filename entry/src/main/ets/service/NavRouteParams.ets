@@ -12,6 +12,8 @@
  * 也让 instanceof 判型成为可能（字面量没有可判型的构造身份）。
  */
 
+import { DiaryTopUp } from './ListenDiaryStats';
+
 /**
  * 「UP 主主页」（路由名 UpSpace）入参。
  *
@@ -115,6 +117,64 @@ export class LoginRouteParam {
 }
 
 /**
+ * 「听歌日记·新面孔清单」（路由名 DiaryNewFaces）入参。
+ *
+ * 听歌日记页已持有派生好的报告，这里直接带报告快照进清单页
+ * （标题 + 新面孔列表），清单页纯展示、不重算统计 —— 重算需全量
+ * 会话扫描（querySessions），为一张静态清单重复扫一遍不划算。
+ * 列表元素是 DiaryTopUp 接口对象（数据快照），仅外层参数做 instanceof 判型。
+ */
+export class DiaryNewFacesRouteParam {
+  /** 页面标题（本周新面孔 / 今日新面孔 …，随周期与往期前缀变化） */
+  title: string;
+  /** 副标题（N 位 UP 主 · 第一次出现在你的列表） */
+  subtitle: string;
+  /** 新面孔清单（时长降序；元素为 DiaryTopUp 快照） */
+  faces: DiaryTopUp[];
+
+  constructor(title: string, subtitle: string, faces: DiaryTopUp[]) {
+    this.title = title;
+    this.subtitle = subtitle;
+    this.faces = faces;
+  }
+}
+
+/**
+ * 「搜索页」（路由名 Search）入参：进页自动执行该关键词搜索。
+ *
+ * 现有搜索入口全部 push('Search', undefined)（进页白板 + 自动聚焦输入框）；
+ * 听歌日记「周期标签」等携带既有关键词的入口传本参数 —— SearchPage 在
+ * onAppear 读取后把词写进输入框并直接走 doSearch（省一步手输/回车）。
+ * keyword 为空串时按无参兜底（页面按普通进入处理）。
+ */
+export class SearchRouteParam {
+  keyword: string;
+
+  constructor(keyword: string) {
+    this.keyword = keyword;
+  }
+}
+
+/**
+ * 「网易云歌单预览」（路由名 NeteasePlaylist）入参。
+ *
+ * playlistId 为网易云歌单定位符（必填，空 = 页面进失败态）；
+ * name / coverUrl 是首页网格卡已有数据的首帧兜底 —— 真值（歌单全名 / 曲目列表）
+ * 由页面内 fetchNeteasePlaylist 现拉并覆盖。
+ */
+export class NeteasePlaylistRouteParam {
+  playlistId: string;
+  name: string;
+  coverUrl: string;
+
+  constructor(playlistId: string, name: string, coverUrl: string) {
+    this.playlistId = playlistId;
+    this.name = name;
+    this.coverUrl = coverUrl;
+  }
+}
+
+/**
  * 需要登录才能进入的路由名清单（NavStackHolder.setupInterception 的
  * willShow 阶段逐跳检查：目标在清单内且未登录 → 改推登录页）。
  *
@@ -176,6 +236,42 @@ export class NavRouteParamReader {
     if (Array.isArray(params) && params.length > 0) {
       const first: ESObject = params[0];
       if (first instanceof CollectionDetailRouteParam) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  /** 取 DiaryNewFaces 路由参数；栈上没有 / 类型不符返回 null（按无参兜底） */
+  static readDiaryNewFacesParam(stack: NavPathStack): DiaryNewFacesRouteParam | null {
+    const params: ESObject = stack.getParamByName('DiaryNewFaces');
+    if (Array.isArray(params) && params.length > 0) {
+      const first: ESObject = params[0];
+      if (first instanceof DiaryNewFacesRouteParam) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  /** 取 Search 路由参数；栈上没有 / 类型不符 / 空关键词返回 null（按普通进入兜底） */
+  static readSearchParam(stack: NavPathStack): SearchRouteParam | null {
+    const params: ESObject = stack.getParamByName('Search');
+    if (Array.isArray(params) && params.length > 0) {
+      const first: ESObject = params[0];
+      if (first instanceof SearchRouteParam && first.keyword.trim().length > 0) {
+        return first;
+      }
+    }
+    return null;
+  }
+
+  /** 取 NeteasePlaylist 路由参数；栈上没有 / 类型不符 / 空 id 返回 null（按失败态兜底） */
+  static readNeteasePlaylistParam(stack: NavPathStack): NeteasePlaylistRouteParam | null {
+    const params: ESObject = stack.getParamByName('NeteasePlaylist');
+    if (Array.isArray(params) && params.length > 0) {
+      const first: ESObject = params[0];
+      if (first instanceof NeteasePlaylistRouteParam && first.playlistId.length > 0) {
         return first;
       }
     }

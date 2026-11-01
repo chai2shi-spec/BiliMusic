@@ -40,7 +40,7 @@ import { currentNetworkLabel } from '../utils/NetworkUtil';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { CollectionDetailRouteParam, NavRouteParamReader, UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP, SEARCH_FILTER_DEBOUNCE_MS } from '../common/constants/InteractionConstants';
+import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP, SEARCH_FILTER_DEBOUNCE_MS, ACTION_ROW_H, SEARCH_MODE_MS } from '../common/constants/InteractionConstants';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { CustomContentDialog } from '@kit.ArkUI';
@@ -49,6 +49,8 @@ import {
   makeButtonMaterialModifier
 } from '../utils/HeaderBarMaterial';
 import { SearchBox } from '../components/SearchBox';
+import { HeaderIconButton } from '../components/HeaderIconButton';
+import { SheetActionRow } from '../components/SheetActionRow';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
 import {
   CONTENT_END_OFFSET,
@@ -56,7 +58,9 @@ import {
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
-  STORE_THEME_DEEP
+  STORE_THEME_DEEP,
+  STORE_THEME_ON,
+  STORE_SELECT_ICONS_HINT_SHOWN
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
@@ -79,11 +83,9 @@ const CD_REVEAL_PAGE_SIZE: number = 20;
  */
 const CD_ENQUEUE_GAP_MS: number = 350;
 
-/** 多选态搜索区 / 动作区交叉淡化时长（PlaylistDetail PD_SELECT_FADE_MS 同款） */
-const CD_SELECT_FADE_MS: number = 250;
-
-/** 头部区（bottomBuilder 承载）实测前的估计高度：封面行 + 按钮两行 + padding */
-const COLLECTION_HEADER_ESTIMATE_HEIGHT: number = 220;
+/** 头部区（bottomBuilder 承载）实测前的估计高度：封面行 + 操作行 + padding
+ *（按钮行 A 与槽位行 B 已按设计方案 §3 合并为单个 36 高三层 Stack） */
+const COLLECTION_HEADER_ESTIMATE_HEIGHT: number = 180;
 
 /** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise（批量下载串行节流用） */
 function delay(ms: number): Promise<void> {
@@ -163,6 +165,11 @@ export struct CollectionDetailPage {
   /** 本地过滤全量匹配；空数组 = 无关键词或 0 命中 */
   @State filteredTracks: Track[] = [];
 
+  /** 搜索态（L2，设计方案 §3.4）：点 🔍 进入，取消 / 返回键退出；搜索框非常驻 */
+  @State searchMode: boolean = false;
+  /** 更多面板（L3 bindSheet）：⋯ 打开 */
+  @State moreSheetOpen: boolean = false;
+
   // ===== 多选（PlaylistDetail 同款口径） =====
   @State selecting: boolean = false;
   @State selectedIds: string[] = [];
@@ -187,6 +194,7 @@ export struct CollectionDetailPage {
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
 
@@ -432,6 +440,25 @@ export struct CollectionDetailPage {
     this.tracks = this.activeSource().slice(0, CD_REVEAL_PAGE_SIZE);
   }
 
+  /**
+   * 点 🔍 进入搜索态（L2，设计方案 §3.4）：整行原位切换为独占输入行 + 取消按钮；
+   * 若在多选先退出（常态 / 搜索 / 多选三态互斥）。
+   * 关键词从空起步 —— 取消 / 返回键出口都会清词，不存在「带着旧词进搜索态」。
+   */
+  private enterSearchMode(): void {
+    this.exitSelecting();
+    this.searchMode = true;
+  }
+
+  /**
+   * 搜索态统一出口（「取消」按钮 / 返回键，§3.4「退出」）：
+   * 清空关键词 → 收起搜索态 → 列表恢复全量。
+   */
+  private cancelSearch(): void {
+    this.clearSearch();
+    this.searchMode = false;
+  }
+
   // ===== 已下载徽标 =====
 
   /** 下载快照变化（新增完成 / 删除任务）：即时重建已下载集合，徽标跟着出现 / 消失 */
@@ -579,9 +606,24 @@ export struct CollectionDetailPage {
 
   // ===== 多选核心（PlaylistDetail 同款口径） =====
 
+  /**
+   * 进入多选（面板「选择分 P」）：
+   * · 先退搜索态并清孤儿关键词 —— 搜索框随 L2 卸载，若留着孤儿过滤词，
+   *   常态行下列表被无指示地筛过（旧 UI 搜索框常驻可回看，新 UI 必须清）；
+   * · 首次进入 toast 一次右侧图标语义（§3.6：图标化以「进多选时提示一次」补齐）。
+   */
   private enterSelecting(): void {
+    this.searchMode = false;
+    if (this.searchKeyword.length > 0) {
+      this.clearSearch();
+    }
     this.selecting = true;
     this.selectedIds = [];
+    const hinted: boolean = AppStorage.get<boolean>(STORE_SELECT_ICONS_HINT_SHOWN) ?? false;
+    if (!hinted) {
+      AppStorage.setOrCreate(STORE_SELECT_ICONS_HINT_SHOWN, true);
+      this.toast('已进入多选 · 右下角可加入歌单 / 下载', 2200);
+    }
   }
 
   private toggleSelected(track: Track): void {
@@ -894,11 +936,55 @@ export struct CollectionDetailPage {
   }
 
   /**
+   * 更多面板（L3 bindSheet，设计方案 §3.5）：随机播放 / 保存为歌单从按钮行收进
+   * 面板 —— 按钮行 A 实测 347vp 已溢出，且两个播放按钮并排违反「主 CTA 唯一
+   * 且显眼」；收敛后 CTA 与歌单详情完全同宽，三页语言一致。
+   * 每行带语义图标 + 副标注；点击行先关面板再执行动作（对话框在面板关闭后叠加）。
+   */
+  @Builder
+  MoreSheetBuilder(): void {
+    Column() {
+      if (this.parts.length > 0) {
+        SheetActionRow({
+          icon: $r('sys.symbol.shuffle'),
+          title: '随机播放',
+          onClickAction: (): void => {
+            this.moreSheetOpen = false;
+            this.shuffleAndPlay();
+          }
+        })
+        SheetActionRow({
+          icon: $r('sys.symbol.plus'),
+          title: '保存为歌单',
+          subtitle: `共 ${this.parts.length} 个分 P`,
+          onClickAction: (): void => {
+            this.moreSheetOpen = false;
+            this.openSaveDialog();
+          }
+        })
+      }
+      if (this.tracks.length > 0) {
+        SheetActionRow({
+          icon: $r('sys.symbol.checkmark'),
+          title: '选择分 P',
+          subtitle: '多选批量',
+          onClickAction: (): void => {
+            this.moreSheetOpen = false;
+            this.enterSelecting();
+          }
+        })
+      }
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /**
    * 头部区（titleBar 的 bottomBuilder 承载）：
    *  · 封面行：96vp 圆角封面 + 28fp 大标题 + 元信息行（N 个分P · 总时长 · 播放量）
    *    + UP 名行（可点跳 UP 主页）；
-   *  · 按钮行 A：播放全部 / 随机播放 / 选择（多选态变身「完成」）/ 保存为歌单；
-   *  · 槽位行 B：常态 = 搜索框（页内过滤），多选态 = 全选 / 加入歌单 / 下载。
+   *  · 操作行：三层重构 §3（常态 CTA + 🔍 + ⋯ / 搜索态 / 多选态，Stack 换层）。
    *  ⚠️ 隐藏层必须用条件渲染（不挂载），不能双层叠放 + 透明层：
    *  HitTestMode.None 只豁免容器自身，子按钮仍响应点击（PlaylistDetail 真机踩过）。
    */
@@ -947,122 +1033,167 @@ export struct CollectionDetailPage {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 按钮行 A：多选态只留「完成」（其余摘出布局，visibility 摘出无过渡可接受）
-      Row({ space: 8 }) {
-        Button('播放全部', { type: ButtonType.Normal })
-          .fontSize(13)
-          .height(32)
-          .borderRadius(BUTTON_RADIUS_VP)
-          .backgroundColor(this.themeSurface)
-          .fontColor(this.themePrimary)
-          .attributeModifier(this.buttonMaterial)
-          .visibility(this.selecting ? Visibility.None : Visibility.Visible)
-          .onClick((): void => {
-            this.playAllParts();
-          })
-        Button('随机播放', { type: ButtonType.Normal })
-          .fontSize(13)
-          .height(32)
-          .borderRadius(BUTTON_RADIUS_VP)
-          .backgroundColor(this.themeSurface)
-          .fontColor(this.themePrimary)
-          .attributeModifier(this.buttonMaterial)
-          .visibility(this.selecting ? Visibility.None : Visibility.Visible)
-          .onClick((): void => {
-            this.shuffleAndPlay();
-          })
-        // 选择 / 完成：同一颗按钮承担多选进出（位置恒定不跳）
-        Button(this.selecting ? '完成' : '选择', { type: ButtonType.Normal })
-          .fontSize(13)
-          .height(32)
-          .borderRadius(BUTTON_RADIUS_VP)
-          .backgroundColor(this.themeSurface)
-          .fontColor(this.themePrimary)
-          .attributeModifier(this.buttonMaterial)
-          .onClick((): void => {
-            if (this.selecting) {
-              this.exitSelecting();
-            } else {
-              this.enterSelecting();
+      // 操作行三层重构（设计方案 §3）：Stack 固定高 36 内三态条件渲染 +
+      // OPACITY 交叉淡出（SEARCH_MODE_MS）—— 隐藏层真不挂载（HitTestMode.None
+      // 透明层误触的坑见 §6②），退场节点脱离布局由固定高兜住（§6①）。
+      // · 常态行 = 播放全部主 CTA（品牌色实底 + themeOn 深字，§2 规则 2）+ 🔍 + ⋯，
+      //   随机播放 / 保存为歌单 / 选择分 P 全收进 ⋯ 面板（L3）；
+      // · 搜索行 = SearchBox 独占 + 取消（搜索是「模式」不是控件，§2 规则 1）；
+      // · 多选行 = 完成 / 全选 + 右侧图标化批量动作（§3.6）。
+      Stack() {
+        // ── 常态行（L1）──
+        if (!this.selecting && !this.searchMode) {
+          Row({ space: 8 }) {
+            // 主 CTA：有分 P 才显示；layoutWeight(1) 吃掉全部剩余宽度
+            if (this.tracks.length > 0) {
+              Button() {
+                Row({ space: 6 }) {
+                  SymbolGlyph($r('sys.symbol.play_fill'))
+                    .fontSize(15)
+                    .fontColor([this.themeOn])
+                  Text('播放全部')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.themeOn)
+                }
+              }
+              .type(ButtonType.Normal)
+              .height(ACTION_ROW_H)
+              .borderRadius(10)
+              .backgroundColor(this.themePrimary)
+              .layoutWeight(1)
+              .onClick((): void => {
+                this.playAllParts();
+              })
             }
-          })
-        Button('保存为歌单', { type: ButtonType.Normal })
-          .fontSize(13)
-          .height(32)
-          .borderRadius(BUTTON_RADIUS_VP)
-          .backgroundColor(this.themeSurface)
-          .fontColor(this.themePrimary)
-          .attributeModifier(this.buttonMaterial)
-          .visibility(this.selecting ? Visibility.None : Visibility.Visible)
-          .onClick((): void => {
-            this.openSaveDialog();
-          })
-      }
-      .width('100%')
-      .margin({ top: 12 })
-      .alignItems(VerticalAlign.Center)
-
-      // 槽位行 B：常态 = 搜索框；多选态 = 全选 / 加入歌单 / 下载（条件渲染换层 + 淡入淡出）
-      if (!this.selecting) {
-        SearchBox({
-          placeholder: '搜索分 P',
-          keyword: this.searchKeyword,
-          clearVisible: this.searchKeyword.trim().length > 0,
-          onKeywordChange: (v: string): void => {
-            this.searchKeyword = v;
-            this.onKeywordChanged();
-          },
-          onClear: (): void => {
-            this.clearSearch();
+            // 🔍 搜索入口（L2 的门）：没有分 P 时没有可搜内容，不显示
+            if (this.tracks.length > 0) {
+              HeaderIconButton({
+                icon: $r('sys.symbol.magnifyingglass'),
+                accessibilityLabel: '搜索分 P',
+                onClickAction: (): void => {
+                  this.enterSearchMode();
+                }
+              })
+            }
+            // ⋯ 更多入口（L3 面板）：位置恒定在这一行最右（§2 规则 3）
+            HeaderIconButton({
+              icon: $r('sys.symbol.more'),
+              accessibilityLabel: '更多合集操作',
+              onClickAction: (): void => {
+                this.moreSheetOpen = true;
+              }
+            })
+            .bindSheet($$this.moreSheetOpen, this.MoreSheetBuilder(), {
+              // 大窗（≥840vp）默认跟手样式：无遮罩不可点关、下拉不关 —— 锁底部样式
+              preferType: SheetType.BOTTOM,
+              title: { title: '合集操作' },
+              height: SheetSize.FIT_CONTENT,
+              dragBar: true,
+              showClose: true
+            })
           }
-        })
-        .width('100%')
-        // 与按钮行 A 之间留 8vp 呼吸间距（换层淡入淡出时两态几何一致）
-        .margin({ top: 8 })
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: CD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
-      } else {
-        Row({ space: 8 }) {
-          Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.toggleSelectAll();
-            })
-          Button('加入歌单', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.addSelectedToPlaylist();
-            })
-          Button('下载', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .enabled(!this.downloadingSelected)
-            .onClick((): void => {
-              this.confirmDownloadSelected();
-            })
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
-        .width('100%')
-        // 与搜索框常态层同几何（margin top 8），换层时按钮位置不跳
-        .margin({ top: 8 })
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: CD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
+        // ── 搜索行（L2，§3.4）：SearchBox 独占 + 取消 ——
+        // 本页纯本地过滤，键盘搜索键无远程动作（onSubmit 空实现仅收键盘）；
+        // 输入即过滤（200ms 防抖，见 onKeywordChanged），框内 × 清除，
+        // 「取消」与返回键统一走 cancelSearch（清词收起、列表恢复全量）。
+        if (this.searchMode) {
+          Row({ space: 8 }) {
+            SearchBox({
+              placeholder: '搜索分 P',
+              keyword: this.searchKeyword,
+              clearVisible: this.searchKeyword.trim().length > 0,
+              onKeywordChange: (v: string): void => {
+                this.searchKeyword = v;
+                this.onKeywordChanged();
+              },
+              onSubmit: (): void => {
+              },
+              onClear: (): void => {
+                this.clearSearch();
+              }
+            })
+              .layoutWeight(1)
+            Button('取消', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(ACTION_ROW_H)
+              .padding({ left: 12, right: 4 })
+              .backgroundColor(Color.Transparent)
+              .fontColor(this.themePrimary)
+              .onClick((): void => {
+                this.cancelSearch();
+              })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
+        }
+        // ── 多选行（§3.6）：完成 / 全选文字按钮 + 右侧图标化批量动作
+        // （＋ 加入歌单 / ↓ 下载）—— 图标语义由进入多选时的 toast 补齐
+        // （enterSelecting，会话级一次）；空选区由各动作方法 toast 兜底。
+        if (this.selecting) {
+          Row({ space: 8 }) {
+            Button('完成', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.exitSelecting();
+              })
+            Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .padding({ left: 10, right: 10 })
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.toggleSelectAll();
+              })
+            Blank()
+              .layoutWeight(1)
+            HeaderIconButton({
+              icon: $r('sys.symbol.plus'),
+              accessibilityLabel: '加入歌单',
+              onClickAction: (): void => {
+                this.addSelectedToPlaylist();
+              }
+            })
+            HeaderIconButton({
+              icon: $r('sys.symbol.arrow_down_to_line'),
+              accessibilityLabel: '下载',
+              onClickAction: (): void => {
+                this.confirmDownloadSelected();
+              }
+            })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
+        }
+      }
+      // ⚠️ 固定高度（faqs-arkui-384 同款结论，§6①）：换层期间退场节点脱离布局，
+      // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 36 = ACTION_ROW_H。
+      .width('100%')
+      .height(ACTION_ROW_H)
+      .margin({ top: 12 })
+
+      // 搜索态匹配计数行（§3.4）：列表上方一行「匹配 N 首」—— 让用户知道是
+      // 「被筛过了」而不是「合集变短了」；头部区高由 onAreaChange 实测机制自动跟随。
+      if (this.searchMode && this.searchKeyword.trim().length > 0) {
+        Text(`匹配 ${this.filteredTracks.length} 首`)
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+          .margin({ top: 8 })
       }
     }
     .width('100%')
@@ -1352,9 +1483,14 @@ export struct CollectionDetailPage {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截：多选态先退出多选（选区清空，留在本页）；否则播放页 overlay
-    // 打开时吞掉返回并发收起请求，再否则走默认 pop（utils/SubPageBackPress）。
+    // 系统返回拦截（优先级从高到低）：搜索态先退搜索态（清词收起，§3.4），
+    // 多选态再退多选（选区清空，留在本页）；否则播放页 overlay 打开时吞掉返回
+    // 并发收起请求，再否则走默认 pop（utils/SubPageBackPress）。
     .onBackPressed((): boolean => {
+      if (this.searchMode) {
+        this.cancelSearch();
+        return true;
+      }
       if (this.selecting) {
         this.exitSelecting();
         return true;

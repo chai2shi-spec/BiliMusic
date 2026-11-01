@@ -66,7 +66,8 @@ import {
   deleteDownload,
   getDownloadByMusicId,
   updateDownloadProgress,
-  updateDownloadStatus
+  updateDownloadStatus,
+  markDownloadFileMissing
 } from '../database/MusicDao';
 import { DownloadTask, DownloadStatus, Track, buildTrack, downloadQualityId } from '../model/MusicModels';
 import { BILI_REFERER, STORE_DOWNLOAD_PAUSED, STORE_DOWNLOAD_TASKS } from '../common/Constants';
@@ -75,7 +76,6 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { isUnmeteredNetwork } from '../utils/NetworkUtil';
 import { audioFileExt } from '../utils/TextUtil';
 import { BackgroundPlayback } from './BackgroundPlayback';
-import { recordLoudness } from './LoudnessStore';
 import { moveTaskFile, PublicSyncResult } from './PublicDownloadsSaver';
 import { exportBaseNameOf, exportExtOf } from './AudioExporter';
 
@@ -357,6 +357,36 @@ export class DownloadManager {
       }
     });
     return found;
+  }
+
+  /**
+   * 播放链路发现 COMPLETED 任务的本地文件已被外部删除时，把该任务改标 ERROR
+   * （errorMessage 注明原因）。**路径精确匹配才动**：missingPath 与记录里的
+   * localFilePath 不一致（如队列快照携带的旧路径 ≠ 记录现存好文件的路径）
+   * 时不动记录，绝不误伤仍然完好的下载。此后：
+   *   · completedLocalPath 不再命中 —— 这首歌播放直接走在线，不再每次绕道
+   *     「stat 失败 → badFile → 回退」的坏路径；
+   *   · 歌单「已下载」徽标（notify 快照驱动）同步消失，与磁盘事实一致；
+   *   · 下载页条目转入失败区，可走既有「失败重试」（retryTasks 只认 ERROR）。
+   * 记录保留不删：可见性优先，由用户自行决定重下。
+   */
+  async markFileMissing(musicId: string, missingPath: string): Promise<void> {
+    await this.ensureLoaded();
+    let target: DownloadTask | undefined = undefined;
+    this.tasks.forEach((t: DownloadTask): void => {
+      if (target === undefined && t.musicId === musicId
+        && t.status === DownloadStatus.COMPLETED && t.localFilePath === missingPath) {
+        target = t;
+      }
+    });
+    if (target === undefined) {
+      return;
+    }
+    target.status = DownloadStatus.ERROR;
+    target.errorMessage = '本地文件已被删除，重新下载即可';
+    target.localFilePath = '';
+    await markDownloadFileMissing(target.id, target.errorMessage);
+    this.notify();
   }
 
   private async loadFromDb(): Promise<void> {
@@ -834,12 +864,6 @@ export class DownloadManager {
             aid: track.aid,
             cid: track.cid
           }, preferred);
-          // 响度记录扼点（下载侧）：下载解析音源时顺手记录响度，
-          // 离线播放（本地文件不查 playurl）也能命中 LoudnessStore 查表均衡。
-          // sourceCache 旧条目缺字段时 undefined > 0 为 false，安全跳过。
-          if (source.loudnessMeasuredI > 0) {
-            recordLoudness(track.id, source.loudnessMeasuredI, source.loudnessTargetI);
-          }
           task.url = source.audioUrl;
           task.audioQuality = source.audioQuality;
           task.audioBandwidth = source.audioBandwidth;

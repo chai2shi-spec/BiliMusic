@@ -830,6 +830,86 @@ interface ScoredCandidate {
   item: SearchResultItem;
 }
 
+/**
+ * 候选打分过滤（原 ImportTaskManager.scoreList 循环体，提为模块级）：
+ * 只保留标题至少命中一档的（score > SCORE_OUT），其余视为不相关。
+ * 导入任务与单曲播放匹配（matchSongForPlayback）共用同一套打分口径。
+ */
+function scoreCandidates(song: ExternalSong, list: SearchResultItem[]): ScoredCandidate[] {
+  const scored: ScoredCandidate[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const score: number = scoreCandidate(song, list[i]);
+    if (score > SCORE_OUT) {
+      const c: ScoredCandidate = { score: score, play: list[i].play, item: list[i] };
+      scored.push(c);
+    }
+  }
+  return scored;
+}
+
+/**
+ * 按打分排序：分高优先；同分优先播放量高的（方案 §3.2，matchOne / 单曲匹配共用）。
+ */
+function sortScored(scored: ScoredCandidate[]): void {
+  scored.sort((a: ScoredCandidate, b: ScoredCandidate): number => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return b.play - a.play;
+  });
+}
+
+/**
+ * 单曲播放匹配（网易云歌单预览页点歌即播用）：
+ * 搜「歌名 歌手」→（零结果回落纯歌名）→ 打分取最优，最优 < SCORE_WEAK 返回 null。
+ * 与导入任务（ImportTaskManager）同一套打分体系，但**无任务态、无节流、无轮内缓存**：
+ * 每次点击即时发 1~2 次 searchVideo（命中风控自动降级 HTML 搜索页一次），
+ * 由调用方做单飞互斥（matchingIndex）控制请求频率。
+ */
+export async function matchSongForPlayback(song: ExternalSong): Promise<Track | null> {
+  let keyword: string = song.title;
+  if (song.artist.length > 0) {
+    keyword = `${song.title} ${song.artist}`;
+  }
+  let list: SearchResultItem[] = await searchSingleWithFallback(keyword);
+  if (list.length === 0 && song.artist.length > 0) {
+    list = await searchSingleWithFallback(song.title);
+  }
+  let scored: ScoredCandidate[] = scoreCandidates(song, list);
+  if (scored.length === 0) {
+    // 双语标题整串召回差，中文段 + 第一歌手再召回一次（matchOne 同款，只在失败分支触发）
+    const alt: string = fallbackKeyword(song);
+    if (alt.length > 0 && alt !== keyword && alt !== song.title) {
+      const altList: SearchResultItem[] = await searchSingleWithFallback(alt);
+      scored = scoreCandidates(song, altList);
+    }
+  }
+  if (scored.length === 0) {
+    return null;
+  }
+  sortScored(scored);
+  if (scored[0].score < SCORE_WEAK) {
+    return null;
+  }
+  return mapSearchResultToTrack(scored[0].item);
+}
+
+/**
+ * 单曲搜索（含通道降级）：API 命中风控（412 / -352 族）当场降级 HTML 搜索页补一次，
+ * 不像导入任务那样整任务切换（单曲调用无「剩余曲目」概念）。
+ */
+async function searchSingleWithFallback(keyword: string): Promise<SearchResultItem[]> {
+  try {
+    const resp: SearchResponse = await searchVideo(keyword, 1, MATCH_PAGE_SIZE);
+    return resp.result ?? [];
+  } catch (e) {
+    if (!ImportTaskManager.isRiskError(e)) {
+      throw e;
+    }
+    return await searchVideoByHtml(keyword);
+  }
+}
+
 /** 轮内去重缓存项（同曲直接复用，零请求） */
 interface CachedMatch {
   status: ImportItemStatus;
@@ -1300,7 +1380,7 @@ export class ImportTaskManager {
    * 后面**每一首都被当成普通失败标成「未找到」**，界面还显示「匹配完成」——
    * 用户看到的就是「很多歌都没找到」，而实际上只是被限流了。
    */
-  private static isRiskError(e: Object): boolean {
+  static isRiskError(e: Object): boolean {
     if (e instanceof BiliApiError) {
       return RISK_CODES.indexOf(e.code) >= 0;
     }
@@ -1444,17 +1524,9 @@ export class ImportTaskManager {
     this.matchCache.set(key, cached);
   }
 
-  /** 候选打分过滤：只保留标题至少命中一档的（其余视为不相关） */
+  /** 候选打分过滤：委托模块级 scoreCandidates（与单曲播放匹配共用同一口径） */
   private scoreList(song: ExternalSong, list: SearchResultItem[]): ScoredCandidate[] {
-    const scored: ScoredCandidate[] = [];
-    for (let i: number = 0; i < list.length; i++) {
-      const score: number = scoreCandidate(song, list[i]);
-      if (score > SCORE_OUT) {
-        const c: ScoredCandidate = { score: score, play: list[i].play, item: list[i] };
-        scored.push(c);
-      }
-    }
-    return scored;
+    return scoreCandidates(song, list);
   }
 
   /**
@@ -1519,13 +1591,8 @@ export class ImportTaskManager {
       item.failReason = list.length === 0 ? '没有搜到相关视频' : '没有找到足够相似的版本';
       return;
     }
-    // 分高优先；同分优先播放量高的（方案 §3.2）
-    scored.sort((a: ScoredCandidate, b: ScoredCandidate): number => {
-      if (b.score !== a.score) {
-        return b.score - a.score;
-      }
-      return b.play - a.play;
-    });
+    // 分高优先；同分优先播放量高的（sortScored，与单曲播放匹配共用）
+    sortScored(scored);
     const candidates: Track[] = [];
     const topN: number = Math.min(3, scored.length);
     for (let i: number = 0; i < topN; i++) {

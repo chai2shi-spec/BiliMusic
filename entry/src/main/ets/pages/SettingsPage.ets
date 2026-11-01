@@ -6,11 +6,12 @@
  *      （收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
  *   2. 设置入口卡（iOS 设置风格彩色圆角图标行，两张分组卡片）：
  *      卡 1：播放设置 / 下载与存储 / 外观设置 / 应用图标 / 歌单导入；
- *      卡 2：日志记录 / 查看更新日志 / 打赏作者 / 关于本项目 / 反馈Q群
+ *      卡 2：查看更新日志 / 打赏作者 / 关于本项目 / 报错记录 / 反馈Q群
  *      （点按复制群号），点击分别推入对应二级页、弹更新日志弹窗或执行复制。
  *
  * 二级页（各自独立文件，懒加载注册见 service/LazyPageRegistry.ets）：
  *   · PlaybackSettingsPage（'PlaybackSettings'）—— 播放设置；
+ *   · HomeFeedFilterPage（'HomeFeedFilter'）—— 首页筛选；
  *   · DownloadSettingsPage（'DownloadSettings'）—— 下载与存储；
  *   · AppearanceSettingsPage（'AppearanceSettings'）—— 外观设置；
  *   · PlaylistBackupPage（'PlaylistBackup'）—— 歌单备份；
@@ -591,6 +592,12 @@ export struct SettingsPage {
                 this.IconEntryRow('我的关注', $r('sys.symbol.person_2_fill'), ICON_BG_INDIGO, (): void => {
                   NavStackHolder.stack.pushPath({ name: 'Follows' });
                 })
+                CardDivider()
+                // 「听直播」：关注主播开播列表 + 房间号/链接手动进入（LivePage），
+                // 直播流按 isLive Track 纯音频播放（地址实时解析不缓存）。
+                this.IconEntryRow('听直播', $r('sys.symbol.dot_radiowaves_left_and_right'), ICON_BG_RED, (): void => {
+                  NavStackHolder.stack.pushPath({ name: 'Live' });
+                })
               }
             }
           }
@@ -608,6 +615,15 @@ export struct SettingsPage {
             InsetCard() {
               this.IconEntryRow('播放设置', $r('sys.symbol.play_fill'), ICON_BG_PINK, (): void => {
                 NavStackHolder.stack.pushPath({ name: 'PlaybackSettings' });
+              })
+
+              CardDivider()
+
+              // 「首页筛选」：首页推荐 tab 的内容过滤（屏蔽/仅看 UP、标题词、
+              // 分区、数值阈值、筛选方案；HomeFeedFilterPage，规则存
+              // HomeFeedFilterStore，只作用于推荐 tab，不发网络请求）。
+              this.IconEntryRow('首页筛选', $r('sys.symbol.funnel'), ICON_BG_PURPLE, (): void => {
+                NavStackHolder.stack.pushPath({ name: 'HomeFeedFilter' });
               })
 
               CardDivider()
@@ -645,17 +661,9 @@ export struct SettingsPage {
               .height(20)
           }
 
-          // ── 设置入口卡 2：日志记录 / 打赏作者 / 关于本项目 / 反馈Q群 ──
+          // ── 设置入口卡 2：查看更新日志 / 打赏作者 / 关于本项目 / 报错记录 / 反馈Q群 ──
           ListItem() {
             InsetCard() {
-              // 「日志记录」：进 PlaybackLogPage 查看播放失败日志（app 内
-              // 环形缓冲留档，三方读不到 hilog 的替代方案，详见 PlaybackLogStore）。
-              this.IconEntryRow('日志记录', $r('sys.symbol.doc_text_fill'), ICON_BG_ORANGE, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'PlaybackLog' });
-              })
-
-              CardDivider()
-
               // 「查看更新日志」：原地弹全量 CHANGELOG 弹窗（WhatsNewDialog
               // 复用，2026-10-29 自「关于」页迁入；不推二级页，即看即关）。
               this.IconEntryRow('查看更新日志', $r('sys.symbol.list_bullet'), ICON_BG_INDIGO, (): void => {
@@ -672,6 +680,14 @@ export struct SettingsPage {
               CardDivider()
 
               this.AboutEntryRow()
+
+              CardDivider()
+
+              // 「报错记录」：进 PlaybackLogPage 查看播放失败日志（app 内
+              // 环形缓冲留档，三方读不到 hilog 的替代方案，详见 PlaybackLogStore）。
+              this.IconEntryRow('报错记录', $r('sys.symbol.doc_text_fill'), ICON_BG_ORANGE, (): void => {
+                NavStackHolder.stack.pushPath({ name: 'PlaybackLog' });
+              })
 
               CardDivider()
 

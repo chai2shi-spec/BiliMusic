@@ -31,11 +31,14 @@ import {
   STORE_PL_BAR_ALL_SELECTED,
   STORE_PL_BAR_CAN_SELECT,
   STORE_PL_BAR_SELECTING,
+  STORE_PL_BAR_SELECTED_COUNT,
+  STORE_PL_BAR_SUBTITLE,
   STORE_PL_EXIT_SELECT_REQUEST,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_ON,
+  STORE_THEME_SURFACE,
   STORE_WINDOW_WIDTH_VP
 } from '../common/Constants';
 import { showAppToast } from '../components/AppToast';
@@ -121,6 +124,7 @@ export struct PlaylistsPage {
   /** 主题色运行时值：滑动删除按钮与 Checkbox 选中色跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
+  @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   /** 名称编辑弹窗：editingId 为空表示新建，非空表示重命名（弹窗本体见三个 editor*Controller） */
   @State editingId: string = '';
   @State editorName: string = '';
@@ -282,6 +286,12 @@ export struct PlaylistsPage {
     };
     TabScrollerHolder.plLocateCurrent = (): void => {
       this.locateCurrentPlaying();
+    };
+    TabScrollerHolder.plSortAllByTitle = (): void => {
+      this.sortAllByTitle();
+    };
+    TabScrollerHolder.plClearTitleSorted = (): void => {
+      this.clearTitleSorted();
     };
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
     // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
@@ -445,6 +455,72 @@ export struct PlaylistsPage {
   }
 
   /**
+   * 行副行来源段：收藏夹镜像 →「收藏夹」、UP 订阅 →「UP 订阅」、
+   * 自建歌单 → 空串（自己的不标「自建」，默认页更干净；收藏夹 / 订阅
+   * 一眼可辨）。判据与 LibraryStore 同源（isUpSubscription 按 sourceKind）。
+   */
+  private sourceLabelOf(p: Playlist): string {
+    if (p.sourceKind === 'fav') {
+      return '收藏夹';
+    }
+    if (LibraryStore.isUpSubscription(p)) {
+      return 'UP 订阅';
+    }
+    return '';
+  }
+
+  /**
+   * 更新时间相对化：今天 / N 天前 / N 周前 / N 个月前，超过一年直接年月。
+   * 空串 / 非法日期返回空串（调用方跳过该段，不渲染悬空分隔符）。
+   */
+  private relTime(iso: string): string {
+    if (iso.length === 0) {
+      return '';
+    }
+    const t: Date = new Date(iso);
+    if (Number.isNaN(t.getTime())) {
+      return '';
+    }
+    const dayMs: number = 86400000;
+    const days: number = Math.floor((Date.now() - t.getTime()) / dayMs);
+    if (days < 1) {
+      return '今天';
+    }
+    if (days < 7) {
+      return `${days} 天前`;
+    }
+    if (days < 30) {
+      return `${Math.floor(days / 7)} 周前`;
+    }
+    if (days < 365) {
+      return `${Math.floor(days / 30)} 个月前`;
+    }
+    const month: number = t.getMonth() + 1;
+    return `${t.getFullYear()}-${month < 10 ? `0${month}` : `${month}`}`;
+  }
+
+  /** 全部歌单曲目总数（标题行统计副行用）：只读 tracks.length，O(歌单数) */
+  private totalTrackCount(): number {
+    let sum: number = 0;
+    for (let i: number = 0; i < this.playlists.length; i++) {
+      sum += this.playlists[i].tracks.length;
+    }
+    return sum;
+  }
+
+  /** ⋮ 菜单「按名称排序全部曲目」：全量按名排序 + 置起此后新增按名插入规则 */
+  private sortAllByTitle(): void {
+    LibraryStore.sortAllPlaylistsByTitle();
+    this.toast('已按名称排序，新增曲目将按名插入', 2000);
+  }
+
+  /** ⋮ 菜单「取消按名称排序」：只关规则不动现有顺序 */
+  private clearTitleSorted(): void {
+    LibraryStore.clearTitleSorted();
+    this.toast('已取消按名称排序规则', 1500);
+  }
+
+  /**
    * 歌单列表「长按拖动排序」。
    *
    * ForEach.onMove 官方拖拽路线（系统浮起/让位动画 + 拖到边缘自动滚动），下标
@@ -469,13 +545,19 @@ export struct PlaylistsPage {
 
   /**
    * 顶栏派生镜像唯一写入口：把栏内组件渲染所需的派生状态
-   * （可否多选 / 全选态）推到 AppStorage，PlTitleActions
-   * （components/PlaylistsTabBar.ets）@StorageProp 订阅。
+    * （可否多选 / 全选态 / 已选数 / 标题右侧同行统计副行）推到 AppStorage，
+   * PlTitleActions（components/PlaylistsTabBar.ets）与
+   * Index.tabTitleRow @StorageProp 订阅。
    * 触发点：refresh（歌单变化）+ selectedIds @Watch。
    */
   private syncBarState(): void {
     AppStorage.setOrCreate(STORE_PL_BAR_CAN_SELECT, this.playlists.length >= 2);
     AppStorage.setOrCreate(STORE_PL_BAR_ALL_SELECTED, this.allSelected());
+    AppStorage.setOrCreate(STORE_PL_BAR_SELECTED_COUNT, this.selectedIds.length);
+    AppStorage.setOrCreate(STORE_PL_BAR_SUBTITLE,
+      this.playlists.length > 0
+        ? `${this.playlists.length} 个歌单 · ${this.totalTrackCount()} 首`
+        : '');
   }
 
   /**
@@ -1194,11 +1276,25 @@ export struct PlaylistsPage {
           .lineHeight(21)
         // 副行行高锁 17（13sp）：与歌单名 lineHeight(21) 一起构成高度
         // 预算（2×21 + 4 + 17 = 63 ≤ 封面 64），见封面注释。
-        // UP 订阅歌单显示「N 个投稿」（投稿总数，非落库曲目数），见 subLineOf
-        Text(this.subLineOf(p))
+        // 三段式：来源（收藏夹 / UP 订阅，自建不标）· 数量（UP 订阅显示
+        // 「N 个投稿」，见 subLineOf）· 更新相对时间；段间以「 · 」分隔，
+        // 空段不渲染（无悬空分隔符），超宽单行省略号兜底。
+        Text() {
+          if (this.sourceLabelOf(p).length > 0) {
+            Span(`${this.sourceLabelOf(p)} · `)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+          Span(this.subLineOf(p))
+            .fontColor($r('app.color.text_secondary'))
+          if (this.relTime(p.updatedAt).length > 0) {
+            Span(` · ${this.relTime(p.updatedAt)}`)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+        }
           .fontSize(13)
-          .fontColor($r('app.color.text_secondary'))
           .lineHeight(17)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 4 })
       }
       .layoutWeight(1)
@@ -1223,7 +1319,11 @@ export struct PlaylistsPage {
         })
         .accessibilityText('更多操作')
         .accessibilityLevel('yes')
-        .bindMenu(this.playlistMenuItems(p))
+        .bindMenu(this.playlistMenuItems(p), {
+          // 全局统一更多菜单方向：菜单右缘对齐 ⋮ 按钮、从按钮下方向外弹出
+          //（PlaylistsTabBar 顶栏 ⋮ 同款 placement 约定）
+          placement: Placement.BottomRight
+        })
     }
     .width('100%')
     .padding({ left: 16, right: 4, top: 10, bottom: 10 })
@@ -1297,7 +1397,11 @@ export struct PlaylistsPage {
         .visibility(this.selecting ? Visibility.None : Visibility.Visible)
         .accessibilityText('更多操作')
         .accessibilityLevel('yes')
-        .bindMenu(this.playlistMenuItems(p))
+        .bindMenu(this.playlistMenuItems(p), {
+          // 全局统一更多菜单方向：菜单右缘对齐 ⋮ 按钮、从按钮下方向外弹出
+          //（PlaylistsTabBar 顶栏 ⋮ 同款 placement 约定）
+          placement: Placement.BottomRight
+        })
       }
       .width('100%')
       .aspectRatio(1)
@@ -1320,9 +1424,10 @@ export struct PlaylistsPage {
       .alignItems(HorizontalAlign.Start)
       .margin({ top: 6 })
 
-      // 副行：N 首 / N 个投稿（与行内版同一口径，见 subLineOf）
+      // 副行：N 首 / N 个投稿（与行内版同一口径，见 subLineOf）。
+      // 13sp 与列表行副行同字号（方案A 统一最小可读字号）。
       Text(this.subLineOf(p))
-        .fontSize(12)
+        .fontSize(13)
         .fontColor($r('app.color.text_secondary'))
         .maxLines(1)
         .width('100%')
@@ -1358,13 +1463,51 @@ export struct PlaylistsPage {
               Text('还没有歌单')
                 .fontColor($r('app.color.text_secondary'))
                 .fontSize(16)
-              Text('点击右上角“新建”创建')
+              Text('把已有的歌单搬进来，比手建快得多')
                 .fontColor($r('app.color.text_tertiary'))
                 .fontSize(13)
                 .margin({ top: 8 })
             }
-            .layoutWeight(1)
             .justifyContent(FlexAlign.Center)
+            // 空态行动区（方案A §7）：主 CTA 新建（品牌实底），次 CTA
+            // 导入 / 同步浅底 —— 空态的定位是「把存量搬进来」，导入排
+            // 在视觉动线第二位；宽度 260 / 高 44（触达铁律），
+            // 圆角与全局 BUTTON_RADIUS_VP 同步。
+            Column({ space: 12 }) {
+              Button('新建歌单', { type: ButtonType.Normal })
+                .width(260)
+                .height(44)
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .borderRadius(BUTTON_RADIUS_VP)
+                .backgroundColor(this.themePrimary)
+                .fontColor(this.themeOn)
+                .onClick((): void => {
+                  this.openCreate();
+                })
+              Button('从网易云 / QQ 音乐导入', { type: ButtonType.Normal })
+                .width(260)
+                .height(44)
+                .fontSize(15)
+                .borderRadius(BUTTON_RADIUS_VP)
+                .backgroundColor(this.themeSurface)
+                .fontColor(this.themePrimary)
+                .onClick((): void => {
+                  NavStackHolder.push('PlaylistImport', undefined);
+                })
+              Button('同步 B 站收藏夹', { type: ButtonType.Normal })
+                .width(260)
+                .height(44)
+                .fontSize(15)
+                .borderRadius(BUTTON_RADIUS_VP)
+                .backgroundColor(this.themeSurface)
+                .fontColor(this.themePrimary)
+                .onClick((): void => {
+                  // 收藏夹同步页的路由名是 'CloudSync'（FavSyncPage 文件名 ≠ 路由名）
+                  NavStackHolder.push('CloudSync', undefined);
+                })
+            }
+            .margin({ top: 24 })
           }
           .width('100%')
           .height('100%')

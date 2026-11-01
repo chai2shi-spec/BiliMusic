@@ -18,8 +18,9 @@ import { initLoginState } from './LoginStore';
 import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
-import { initLoudnessStore } from './LoudnessStore';
 import { initIntroSkipStore } from './IntroSkipStore';
+import { initTrackVolumeStore } from './TrackVolumeStore';
+import { initHomeFeedFilterStore } from './HomeFeedFilterStore';
 import { initPlayerStateStore } from './PlayerStateStore';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
@@ -82,14 +83,18 @@ export class AppContainer {
     // 听后缓存目录：filesDir/listen_cache，512MB LRU。
     // 同步建目录 + 扫描索引（文件数百级有上界），毫秒级不拖慢启动。
     initListenCache(context);
-    // 响度均衡数据表：filesDir/loudness.json 装载进内存 Map。
-    // 同步读一次小 JSON（2000 条上限 ≈ 60KB），毫秒级；
-    // 未装载时 record 静默跳过、lookup 返回 null，无害降级。
-    initLoudnessStore(context);
     // 按曲「跳过开头」秒数表：filesDir/intro_skip.json 装载进内存 Map。
     // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
     // 查询返回 0，无害降级为「该曲目不跳过」。
     initIntroSkipStore(context);
+    // 按曲「单曲音量」系数表：filesDir/track_volume.json 装载进内存 Map。
+    // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
+    // 查询返回 1.0，无害降级为「该曲目不调音量」。
+    initTrackVolumeStore(context);
+    // 首页筛选规则：filesDir/home_feed_filter.json 装载进内存。
+    // 小 JSON（名单/方案，KB 级），毫秒级；未装载时读默认配置（无规则 = 全透传）、
+    // 装载完成补一次版本号递增，把可能已渲染的推荐列表用真实规则重滤。
+    initHomeFeedFilterStore(context);
 
     // buvid：缺它首页推荐接口会被 412 拦下，必须早于任何页面请求装填
     initBuvidCookie();

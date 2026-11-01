@@ -11,7 +11,9 @@
  *   · `openToast` 返回 toastId，配 `closeToast(id)` 先关旧再开新，
  *     天然满足「替换不排队」。
  *
- * 通道（任何 .ts/.ets 都能写，播放内核也走这里，见 MusicPlayer.notifyHint）：
+ * 通道（唯一写实现在 common/ToastChannel.ts —— postAppToast /
+ * notifyPlaybackHint，任何 .ts/.ets 都能 import；播放内核也走这里，见
+ * MusicPlayer.notifyHint）：
  *   STORE_TOAST_MSG      文案
  *   STORE_TOAST_HOLD_MS  停留时长（ms，即 toast 的 duration）
  *   STORE_TOAST_SEQ      递增序号 —— 相同文案连续调用也要触发 @Watch（替换而非忽略）；
@@ -30,16 +32,14 @@ import {
   STORE_TOAST_SEQ
 } from '../common/Constants';
 import { TOAST_HOLD_MS, TOAST_LIFT_VP } from '../common/constants/InteractionConstants';
+import { postAppToast } from '../common/ToastChannel';
 
 /**
- * 全局轻提示入口（UI 侧统一走这里）。
- * 连续调用 = 替换：seq 递增让组件先关旧 toast 再开新的，不排队。
+ * 全局轻提示入口（UI 侧统一走这里）：委托 common/ToastChannel.postAppToast
+ *（三键协议唯一实现，连续调用 = 替换不排队，见 ToastChannel.ts）。
  */
 export function showAppToast(message: string, holdMs: number = TOAST_HOLD_MS): void {
-  AppStorage.setOrCreate(STORE_TOAST_MSG, message);
-  AppStorage.setOrCreate(STORE_TOAST_HOLD_MS, holdMs);
-  const seq: number = AppStorage.get<number>(STORE_TOAST_SEQ) ?? -1;
-  AppStorage.setOrCreate(STORE_TOAST_SEQ, seq + 1);
+  postAppToast(message, holdMs);
 }
 
 @Component

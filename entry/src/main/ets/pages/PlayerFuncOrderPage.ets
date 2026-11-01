@@ -1,12 +1,12 @@
 /**
  * 自定义功能栏页（播放设置 → 播放页入口 → 自定义功能栏）。
  *
- * 播放页功能行共 9 个功能项（核心 4 + 开关入口 5），顺序持久化在
+ * 播放页功能行共 10 个功能项（核心 4 + 开关入口 6），顺序持久化在
  * AppSettings.funcItemOrder：前 4 位 = 播放页默认页图标，其余经左右滑动
  * 分页切换查看（ControlAreaComponent 的 Swiper 分页）。本页负责整体排序：
  *   · 长按拖动（ForEach.onMove 官方拖拽路线，系统自带浮起/让位动画）；
  *   · 前 4 位行尾标「默认显示」主题色描边徽标；
- *   · 5 个开关入口项受各自入口开关控制：未开启时降透明 + 副文案提示，
+ *   · 6 个开关入口项受各自入口开关控制：未开启时降透明 + 副文案提示，
  *     仍可拖动（占位顺序保留，开启后按当前顺序出现在功能行）；
  *   · 拖动落手即写穿：AppPreferences.updateSettings（持久层）+
  *     AppStorage.setOrCreate(STORE_FUNC_ITEM_ORDER)（运行时镜像）。
@@ -17,7 +17,8 @@
  * （未跨界行键不变不重建，内容本就无需变）。
  *
  * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，PlaybackSettingsPage
- * 同款骨架）：材质与滚动模糊由 HDS 统一渲染，内容用 stackBuilder 承载标题；
+ * 同款骨架）：材质由 HDS 统一渲染，滚动渐变模糊由自绘 TopGradientBlurOverlay
+ * 承担（AppearanceSettingsPage 同款），内容用 stackBuilder 承载标题；
  * 侧滑返回是 Navigation 级能力，不受影响。
  */
 
@@ -32,6 +33,7 @@ import {
   STORE_SLEEP_TIMER_ENTRY_ENABLED,
   STORE_SKIP_INTRO_ENTRY_ENABLED,
   STORE_UP_SPACE_ENTRY_ENABLED,
+  STORE_TRACK_VOLUME_ENTRY_ENABLED,
   STORE_THEME_PRIMARY,
   STORE_FUNC_ITEM_ORDER
 } from '../common/Constants';
@@ -47,6 +49,7 @@ import {
   PLAYER_FUNC_SLEEP,
   PLAYER_FUNC_BILI,
   PLAYER_FUNC_UP_SPACE,
+  PLAYER_FUNC_VOLUME,
   DEFAULT_FUNC_ITEM_ORDER,
   speedLabelOf
 } from '../model/MusicModels';
@@ -61,6 +64,8 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { modeIconOf } from '../components/QueueSheet';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 @Component
 export struct PlayerFuncOrderPage {
@@ -78,12 +83,13 @@ export struct PlayerFuncOrderPage {
   @StorageProp(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
   /** 当前倍速（speed 项视觉 = 倍速片文案，实时跟随） */
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
-  /** 五个开关入口项的入口开关镜像（未开启 → 行降透明 + 副文案提示） */
+  /** 六个开关入口项的入口开关镜像（未开启 → 行降透明 + 副文案提示） */
   @StorageProp(STORE_PLAYBACK_SPEED_ENABLED) speedEnabled: boolean = false;
   @StorageProp(STORE_SKIP_INTRO_ENTRY_ENABLED) skipEntryEnabled: boolean = false;
   @StorageProp(STORE_SLEEP_TIMER_ENTRY_ENABLED) sleepEntryEnabled: boolean = false;
   @StorageProp(STORE_OPEN_IN_BILI_ENABLED) openInBiliEnabled: boolean = true;
   @StorageProp(STORE_UP_SPACE_ENTRY_ENABLED) upSpaceEntryEnabled: boolean = false;
+  @StorageProp(STORE_TRACK_VOLUME_ENTRY_ENABLED) volumeEntryEnabled: boolean = false;
   /**
    * 功能项顺序（本页唯一数据源）。aboutToAppear 从持久层读
    * （AppPreferences 内存缓存启动即热，getSettings 同步零磁盘读）；
@@ -92,12 +98,23 @@ export struct PlayerFuncOrderPage {
   @State order: string[] = DEFAULT_FUNC_ITEM_ORDER;
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
+
+  /** 自绘顶栏渐变模糊层进度更新器（AboutPage 同款命令式驱动，高频回调零重建） */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.pageScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier 补上）
+    this.syncTopBlurProgress();
     // 持久层真值起步：AppPreferences.getSettings 走内存缓存（EntryAbility 启动
-    // 已读 → 必热），同步调用零磁盘读；normalizeFuncItemOrder 保证合法 9 项序。
+    // 已读 → 必热），同步调用零磁盘读；normalizeFuncItemOrder 保证合法 10 项序。
     this.order = AppPreferences.getSettings().funcItemOrder;
   }
 
@@ -152,7 +169,10 @@ export struct PlayerFuncOrderPage {
     if (id === PLAYER_FUNC_BILI) {
       return '在 B 站打开';
     }
-    return '进入 UP 主页';
+    if (id === PLAYER_FUNC_UP_SPACE) {
+      return '进入 UP 主页';
+    }
+    return '单曲音量';
   }
 
   /** 开关入口项的入口开关是否开启（核心 4 项恒开） */
@@ -171,6 +191,9 @@ export struct PlayerFuncOrderPage {
     }
     if (id === PLAYER_FUNC_UP_SPACE) {
       return this.upSpaceEntryEnabled;
+    }
+    if (id === PLAYER_FUNC_VOLUME) {
+      return this.volumeEntryEnabled;
     }
     return true;
   }
@@ -261,8 +284,12 @@ export struct PlayerFuncOrderPage {
       SymbolGlyph($r('sys.symbol.arrow_up_right'))
         .fontSize(22)
         .fontColor([$r('app.color.text_primary')])
-    } else {
+    } else if (id === PLAYER_FUNC_UP_SPACE) {
       SymbolGlyph($r('sys.symbol.person'))
+        .fontSize(22)
+        .fontColor([$r('app.color.text_primary')])
+    } else {
+      SymbolGlyph($r('sys.symbol.speaker_wave_2'))
         .fontSize(22)
         .fontColor([$r('app.color.text_primary')])
     }
@@ -317,6 +344,7 @@ export struct PlayerFuncOrderPage {
 
   build() {
     HdsNavDestination() {
+      Stack() {
       List({ scroller: this.pageScroller }) {
         // 顶部空白占位条目（官方沉浸口径）：高度 = safeTop + 56（MINI 标题栏），
         // 静止位首个真实条目恰从栏底起排，滚动时从材质下方穿过。
@@ -371,11 +399,26 @@ export struct PlayerFuncOrderPage {
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
       // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 自绘渐变模糊层驱动：逐帧更新 + 停止校准终态（渐变软边由 overlay 承担）
+      .onDidScroll((xOffset: number, yOffset: number): void => {
+        this.syncTopBlurProgress();
+      })
+      .onScrollStop((): void => {
+        this.syncTopBlurProgress();
+      })
+
+      // 顶栏渐变模糊层：盖 List 内容之上（z 序低于 HDS titleBar），进度命令式驱动
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
+      }
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
+    //（HDS 内置滚动效果关闭：渐变模糊由自绘 TopGradientBlurOverlay 承担，防双重模糊）
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this）
         stackBuilder: (): void => {

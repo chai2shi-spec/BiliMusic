@@ -15,8 +15,10 @@ import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import common from '@ohos.app.ability.common';
-import { BiliApiError, extractAudioFromVideo, expandVideoParts, qualityDowngradePlan } from '../api/BilibiliApi';
-import { getLyricForTrack } from '../api/LyricsApi';
+import { BiliApiError, extractAudioFromVideo, expandVideoParts, fetchLiveStreamUrls, LiveStreamUrls, qualityDowngradePlan } from '../api/BilibiliApi';
+import { util } from '@kit.ArkTS';
+import { call, observer } from '@kit.TelephonyKit';
+import { getLyricForTrack, getLyricOffset } from '../api/LyricsApi';
 import { LibraryStore } from '../service/LibraryStore';
 import {
   PersistedPlayerQueue,
@@ -28,8 +30,8 @@ import {
 } from '../service/PlayerStateStore';
 import { DownloadManager } from '../service/DownloadManager';
 import { cachedListenPath, hasListenCache, enqueueListenCache, touchListenCache, removeListenCacheFile } from '../service/ListenCacheStore';
-import { recordLoudness, lookupLoudness, calculateLoudnessGain, LoudnessLookup } from '../service/LoudnessStore';
 import { skipIntroSecOf, skipOutroSecOf } from '../service/IntroSkipStore';
+import { trackVolumeGainOf, setTrackVolumeRecord } from '../service/TrackVolumeStore';
 import { BackgroundPlayback } from '../service/BackgroundPlayback';
 import { AudioRouteWatcher } from '../service/AudioRouteWatcher';
 import { upgradeBuvidCookie } from '../service/BiliDevice';
@@ -39,6 +41,8 @@ import {
   PLAYBACK_LOG_ERROR,
   recordPlaybackLog
 } from '../service/PlaybackLogStore';
+import { appendSession } from '../service/PlaySessionStore';
+import { notifyPlaybackHint } from '../common/ToastChannel';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { hasNetwork, isUnmeteredNetwork } from '../utils/NetworkUtil';
 import { CdnLineOption, CDN_LINE_AUTO, probeCdnLinesInOrder, setAutoPickedCdnLine } from '../utils/CdnLine';
@@ -68,10 +72,6 @@ import {
   STORE_PLAYBACK_SPEED,
   STORE_PLAYBACK_SPEED_ENABLED,
   STORE_AUDIO_MIX_ENABLED,
-  STORE_LOUDNESS_NORM_ENABLED,
-  STORE_TOAST_MSG,
-  STORE_TOAST_HOLD_MS,
-  STORE_TOAST_SEQ,
   STORE_BT_PERM_REQ_SEQ,
   STORE_SLEEP_TIMER_END,
   RESUME_MIN_SEC,
@@ -252,6 +252,13 @@ function speedToPlaybackSpeed(v: number): media.PlaybackSpeed {
 }
 
 /**
+ * AVPlayer.setLoudnessGain 的 API 正增益硬上限（合法域 [-90, +24]dB）。
+ * UI 滑条允许 ±30dB：+24dB 以上 API 会拒绝（并可能触发 on('error') 误归因），
+ * 派发前统一钳到 +24dB 生效；记账与落盘仍保留用户原始值（±30dB）。
+ */
+const LOUDNESS_GAIN_API_MAX_DB: number = 24;
+
+/**
  * 旧版播放快照（Preferences 单键 PREF_PLAYER_STATE 的 JSON 结构）。
  * 仅用于覆盖安装后的一次性迁移：读到就转存进 PlayerStateStore 双文件，
  * 再删掉旧键。旧数据受 8192 字节单值上限约束，队列已被截断（~10 首），
@@ -357,17 +364,59 @@ function formatLrcTime(seconds: number): string {
   return `${mm < 10 ? '0' : ''}${mm}:${ss < 10 ? '0' : ''}${ss}.${cs < 10 ? '0' : ''}${cs}`;
 }
 
+/** AVMetadata.lyric 官方要求总长「小于 40960 字节」，截断阈值留 1 字节余量 */
+const SESSION_LYRIC_MAX_BYTES: number = 40959;
+
+/** 模块级复用的 UTF-8 编码器（字节计数用） */
+const lyricUtf8Encoder: util.TextEncoder = new util.TextEncoder();
+
 /**
  * LyricLine[]（行级时间轴，秒）→ 标准歌词格式（LRC）文本，供 AVMetadata.lyric
  * 上报给媒体中心 / 车机。空行丢弃；空串 = 没有可报歌词。
+ *
+ * 系统解析器按 Simple LRC 严格要求（AVMetadata.lyric 文档）：
+ * - 时间戳必须唯一递增——中文歌词头部 [00:00.00]作词/作曲/编曲 多行同戳会
+ *   「导致解析失败，并在系统中显示异常」（车机不显示歌词的根因）。此处把撞戳
+ *   的行依次上推 0.01s；文本与上一输出行相同视为真重复直接丢弃。
+ * - 总长需小于 40960 字节：超限按行截断（保留时间轴开头的行）。
+ * - offsetMs（用户每曲歌词偏移，正数 = 歌词延后）：与 app 内 LrcView 同口径，
+ *   行时刻 = line.time + offsetMs / 1000，负值钳到 0。
  */
-function buildLrcText(lines: LyricLine[]): string {
+function buildLrcText(lines: LyricLine[], offsetMs: number): string {
+  const offsetSec: number = Number.isFinite(offsetMs) ? offsetMs / 1000 : 0;
   const parts: string[] = [];
+  let totalBytes: number = 0;
+  let lastTimeSec: number = -1;
+  let lastText: string = '';
+  let truncated: boolean = false;
   lines.forEach((line: LyricLine): void => {
-    if (line.text.length === 0) {
+    const text: string = line.text;
+    if (text.length === 0) {
       return;
     }
-    parts.push(`[${formatLrcTime(line.time)}]${line.text}`);
+    if (truncated) {
+      return;
+    }
+    let timeSec: number = Math.max(0, (Number.isFinite(line.time) ? line.time : 0) + offsetSec);
+    if (timeSec <= lastTimeSec) {
+      if (text === lastText) {
+        return;
+      }
+      // 撞戳：上推一个百分秒，保证全曲时间戳严格递增唯一
+      timeSec = lastTimeSec + 0.01;
+    }
+    const part: string = `[${formatLrcTime(timeSec)}]${text}`;
+    // +1 = 换行符字节；超限即停止收录后续行（保留时间轴开头）
+    const partBytes: number = lyricUtf8Encoder.encodeInto(part).byteLength + 1;
+    if (totalBytes + partBytes > SESSION_LYRIC_MAX_BYTES) {
+      truncated = true;
+      console.warn(`[SessionLyric] lrc exceeds ${SESSION_LYRIC_MAX_BYTES} bytes, truncated at line ${parts.length}`);
+      return;
+    }
+    totalBytes += partBytes;
+    lastTimeSec = timeSec;
+    lastText = text;
+    parts.push(part);
   });
   return parts.join('\n');
 }
@@ -406,13 +455,25 @@ export class MusicPlayer {
   private repeatMode: RepeatMode = RepeatMode.NONE;
   private isShuffled: boolean = false;
   /**
-   * 音量策略：响度均衡开关（STORE_LOUDNESS_NORM_ENABLED 镜像）关闭时恒走
-   * AVPlayer 默认 1.0，只由系统媒体音量控制，与其他 App 完全一致；开启时
-   * prepared 挂点按 LoudnessStore 记录把偏响的歌衰减到目标响度
-   * （见 applyLoudnessOnPrepared）。换源每次重建 AVPlayer，增益每首重补。
+   * 音量策略：单曲音量增益走 AVPlayer.setLoudnessGain（dB 域，±30dB，
+   * 放大与衰减统一走增益维度；API 正增益硬上限 +24dB，+25dB 及以上
+   * 钳到 +24dB 生效）；setVolume（[0,1]，上限 1.00 = 原始音量）只服务
+   * 首播淡入斜坡，以及在通路会话级降级时兜底衰减（gainUnsupported 且
+   * 增益为负）。换源每次重建 AVPlayer（增益归 0dB），prepared 挂点按
+   * 当前曲记录重补。
    */
+  /** 会话级降级标记：setLoudnessGain 通路报错过（如高清通路不支持），本会话退回 setVolume 仅衰减（放大不可用） */
+  private gainUnsupported: boolean = false;
+  /** 最近一次 setLoudnessGain 派发时间戳（on('error') 归因窗口：3s 内且状态机仍健康 → 属性级失败而非音源故障） */
+  private gainCallAt: number = 0;
+  /** 「error 回调刚吞过一次增益归因错误」一次性标志：stateChange('error') 背保补触发恢复用 */
+  private gainErrorSwallowed: boolean = false;
   /** 当前播放倍速（档位见 PLAYBACK_SPEED_OPTIONS；换源重建 AVPlayer 后由 applySpeedOnPrepared 重补） */
   private playbackSpeed: number = 1.0;
+  /** 当前曲「单曲音量」增益（dB，0 = 不调整）：换源 prepared 时从 TrackVolumeStore 重查（loadTrackVolume） */
+  private trackVolumeGainDb: number = 0;
+  /** 同一 AVPlayer 实例最近已应用的增益（dB）：差量应用，避免重复派发 setLoudnessGain 制造归因窗口噪音 */
+  private appliedGainDb: number = 0;
   private shouldAutoplay: boolean = false;
   private retryCount: number = 0;
   /** prepare 看门狗定时器 id（-1 = 未开启）。见 startPrepareWatchdog / recoverFromStall。 */
@@ -535,6 +596,14 @@ export class MusicPlayer {
   private listenAccumSeconds: number = 0;
   /** 上一次 timeUpdate 的时间戳；-1 表示尚未开始计时（暂停/切歌后复位） */
   private lastListenTickAt: number = -1;
+  /** 听歌日记：当前播放会话开始 ms 时间戳；-1 = 无进行中的会话（结算后复位） */
+  private diarySessionStartAt: number = -1;
+  /** 听歌日记：当前会话累计有效收听 ms（与 listenAccumSeconds 同源同收口） */
+  private diarySessionMs: number = 0;
+  /** 听歌日记：会话开始时的曲目快照（切歌准备期旧音源仍在出声，结算归属用它防错位） */
+  private diarySessionTrack: Track | null = null;
+  /** 听歌日记：自然播完标记（completed / 片尾限定触发在结算前置位，close 时取走复位） */
+  private diarySessionCompleted: boolean = false;
   /** seek 进行中标志：seek 真正生效（seekDone）前，抑制 timeUpdate 把滑块拽回旧位置 */
   private seeking: boolean = false;
   /** seek 开始时间戳，用于「长时间收不到 seekDone」的兜底解除抑制 */
@@ -553,6 +622,12 @@ export class MusicPlayer {
    */
   private outroSkipFired: boolean = false;
   /**
+   * stopAtCurrent 主动停声标志：紧随的 stateChange('paused') 据此跳过
+   * 「上次听到」覆写 —— 片尾限定/自然播完分支的 reset-to-0 不能被
+   * 限定点位置回滚（否则最近播放点这首歌会从限定点续播、起播即跳下一首）。
+   */
+  private stoppingAtCurrent: boolean = false;
+  /**
    * 本次 loadAndPlay 的起始定位秒数。
    * 准备期间 STORE_PROGRESS 已被清零、真实定位要等 prepared 后 seek 才生效——
    * 这段时间内任何落盘都必须用这个「意图位置」，见 savePlayerStateNow 注释。
@@ -561,20 +636,32 @@ export class MusicPlayer {
   /** 音频被系统强制打断前是否正在播放，供打断结束（RESUME）时决定自动续播 */
   private wasPlayingBeforeInterrupt: boolean = false;
   /**
+   * 「因通话而暂停」标志：挂断后据此自动恢复。
+   * 不能复用 wasPlayingBeforeInterrupt —— pause()/play() 开头都会把它清掉
+   * （防止上一打断周期残留意图错误拉起），通话暂停的恢复意图只能独立记。
+   * 用户通话中手动暂停/播放会经 pause()/play() 开头作废本标志，挂断后不再自动恢复。
+   */
+  private pausedForCall: boolean = false;
+  /** 电话状态订阅只挂一次（init 可能被多次调用） */
+  private callWatchStarted: boolean = false;
+  /**
    * 最近一次**成功加载出音源**的曲目，用于音源解析失败时把界面回滚回来。
    *
-   * 背景：`playTrack` 是乐观更新——先把 STORE_CURRENT_TRACK 写成目标曲目再解析音源。
-   * 一旦解析失败（视频已删、cid 错配、区域限制……），界面就停在「这首播不出来的歌」上，
-   * 而音频其实还是上一首，用户看到的就是「点了没换歌，除了音乐其他信息都加载了」。
-   * 有这份快照才能在失败时把界面拉回真实正在播的那首。
-   */
+    * 背景：`playTrack` 是乐观更新——先把 STORE_CURRENT_TRACK 写成目标曲目再解析音源。
+    * 一旦解析失败（视频已删、cid 错配、区域限制……），界面就停在「这首播不出来的歌」上，
+    * 而音频其实还是上一首（压声后是被暂停的上一首，恢复播放仍是它），
+    * 用户看到的就是「点了没换歌，除了音乐其他信息都加载了」。
+    * 有这份快照才能在失败时把界面拉回真实正在播的那首。
+    */
   private lastPlayableTrack: Track | null = null;
   /**
    * 「正在准备新音源」标志：从开始解析音源（view + playurl）、重建播放器，
    * 到新音源挂载完成为止。
    *
-   * 为什么必须抑制这期间的进度回传：解析要发两次串行网络请求（数百 ms 到数秒），
-   * 这段时间**旧音源仍在出声**，它的 timeUpdate 会按**上一首**的位置回调。
+   * 为什么必须抑制这期间的进度回传：解析要发两次串行网络请求（数百 ms 到数秒）。
+   * 点歌瞬间旧播放器已被 pauseOldSourceOnSwitch 压静音，但它的 timeUpdate
+   * 停止前来得及按**上一首**的位置回调一拍；且加载失败 / 被连点作废时
+   * 旧播放器可能恢复出声，位置仍是上一首的。
    * 若照常写入 STORE_PROGRESS，刚点的新歌进度条就会乱跳，而 5s 一次的落盘
    * 还会把上一首的位置存成新歌的续播点。
    * 参考实现（BiliMusic-main/service/PlayerController.ets）同样在 isPreparing 时直接 return。
@@ -692,6 +779,8 @@ export class MusicPlayer {
     this.playbackSpeed = (AppStorage.get(STORE_PLAYBACK_SPEED) as number) ?? 1.0;
 
     this.startAudioRouteWatch();
+    // 通话状态订阅：来电/通话中自动暂停，挂断自动恢复（见 startCallStateWatch）
+    this.startCallStateWatch();
 
     await this.restoreState();
     this.initCompleted = true;
@@ -718,6 +807,56 @@ export class MusicPlayer {
       this.pause();
       this.notifyHint('蓝牙已断开，已暂停播放');
     });
+  }
+
+  /**
+   * 订阅系统电话状态：**来电/通话中自动暂停音乐，挂断后自动恢复**。
+   *
+   * 为什么不能只靠音频焦点（onAudioInterrupt）：
+   *   · 「与其他应用同时播放」开启时激活 CONCURRENCY_MIX_WITH_OTHERS，
+   *     电话不抢焦点、不触发 interrupt —— 音乐与通话并存；
+   *   · 通话结束后系统也未必派发 RESUME 事件。
+   * 电话状态（observer.on('callStateChange')，API 6+，无需权限）是确定性信号。
+   *
+   * 与 onAudioInterrupt 的双路径互斥（非混音模式下来电两者都触发，顺序不定）：
+   *   · observer 先到 → 本方法真 pause()（wasPlayingBeforeInterrupt 被 pause 清掉）→
+   *     焦点 RESUME 到达时 onAudioInterrupt 无续播意图，由本方法 IDLE 分支恢复；
+   *   · 焦点 FORCE+PAUSE 先到 → 状态已同步为未播放 → 本方法不动作不置标志 →
+   *     由 onAudioInterrupt 的 RESUME 恢复，IDLE 分支因无标志不动作。
+   * 两条恢复路径天然只有一条生效，不会双重恢复。
+   */
+  private startCallStateWatch(): void {
+    if (this.callWatchStarted) {
+      return;
+    }
+    this.callWatchStarted = true;
+    try {
+      // 不带 options 的重载监听所有卡槽（双卡全覆盖）；仅 state 对三方应用可读。
+      observer.on('callStateChange', (data: observer.CallStateInfo): void => {
+        const playing: boolean = (AppStorage.get(STORE_IS_PLAYING) as boolean) ?? false;
+        plogInfo(`[CallState] state=${data.state} isPlaying=${playing} pausedForCall=${this.pausedForCall}`);
+        if (data.state === call.CallState.CALL_STATE_IDLE) {
+          // 挂断：只有「因通话暂停且用户没动过」才自动恢复
+          if (!this.pausedForCall) {
+            return;
+          }
+          this.pausedForCall = false;
+          if (!playing) {
+            this.play();
+          }
+          return;
+        }
+        // 响铃 / 拨出 / 通话中（RINGING/OFFHOOK/ANSWERED）。
+        // 先 pause() 再置标志 —— pause() 开头会作废 pausedForCall，顺序反了标志就被自己清掉。
+        if (playing) {
+          this.pause();
+          this.pausedForCall = true;
+        }
+      });
+    } catch (e) {
+      // 无蜂窝能力设备（模拟器 / 部分 WiFi-only 平板）：降级为不订阅，不影响其余功能
+      console.warn(`callStateChange watch unavailable: ${JSON.stringify(e)}`);
+    }
   }
 
   /**
@@ -1003,8 +1142,10 @@ export class MusicPlayer {
         this.cancelPrepareWatchdog();
         // 倍速补应用：换源每次重建 AVPlayer，不补的话切歌后倍速悄悄变回 1.0
         this.applySpeedOnPrepared(player);
-        // 响度均衡补应用：与倍速同一套「换源重建、prepared 重补」机制
-        this.applyLoudnessOnPrepared(player);
+        // 单曲音量增益重查：当前曲在 TrackVolumeStore 的记录（无记录 = 0dB 默认）
+        this.loadTrackVolume();
+        // 单曲音量增益补应用：与倍速同一套「换源重建、prepared 重补」机制
+        this.applyTrackVolumeOnPrepared(player);
         // 首次出声淡入（会话级一次性）：出声前归零音量，playing 时启动斜坡爬坡
         this.zeroVolumeForFirstFade(player);
         if (this.pendingSeekTo >= 0) {
@@ -1013,12 +1154,31 @@ export class MusicPlayer {
           this.pendingSeekTo = -1;
           const doPlay: boolean = this.pendingAutoPlayAfterSeek;
           this.pendingAutoPlayAfterSeek = false;
+          // 曲末兜底：源条目 duration 未知（=0，如循环榜聚合行）时，
+          // rememberedStartSec 的「距结尾不足 RESUME_TAIL_SEC 不续播」保护
+          // 因 dur<=0 被跳过，lastPosSec ≈ 曲末的续播请求一路放行到这里。
+          // prepared 才拿得到真实时长：定位点已进片尾（或超出时长，数据异常）
+          // 就改为从头播 —— 否则起播即 completed 自动切歌，用户感知
+          // 「点的是 A，播出来的是队列里的 B」（循环榜点分 P 播成第一首的根因）。
+          let seekTarget: number = target;
+          const realDurSec: number = player.duration > 0 ? player.duration / 1000 : 0;
+          // 片尾限定感知：限定点（时长 − 片尾秒数）即该曲「有效结尾」，
+          // 快照恢复 / 续播定位落进限定区一律从头播 —— 否则起播即触发
+          // 片尾跳过自动切歌（与 rememberedStartSec 读侧兜底同口径；
+          // outroSec = 0 时退化为既有 RESUME_TAIL_SEC 曲末兜底）
+          const guardTrack: Track | null = this.currentTrackSnapshot();
+          const tailGuardSec: number = Math.max(RESUME_TAIL_SEC,
+            guardTrack !== null ? skipOutroSecOf(guardTrack.id) : 0);
+          if (realDurSec > 0 && seekTarget >= realDurSec - tailGuardSec) {
+            plogWarn(`resume position ${seekTarget}s at/after effective tail of ${realDurSec}s, restart from 0`);
+            seekTarget = 0;
+          }
           // 与公开 seek() 同款抑制——seekDone 前旧位置的
           // timeUpdate 不能把 STORE_PROGRESS 写回去，否则续播进度显示会被拽回 0
           this.seeking = true;
           this.seekStartedAt = Date.now();
           try {
-            player.seek(target * 1000);
+            player.seek(seekTarget * 1000);
           } catch (e) {
             console.error(`seek on prepared failed: ${JSON.stringify(e)}`);
             this.seeking = false;
@@ -1068,16 +1228,31 @@ export class MusicPlayer {
         this.updateSessionState();
         this.syncBackgroundTask(true);
       } else if (state === 'paused') {
+        // stopAtCurrent 主动停声：位置已由片尾限定/自然播完分支 reset 为 0，
+        // 这里不能用限定点位置覆写「上次听到」。一次性消费。
+        const stoppingNow: boolean = this.stoppingAtCurrent;
+        this.stoppingAtCurrent = false;
         this.setStore(STORE_IS_PLAYING, false);
         this.updateSessionState();
-        this.syncBackgroundTask(false);
+        // 准备新音源期间不停后台长任务：上面的 pauseOldSourceOnSwitch 刚把
+        // 旧播放器压静音，新音源的解析 / 挂载还在途。此刻停任务，用户恰好
+        // 切后台就会进程挂起、加载链中断（旧逻辑靠旧歌持续出声维持任务，
+        // 压声后必须显式保留）。新音源真正出声时 'playing' 分支会重新同步。
+        if (!this.isPreparing) {
+          this.syncBackgroundTask(false);
+        }
         // 停止听歌计时并立即落盘已累计的整数部分：
         // 暂停后到下次恢复之间的空白不计入（由游标复位实现）
         this.finalizeListenSegment();
         // 用户暂停 / 音频打断即写「上次听到」位置，不等 10s 节流：
         // 暂停后随时可能杀进程，此刻的位置必须已经在盘上
-        this.recordRecentProgress(undefined, true);
+        // （stopAtCurrent 主动停声除外 —— 位置已由触发分支 reset 为 0）
+        if (!stoppingNow) {
+          this.recordRecentProgress(undefined, true);
+        }
       } else if (state === 'completed') {
+        // 听歌日记：自然播完，结算的会话带 completed 标记
+        this.diarySessionCompleted = true;
         // 听完一首歌是高频的「停止点」，攒在内存里的余量马上落盘，
         // 用户听完就杀 App 也不丢
         this.finalizeListenSegment();
@@ -1088,13 +1263,22 @@ export class MusicPlayer {
         // fire-and-forget：缓存链路自身吞掉全部异常，不影响播完收尾。
         this.tryCacheListenedTrack();
         this.handleEnded();
+      } else if (state === 'error') {
+        // 背保：error 回调吞掉过增益归因错误后，若实为音源真错误，
+        // 状态机转入 error 态时补触发恢复（一次性标志防重复触发；
+        // 正常路径的恢复仍由 on('error') 驱动，本分支只兜误吞场景）。
+        if (this.gainErrorSwallowed) {
+          this.gainErrorSwallowed = false;
+          this.recoverFromStall();
+        }
       }
     });
 
     player.on('timeUpdate', (time: number): void => {
       // ⚠️ 累计听歌时长必须放在「准备中」判断**之前**：
-      // 切歌解析期间旧音源仍在出声（见 isPreparing 字段注释），这段真实听掉的
-      // 时间不能丢。无声的换源空窗由 detachAndClearPlayer 复位游标兜住。
+      // 正常换源空窗已被 pauseOldSourceOnSwitch 压静音（无 tick、不计听时），
+      // 但压声是异步 Promise、暂停落地前的最后一拍仍是真实听掉的时间，
+      // 不能丢。无声的换源空窗由 detachAndClearPlayer 复位游标兜住。
       this.accumulateListenTime();
       // ⚠️ 正在准备新音源（解析 + 重建播放器）期间，出声的仍是**上一首**，
       // 它的 timeUpdate 会按旧位置回调。此时若写进度，新歌的进度条会乱跳，
@@ -1116,6 +1300,8 @@ export class MusicPlayer {
           const headSec: number = skipIntroSecOf(rangeTrack.id);
           if (this.lastDuration - outroSec > headSec) {
             this.outroSkipFired = true;
+            // 听歌日记：片尾限定触发视同自然播完，结算的会话带 completed 标记
+            this.diarySessionCompleted = true;
             this.finalizeListenSegment();
             this.recordRecentProgress(0, true);
             this.tryCacheListenedTrack();
@@ -1175,6 +1361,20 @@ export class MusicPlayer {
       plogError(`AVPlayer error: ${JSON.stringify(err)}`);
       // 换源时旧实例已 detach + release，它的 error 不会走到这里，
       // 所以这里收到的必定是**当前音源**的真实错误。
+      // 单曲音量增益归因护栏（须在恢复动作之前）：setLoudnessGain 的错误也走本
+      // 回调（文档口径）。若 3s 窗口内派发过 setLoudnessGain 且状态机仍健康
+      // （未转入 error 态），判定为属性级失败（如高清通路不支持增益设置）而
+      // 非音源故障 —— 标记会话级降级并直接返回，绝不触发换链重试。
+      // 若实为音源真错误，状态机随后转入 error 态，stateChange('error')
+      // 背保会补触发 recoverFromStall。
+      if (Date.now() - this.gainCallAt < 3000
+        && (this.playerState === 'prepared' || this.playerState === 'playing'
+          || this.playerState === 'paused' || this.playerState === 'completed')) {
+        this.gainUnsupported = true;
+        this.gainErrorSwallowed = true;
+        plogWarn('setLoudnessGain rejected on healthy pipeline, degrade to attenuation-only for this session');
+        return;
+      }
       this.cancelPrepareWatchdog();
       this.isPreparing = false;
       // 续播 seek→play 挂起中出错：取消挂起的 play 与兜底定时器，
@@ -1198,6 +1398,23 @@ export class MusicPlayer {
     player.on('seekDone', (seekDoneTime: number): void => {
       this.seeking = false;
       this.lastProgressBucket = -1;
+      // 片尾限定触发资格重置：成功定位到限定点之前 === 新一轮播放，
+      // 重新拥有「到达限定点即视为播完」。统一覆盖三条路径 ——
+      // 单曲循环重播 / completed 态播放键重播 / 用户拖回限定点之前；
+      // 定位到限定点之后不重置（维持已触发语义）。不能提前到 seek 派发时：
+      // seekDone 前 timeUpdate 仍按旧位置（限定点）回调，提前复位会在
+      // 限定点反复触发形成切歌风暴。实例守卫：旧实例迟到的 seekDone
+      // 不碰新曲状态（loadAndPlay 已复位，此处纯双保险）。
+      if (player === this.avPlayer && this.outroSkipFired) {
+        const rearmTrack: Track | null = this.currentTrackSnapshot();
+        if (rearmTrack !== null) {
+          const rearmOutro: number = skipOutroSecOf(rearmTrack.id);
+          if (rearmOutro > 0 && this.lastDuration > 0
+            && seekDoneTime / 1000 < this.lastDuration - rearmOutro) {
+            this.outroSkipFired = false;
+          }
+        }
+      }
       // prepared 态续播 seek 完成，补上被挂起的 play
       if (this.playAfterSeekPending) {
         this.playAfterSeekPending = false;
@@ -1342,6 +1559,34 @@ export class MusicPlayer {
       console.error(`[Cast] getAVCastController failed: ${e.code} ${e.message}`);
       this.notifyHint('投播建立失败，请重试');
     });
+  }
+
+  /**
+   * 点新歌瞬间压掉仍在出声的旧播放器。
+   *
+   * 背景：playTrack 是乐观更新（STORE_CURRENT_TRACK 先行），而新音源解析 +
+   * 挂载要数百 ms 到数秒。若不干预，这段空窗里**旧歌继续出声**，用户看到的
+   * 是新歌信息、听到的是上一首 —— 表现为「点了 A 还在播 B」；快速连点时
+   * 后一个点歌还会作废前一个在途解析（loadToken），旧歌就一直响下去。
+   * 这里在进入解析前立刻暂停旧播放器：空窗静音（UI 已有 LOADING 态），
+   * 新音源起播即接管。失败回滚（recoverAfterLoadFailure）后旧歌停在原位，
+   * 按播放可续听。
+   *
+   * 只在 playing 态出手（唯一真正出声的形态）；指针为空 / 未出声时纯 no-op，
+   * 风控自动重试、死键复活等「播放器本就无声」的加载路径不受影响。
+   */
+  private pauseOldSourceOnSwitch(): void {
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (!player || this.playerState !== 'playing') {
+      return;
+    }
+    try {
+      player.pause().catch((e: BusinessError): void => {
+        console.error(`pause old source on switch failed: ${e.code} ${e.message}`);
+      });
+    } catch (e) {
+      console.error(`pause old source on switch threw: ${JSON.stringify(e)}`);
+    }
   }
 
   /** 投播中直接暂停本机 AVPlayer 实例（不经 this.pause()，避免远端转发） */
@@ -1698,7 +1943,12 @@ export class MusicPlayer {
   /**
    * 异步补报歌词：AVMetadata.lyric 要求标准歌词格式（LRC），复用 LyricsApi 缓存
    * （与播放页歌词共享，不重复请求）。令牌防切歌竞态；synced=false（纯文本歌词）
-   * 不上报，避免被 LRC 解析器乱显。本曲只尝试一次，重报不重复拉取。
+   * 不上报，避免被 LRC 解析器乱显。
+   *
+   * 瞬时失败可重试：取词返回 null（字幕 10 分钟节流窗等）、非 synced 或异常时
+   * 复位 lastLyricAssetId，暂停→恢复的 'playing' 会再试一次。网络成本有既有
+   * 闸门兜底——definitive miss 已写 24h miss 缓存（重试时缓存直返，零网络），
+   * 字幕瞬时节流 10 分钟，不会造成请求风暴。
    */
   private publishSessionLyric(track: Track): void {
     if (!this.session) {
@@ -1713,14 +1963,21 @@ export class MusicPlayer {
     this.lastLyricText = '';
     getLyricForTrack(track).then((result: LyricResult | null): void => {
       // 切歌竞态：在途结果属于旧曲，丢弃
-      if (token !== this.lyricFetchToken || result === null || !result.synced) {
+      if (token !== this.lyricFetchToken) {
         return;
       }
-      const lrc: string = buildLrcText(result.lines);
+      if (result === null || !result.synced) {
+        this.lastLyricAssetId = '';
+        console.info(`[SessionLyric] no synced lyric yet, retry on next play, track=${track.title}`);
+        return;
+      }
+      const lrc: string = buildLrcText(result.lines, getLyricOffset(track.id));
       if (lrc.length === 0) {
         return;
       }
       this.lastLyricText = lrc;
+      console.info(`[SessionLyric] published track=${track.title}`
+        + ` lines=${result.lines.length} bytes=${lyricUtf8Encoder.encodeInto(lrc).byteLength}`);
       if (!this.session) {
         return;
       }
@@ -1732,6 +1989,10 @@ export class MusicPlayer {
         console.error(`setAVMetadata with lyric failed: ${JSON.stringify(e)}`);
       }
     }).catch((e: Error): void => {
+      // 异常同样复位标记：网络错误等瞬时故障不该让本曲整个会话都拿不到歌词
+      if (token === this.lyricFetchToken) {
+        this.lastLyricAssetId = '';
+      }
       console.error(`publish session lyric failed: ${e.message}`);
     });
   }
@@ -2094,12 +2355,6 @@ export class MusicPlayer {
       // 线上再出现「播放页的图与列表不一致」时，看这行即可确认最终采用了哪一张。
       console.info(`cover=list ${track.coverUrl.slice(0, 80)} | source=${source.coverUrl.slice(0, 80)}`);
     }
-    // 响度记录扼点：loadAndPlay / reloadCurrentSource 两条在线解析路径都经
-    // mergeTrack 落地，在这里记一次即全覆盖。sourceCache 旧条目缺字段时
-    // undefined > 0 为 false，安全跳过。
-    if (source.loudnessMeasuredI > 0) {
-      recordLoudness(track.id, source.loudnessMeasuredI, source.loudnessTargetI);
-    }
     return {
       id: track.id,
       title: track.title.length > 0 ? track.title : source.title,
@@ -2130,6 +2385,43 @@ export class MusicPlayer {
       audioMimeType: source.audioMimeType,
       // 备用直链跟着解析结果走（列表侧落盘的曲目不带，取 ?? 兜旧数据）
       audioBackupUrls: source.audioBackupUrls
+    };
+  }
+
+  /**
+   * 构造直播条目的「已解析」形态：把重新取到的直播流地址填进 audioUrl。
+   * 不走 mergeTrack —— 它的点播语义（bvid/aid/cid 音源侧优先、
+   * 备用直链）对直播全部无意义，且其返回的字面量会丢 isLive/roomId 标记，
+   * 直播条目一旦经过它就再也走不回直播链路。
+   * HLS 优先（AVPlayer 对 m3u8 的解复用支持最稳），FLV 仅兜底。
+   */
+  private buildLiveTrack(track: Track, urls: LiveStreamUrls): Track {
+    const isHls: boolean = urls.hlsUrl.length > 0;
+    return {
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      coverUrl: track.coverUrl,
+      duration: 0,
+      videoUrl: '',
+      bvid: '',
+      aid: '',
+      cid: '',
+      upMid: track.upMid,
+      playCount: track.playCount,
+      pubdate: track.pubdate,
+      playedAt: track.playedAt,
+      lastPosSec: 0,
+      isLiked: track.isLiked,
+      likedAt: track.likedAt,
+      addedAt: track.addedAt,
+      audioUrl: isHls ? urls.hlsUrl : urls.flvUrl,
+      audioQuality: 0,
+      audioBandwidth: 0,
+      audioMimeType: isHls ? 'application/vnd.apple.mpegurl' : 'video/x-flv',
+      audioBackupUrls: [],
+      isLive: true,
+      roomId: track.roomId
     };
   }
 
@@ -2266,6 +2558,13 @@ export class MusicPlayer {
       return;
     }
     const token: number = this.loadToken;
+    // ── 直播分支：直播地址几分钟就过期，点播恢复链的每一级（备用直链 /
+    // CDN 线路探测 / 降档重解析）对直播都无意义 —— 唯一正确的恢复是按
+    // 房间号重新取流。──
+    if (track.isLive === true) {
+      this.recoverLiveStream(track, token);
+      return;
+    }
     const backups: string[] = track.audioBackupUrls ?? [];
     // ① 备用直链：本轮加载还没把 3 条用完，就先试下一条
     if (this.triedBackupCount < 3 && this.triedBackupCount < backups.length) {
@@ -2431,6 +2730,73 @@ export class MusicPlayer {
     return msg.indexOf('[-352]') >= 0 || msg.indexOf('[-412]') >= 0
       || msg.indexOf('[-509]') >= 0 || msg.indexOf('[-799]') >= 0
       || msg.indexOf('HTTP 412') >= 0 || msg.indexOf('HTTP 403') >= 0;
+  }
+
+  /**
+   * 直播流恢复：直播地址几分钟就过期，点播恢复链的每一级（备用直链 /
+   * CDN 线路探测 / 降档重解析）对直播都无意义 —— 唯一正确的恢复是按房间号
+   * 重新取流并整建播放器。recovering 防重入与点播链同款（error 连发 /
+   * 看门狗直达只允许第一个触发点发起，后续重复触发全部吞掉）。
+   * 直播重取不恢复旧位置：从最新直播点继续听（seek 对实时流无意义）。
+   */
+  private recoverLiveStream(track: Track, token: number): void {
+    if (this.recovering) {
+      plogWarn('recover live stream already in flight, skip duplicate');
+      return;
+    }
+    const roomId: number = track.roomId ?? 0;
+    if (roomId <= 0) {
+      // 快照恢复的旧直播条目丢了房间号：无法重取流，直接收口提示
+      this.finishLiveRecover('直播流中断，无法恢复（缺少房间号），请重新进入直播间');
+      return;
+    }
+    this.recovering = true;
+    this.isPreparing = true;
+    this.setStore(STORE_LOADING_AUDIO, true);
+    plogWarn(`recover live stream: re-fetch room ${roomId}`);
+    fetchLiveStreamUrls(roomId)
+      .then((urls: LiveStreamUrls): Promise<boolean> => {
+        if (token !== this.loadToken) {
+          // 已被更新的点歌取代：重取结果作废，收尾由获胜方负责
+          return Promise.resolve<boolean>(false);
+        }
+        const url: string = urls.hlsUrl.length > 0 ? urls.hlsUrl : urls.flvUrl;
+        if (url.length === 0) {
+          return Promise.resolve<boolean>(false);
+        }
+        // quiet=true：失败统一由 finishLiveRecover 收口，不在中途弹提示
+        return this.switchSource(url, token, true);
+      })
+      .then((attached: boolean): void => {
+        this.recovering = false;
+        if (token !== this.loadToken) {
+          return;
+        }
+        if (attached) {
+          this.isPreparing = false;
+          return;
+        }
+        this.finishLiveRecover('直播流已中断，房间可能已下播');
+      })
+      .catch((e: Error): void => {
+        this.recovering = false;
+        const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+        plogWarn(`recover live stream failed: ${detail}`);
+        if (token !== this.loadToken) {
+          return;
+        }
+        this.finishLiveRecover('直播流已中断，房间可能已下播');
+      });
+  }
+
+  /** 直播恢复失败的统一收口：清状态、停长时任务、明确提示（仅提示一次） */
+  private finishLiveRecover(message: string): void {
+    this.isPreparing = false;
+    this.setStore(STORE_LOADING_AUDIO, false);
+    this.setStore(STORE_IS_PLAYING, false);
+    this.updateSessionState();
+    this.syncBackgroundTask(false);
+    this.notifyHint(message);
   }
 
   /**
@@ -2864,13 +3230,14 @@ export class MusicPlayer {
 
   /**
    * 启动后首次出声的淡入（二）：playing（真正出声）时启动斜坡定时器，
-   * 把音量在 FIRST_PLAY_FADE_MS 内线性爬到 1，并一次性消费淡入标记。
+   * 把音量在 FIRST_PLAY_FADE_MS 内线性爬到有效音量（effectiveVolume：
+   * 正常通路恒 1，降级通路的单曲增益衰减），并一次性消费淡入标记。
    *
    * 斜坡期间的守卫（任一命中即收尾）：
    *   · 实例被换 / 释放（avPlayer !== player）：清定时器即可——pending 已在
    *     启动斜坡时消费，新实例满音量起步，不存在「归零后无人爬坡」的静音窗口；
-   *   · 被暂停 / 打断（playerState !== 'playing'）：立即恢复满音量再清定时器，
-   *     保证恢复播放时满音量即时出声、不卡无声。
+   *   · 被暂停 / 打断（playerState !== 'playing'）：立即恢复到有效音量再清
+   *     定时器，保证恢复播放时正常音量即时出声、不卡无声。
    */
   private startFirstFadeRamp(player: media.AVPlayer): void {
     if (!this.firstPlayFadePending || this.casting || player !== this.avPlayer) {
@@ -2890,9 +3257,9 @@ export class MusicPlayer {
         return;
       }
       if (this.playerState !== 'playing') {
-        // 暂停 / 打断：恢复满音量，之后恢复播放不再淡入
+        // 暂停 / 打断：恢复到有效音量（降级通路的单曲增益衰减），之后恢复播放不再淡入
         try {
-          cur.setVolume(1);
+          cur.setVolume(this.effectiveVolume());
         } catch (e) {
           console.error(`restore volume after fade interrupt failed: ${JSON.stringify(e)}`);
         }
@@ -2902,7 +3269,10 @@ export class MusicPlayer {
       }
       const t: number = (Date.now() - startedAt) / FIRST_PLAY_FADE_MS;
       try {
-        cur.setVolume(t >= 1 ? 1 : t);
+        // 爬坡目标 = 有效音量（降级通路的单曲增益衰减），不是满音量 1.0——
+        // 否则首播淡入会把降级衰减悄悄冲掉
+        const target: number = this.effectiveVolume();
+        cur.setVolume(t >= 1 ? target : t * target);
       } catch (e) {
         console.error(`fade ramp set volume failed: ${JSON.stringify(e)}`);
         clearInterval(this.firstPlayFadeTimer);
@@ -2936,82 +3306,67 @@ export class MusicPlayer {
   }
 
   /**
-    * 补应用响度均衡增益到播放器。setVolume 的合法窗口是
-    * prepared/playing/paused/completed，与 setSpeed 同款约束；
-    * 取值 [0.0,1.0] 正好契合「只衰减不放大」的增益定义。
-    * 换源每次都重建 AVPlayer（默认音量 1.0），prepared 时按当前曲目
-    * 在 LoudnessStore 的记录重补增益，否则「切歌后均衡悄悄失效」。
-    *
-    * 开关关闭直接 return——重建后的新实例本来就是 1.0，无需归位；
-    * 无记录 / 无效数据增益为 1.0，同样不调 setVolume。
-    * 查表失败或 setVolume 抛错一律吞掉：均衡是增强功能，不能连累播放。
-    */
-  private applyLoudnessOnPrepared(player: media.AVPlayer): void {
-    const enabled: boolean = (AppStorage.get(STORE_LOUDNESS_NORM_ENABLED) as boolean) ?? false;
-    if (!enabled) {
-      return;
+   * 有效音量收口（setVolume 维度）：正常通路恒 1 —— 单曲音量增益全走
+   * setLoudnessGain（dB 域），setVolume 只服务首播淡入斜坡，绝不超 1.00
+   * 上限；仅在增益通路会话级降级（gainUnsupported）且增益为负时，把衰减
+   * 值换算回线性域经 setVolume 兜底。淡入斜坡 / 打断恢复的 setVolume
+   * 终值一律经本方法计算，增益维度不会被斜坡冲掉（两者不同维度）。
+   */
+  private effectiveVolume(): number {
+    if (this.gainUnsupported && this.trackVolumeGainDb < 0) {
+      return Math.pow(10, this.trackVolumeGainDb / 20);
     }
-    try {
-      const track: Track | null = this.currentTrackSnapshot();
-      if (track === null) {
-        return;
-      }
-      const hit: LoudnessLookup | null = lookupLoudness(track.id);
-      if (hit === null) {
-        return;
-      }
-      // 记录里 targetI 为 0（老数据缺字段）时兜标准目标 -14 LUFS
-      const targetI: number = hit.t !== 0 ? hit.t : -14;
-      const gain: number = calculateLoudnessGain(hit.m, targetI);
-      if (gain >= 1.0) {
-        return;
-      }
-      player.setVolume(gain);
-      plogInfo(`loudness norm applied: id=${track.id.slice(0, 40)} measured=${hit.m} target=${targetI} gain=${gain.toFixed(3)}`);
-    } catch (e) {
-      console.error(`applyLoudnessOnPrepared failed: ${JSON.stringify(e)}`);
-    }
+    return 1;
   }
 
   /**
-    * 设置页切换响度均衡开关后的即时生效入口：
-    * 对当前 avPlayer 立即应用或归位，不用等下一首歌。
-    * setVolume 只在 prepared/playing/paused/completed 态可调，playerState
-    * 处于其他态（idle/initialized/stopped/released）时不调，
-    * 交给下一次换源重建后的 prepared 挂点补上。
-    */
-  setLoudnessNormalizationEnabled(enabled: boolean): void {
-    const player: media.AVPlayer | null = this.avPlayer;
-    if (player === null) {
+   * 换源 prepared 挂点重查当前曲的单曲音量增益（TrackVolumeStore，
+   * dB 直存无换算）：无记录 = 0dB（默认原始音量）。新实例增益必为
+   * 0dB，appliedGainDb 同步归零 —— 差量应用基线从新实例起步。
+   */
+  private loadTrackVolume(): void {
+    this.appliedGainDb = 0;
+    const track: Track | null = this.currentTrackSnapshot();
+    this.trackVolumeGainDb = track === null ? 0 : trackVolumeGainOf(track.id);
+  }
+
+  /**
+   * 单曲音量增益补应用（prepared 挂点）：换源重建 AVPlayer 后增益回到
+   * 默认 0dB，当前曲有增益记录时重补，否则「切歌后增益悄悄失效」。
+   * 正常通路走 setLoudnessGain（3s 归因窗口同步记录）；降级通路
+   * （gainUnsupported：本会话 setLoudnessGain 报错过）仅衰减可用
+   * （setVolume 兜底，effectiveVolume 收口），非负增益无效果。
+   * 首播淡入未消费时衰减值交给归零 + 斜坡收尾（斜坡目标经
+   * effectiveVolume 收口），无需先写一次再归零。
+   */
+  private applyTrackVolumeOnPrepared(player: media.AVPlayer): void {
+    if (this.trackVolumeGainDb === 0) {
       return;
     }
-    const writableState: boolean = this.playerState === 'prepared' || this.playerState === 'playing'
-      || this.playerState === 'paused' || this.playerState === 'completed';
-    if (!writableState) {
+    if (this.gainUnsupported) {
+      if (this.trackVolumeGainDb < 0) {
+        if (this.firstPlayFadePending) {
+          return;
+        }
+        try {
+          player.setVolume(this.effectiveVolume());
+        } catch (e) {
+          console.error(`apply track volume gain on prepared (degraded) failed: ${JSON.stringify(e)}`);
+        }
+      } else {
+        plogWarn('track volume gain degraded: boost unavailable this session');
+      }
       return;
     }
     try {
-      if (!enabled) {
-        // 关闭 = 归位系统默认；写回 1.0 而不是等重建，当前这首歌立即恢复原始响度
-        player.setVolume(1.0);
-        return;
-      }
-      const track: Track | null = this.currentTrackSnapshot();
-      if (track === null) {
-        return;
-      }
-      const hit: LoudnessLookup | null = lookupLoudness(track.id);
-      if (hit === null) {
-        return;
-      }
-      const targetI: number = hit.t !== 0 ? hit.t : -14;
-      const gain: number = calculateLoudnessGain(hit.m, targetI);
-      if (gain < 1.0) {
-        player.setVolume(gain);
-        plogInfo(`loudness norm applied on toggle: gain=${gain.toFixed(3)}`);
-      }
+      const apiDb: number = Math.min(LOUDNESS_GAIN_API_MAX_DB, this.trackVolumeGainDb);
+      this.gainCallAt = Date.now();
+      player.setLoudnessGain(apiDb).catch((e: BusinessError): void => {
+        plogWarn(`setLoudnessGain on prepared rejected: ${e.code} ${e.message}`);
+      });
+      this.appliedGainDb = apiDb;
     } catch (e) {
-      console.error(`setLoudnessNormalizationEnabled failed: ${JSON.stringify(e)}`);
+      console.error(`apply track volume gain on prepared failed: ${JSON.stringify(e)}`);
     }
   }
 
@@ -3200,9 +3555,14 @@ export class MusicPlayer {
     // 切歌瞬间先把上一段已听的时长收尾落盘：
     // 准备新音源可能耗时数秒且进程随时可能被杀，不能等攒满阈值再写
     this.finalizeListenSegment();
-    // 进入「准备中」：解析音源 + 重建播放器期间，旧音源还在出声，
-    // 它的 timeUpdate 必须被忽略（理由见 isPreparing 字段注释）
+    // 进入「准备中」：解析音源 + 重建播放器期间，旧音源的 timeUpdate
+    // 必须被忽略（理由见 isPreparing 字段注释）
     this.isPreparing = true;
+    // 压声：点歌到新音源挂载之间的空窗（数百 ms 到数秒）不能让旧歌继续
+    // 出声——用户听到的是「点了 A 还在播 B」。空窗静音，UI 由
+    // LOADING 态交代加载中；快速连点时每个新点歌都作废上一个在途解析，
+    // 若不压声，旧不相关歌曲会一直响到某个解析最终落地为止。
+    this.pauseOldSourceOnSwitch();
     // 记录本次起始定位——准备期间 STORE_PROGRESS 已清零、
     // seek 未生效，这段时间内的落盘（如缓冲中按暂停）都必须用这个「意图位置」
     this.loadStartAt = startAt > 0 ? startAt : 0;
@@ -3211,7 +3571,7 @@ export class MusicPlayer {
 
     // ── 本地优先链（三条，选路优先级：track.localFilePath > 下载记录 > 听后缓存）──
     //   · 「准备中」标志已置位后才走这里（loadLocalFile 同样要维护 isPreparing 语义：
-    //     它也会重建播放器，期间旧音源仍在出声）；
+    //     它也会重建播放器，旧音源已在上面压静音）；
     //   · 歌单 / 队列 / 最近播放里的条目落盘时被剥掉了 localFilePath（slimTrack
     //     为省 Preferences 体积会清理字段），在线解析之前先查下载任务表 ——
     //     放在 MusicPlayer 层（而不是页面层）是为了所有入口统一生效；
@@ -3248,16 +3608,33 @@ export class MusicPlayer {
         // played=已本地播出 / superseded=被取代（token 已在上面拦住）/ failed=已收尾
         return;
       }
-      // ── badFile：本地文件损坏，回退判定 ──
+      // ── badFile：本地文件不可播（被外部删除 / 损坏），回退判定 ──
+      // 删除与损坏分流：access 探测文件是否还在。badFile 是失败路径，
+      // 一次探测开销可忽略，不进切歌热路径。
+      let fileMissing: boolean = true;
+      try {
+        fileMissing = !(await fs.access(localPathToTry));
+      } catch (e) {
+        // access 抛错按「文件不在」处理（与下载页丢失检测同口径）
+      }
+      if (fileMissing && !fromListenCache) {
+        // COMPLETED 下载记录清理（内存 + 落库）：completedLocalPath 从此不再
+        // 命中坏路径（这首歌以后直接走在线），歌单「已下载」徽标同步消失；
+        // 记录转 ERROR 保留在下载页，可走既有「失败重试」。fire-and-forget：
+        // 清理失败不影响本次回退在线。
+        DownloadManager.getInstance().markFileMissing(track.id, localPathToTry).catch((e: Error): void => {
+          plogWarn(`mark download file missing failed: ${e.message}`);
+        });
+      }
       if (AppPreferences.getSettings().wifiOnlyPlay && !isUnmeteredNetwork()) {
         // 「仅 WiFi 播放」+ 蜂窝网：回退在线 = 偷跑流量，违背用户省流意图，
         // 保留原硬失败口径（提示重下 + 回滚收口）
-        this.notifyHint('本地文件无法播放，请重新下载');
+        this.notifyHint(fileMissing ? '下载文件已被删除，请重新下载' : '本地文件无法播放，请重新下载');
         this.recoverAfterLoadFailure(track, seqBeforeLoad);
         return;
       }
       plogWarn(`local file unplayable, falling back to online: ${track.id} (${localPathToTry})`);
-      this.notifyHint('本地文件已损坏，已切换为在线播放');
+      this.notifyHint(fileMissing ? '下载文件已被删除，已切换为在线播放' : '本地文件已损坏，已切换为在线播放');
       if (fromListenCache) {
         // 听后缓存坏文件顺手清理：内部缓存无用户态，删掉后这首不再反复撞坏文件
         removeListenCacheFile(track.id).catch((e: Error): void => {
@@ -3274,19 +3651,34 @@ export class MusicPlayer {
     // 只是收尾环节的岔子，绝不能据此回滚界面并弹「加载失败」。
     let attached: boolean = false;
     try {
-      // ⚠️ 播放音质跟随用户设置（AppSettings.playQuality）：
-      // 标准档用户会真的听到 64k（这是他选的）。
-      // 服务端没有该档时仍按 audioQualityCandidates 的预定义顺序降级，绝不会失败。
-      // `sourceCache` 的 cacheKey 含 preferredQuality（见 BilibiliApi
-      // extractAudioFromVideo），改设置后缓存自然分裂，无需手动清缓存。
-      const source = await extractAudioFromVideo(track.bvid || track.id, {
-        aid: track.aid,
-        cid: track.cid
-      }, this.currentPlayQualityId());
-      if (token !== this.loadToken) {
-        return;
+      // ── 直播分支（isLive）：音源是直播间实时流（HLS m3u8 / FLV），不走
+      // extractAudioFromVideo 的 bvid 点播解析（直播没有 bvid），更不进
+      // sourceCache —— 直播地址几分钟就过期，缓存即过期。audioUrl 为空 =
+      // 队列快照 / 最近播放恢复的旧直播条目，按 roomId 重新取流。──
+      let updated: Track = track;
+      if (track.isLive === true) {
+        if (track.audioUrl.length === 0) {
+          const liveUrls: LiveStreamUrls = await fetchLiveStreamUrls(track.roomId ?? 0);
+          if (token !== this.loadToken) {
+            return;
+          }
+          updated = this.buildLiveTrack(track, liveUrls);
+        }
+      } else {
+        // ⚠️ 播放音质跟随用户设置（AppSettings.playQuality）：
+        // 标准档用户会真的听到 64k（这是他选的）。
+        // 服务端没有该档时仍按 audioQualityCandidates 的预定义顺序降级，绝不会失败。
+        // `sourceCache` 的 cacheKey 含 preferredQuality（见 BilibiliApi
+        // extractAudioFromVideo），改设置后缓存自然分裂，无需手动清缓存。
+        const source = await extractAudioFromVideo(track.bvid || track.id, {
+          aid: track.aid,
+          cid: track.cid
+        }, this.currentPlayQualityId());
+        if (token !== this.loadToken) {
+          return;
+        }
+        updated = this.mergeTrack(track, source);
       }
-      const updated: Track = this.mergeTrack(track, source);
       this.setStore(STORE_CURRENT_TRACK, updated);
       // 会话元数据轻字段（标题/歌手/时长）即时上报：纯 IPC 不抢音频首包带宽，
       // 实况窗随 UI 即时换信息，不再滞后到出声。封面 PixelMap 需网络下载 + 解码，
@@ -3433,6 +3825,11 @@ export class MusicPlayer {
     if (!cur) {
       return;
     }
+    // 直播条目不记「上次听到」位置：实时流的位置没有续播意义，
+    // 写入只会让最近播放页出现误导性的「上次听到 x:xx」
+    if (cur.isLive === true) {
+      return;
+    }
     const hasOverride: boolean = progressOverride !== undefined && progressOverride >= 0;
     // 准备新音源期间只有带意图位置（loadStartAt / 续播点）的调用才可信
     if (this.isPreparing && !hasOverride) {
@@ -3442,8 +3839,24 @@ export class MusicPlayer {
     if (!force && now - this.lastRecentProgressAt < RECENT_PROGRESS_THROTTLE_MS) {
       return;
     }
-    const pos: number = hasOverride ? (progressOverride as number)
+    let pos: number = hasOverride ? (progressOverride as number)
       : (AppStorage.get(STORE_PROGRESS) as number) ?? 0;
+    // 片尾限定感知（写侧收口）：位置落在限定点（时长 − 片尾秒数）及之后 =
+    // 该曲「有效结尾」已到达，视同听完记 0（与 timeUpdate 触发条件同边界）。
+    // 防停播残留：片尾限定触发后播放器停在限定点，退后台 / release / 暂停的
+    // 「记当前位置」不再把限定点写回 lastPosSec —— 否则下次从限定点续播，
+    // 起播即触发片尾跳过自动切歌，形成这首歌无法播放的死循环。
+    // 时长优先用解码后的 lastDuration，回落列表侧 cur.duration，均未知不收口。
+    if (pos > 0) {
+      const outroGuardSec: number = skipOutroSecOf(cur.id);
+      if (outroGuardSec > 0) {
+        const guardDur: number = this.lastDuration > 0 ? this.lastDuration
+          : (cur.duration > 0 ? cur.duration : 0);
+        if (guardDur > 0 && pos >= guardDur - outroGuardSec) {
+          pos = 0;
+        }
+      }
+    }
     try {
       const wrote: boolean = LibraryStore.updateRecentProgress(cur.id, pos);
       if (wrote) {
@@ -3576,11 +3989,17 @@ export class MusicPlayer {
     //   3. 按曲「跳过开头」（IntroSkipStore）/ UP 默认起播规则（replayStartSec）。
     // 显式位置优先，不叠加。
     let startAt: number = startAtSec > 0 ? startAtSec : 0;
-    if (startAt <= 0 && (prevTrack === null || prevTrack.id !== track.id)) {
-      startAt = this.rememberedStartSec(track);
-    }
-    if (startAt <= 0) {
-      startAt = this.replayStartSec(track);
+    if (track.isLive === true) {
+      // 直播没有「续播位置 / 跳过开头」概念：任何记忆位置对实时流都无意义，
+      // 一律从最新直播点开始听
+      startAt = 0;
+    } else {
+      if (startAt <= 0 && (prevTrack === null || prevTrack.id !== track.id)) {
+        startAt = this.rememberedStartSec(track);
+      }
+      if (startAt <= 0) {
+        startAt = this.replayStartSec(track);
+      }
     }
     this.loadAndPlay(track, true, startAt).catch((e: Error): void => {
       console.error(`playTrack failed: ${e.message}`);
@@ -3592,6 +4011,9 @@ export class MusicPlayer {
     // 「系统打断那一刻正在播」这一事实，用户手动开播后旧事实不再成立；
     // 也拦掉迟到 / 重复派发的 RESUME 二次拉起）。
     this.wasPlayingBeforeInterrupt = false;
+    // 用户手动开播（含通话中主动播放）：作废「因通话暂停」的恢复意图，
+    // 挂断后不重复 play（本就在播）。
+    this.pausedForCall = false;
     this.shouldAutoplay = true;
     // 首次播放才申请蓝牙权限（审核合规：使用对应功能时才弹窗）
     this.requestBluetoothPermissionOnce();
@@ -3702,6 +4124,12 @@ export class MusicPlayer {
     // 作废「打断前在播放」的自动续播意图 —— 否则上一个打断周期残留的意图
     // 会在下一次焦点归还（如微信消息提示音结束）时把已暂停的音乐错误拉起。
     this.wasPlayingBeforeInterrupt = false;
+    // 同时作废「因通话暂停」的恢复意图：用户在通话中主动按了暂停，
+    // 挂断后不再自动拉起（尊重用户的明确操作）。通话暂停流程本身
+    // （startCallStateWatch）是先 pause() 后置标志，不会被这里误清。
+    if (this.pausedForCall) {
+      this.pausedForCall = false;
+    }
     // 投播中：暂停命令转发远端（本机实例早已停声）
     if (this.casting && this.castController !== null) {
       console.info('[Cast] forward pause');
@@ -3728,9 +4156,21 @@ export class MusicPlayer {
       this.savePlayerStateNow(this.loadStartAt);
       return;
     }
+    // 续播定位窗口（prepared → seek → 挂起等 seekDone 补播）内暂停：
+    // 必须取消挂起的 play 与 2.5s 兜底定时器（对齐 error 处理器的清理），
+    // 否则暂停后 seekDone 一到仍会自动唱起来（「点了暂停却又自己播」）。
+    this.playAfterSeekPending = false;
+    if (this.playAfterSeekTimer !== -1) {
+      clearTimeout(this.playAfterSeekTimer);
+      this.playAfterSeekTimer = -1;
+    }
     if (this.avPlayer) {
       const s: string = this.playerState;
-      if (s === 'prepared' || s === 'paused' || s === 'playing' || s === 'completed') {
+      // pause() 仅在 playing 态合法（AVPlayer 状态机约束）；prepared/paused/
+      // completed 态播放器本就不出声，硬调只会报 5400102
+      // 「Pause operation only supports playing」刷脏报错记录。
+      // 挂起 play 已在上面取消，这些态下不存在残留出声路径。
+      if (s === 'playing') {
         try {
           this.avPlayer.pause().catch((e: BusinessError): void => {
             console.error(`avPlayer.pause failed: ${e.code} ${e.message}`);
@@ -3795,9 +4235,22 @@ export class MusicPlayer {
    * 清空即自然失忆，零额外清理逻辑。
    */
   private rememberedStartSec(track: Track): number {
+    // 「续播」总开关（设置 → 播放，默认开）：关闭后切歌 / 新播放一律不取
+    // 「上次听到」记忆位置，从头起播 —— playTrack 自然落到 replayStartSec，
+    // 「限定播放进度·跳过片头」不受影响仍生效。记录侧不受影响：位置照常记，
+    // 重新打开开关续播立即恢复。所有消费方（playTrack 切歌点播 /
+    // playRecentFromHistory 最近播放续播入口）都经本方法取位置，单点封禁全覆盖。
+    if (!AppPreferences.getSettings().resumeFromProgress) {
+      return 0;
+    }
     const posSec: number = LibraryStore.getRecentProgressSec(track.id);
     const dur: number = track.duration > 0 ? track.duration : 0;
-    if (posSec >= RESUME_MIN_SEC && (dur <= 0 || posSec <= dur - RESUME_TAIL_SEC)) {
+    // 片尾限定感知（读侧兜底）：限定点（时长 − 片尾秒数）即该曲「有效结尾」，
+    // 落在限定点及之后的位置（停播残留 / 旧脏数据）一律视为听完 → 不续播，
+    // 否则从限定点起播即触发片尾跳过自动切歌（无法播放的死循环）。
+    // outroSec = 0 时退化为既有 RESUME_TAIL_SEC 保护，无限定歌曲零影响。
+    const tailGuardSec: number = Math.max(RESUME_TAIL_SEC, skipOutroSecOf(track.id));
+    if (posSec >= RESUME_MIN_SEC && (dur <= 0 || posSec <= dur - tailGuardSec)) {
       return posSec;
     }
     return 0;
@@ -3992,16 +4445,12 @@ export class MusicPlayer {
   }
 
   /**
-   * 轻提示（后台任务拿不到 UIContext，写 AppStorage 由全局 AppToast 弹出）。
-   * seq 读-改-写递增：与 UI 侧 showAppToast 共用同一计数器，独立计数会撞号丢提示。
+   * 轻提示（后台任务拿不到 UIContext，经 common/ToastChannel 走全局 AppToast）。
+   * toast 与「日志记录」页留痕统一在 notifyPlaybackHint —— 多副本手抄会漂移，
+   * 见 ToastChannel.ts。
    */
   private notifyHint(message: string): void {
-    AppStorage.setOrCreate(STORE_TOAST_MSG, message);
-    AppStorage.setOrCreate(STORE_TOAST_HOLD_MS, 1800);
-    const seq: number = AppStorage.get<number>(STORE_TOAST_SEQ) ?? -1;
-    AppStorage.setOrCreate(STORE_TOAST_SEQ, seq + 1);
-    // 用户可见提示也入日志页（提示级），方便对照「当时弹了什么」
-    recordPlaybackLog(PLAYBACK_LOG_INFO, message);
+    notifyPlaybackHint(message);
   }
 
   /**
@@ -4018,6 +4467,7 @@ export class MusicPlayer {
       const deltaMs: number = Math.min(now - this.lastListenTickAt, LISTEN_TICK_MAX_GAP_MS);
       if (deltaMs > 0) {
         this.listenAccumSeconds += deltaMs / 1000;
+        this.accumulateDiarySession(now, deltaMs);
       }
     }
     this.lastListenTickAt = now;
@@ -4037,10 +4487,55 @@ export class MusicPlayer {
       const deltaMs: number = Math.min(now - this.lastListenTickAt, LISTEN_TICK_MAX_GAP_MS);
       if (deltaMs > 0) {
         this.listenAccumSeconds += deltaMs / 1000;
+        this.accumulateDiarySession(now, deltaMs);
       }
     }
     this.lastListenTickAt = -1;
     this.flushListenTime();
+    // 所有结算点（暂停/播完/片尾限定/出错/切歌/退出）都汇聚到这里，
+    // 听歌日记的会话随听歌时长一并收口，无需在各分支重复埋点
+    this.closeDiarySession();
+  }
+
+  /**
+   * 听歌日记：累计当前播放会话的有效收听毫秒。
+   * 会话首拍顺带快照曲目与起始时间 —— 快照只取一次，切歌准备期
+   * （旧音源仍在出声、STORE_CURRENT_TRACK 已换新）不会把整段听量
+   * 归属到还没出声的新歌上。
+   */
+  private accumulateDiarySession(now: number, deltaMs: number): void {
+    if (this.diarySessionStartAt === -1) {
+      this.diarySessionStartAt = now - deltaMs;
+      this.diarySessionTrack = this.currentTrackSnapshot();
+    }
+    this.diarySessionMs += deltaMs;
+  }
+
+  /**
+   * 听歌日记：结算并落库当前播放会话（PlaySessionStore 追加写）。
+   * 不足 1s 的会话由 appendSession 内部丢弃；落库失败在 store 内部
+   * 只记日志，绝不影响播放主链路。
+   */
+  private closeDiarySession(): void {
+    const track: Track | null = this.diarySessionTrack;
+    if (this.diarySessionStartAt > 0 && this.diarySessionMs > 0 && track !== null) {
+      appendSession({
+        trackId: track.id,
+        title: track.title,
+        artist: track.artist,
+        upMid: track.upMid,
+        coverUrl: track.coverUrl,
+        bvid: track.bvid,
+        durationMs: Math.round(track.duration * 1000),
+        startedAt: this.diarySessionStartAt,
+        ms: Math.round(this.diarySessionMs),
+        completed: this.diarySessionCompleted
+      });
+    }
+    this.diarySessionStartAt = -1;
+    this.diarySessionMs = 0;
+    this.diarySessionTrack = null;
+    this.diarySessionCompleted = false;
   }
 
   /** 把会话内累计的听歌秒数（整数部分）落盘，失败只留日志不影响播放 */
@@ -4244,6 +4739,58 @@ export class MusicPlayer {
   }
 
   /**
+   * 设置当前曲的「单曲音量」增益（±30dB，归一 1dB 网格，0 = 恢复默认）。
+   * 播放页 VolumeChip 滑条实时调用：增益记账（dB 域，与 setLoudnessGain
+   * 参数同域无换算）+ 写 TrackVolumeStore（归零删记录）+ 对当前 avPlayer
+   * 即时生效。正常通路走 setLoudnessGain 差量应用（+24dB API 硬上限先钳，
+   * 与 appliedGainDb 相同则跳过，避免重复派发制造归因窗口噪音；归零也写
+   * 0dB —— 同实例从有增益归位需要显式归零）；降级通路（gainUnsupported）
+   * 仅衰减可用：setVolume 兜底（effectiveVolume 收口，拖回 0 归位 1.0），
+   * 非负增益无效果。状态机不可写（idle/initialized 等）时只记账 + 落盘，
+   * 交给下一次 prepared 挂点补上。查不到当前曲时只记账（不入库，防止脏 id 串曲）。
+   */
+  setTrackVolumeGain(gainDb: number): void {
+    const clamped: number = Math.min(30, Math.max(-30, gainDb));
+    const normalized: number = Math.round(clamped);
+    this.trackVolumeGainDb = normalized;
+    const track: Track | null = this.currentTrackSnapshot();
+    if (track !== null) {
+      setTrackVolumeRecord(track.id, normalized);
+      plogInfo(`track volume gain set: id=${track.id.slice(0, 40)} gain=${normalized}dB`);
+    }
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (player === null) {
+      return;
+    }
+    const writableState: boolean = this.playerState === 'prepared' || this.playerState === 'playing'
+      || this.playerState === 'paused' || this.playerState === 'completed';
+    if (!writableState) {
+      return;
+    }
+    if (this.gainUnsupported) {
+      try {
+        player.setVolume(this.effectiveVolume());
+      } catch (e) {
+        console.error(`set track volume gain (degraded) failed: ${JSON.stringify(e)}`);
+      }
+      return;
+    }
+    if (this.trackVolumeGainDb === this.appliedGainDb) {
+      return;
+    }
+    try {
+      const apiDb: number = Math.min(LOUDNESS_GAIN_API_MAX_DB, this.trackVolumeGainDb);
+      this.gainCallAt = Date.now();
+      player.setLoudnessGain(apiDb).catch((e: BusinessError): void => {
+        plogWarn(`setLoudnessGain rejected: ${e.code} ${e.message}`);
+      });
+      this.appliedGainDb = apiDb;
+    } catch (e) {
+      console.error(`set track volume gain failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
    * 设置页切换「与其他应用同时播放」时对当前实例立即生效（best-effort）。
    * AudioSession 并发策略只对**激活后新起**的音频流完全生效：正在出声的这一首
    * 是 best-effort；本 App 每次切歌都重建 AVPlayer，loadAndPlay 开头的
@@ -4371,6 +4918,10 @@ export class MusicPlayer {
       if (track === null || track.id.length === 0) {
         return;
       }
+      // 直播流不做听后缓存：m3u8 是动态播放列表，缓存到手即已过期
+      if (track.isLive === true) {
+        return;
+      }
       // 正在播本地文件（已下载 / 缓存命中）无需再缓存
       if ((track.localFilePath ?? '').length > 0) {
         return;
@@ -4386,6 +4937,15 @@ export class MusicPlayer {
   }
 
   private handleEnded(): void {
+    // 直播条目 completed = 流结束（下播 / 断流收口），不是「播完切下一首」：
+    // 不推进队列、不单曲循环 —— 停在当前并明确提示（卡顿恢复链
+    // recoverLiveStream 已按房间号重取过流，仍走到这里说明流真的结束了）
+    const endedLive: Track | null = this.currentTrackSnapshot();
+    if (endedLive !== null && endedLive.isLive === true) {
+      this.notifyHint('直播已结束');
+      this.stopAtCurrent();
+      return;
+    }
     const dq: Track[] = this.displayQueue();
     if (dq.length === 0) {
       this.stopAtCurrent();
@@ -4472,6 +5032,25 @@ export class MusicPlayer {
    */
   private stopAtCurrent(): void {
     this.shouldAutoplay = false;
+    // 「停在当前」必须真正停声：片尾限定触发后本曲仍处 playing 态，
+    // 不暂停会越过限定点播完真实片尾，才等来系统 completed。
+    // 仅 playing 态 pause（与 pause() 的状态机约束同口径，completed/paused
+    // 态本就无声，硬调只会刷 5400102 脏报错）；投播中本机实例早已停声
+    // （playerState 非 playing），自然跳过、远端不受影响。
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (player && this.playerState === 'playing') {
+      this.stoppingAtCurrent = true;
+      try {
+        player.pause().catch((e: BusinessError): void => {
+          // pause 被拒：标志撤掉，不留给下一次意外暂停吞掉合法的进度记录
+          this.stoppingAtCurrent = false;
+          console.error(`pause on stopAtCurrent failed: ${e.code} ${e.message}`);
+        });
+      } catch (e) {
+        this.stoppingAtCurrent = false;
+        console.error(`pause on stopAtCurrent threw: ${JSON.stringify(e)}`);
+      }
+    }
     this.setStore(STORE_IS_PLAYING, false);
     this.updateSessionState();
     this.syncBackgroundTask(false);

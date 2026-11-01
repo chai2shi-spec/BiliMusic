@@ -15,7 +15,7 @@ export function utf8Decode(bytes: Uint8Array): string {
     return '';
   }
   const decoder: util.TextDecoder = new util.TextDecoder('utf-8');
-  return decoder.decodeWithStream(bytes);
+  return decoder.decodeToString(bytes);
 }
 
 /** Base64 → 字节（失败返回空数组） */

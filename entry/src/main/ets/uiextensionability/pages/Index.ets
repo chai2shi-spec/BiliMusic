@@ -8,7 +8,7 @@
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { formInfo } from '@kit.FormKit';
-import { downloadCoverToTemp } from '../../service/card/CardPayloadBuilder';
+import { DEFAULT_COLOR_HEX, downloadCoverToTemp } from '../../service/card/CardPayloadBuilder';
 import {
   LIVE_CARD_RATIO,
   ANIMATE_COMPONENT_LEFT,
@@ -47,7 +47,7 @@ const PlayAlignRules: Record<string, Record<string, string | VerticalAlign | Hor
 struct CardOverflowPage {
   @State title: string = '';
   @State singer: string = '';
-  @State imageColorHex: string = 'fb7299';
+  @State imageColorHex: string = DEFAULT_COLOR_HEX;
   @State coverPath: string = '';
   @State hasCover: boolean = false;
   @State isCollected: boolean = false;
@@ -75,7 +75,17 @@ struct CardOverflowPage {
     this.formBottom = formRect !== undefined
       ? formRect.height * LIVE_CARD_RATIO - formRect.top - formRect.height : 0;
     this.formRadius = borderRadius ?? 0;
-    this.loadCover(localStorage?.get<string>('coverUrl') ?? '');
+    // 本地封面优先（Form 进程推卡时落盘的 card_cover_<id>.jpg，同沙箱同 tempDir）：
+    // 命中即首帧显示正确封面 + 卡片同款底色，跳过网络下载（B 站 CDN 慢时动画
+    // 全程默认占位图的根因）；未命中回落 downloadCoverToTemp 网络路径。
+    const localPath: string = localStorage?.get<string>('coverLocalPath') ?? '';
+    if (localPath.length > 0) {
+      this.coverPath = localPath;
+      this.hasCover = true;
+      this.imageColorHex = localStorage?.get<string>('imageColorHex') ?? DEFAULT_COLOR_HEX;
+    } else {
+      this.loadCover(localStorage?.get<string>('coverUrl') ?? '');
+    }
   }
 
   private loadCover(coverUrl: string): void {
@@ -205,5 +215,16 @@ struct CardOverflowPage {
     }
     .width('100%')
     .height('100%')
+    // 溢出区（1.5 倍卡片视觉区）整体铺卡片同款渐变：转盘转出时四周露出的是
+    // 主色延续而非 liveForm 窗口默认白底（根 Stack 原先无背景 → 四周白边根因）。
+    // 圆角与卡片复刻同源（liveFormInfo.borderRadius），clip 裁掉圆角外像素。
+    .linearGradient({
+      direction: GradientDirection.Bottom,
+      repeating: false,
+      colors: [[`#ff${this.imageColorHex}`, 0.0], [`#ff${this.imageColorHex}`, 0.5],
+        [`#ff${this.imageColorHex}`, 1.0]]
+    })
+    .borderRadius(this.formRadius)
+    .clip(true)
   }
 }

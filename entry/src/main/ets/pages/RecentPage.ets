@@ -61,6 +61,8 @@ import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
+import { skipOutroSecOf } from '../service/IntroSkipStore';
+import { AppPreferences } from '../preferences/AppPreferences';
 
 /**
  * 标题栏按钮行（播放全部 / 清空）固定高：padding 4/8 + 按钮 32 = 44。
@@ -241,12 +243,22 @@ export struct RecentPage {
    * 听完重置为 0 / 没听够 / 临近结尾 / 旧数据无字段 → 空串不渲染。
    */
   private heardTextOf(t: Track): string {
+    // 「续播」总开关关闭时不显示：显示的就是会续播的位置，关闭后点击也
+    // 从头播，提示留着只会误导（位置记录仍在，重新打开开关即恢复显示）
+    if (!AppPreferences.getSettings().resumeFromProgress) {
+      return '';
+    }
     const pos: number = t.lastPosSec ?? 0;
     if (pos < RESUME_MIN_SEC) {
       return '';
     }
     const dur: number = t.duration > 0 ? t.duration : 0;
-    if (dur > 0 && pos > dur - RESUME_TAIL_SEC) {
+    // 片尾限定感知：限定点（时长 − 片尾秒数）即该曲「有效结尾」，
+    // 与 rememberedStartSec 续播判定同口径 —— 限定区位置不续播，
+    // 也不显示（显示的就是会续播的位置）。
+    // outroSec = 0 时退化为既有 RESUME_TAIL_SEC 判定，无限定歌曲零影响。
+    const tailGuardSec: number = Math.max(RESUME_TAIL_SEC, skipOutroSecOf(t.id));
+    if (dur > 0 && pos > dur - tailGuardSec) {
       return '';
     }
     return `上次听到 ${formatDurationText(pos)}`;

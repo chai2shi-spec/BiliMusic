@@ -24,6 +24,13 @@
  * 与 TrackItem 的差异（有意）：无入场错峰 —— TrackEntranceQueue 是
  * TrackItem.ets 的模块私有类，错峰逻辑不跨文件复用；网格条目挂载即显示，
  * 滚动中懒加载为主，错峰收益小。
+ *
+ * @Reusable 复用陷阱：各页面传参子集不同（RecentPage 传 heardText、
+ * PlaylistDetail 传 downloaded、多选页传 selecting/selected，HomePage /
+ * SearchPage / UpSpacePage 不传），复用池跨页面共享 —— 复用进未传参的调用
+ * 点时 @Prop 被置 undefined，`heardText.length` 直接闪退（CoverImage v1.3.5
+ * 线上崩溃同类）。aboutToReuse 统一回落缺省项（reuseParamMissing 见
+ * utils/ReuseUtil.ts），读取处再以 `??` 空安全双保险。
  */
 
 import { Track, buildTrack } from '../model/MusicModels';
@@ -36,6 +43,7 @@ import {
   STORE_THEME_PRIMARY
 } from '../common/Constants';
 import { MaterialCompat } from '../utils/MaterialCompat';
+import { reuseParamMissing } from '../utils/ReuseUtil';
 
 /** 「⋯」圆钮边长（视觉 16px 字号居中留白）：网格内对 44vp 触达下限的折衷（见头注释） */
 const CARD_MORE_HIT: number = 36;
@@ -75,6 +83,30 @@ export struct TrackCard {
   onToggleSelect: (track: Track) => void = (_track: Track): void => {};
   /** 按压缩放（本卡独占动画状态，见头注释） */
   @State pressScale: number = 1;
+
+  /**
+   * @Reuse 复用陷阱兜底（与 CoverImage.aboutToReuse 同模式）：各页面传参
+   * 子集不同（见头注释「@Reusable 复用陷阱」段），复用进来先把缺省项回落
+   * 默认值 —— 未传的 @Prop 被置 undefined，`heardText.length`（下方续播
+   * 提示行）会直接闪退。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    if (reuseParamMissing(params, 'track')) {
+      this.track = buildTrack({});
+    }
+    if (reuseParamMissing(params, 'downloaded')) {
+      this.downloaded = false;
+    }
+    if (reuseParamMissing(params, 'heardText')) {
+      this.heardText = '';
+    }
+    if (reuseParamMissing(params, 'selecting')) {
+      this.selecting = false;
+    }
+    if (reuseParamMissing(params, 'selected')) {
+      this.selected = false;
+    }
+  }
 
   /** 本卡是否正在播放：id 精确匹配（TrackItem / QueueSheet 同一语义，多 P 条目 id 唯一） */
   private isPlayingTrack(): boolean {
@@ -131,7 +163,11 @@ export struct TrackCard {
         .visibility(this.selecting ? Visibility.None : Visibility.Visible)
         .accessibilityText('更多操作')
         .accessibilityLevel('yes')
-        .bindMenu(this.moreMenuItems(this.track))
+        .bindMenu(this.moreMenuItems(this.track), {
+          // 全局统一更多菜单方向：菜单右缘对齐 ⋯ 按钮、从按钮下方向外弹出
+          //（PlaylistsTabBar 顶栏 ⋮ 同款 placement 约定）
+          placement: Placement.BottomRight
+        })
 
         // 多选勾选圈（可选）：占「⋯」原位 —— 选择模式下「⋯」不参与布局，
         // 22vp 圈心对齐 36vp「⋯」钮心（margin 13 = 6 + (36-22)/2）。
@@ -181,7 +217,8 @@ export struct TrackCard {
       .margin({ top: 6 })
 
       // 「上次听到 x:xx」：最近播放续播提示，其余页面空串整块不渲染。
-      if (this.heardText.length > 0) {
+      // `??` 双保险：复用兜底失效（理论上不会）也不闪退（见 aboutToReuse 注释）。
+      if ((this.heardText ?? '').length > 0) {
         Text(this.heardText)
           .fontSize(12)
           .fontColor($r('app.color.text_tertiary'))

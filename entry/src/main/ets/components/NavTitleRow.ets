@@ -44,8 +44,16 @@ export struct NavTitleRow {
   /** 标题文案；空串 = 无标题变体（歌单详情 / UP 主空间，标题让给头部区大字） */
   @Prop title: string = '';
   /**
+   * 标题统计副文案（可选；默认空串 = 不渲染，存量使用点零变化）。
+   * 下载页等带统计的二级页用：与主标题**同行**排布 —— 11fp /
+   * text_tertiary / 左距主标题 6vp，副行 layoutWeight(1) 吃剩余宽
+   * （超长按 maxLines(1) + Ellipsis 截断），标题行高 56 不变。
+   */
+  @Prop subtitle: string = '';
+  /**
    * 标题行尾部插槽（可选；默认空）：如歌单详情页的「定位」按钮。
-   * · 有标题：标题 layoutWeight(1) 撑开，槽内容自然靠右；
+   * · 有标题：标题 Row layoutWeight(1) 撑开（主副行同行顺序排布），
+   *   槽内容自然靠右；
    * · 无标题：Blank().layoutWeight(1) 占位（纯空白，存量空标题页视觉零变化），槽内容靠右；
    * · 不传：默认空 builder，什么都不渲染（存量使用点零改动）。
    * 几何锚定（Center 居中 + 中间层 Column）不因插槽改变。
@@ -67,13 +75,29 @@ export struct NavTitleRow {
           .width(NAV_BACK_SIZE + NAV_TITLE_GAP)
 
         if (this.title.length > 0) {
-          Text(this.title)
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.text_primary'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
+          // ⚠️ 标题容器必须是 Row 顺序排布：包 Column 的话其默认
+          // alignItems = HorizontalAlign.Center 会把标题水平居中到屏幕中央
+          //（dl-page-redesign 踩过）。主标题自然宽优先，副行
+          // layoutWeight(1) 吃剩余宽，超长按 maxLines(1) + Ellipsis 截断；
+          // 标题左缘 x = 64vp 紧贴返回键（见文件头几何解码）。
+          Row() {
+            Text(this.title)
+              .fontSize(20)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.text_primary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.subtitle.length > 0) {
+              Text(this.subtitle)
+                .fontSize(11)
+                .fontColor($r('app.color.text_tertiary'))
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .margin({ left: 6 })
+                .layoutWeight(1)
+            }
+          }
+          .layoutWeight(1)
         } else {
           // 无标题：占位撑开，尾部插槽靠右（纯空白，空标题存量页视觉零变化）
           Blank()

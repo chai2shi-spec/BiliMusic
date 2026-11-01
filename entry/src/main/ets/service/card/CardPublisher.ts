@@ -32,7 +32,8 @@ import {
   fetchCardLyric,
   pushCardToForm,
   pushLyricWindowToForm,
-  pushPlayStatusToForm
+  pushPlayStatusToForm,
+  pushProgressToForm
 } from './CardPayloadBuilder';
 import { PersistedPlayerState } from '../PlayerStateStore';
 
@@ -61,6 +62,8 @@ export class CardPublisher {
   private lastLyricPushAt: number = 0;
   /** 歌词窗口异步推送进行中标志（防重入） */
   private lyricUpdating: boolean = false;
+  /** 外屏卡进度异步推送进行中标志（防重入，链路独立于歌词窗口） */
+  private progressUpdating: boolean = false;
   /** 全量刷新进行中标志（换歌瞬间防重复全量推） */
   private refreshing: boolean = false;
   private listener: (key: string) => void = (key: string): void => {
@@ -178,10 +181,10 @@ export class CardPublisher {
       });
   }
 
-  /** 进度节拍：1s 节流 + 歌词行变化才推动态歌词窗口 */
+  /** 进度节拍：1s 节流；动态歌词窗口（歌词行变化才推）+ 外屏卡进度（每节拍推） */
   private onProgressTick(): void {
     const context: common.Context | null = this.context;
-    if (context === null || this.lyricUpdating) {
+    if (context === null) {
       return;
     }
     const now: number = Date.now();
@@ -194,17 +197,41 @@ export class CardPublisher {
       return;
     }
     const progress: number = AppStorage.get<number>(STORE_PROGRESS) ?? 0;
+    const duration: number = AppStorage.get<number>(STORE_DURATION) ?? 0;
     const isPlay: boolean = AppStorage.get<boolean>(STORE_IS_PLAYING) ?? false;
     if (!isPlay) {
       return; // 暂停不推（恢复播放后由下一拍补齐）
     }
-    this.lyricUpdating = true;
-    this.updateLyricWindow(context, track, progress, isPlay)
-      .then((): void => {
-        this.lyricUpdating = false;
-      }, (): void => {
-        this.lyricUpdating = false;
-      });
+    if (!this.lyricUpdating) {
+      this.lyricUpdating = true;
+      this.updateLyricWindow(context, track, progress, isPlay)
+        .then((): void => {
+          this.lyricUpdating = false;
+        }, (): void => {
+          this.lyricUpdating = false;
+        });
+    }
+    // 外屏播控卡进度推送独立成链：歌词行索引不变时 updateLyricWindow 不推，
+    // 进度条必须每节拍都走；两条链各自防重入，互不阻塞。
+    if (!this.progressUpdating) {
+      this.progressUpdating = true;
+      this.updateFoldCardProgress(context, progress, duration, isPlay)
+        .then((): void => {
+          this.progressUpdating = false;
+        }, (): void => {
+          this.progressUpdating = false;
+        });
+    }
+  }
+
+  /** 外屏播控卡（PlayControlCardFold）进度轻量推送 */
+  private async updateFoldCardProgress(context: common.Context, progress: number,
+    duration: number, isPlay: boolean): Promise<void> {
+    const records: CardFormRecord[] =
+      await CardFormStore.getInstance().queryByName(FormCardName.CONTROL_FOLD);
+    for (let i = 0; i < records.length; i++) {
+      await pushProgressToForm(records[i].formId, progress, duration, isPlay);
+    }
   }
 
   private async updateLyricWindow(context: common.Context, track: Track,

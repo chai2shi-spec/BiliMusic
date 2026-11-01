@@ -1,12 +1,12 @@
 /**
  * 播放控制区。
  *
- * 版式自上而下：功能行（Swiper 分页：全部 9 个功能项按用户排序
+ * 版式自上而下：功能行（Swiper 分页：全部 10 个功能项按用户排序
  * （STORE_FUNC_ITEM_ORDER，设置 → 播放设置 → 自定义功能栏拖动调整）过滤
  * 后每页 4 个等宽槽位分页展示，核心键「播放模式 / 下载 / 加入歌单 / 队列」
- * 恒在，开关入口「倍速 / 限定进度 / 定时停止 / 在 B 站打开 / 进入 UP 主页」
- * 按各自开关决定是否渲染；多页时双侧箭头按页位显隐；图标统一尺寸、
- * 内容居中到同一条中线）→ 进度条 + 双侧时间 → 三键控制行。
+ * 恒在，开关入口「倍速 / 限定进度 / 定时停止 / 在 B 站打开 / 进入 UP 主页 /
+ * 单曲音量」按各自开关决定是否渲染；多页时双侧箭头按页位显隐；图标统一
+ * 尺寸、内容居中到同一条中线）→ 进度条 + 双侧时间 → 三键控制行。
  * 紧凑模式（compactMode，阔折叠外屏）：功能行与进度区整体不挂载
  * （条件渲染而非 visibility 隐藏），只渲染三键行（聚拢左对齐）。
  * 控制调用全部走 MusicPlayer 单例；队列弹层复用共享组件 QueueSheet；
@@ -37,6 +37,7 @@ import {
   PLAYER_FUNC_SLEEP,
   PLAYER_FUNC_BILI,
   PLAYER_FUNC_UP_SPACE,
+  PLAYER_FUNC_VOLUME,
   DEFAULT_FUNC_ITEM_ORDER
 } from '../../model/MusicModels';
 import { getVideoDetail } from '../../api/BilibiliApi';
@@ -52,6 +53,7 @@ import { PlayButtonComponent } from './PlayButtonComponent';
 import { BounceIconButton } from './BounceIconButton';
 import { PlayerProgressArea } from './PlayerProgressArea';
 import { SleepTimerChip } from './SleepTimerChip';
+import { VolumeChip } from './VolumeChip';
 import { LibraryStore } from '../../service/LibraryStore';
 import { skipIntroSecOf, skipOutroSecOf, setTrackSkipRange } from '../../service/IntroSkipStore';
 import { NavStackHolder } from '../../service/NavStackHolder';
@@ -74,6 +76,7 @@ import {
   STORE_SLEEP_TIMER_ENTRY_ENABLED,
   STORE_SKIP_INTRO_ENTRY_ENABLED,
   STORE_UP_SPACE_ENTRY_ENABLED,
+  STORE_TRACK_VOLUME_ENTRY_ENABLED,
   STORE_FUNC_ITEM_ORDER,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
@@ -169,6 +172,8 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_SLEEP_TIMER_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') sleepEntryEnabled: boolean = false;
   /** 「进入 UP 主页」入口开关（设置页镜像）：开 = 功能行渲染「进入 UP 主页」跳转入口；变化 = 组合变（回第 0 页） */
   @StorageProp(STORE_UP_SPACE_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') upSpaceEntryEnabled: boolean = false;
+  /** 「单曲音量」入口开关（设置页镜像，默认关）：开 = 功能行渲染 VolumeChip（需有当前曲）；变化 = 组合变（回第 0 页） */
+  @StorageProp(STORE_TRACK_VOLUME_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') volumeEntryEnabled: boolean = false;
   /** 当前倍速（MusicPlayer.setStore 写回 → 倍速片标签与菜单 ✓ 实时刷新） */
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
   /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
@@ -576,9 +581,9 @@ export struct ControlAreaComponent {
 
   /**
    * 功能行可见功能项序列：按用户排序（funcItemOrder）过滤。
-   * 核心 4 键恒在；5 个开关入口各按对应开关过滤，「限定进度」额外要求有当前曲
-   * （播放页无曲不展开，防御性条件）。unknown id 不会出现（AppPreferences 已归一化），
-   * 但防御性跳过：其余键位不受影响。
+   * 核心 4 键恒在；6 个开关入口各按对应开关过滤，「限定进度」「单曲音量」
+   * 额外要求有当前曲（播放页无曲不展开，防御性条件）。unknown id 不会出现
+   * （AppPreferences 已归一化），但防御性跳过：其余键位不受影响。
    */
   private visibleFuncItems(): string[] {
     const result: string[] = [];
@@ -596,6 +601,8 @@ export struct ControlAreaComponent {
       } else if (id === PLAYER_FUNC_BILI && this.openInBiliEnabled) {
         result.push(id);
       } else if (id === PLAYER_FUNC_UP_SPACE && this.upSpaceEntryEnabled) {
+        result.push(id);
+      } else if (id === PLAYER_FUNC_VOLUME && this.volumeEntryEnabled && this.currentTrack !== null) {
         result.push(id);
       }
     }
@@ -623,6 +630,26 @@ export struct ControlAreaComponent {
   /** 页数（>1 才渲染双侧箭头；1 页 = 单页直出，无翻页交互） */
   private funcPageCount(): number {
     return this.funcPages().length;
+  }
+
+  /** 功能键图标尺寸：断点取值 */
+  private funcIconSize(): number {
+    return FUNC_ICON_SIZE.getValue(this.currentBreakpoint);
+  }
+
+  /** 功能键圆底尺寸：断点取值 */
+  private funcButtonSize(): number {
+    return FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint);
+  }
+
+  /** 倍速片字号：断点取值 */
+  private speedFontSize(): number {
+    return SPEED_FONT_SIZE.getValue(this.currentBreakpoint);
+  }
+
+  /** 倍速片最小字号：断点取值 */
+  private speedMinFontSize(): number {
+    return SPEED_MIN_FONT_SIZE.getValue(this.currentBreakpoint);
   }
 
   /**
@@ -874,8 +901,8 @@ export struct ControlAreaComponent {
     if (itemId === PLAYER_FUNC_REPEAT) {
       BounceIconButton({
         icon: modeIconOf(this.repeatMode),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.cycleRepeat();
         }
@@ -883,8 +910,8 @@ export struct ControlAreaComponent {
     } else if (itemId === PLAYER_FUNC_DOWNLOAD) {
       BounceIconButton({
         icon: $r('sys.symbol.arrow_down_to_line'),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.downloadCurrent();
         }
@@ -899,12 +926,12 @@ export struct ControlAreaComponent {
       // 不会与菜单的点击手势竞争（TrackItem 行已真机验证该共存方式）。
       Column() {
         SymbolGlyph($r('sys.symbol.plus'))
-          .fontSize(FUNC_ICON_SIZE.getValue(this.currentBreakpoint))
+          .fontSize(this.funcIconSize())
           .fontColor([Color.White])
           .opacity(0.86)
       }
-      .width(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-      .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
+      .width(this.funcButtonSize())
+      .height(this.funcButtonSize())
       .justifyContent(FlexAlign.Center)
       .scale({ x: this.menuButtonScale, y: this.menuButtonScale })
       .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
@@ -920,8 +947,8 @@ export struct ControlAreaComponent {
     } else if (itemId === PLAYER_FUNC_QUEUE) {
       BounceIconButton({
         icon: $r('sys.symbol.list_bullet'),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.showQueueSheet = true;
         }
@@ -933,9 +960,9 @@ export struct ControlAreaComponent {
       // 不消费事件，不与菜单手势竞争）。
       Column() {
         Text(speedLabelOf(this.playbackSpeed))
-          .fontSize(SPEED_FONT_SIZE.getValue(this.currentBreakpoint))
-          .minFontSize(SPEED_MIN_FONT_SIZE.getValue(this.currentBreakpoint))
-          .maxFontSize(SPEED_FONT_SIZE.getValue(this.currentBreakpoint))
+          .fontSize(this.speedFontSize())
+          .minFontSize(this.speedMinFontSize())
+          .maxFontSize(this.speedFontSize())
           .width('100%')
           .maxLines(1)
           .textAlign(TextAlign.Center)
@@ -943,8 +970,8 @@ export struct ControlAreaComponent {
           .opacity(0.86)
           .fontWeight(FontWeight.Medium)
       }
-      .width(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-      .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
+      .width(this.funcButtonSize())
+      .height(this.funcButtonSize())
       .justifyContent(FlexAlign.Center)
       .scale({ x: this.speedButtonScale, y: this.speedButtonScale })
       .animation({ duration: PRESS_ANIM_MS, curve: Curve.EaseOut })
@@ -963,8 +990,8 @@ export struct ControlAreaComponent {
       // 渲染线宽与同排功能键天然一致（BounceIconButton 标准键，含点击弹跳反馈）。
       BounceIconButton({
         icon: $r('sys.symbol.arrow_left_arrow_right'),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.openRangeDialog();
         }
@@ -978,8 +1005,8 @@ export struct ControlAreaComponent {
       // 在 B 站打开原视频：优先 bilibili:// 深链拉官方 App，未装/不支持降级 https 网页。
       BounceIconButton({
         icon: $r('sys.symbol.arrow_up_right'),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.openInBilibili();
         }
@@ -990,14 +1017,101 @@ export struct ControlAreaComponent {
       // （UpSpacePage）；mid 缺失时经 getVideoDetail 解析（openUpSpace 注释）。
       BounceIconButton({
         icon: $r('sys.symbol.person'),
-        iconSize: FUNC_ICON_SIZE.getValue(this.currentBreakpoint),
-        buttonSize: FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
         onTap: (): void => {
           this.openUpSpace();
         }
       })
         .accessibilityText('进入 UP 主页')
+    } else if (itemId === PLAYER_FUNC_VOLUME) {
+      // 单曲音量快捷入口：100% 显喇叭图标、已调低显百分比文字片，
+      // 点击弹就近气泡滑条（0-100% 拖动实时生效，按曲存 TrackVolumeStore）。
+      VolumeChip()
     }
+  }
+
+  /**
+   * 功能行（舞台 / 常规分支共用，常规同款）：Swiper 分页 —— 可见项按
+   * 用户排序过滤后每页 FUNC_ITEMS_PER_PAGE(4) 个等宽槽位，左右滑动翻页；
+   * 组合变化（顺序 / 开关 / 当前曲）经 @Watch 回第 0 页（默认页）。
+   * 外层 ForEach 键 = 页内容串联（每项全局唯一 → 内容变即键变，页面整体
+   * 重建；固定键会滞留旧图标）。队列弹层 bindSheet 挂 Swiper —— 功能行
+   * 唯一常驻宿主，舞台/常规两分支同一实例，弹层配置只此一份。
+   */
+  @Builder
+  private FuncRow(): void {
+    Row() {
+      // 左侧「上一页」箭头：仅多页（>1 页）时渲染；首页淡出、其余页淡入。
+      // 多页期间节点常驻占位（显隐走 opacity），避免出现/消失时 Swiper
+      // 宽度跳变；单页时不渲染，Swiper 占满整行。
+      if (this.funcPageCount() > 1) {
+        SymbolGlyph($r('sys.symbol.chevron_left'))
+          .fontSize(16)
+          .fontColor([Color.White])
+          .opacity(this.funcPageIndex > 0 ? 0.4 : 0)
+          .animation({ duration: 120, curve: Curve.EaseOut })
+          .margin({ right: 2 })
+      }
+
+      Swiper() {
+        ForEach(
+          this.funcPages(),
+          (pageIds: string[]): void => {
+            Row() {
+              ForEach(
+                pageIds,
+                (itemId: string): void => {
+                  Column() {
+                    this.FuncItem(itemId)
+                  }
+                  .layoutWeight(1)
+                  .height('100%')
+                  .justifyContent(FlexAlign.Center)
+                  .alignItems(HorizontalAlign.Center)
+                },
+                (itemId: string): string => itemId
+              )
+            }
+            .width('100%')
+            .height('100%')
+            .alignItems(VerticalAlign.Center)
+          },
+          (pageIds: string[]): string => pageIds.join('_')
+        )
+      }
+      .index(this.funcPageIndex)
+      .loop(false)
+      .indicator(false)
+      .duration(300)
+      .layoutWeight(1)
+      .height(this.funcButtonSize())
+      .onChange((index: number): void => {
+        this.funcPageIndex = index;
+      })
+      .bindSheet($$this.showQueueSheet, this.QueueSheetHost(), {
+        // 大窗（≥840vp）默认 POPUP（跟手）小窗：外区默认可交互、无遮罩 ——
+        // 弹层收不回。显式 POPUP 恢复原小窗外观，enableOutsideInteractive:
+        // false 补遮罩与点外关闭；手机（<600vp）只支持底部样式，回退原行为。
+        preferType: SheetType.POPUP,
+        enableOutsideInteractive: false,
+        height: SheetSize.MEDIUM,
+        dragBar: true,
+        showClose: false
+      })
+
+      // 右侧「下一页」箭头：仅多页时渲染；末页淡出、其余页淡入（同左侧）。
+      if (this.funcPageCount() > 1) {
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(16)
+          .fontColor([Color.White])
+          .opacity(this.funcPageIndex < this.funcPageCount() - 1 ? 0.4 : 0)
+          .animation({ duration: 120, curve: Curve.EaseOut })
+          .margin({ left: 2 })
+      }
+    }
+    .width(StyleConstants.FULL_WIDTH)
+    .alignItems(VerticalAlign.Center)
   }
 
   build() {
@@ -1005,80 +1119,7 @@ export struct ControlAreaComponent {
       // 紧凑模式（阔折叠外屏）：功能行整体不挂载 —— bindSheet 的队列弹层宿主
       // 在功能行 Swiper 上，一并不挂载（外屏按用户决策只保留「信息 + 三键」）。
       if (!this.compactMode) {
-        Row() {
-          // 左侧「上一页」箭头：仅多页（>1 页）时渲染；首页淡出、其余页淡入。
-          // 多页期间节点常驻占位（显隐走 opacity），避免出现/消失时 Swiper
-          // 宽度跳变；单页时不渲染，Swiper 占满整行。
-          if (this.funcPageCount() > 1) {
-            SymbolGlyph($r('sys.symbol.chevron_left'))
-              .fontSize(16)
-              .fontColor([Color.White])
-              .opacity(this.funcPageIndex > 0 ? 0.4 : 0)
-              .animation({ duration: 120, curve: Curve.EaseOut })
-              .margin({ right: 2 })
-          }
-
-          // 功能行主体：Swiper 分页 —— 全部功能项按用户排序过滤后每页
-          // FUNC_ITEMS_PER_PAGE(4) 个等宽槽位，左滑/右滑翻页；组合变化
-          // （顺序 / 开关 / 当前曲）经 @Watch 回第 0 页（默认页）。
-          // 外层 ForEach 键 = 页内容串联（每项全局唯一 → 内容变即键变，
-          // 页面整体重建；若用固定键，ForEach 复用旧页组件不会重跑
-          // itemGenerator，页内图标会滞留旧组合）。Swiper 受控：
-          // .index(this.funcPageIndex) 与 onChange 回写状态闭环，
-          // @Watch 归零时受控跳回第 0 页。
-          Swiper() {
-            ForEach(
-              this.funcPages(),
-              (pageIds: string[]): void => {
-                Row() {
-                  ForEach(
-                    pageIds,
-                    (itemId: string): void => {
-                      Column() {
-                        this.FuncItem(itemId)
-                      }
-                      .layoutWeight(1)
-                      .height('100%')
-                      .justifyContent(FlexAlign.Center)
-                      .alignItems(HorizontalAlign.Center)
-                    },
-                    (itemId: string): string => itemId
-                  )
-                }
-                .width('100%')
-                .height('100%')
-                .alignItems(VerticalAlign.Center)
-              },
-              (pageIds: string[]): string => pageIds.join('_')
-            )
-          }
-          .index(this.funcPageIndex)
-          .loop(false)
-          .indicator(false)
-          .duration(300)
-          .layoutWeight(1)
-          .height(FUNC_BUTTON_SIZE.getValue(this.currentBreakpoint))
-          .onChange((index: number): void => {
-            this.funcPageIndex = index;
-          })
-          .bindSheet($$this.showQueueSheet, this.QueueSheetHost(), {
-            height: SheetSize.MEDIUM,
-            dragBar: true,
-            showClose: false
-          })
-
-          // 右侧「下一页」箭头：仅多页时渲染；末页淡出、其余页淡入（同左侧）。
-          if (this.funcPageCount() > 1) {
-            SymbolGlyph($r('sys.symbol.chevron_right'))
-              .fontSize(16)
-              .fontColor([Color.White])
-              .opacity(this.funcPageIndex < this.funcPageCount() - 1 ? 0.4 : 0)
-              .animation({ duration: 120, curve: Curve.EaseOut })
-              .margin({ left: 2 })
-          }
-        }
-        .width(StyleConstants.FULL_WIDTH)
-        .alignItems(VerticalAlign.Center)
+        this.FuncRow()
       }
 
       // 进度区（四分支进度条 + 双侧时间行，独立子组件）：

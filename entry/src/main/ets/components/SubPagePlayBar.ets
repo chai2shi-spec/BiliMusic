@@ -262,6 +262,13 @@ export struct SubPagePlayBar {
       .tabBar(this.hiddenTabItem)
     }
     .vertical(false)
+    // ⚠️ 关闭内容区滑动切换（修「子页横滑被抢」根因）：载体内部是全屏
+    // Swiper（唯一 TabContent 的宿主），默认注册横向 pan 识别器 —— 载体
+    // Transparent 全屏可命中且 z 序在 NavDestination 之上，子页里任何横向
+    // 滑动（听歌日记 Hero 封面轮播、节奏图等）都会被它抢走仲裁（单项
+    // index 0 双向冻结、原地弹回）。scrollable(false) 移除该手势识别器，
+    // 点击穿透（Transparent）与栏内交互不受影响；单项载体本就无滑切语义。
+    .scrollable(false)
     .barPosition(BarPosition.End)
     .barMode(BarMode.Fixed)
     .barOverlap(true)

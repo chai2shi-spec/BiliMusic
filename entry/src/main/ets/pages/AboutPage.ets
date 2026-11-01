@@ -33,6 +33,7 @@ const APP_ICON_RADIUS: number = 22;
 const SOURCE_URL_BILIMUSIC: string = 'https://github.com/HanversionOvO/BiliMusic';
 const SOURCE_URL_BBPLAYER: string = 'https://github.com/bbplayer-app/BBPlayer';
 const SOURCE_URL_LX_MUSIC: string = 'https://github.com/lyswhut/lx-music-mobile';
+const SOURCE_URL_TAGREC: string = 'https://github.com/yunomega/Bilibili-Gate-TagRec';
 
 @Component
 export struct AboutPage {
@@ -149,6 +150,25 @@ export struct AboutPage {
   }
 
   /**
+   * 「项目说明」单条功能行：加粗领域前缀 + 描述。内容与 README「功能特性」
+   * 同源提炼（改功能时两处同步），六条覆盖发现 / 歌单 / 下载 / 播放 / 拾音 /
+   * 桌面卡片，不做全量罗列 —— 关于页是介绍不是说明书。
+   */
+  @Builder
+  private featureLine(domain: string, desc: string) {
+    Text() {
+      Span(`${domain} · `)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+      Span(desc)
+    }
+    .fontSize(13)
+    .fontColor($r('app.color.text_secondary'))
+    .lineHeight(18)
+    .margin({ top: 8 })
+  }
+
+  /**
    * App 图标：分层图标 = 背景层 + 前景层，按系统同款圆角比例裁切
    * （clip 到圆角内），再补一层柔和阴影让它「浮」在卡片上。
    */
@@ -222,7 +242,7 @@ export struct AboutPage {
             .width('100%')
             .padding({ left: 16, right: 16 })
 
-            // ── 移植自（三条可点击长条：onClick 经 openLink 打开 GitHub）──
+            // ── 移植自（四条可点击长条：onClick 经 openLink 打开 GitHub）──
             SectionHeader({ headerText: '移植自' })
             InsetCard() {
               HdsListItemCard({
@@ -266,17 +286,45 @@ export struct AboutPage {
                   this.openExternal(SOURCE_URL_LX_MUSIC);
                 }
               })
+              CardDivider()
+              HdsListItemCard({
+                textItem: {
+                  primaryText: { text: 'Bilibili Gate TagRec' },
+                  secondaryText: { text: 'B 站首页兴趣推荐油猴脚本' }
+                },
+                suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+                cardBackgroundColor: Color.Transparent,
+                cardPrefixMargin: 0,
+                cardSuffixMargin: 0,
+                onClick: (): void => {
+                  this.openExternal(SOURCE_URL_TAGREC);
+                }
+              })
             }
 
-            // ── 项目说明 ──
+            // ── 项目说明（简介 + 主要功能提炼，与 README「功能特性」同源，改功能时两处同步）──
             SectionHeader({ headerText: '项目说明' })
             InsetCard() {
-              Text('开源学习交流项目，界面与交互针对 HarmonyOS 手机端设计。默认以匿名 + buvid 身份访问 B 站接口，可选扫码登录（凭据仅保存在本机）；播放、下载、歌单等数据全部保存在设备本地，不收集、不上传任何用户数据。')
-                .fontSize(13)
-                .fontColor($r('app.color.text_secondary'))
-                .lineHeight(18)
-                .width('100%')
-                .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+              Column() {
+                Text('开源学习交流项目，界面与交互针对 HarmonyOS 手机端设计。默认以匿名 + buvid 身份访问 B 站接口，可选扫码登录（凭据仅保存在本机）；播放、下载、歌单等数据全部保存在设备本地，不收集、不上传任何用户数据。')
+                  .fontSize(13)
+                  .fontColor($r('app.color.text_secondary'))
+                  .lineHeight(18)
+                Text('主要功能')
+                  .fontSize(13)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.text_primary'))
+                  .margin({ top: 14 })
+                this.featureLine('搜索与发现', '单曲 / 合集 / UP 主搜索，推荐 / 排行榜 / 音乐中心，网易云热门歌单')
+                this.featureLine('歌单', '本地歌单管理、网易云 / QQ 音乐导入，登录后收藏夹双向同步')
+                this.featureLine('下载', '64K ~ Hi-Res 音质、断点续传、听后缓存，文件丢失自动回退在线播放')
+                this.featureLine('播放', '多源逐字歌词、投播、后台播放、单曲音量、定时停止')
+                this.featureLine('拾音', '按日 / 周 / 月 / 年翻阅听歌报告，收听流水与时段偏好统计')
+                this.featureLine('桌面卡片', '播控 / 歌词 / 外屏卡片，双进程自给、不依赖主进程')
+              }
+              .width('100%')
+              .alignItems(HorizontalAlign.Start)
+              .padding({ left: 16, right: 16, top: 14, bottom: 14 })
             }
             SectionFooter({ noteText: '本项目与哔哩哔哩官方无关，音频内容版权归原作者所有，请勿将下载内容用于商业用途。' })
           }

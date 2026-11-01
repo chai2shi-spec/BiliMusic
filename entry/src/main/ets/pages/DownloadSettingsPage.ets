@@ -4,7 +4,7 @@
  * 按类别分三张分组卡片（SectionHeader 标类别）：
  *   · 下载：仅 WiFi 下载 / 下载音质（SelectDialog 弹窗）
  *   · 系统下载目录：保存到系统下载目录（DOWNLOAD 模式持久授权 + 单份存储搬移）/ 同步已完成歌曲
- *   · 缓存：缓存（占用统计 + 清理）/ 听后缓存（开关）/ 清理听后缓存
+ *   · 缓存：缓存（占用统计 + 清理）/ 听后缓存（开关）/ 查看缓存歌曲 / 清理听后缓存
  *
  * 「仅 WiFi 下载」只写偏好，**拦截逻辑在 DownloadManager.requestDownload 入口**
  * （见 service/DownloadManager.ts）：开关打开且当前是蜂窝网络时，那次下载请求会带着
@@ -13,7 +13,9 @@
  * 缓存统计 / 清理走 TaskPool 异步（防主线程阻塞 6s+），
  * 轮次令牌防「快速进出页时旧轮结果覆盖新轮」。
  *
- * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）。
+ * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）：
+ * 材质由 HDS 统一渲染，滚动渐变模糊由自绘 TopGradientBlurOverlay 承担
+ * （AppearanceSettingsPage 同款）。
  */
 
 import common from '@ohos.app.ability.common';
@@ -44,7 +46,10 @@ import { QUALITY_OPTIONS, QualityOption, formatBytes } from '../utils/SettingsSh
 import { ensureDirUri, PublicSyncResult } from '../service/PublicDownloadsSaver';
 import { DownloadManager } from '../service/DownloadManager';
 import { countListenCache, listenCacheUsage, clearListenCache } from '../service/ListenCacheStore';
+import { NavStackHolder } from '../service/NavStackHolder';
 import { BarNarrowShell } from '../components/BarNarrowShell';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 @Component
 export struct DownloadSettingsPage {
@@ -76,6 +81,8 @@ export struct DownloadSettingsPage {
   @State listenCacheUsageText: string = '0 B';
   /** 听后缓存条数副文案（「已缓存 N 首，点击清理」/「暂无缓存」） */
   @State listenCacheDescText: string = '暂无缓存';
+  /** 听后缓存条数后缀（「查看缓存歌曲」行右侧的「N 首」；空缓存为空串不占位） */
+  @State listenCacheCountText: string = '';
   /** 听后缓存清理进行中（防重入 + 主文案「清理中…」） */
   @State clearingListenCache: boolean = false;
   private cacheDirPath: string = '';
@@ -97,10 +104,20 @@ export struct DownloadSettingsPage {
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
 
+  /** 自绘顶栏渐变模糊层进度更新器（AboutPage 同款命令式驱动，高频回调零重建） */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.pageScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
   aboutToAppear(): void {
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier 补上）
+    this.syncTopBlurProgress();
     // 偏好读取延后一拍，首帧 build 全程零磁盘读。
     setTimeout((): void => {
       this.settings = AppPreferences.getSettings();
@@ -242,6 +259,7 @@ export struct DownloadSettingsPage {
         this.listenCacheUsageText = formatBytes(bytes);
         const count: number = countListenCache();
         this.listenCacheDescText = count > 0 ? `已缓存 ${count} 首，点击清理` : '暂无缓存';
+        this.listenCacheCountText = count > 0 ? `${count} 首` : '';
       })
       .catch((e: Error): void => {
         console.error(`refresh listen cache usage failed: ${e.message}`);
@@ -462,6 +480,7 @@ export struct DownloadSettingsPage {
 
   build() {
     HdsNavDestination() {
+      Stack() {
       List({ scroller: this.pageScroller }) {
         // 顶部空白占位条目（官方沉浸口径）：高度 = safeTop + 56（MINI 标题栏），
         // 静止位首个真实条目恰从栏底起排，滚动时从材质下方穿过。
@@ -616,6 +635,27 @@ export struct DownloadSettingsPage {
 
             CardDivider()
 
+            // 查看缓存歌曲：进缓存清单页（封面/标题/大小/日期，点击即播，
+            // localFilePath 直链断网可放）。后缀实时条数（空缓存为空串不占位）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '查看缓存歌曲' },
+                secondaryText: { text: '查看已缓存到本地的歌曲，点击可直接播放' }
+              },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: this.listenCacheCountText },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                NavStackHolder.push('ListenCacheList', undefined);
+              }
+            })
+
+            CardDivider()
+
             // 清理听后缓存：占用统计 + 条数副文案，点击弹确认框（已下载歌曲不受影响）。
             HdsListItemCard({
               textItem: {
@@ -643,11 +683,26 @@ export struct DownloadSettingsPage {
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
       // 大屏适配：内容列收窄居中（走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 自绘渐变模糊层驱动：逐帧更新 + 停止校准终态（渐变软边由 overlay 承担）
+      .onDidScroll((xOffset: number, yOffset: number): void => {
+        this.syncTopBlurProgress();
+      })
+      .onScrollStop((): void => {
+        this.syncTopBlurProgress();
+      })
+
+      // 顶栏渐变模糊层：盖 List 内容之上（z 序低于 HDS titleBar），进度命令式驱动
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
+      }
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
+    //（HDS 内置滚动效果关闭：渐变模糊由自绘 TopGradientBlurOverlay 承担，防双重模糊）
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this）
         stackBuilder: (): void => {

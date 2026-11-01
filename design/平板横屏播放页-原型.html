@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>平板横屏播放页 · 封面舞台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#101014;color:#E8E8EE;
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  padding:24px 30px 30px}
+.bar{display:flex;align-items:center;justify-content:space-between;width:1400px;margin:0 auto 20px}
+.bar .t{font-size:15px;font-weight:700;letter-spacing:.3px}
+.bar .t i{color:#FB7299;font-style:normal}
+.seg{display:flex;gap:6px;background:#1C1C22;border:1px solid #2E2E38;border-radius:9px;padding:3px}
+.seg button{background:none;border:0;color:#9C9CA8;font-size:12px;padding:6px 12px;border-radius:7px;
+  cursor:pointer;font-family:inherit}
+.seg button.on{background:#FB7299;color:#2B0016;font-weight:700}
+
+.grid{display:grid;grid-template-columns:652px 652px;gap:20px 36px;justify-content:center;width:1400px;margin:0 auto}
+.slot{position:relative;width:652px;height:412px;border-radius:14px;overflow:hidden;
+  background:#000;border:6px solid #23232B;
+  box-shadow:0 16px 44px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.045) inset}
+.pad{position:absolute;left:0;top:0;width:1280px;height:800px;transform:scale(.5);transform-origin:0 0;
+  overflow:hidden;background:#080F16}
+.pad.small{width:1024px;height:640px;left:64px;top:40px}
+
+/* ── 封面假图（同一张，清晰/模糊两用） ── */
+.art{position:absolute;inset:0;
+  background:
+    radial-gradient(circle at 71% 22%,rgba(255,244,206,.97) 0 32px,rgba(255,208,132,.42) 33px 60px,rgba(255,190,110,0) 112px),
+    radial-gradient(ellipse at 18% 94%,rgba(96,196,206,.32),transparent 56%),
+    radial-gradient(ellipse at 88% 82%,rgba(24,86,120,.46),transparent 62%),
+    linear-gradient(163deg,#08111F 0%,#0D2740 26%,#124C5E 48%,#1C6A66 63%,#2A7A6C 72%,#0E2A40 100%)}
+.art::after{content:"";position:absolute;inset:0;
+  background-image:radial-gradient(rgba(255,255,255,.9) 1px,transparent 1.4px);
+  background-size:74px 61px;background-position:12px 18px;opacity:.5}
+.art::before{content:"";position:absolute;inset:0;
+  background-image:radial-gradient(rgba(255,255,255,.7) .8px,transparent 1.2px);
+  background-size:113px 97px;background-position:51px 62px;opacity:.36}
+.blur{filter:blur(26px) saturate(1.12) brightness(.62);transform:scale(1.22)}
+
+/* ── 现状版 ── */
+.bgfill{position:absolute;inset:0}
+.toprow{position:absolute;left:0;top:0;width:100%;height:72px;padding:24px 24px 0;display:flex;align-items:center}
+.tb{width:44px;height:44px;border-radius:22px;display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:19px;background:rgba(255,255,255,.07)}
+.oldgrid{position:absolute;left:24px;right:24px;top:72px;bottom:24px}
+.oldcol{position:absolute;top:0;bottom:0;display:flex;flex-direction:column;
+  justify-content:space-between;align-items:center}
+.oldcol.l{left:206px;width:490px}
+.oldcol.r{left:719px;width:490px}
+.disc{width:460px;height:460px;border-radius:50%;overflow:hidden;position:relative;
+  box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.disc::after{content:"";position:absolute;left:50%;top:50%;width:88px;height:88px;margin:-44px 0 0 -44px;
+  border-radius:50%;background:rgba(6,10,14,.72);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset}
+.oldtitle{width:100%;text-align:center}
+.oldtitle .n{font-size:30px;font-weight:700;letter-spacing:.3px}
+.oldtitle .a{font-size:14px;color:rgba(255,255,255,.55);margin-top:12px}
+
+/* ── 控制块 ── */
+.ctlblk{width:100%}
+.frow{display:flex;align-items:center;justify-content:space-between;padding:0 12px;height:46px}
+.frow span{width:46px;height:46px;border-radius:23px;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.86);font-size:19px}
+.prog{display:flex;align-items:center;gap:12px;padding:0 8px;height:52px}
+.prog .tm{font-size:12px;color:rgba(255,255,255,.55);font-variant-numeric:tabular-nums;width:36px}
+.prog .tm:last-child{text-align:right}
+.track{position:relative;flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.20)}
+.track i{position:absolute;left:0;top:0;height:100%;border-radius:2px;background:#FB7299}
+.track b{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:6px;background:#fff}
+.ctlrow{display:flex;align-items:center;justify-content:space-between;height:76px;padding:0 18px}
+.ctlrow .ico{font-size:26px;color:rgba(255,255,255,.92);letter-spacing:-3px}
+.pbtn{width:76px;height:76px;border-radius:38px;background:#FB7299;display:flex;align-items:center;
+  justify-content:center;gap:5px}
+.pbtn i{display:block;width:5px;height:23px;border-radius:2px;background:#2B0016}
+
+/* ── 新案：舞台 ── */
+.stage{position:absolute;inset:0}
+.cover{position:absolute;left:0;top:0;width:640px;height:800px;overflow:hidden}
+.fadeR{position:absolute;left:420px;top:0;width:220px;height:800px;
+  background:linear-gradient(90deg,rgba(9,17,24,0) 0%,rgba(9,17,24,.42) 34%,
+    rgba(9,17,24,.83) 68%,rgba(9,17,24,.97) 100%)}
+.scrimB{position:absolute;left:0;top:520px;width:640px;height:280px;
+  background:linear-gradient(180deg,rgba(9,17,24,0) 0%,rgba(9,17,24,.16) 46%,rgba(9,17,24,.40) 100%)}
+.scrimT{position:absolute;left:0;top:0;width:640px;height:110px;
+  background:linear-gradient(180deg,rgba(9,17,24,.46),rgba(9,17,24,0))}
+.right{position:absolute;left:640px;top:0;width:640px;height:800px;
+  background:rgba(9,17,24,.94);padding:72px 48px 0}
+/* 变体 B：圆盘不能被右缘渐变糊掉边缘，改成「模糊底 → 实色」在右半屏内部过渡 */
+.right.fadein{background:linear-gradient(90deg,rgba(9,17,24,0) 0px,
+  rgba(9,17,24,.94) 170px,rgba(9,17,24,.94) 100%)}
+.rhead{height:104px;position:relative}
+.rhead .n{font-size:32px;font-weight:700;line-height:40px;letter-spacing:.4px}
+.rhead .a{font-size:15px;color:rgba(255,255,255,.55);margin-top:8px}
+.rhead .q{font-size:12px;color:rgba(255,255,255,.42);margin-top:6px;letter-spacing:.2px}
+.rhead .acts{position:absolute;right:0;top:-10px;display:flex;gap:4px}
+.rhead .acts span{width:44px;height:44px;border-radius:22px;display:flex;align-items:center;
+  justify-content:center;color:rgba(255,255,255,.80);font-size:20px}
+.lyr{position:absolute;left:688px;top:204px;width:544px}
+.lyr .l{display:block;font-size:22px;line-height:1;padding:18px 0;color:rgba(255,255,255,.26);
+  text-align:center;font-weight:500}
+.lyr .l.cur{font-size:30px;color:#fff;font-weight:700;padding:20px 0}
+.lyr .l.cur em{font-style:normal;color:#FB7C9E}
+.lyr .l.near{color:rgba(255,255,255,.44)}
+
+/* 玻璃面板 */
+.panel{position:absolute;left:40px;top:554px;width:560px;height:168px;border-radius:28px;
+  background:rgba(255,255,255,.105);
+  border:.5px solid rgba(255,255,255,.165);
+  box-shadow:0 12px 40px rgba(0,0,0,.38),0 0 0 .5px rgba(0,0,0,.18) inset;
+  backdrop-filter:blur(26px) saturate(1.14);-webkit-backdrop-filter:blur(26px) saturate(1.14);
+  padding:14px 24px}
+.func{position:absolute;left:40px;top:734px;width:560px;height:46px;display:flex;
+  align-items:center;justify-content:space-between}
+.func span{width:46px;height:46px;border-radius:23px;display:flex;align-items:center;justify-content:center;
+  font-size:19px;color:rgba(255,255,255,.84)}
+.func span.on{color:#FB7299}
+.func span.txt{font-size:12px;font-weight:700;letter-spacing:-.2px}
+
+/* 变体 B 圆盘 */
+.discB{position:absolute;left:67px;top:24px;width:506px;height:506px;border-radius:50%;overflow:hidden;
+  box-shadow:0 26px 60px rgba(0,0,0,.55),0 0 0 .5px rgba(255,255,255,.10)}
+.discB::after{content:"";position:absolute;left:50%;top:50%;width:96px;height:96px;margin:-48px 0 0 -48px;
+  border-radius:50%;background:rgba(6,10,14,.70);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset}
+
+/* 测量线：pad 内 0.5 缩放，字号写 21 → 实际 10.5 */
+.guide .ln{position:absolute;background:rgba(251,114,153,.9);z-index:40}
+.guide .ln.d{border-left:1.6px dashed rgba(255,255,255,.22);background:none}
+.guide .tag{position:absolute;z-index:41;font-size:21px;font-weight:700;letter-spacing:.4px;
+  padding:6px 13px;border-radius:9px;background:#FB7299;color:#2B0016;white-space:nowrap}
+.guide .tag.g{background:#39C57E;color:#03240F}
+.guide .tag.b{background:#5AA9FF;color:#02182E}
+.guide .tag.w{background:rgba(12,19,26,.86);color:#EAF2F8;border:.5px solid rgba(255,255,255,.22)}
+.guide.off .ln,.guide.off .tag{display:none}
+
+/* 说明 */
+figcaption{margin-top:10px;font-size:12.5px;line-height:1.6;color:#9A9AA6}
+figcaption b{color:#EDEDF3;font-weight:700}
+figcaption .k{color:#FB7299;font-weight:700}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.chip{font-size:11px;padding:3px 7px;border-radius:5px;background:#1E1E26;color:#A9A9B6;
+  border:1px solid #2C2C36;font-variant-numeric:tabular-nums}
+.chip.hi{background:rgba(251,114,153,.13);border-color:rgba(251,114,153,.32);color:#FB8FAE}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="t">平板横屏播放页 · <i>封面舞台 Cover Stage</i>　·　1280×800 vp 基准，整体 0.5 缩放</div>
+  <div class="seg" id="seg">
+    <button class="on" data-k="guide">显示测量线</button>
+    <button data-k="plain">纯视觉</button>
+  </div>
+</div>
+
+<div class="grid" id="grid">
+
+  <!-- ① 现状 -->
+  <figure class="cell guide">
+    <div class="slot"><div class="pad">
+      <div class="bgfill"><div class="art blur"></div></div>
+      <div class="toprow"><span class="tb">⌄</span></div>
+      <div class="oldgrid">
+        <div class="oldcol l">
+          <div class="disc"><div class="art"></div></div>
+          <div class="oldtitle">
+            <div class="n">夜航星</div>
+            <div class="a">某某某</div>
+          </div>
+          <div class="ctlblk">
+            <div class="frow"><span>♡</span><span>▤</span><span>⤓</span><span>☰</span></div>
+            <div class="prog"><span class="tm">1:23</span>
+              <div class="track"><i style="width:37%"></i><b style="left:37%"></b></div>
+              <span class="tm">3:45</span></div>
+            <div class="ctlrow"><span class="ico">◀◀</span>
+              <div class="pbtn"><i></i><i></i></div><span class="ico">▶▶</span></div>
+          </div>
+        </div>
+        <div class="oldcol r" style="justify-content:center">
+          <div class="lyr" style="position:static;width:100%">
+            <span class="l">我数着光年之外的光</span>
+            <span class="l">第七个夜晚 海面很静</span>
+            <span class="l cur">晚安 <em>夜航星</em></span>
+            <span class="l">沉入海底也不肯熄灭</span>
+            <span class="l">而我在甲板上等一场风</span>
+          </div>
+        </div>
+      </div>
+      <div class="ln" style="left:0;top:300px;width:206px;height:3px"></div>
+      <div class="tag" style="left:20px;top:248px">空白 230vp</div>
+    </div></div>
+    <figcaption>
+      <b>现状：栅格分栏</b>　12 列栅格里左列只 <span class="k">span 5</span>，圆盘被
+      <span class="k">min(490, 800−48−178−90−24)</span> 收成 460；左缘一条 230vp 的空白，
+      封面只占 <span class="k">36% 屏宽 / 58% 屏高</span>。三块内容被 <span class="k">SpaceBetween</span>
+      拉开（窗口越高越散），两列之间只有 24vp 空隙、硬边相对，没有「一张图延伸出去」的感觉；歌词被 7 列窄栅格压到行宽 ≈300。
+      <div class="chips">
+        <span class="chip">封面 460 圆盘</span><span class="chip">左缘空白 230</span>
+        <span class="chip">控制区 178（列底）</span><span class="chip">歌词行宽 ≈300</span>
+        <span class="chip">字号 20 / 24</span><span class="chip">功能项 4/页</span>
+      </div>
+    </figcaption>
+  </figure>
+
+  <!-- ② 主案 -->
+  <figure class="cell guide">
+    <div class="slot"><div class="pad">
+      <div class="bgfill"><div class="art blur"></div></div>
+      <div class="stage">
+        <div class="cover"><div class="art"></div></div>
+        <div class="fadeR"></div>
+        <div class="scrimB"></div>
+        <div class="scrimT"></div>
+
+        <div class="right">
+          <div class="rhead">
+            <div class="n">夜航星</div>
+            <div class="a">某某某 · 176 kbps</div>
+            <div class="q">Hi-Res 无损</div>
+            <div class="acts"><span>♡</span><span>⋯</span></div>
+          </div>
+        </div>
+        <div class="lyr">
+          <span class="l">我数着光年之外的光</span>
+          <span class="l">第七个夜晚 海面很静</span>
+          <span class="l cur">晚安 <em>夜航星</em></span>
+          <span class="l near">沉入海底也不肯熄灭</span>
+          <span class="l">而我在甲板上等一场风</span>
+          <span class="l">把所有的名字吹回岸上</span>
+        </div>
+
+        <div class="panel">
+          <div class="prog"><span class="tm">1:23</span>
+            <div class="track"><i style="width:37%"></i><b style="left:37%"></b></div>
+            <span class="tm">3:45</span></div>
+          <div class="ctlrow"><span class="ico">◀◀</span>
+            <div class="pbtn"><i></i><i></i></div><span class="ico">▶▶</span></div>
+        </div>
+
+        <div class="func">
+          <span>♡</span><span>▤</span><span>⤓</span><span class="on">☰</span>
+          <span class="txt">1.0x</span><span>◷</span><span>↻</span><span>⋯</span><span>↗</span>
+        </div>
+
+        <div style="position:absolute;left:24px;top:32px"><span class="tb">⌄</span></div>
+      </div>
+
+      <div class="ln d" style="left:420px;top:0;width:0;height:800px"></div>
+      <div class="ln d" style="left:640px;top:0;width:0;height:800px"></div>
+      <div class="tag" style="left:430px;top:428px">渐变 220</div>
+      <div class="tag w" style="left:648px;top:584px">接缝 ΔRGB ≤ 3</div>
+      <div class="ln" style="left:40px;top:528px;width:560px;height:3px"></div>
+      <div class="tag g" style="left:46px;top:474px">面板 560×168 · 玻璃</div>
+    </div></div>
+    <figcaption>
+      <b>主案：封面舞台</b>　封面 <span class="k">640×800 满幅出血</span>（`ImageFit.Cover`，右缘被渐变吃掉、裁切不可感），
+      右缘 220vp 把封面溶解进右半屏的 <span class="k">rgba(deep,.94)</span> 实色；
+      控制区变成 560×168 玻璃面板、<span class="k">压在封面下三分之一</span>；功能区 46 高贴面板之下、9 项一屏无翻页。
+      歌词行宽 300→<span class="k">544</span>，字号 20/24→<span class="k">22/30</span>。
+      <div class="chips">
+        <span class="chip hi">封面 640×800（满幅）</span><span class="chip">渐变带 220</span>
+        <span class="chip hi">面板 560×168 @y554</span><span class="chip hi">功能区 46 · 9 项</span>
+        <span class="chip">歌词行宽 544</span><span class="chip">字号 22 / 30</span>
+      </div>
+    </figcaption>
+  </figure>
+
+  <!-- ③ 变体 B -->
+  <figure class="cell guide">
+    <div class="slot"><div class="pad">
+      <div class="bgfill"><div class="art blur"></div></div>
+      <div class="stage">
+        <div class="scrimB"></div>
+        <div class="discB"><div class="art"></div></div>
+
+        <div class="right fadein">
+          <div class="rhead">
+            <div class="n">夜航星</div>
+            <div class="a">某某某 · 176 kbps</div>
+            <div class="acts"><span>♡</span><span>⋯</span></div>
+          </div>
+        </div>
+        <div class="lyr">
+          <span class="l">我数着光年之外的光</span>
+          <span class="l">第七个夜晚 海面很静</span>
+          <span class="l cur">晚安 <em>夜航星</em></span>
+          <span class="l near">沉入海底也不肯熄灭</span>
+          <span class="l">而我在甲板上等一场风</span>
+        </div>
+
+        <div class="panel">
+          <div class="prog"><span class="tm">1:23</span>
+            <div class="track"><i style="width:37%"></i><b style="left:37%"></b></div>
+            <span class="tm">3:45</span></div>
+          <div class="ctlrow"><span class="ico">◀◀</span>
+            <div class="pbtn"><i></i><i></i></div><span class="ico">▶▶</span></div>
+        </div>
+        <div class="func">
+          <span>♡</span><span>▤</span><span>⤓</span><span class="on">☰</span>
+          <span class="txt">1.0x</span><span>◷</span><span>↻</span><span>⋯</span><span>↗</span>
+        </div>
+        <div style="position:absolute;left:24px;top:32px"><span class="tb">⌄</span></div>
+      </div>
+      <div class="ln" style="left:67px;top:530px;width:506px;height:3px"></div>
+      <div class="tag g" style="left:290px;top:452px">圆盘 506</div>
+    </div></div>
+    <figcaption>
+      <b>变体 B：`coverStyle = disc`</b>　保留现有「封面风格」设置——选「唱片」时舞台退化为
+      <span class="k">居中圆盘 D = min(L−96, 800−168−46−56) = 506</span>，上缘 24、下缘正好压在面板之上；
+      背景由整页模糊封面铺满，右缘渐变照旧。比主案保守，但封面占屏高从 100% 掉到 <span class="k">65%</span>，
+      「渐变沿封面边缘走」这件事也就不成立了。
+      <div class="chips">
+        <span class="chip">圆盘 506 居中</span><span class="chip">占屏高 65%</span>
+        <span class="chip">面板 / 功能区不变</span><span class="chip">设置项语义扩展</span>
+      </div>
+    </figcaption>
+  </figure>
+
+  <!-- ④ 1024 -->
+  <figure class="cell guide">
+    <div class="slot"><div class="pad small">
+      <div class="bgfill"><div class="art blur"></div></div>
+      <div class="stage">
+        <div class="cover" style="width:512px;height:640px"><div class="art"></div></div>
+        <div class="fadeR" style="left:336px;width:176px;height:640px"></div>
+        <div class="scrimB" style="left:0;top:416px;width:512px;height:224px"></div>
+
+        <div class="right" style="left:512px;width:512px;height:640px;padding:48px 48px 0">
+          <div class="rhead" style="height:88px">
+            <div class="n" style="font-size:26px;line-height:34px">夜航星</div>
+            <div class="a" style="font-size:14px;margin-top:6px">某某某 · 176 kbps</div>
+            <div class="acts" style="right:0;top:-8px"><span>♡</span><span>⋯</span></div>
+          </div>
+        </div>
+        <div class="lyr" style="left:560px;top:152px;width:416px">
+          <span class="l" style="font-size:19px;padding:14px 0">我数着光年之外的光</span>
+          <span class="l" style="font-size:19px;padding:14px 0">第七个夜晚 海面很静</span>
+          <span class="l cur" style="font-size:26px;padding:16px 0">晚安 <em>夜航星</em></span>
+          <span class="l near" style="font-size:19px;padding:14px 0">沉入海底也不肯熄灭</span>
+          <span class="l" style="font-size:19px;padding:14px 0">而我在甲板上等一场风</span>
+        </div>
+
+        <div class="panel" style="left:28px;top:422px;width:456px;height:152px;padding:15px 20px;border-radius:26px">
+          <div class="prog" style="height:48px"><span class="tm">1:23</span>
+            <div class="track"><i style="width:37%"></i><b style="left:37%"></b></div>
+            <span class="tm">3:45</span></div>
+          <div class="ctlrow" style="height:64px;padding:0 14px">
+            <span class="ico" style="font-size:22px">◀◀</span>
+            <div class="pbtn" style="width:64px;height:64px;border-radius:32px"><i style="height:19px"></i><i style="height:19px"></i></div>
+            <span class="ico" style="font-size:22px">▶▶</span></div>
+        </div>
+        <div class="func" style="left:28px;top:584px;width:456px;height:40px">
+          <span style="width:40px;height:40px;font-size:17px">♡</span>
+          <span style="width:40px;height:40px;font-size:17px">▤</span>
+          <span style="width:40px;height:40px;font-size:17px">⤓</span>
+          <span class="on" style="width:40px;height:40px;font-size:17px">☰</span>
+          <span class="txt" style="width:40px;height:40px;font-size:11px">1.0x</span>
+          <span style="width:40px;height:40px;font-size:17px">◷</span>
+          <span style="width:40px;height:40px;font-size:17px">↻</span>
+          <span style="width:40px;height:40px;font-size:17px">⋯</span>
+          <span style="width:40px;height:40px;font-size:17px">↗</span>
+        </div>
+        <div style="position:absolute;left:20px;top:24px"><span class="tb" style="width:38px;height:38px;font-size:17px">⌄</span></div>
+      </div>
+      <div class="ln d" style="left:336px;top:0;width:0;height:640px"></div>
+      <div class="ln" style="left:28px;top:396px;width:456px;height:3px"></div>
+      <div class="tag g" style="left:34px;top:344px">面板 456×152</div>
+    </div></div>
+    <figcaption>
+      <b>1024×640：同一套公式，只换密度档</b>　窗口高 &lt; 720 → 面板 168→<span class="k">152</span>、功能键 46→<span class="k">40</span>、
+      底部边距 20→16。左半屏 512×640 封面照旧满幅；<span class="k">9×40 + 8×12 = 456 = 面板宽</span>，
+      正好一屏装下 9 项（间距取 12，不能再宽）。歌词行宽 416、字号 19/26。
+      <div class="chips">
+        <span class="chip">封面 512×640</span><span class="chip">面板 456×152</span>
+        <span class="chip">功能键 40×9</span><span class="chip">歌词行宽 416</span>
+        <span class="chip">字号 19 / 26</span>
+      </div>
+    </figcaption>
+  </figure>
+
+</div>
+
+<script>
+(function(){
+  function setMode(k){
+    document.querySelectorAll('.cell').forEach(function(c){
+      c.classList.toggle('guide', k === 'guide');
+    });
+    document.querySelectorAll('#seg button').forEach(function(b){
+      b.classList.toggle('on', b.getAttribute('data-k') === k);
+    });
+  }
+  document.querySelectorAll('#seg button').forEach(function(b){
+    b.addEventListener('click', function(){ setMode(b.getAttribute('data-k')); });
+  });
+  var m = /mode=(guide|plain)/.exec(location.hash || '');
+  if (m) { setMode(m[1]); }
+})();
+</script>
+</body>
+</html>

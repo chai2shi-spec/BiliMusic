@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>拾音页二轮优化 · 补充原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#0E0E12;color:#EDEDF2;padding:40px 40px 56px;
+}
+:root{--brand:#FB7299;--brand-bright:#FF8BAC;--deepL:#C2185B;--deepD:#FF8BAC;
+  --surL:#FFF1F5;--surD:#33222B;--on:#3D0018}
+.phone{
+  width:372px;height:796px;position:relative;border-radius:36px;background:#000;
+  border:8px solid #2A2A31;overflow:hidden;flex:none;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  --n-bgpage:#121216; --n-bgcard:#1E1E24; --n-divider:#33333C;
+  --n-tp:#F5F5F7; --n-ts:#ABABB5; --n-tt:#83838F; --n-td:#55555F;
+  --n-press:rgba(255,255,255,.08); --deep:var(--deepD); --surface:var(--surD);
+}
+.phone.light{
+  --n-bgpage:#F5F5F5; --n-bgcard:#FFFFFF; --n-divider:#E8E8EC;
+  --n-tp:#1A1A1A; --n-ts:#6B6B70; --n-tt:#8A8A90; --n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06); --deep:var(--deepL); --surface:var(--surL);
+}
+
+/* ── 头部舞台 ── */
+.head{max-width:1240px;margin:0 auto 34px}
+.head h1{font-size:26px;font-weight:700;margin:0 0 10px;letter-spacing:.2px}
+.head p{margin:0;font-size:14px;line-height:23px;color:#9A9AA6;max-width:960px}
+.tools{display:flex;gap:10px;align-items:center;margin-top:18px;flex-wrap:wrap}
+.lbl{font-size:12px;color:#7E7E8C;margin-right:2px}
+.sw{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0}
+.sw.on{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.22)}
+.seg{display:flex;background:#22222A;border-radius:9px;padding:3px;gap:2px}
+.seg button{background:transparent;border:0;color:#9A9AA6;font-size:12px;
+  font-family:inherit;padding:4px 12px;border-radius:7px;cursor:pointer}
+.seg button.on{background:#3A3A46;color:#fff}
+
+/* ── 行布局 ── */
+.row{display:flex;gap:36px;justify-content:center;align-items:flex-start;
+  max-width:1240px;margin:0 auto 18px;flex-wrap:wrap}
+.cell{width:372px}
+.cap{margin-top:14px;font-size:12.5px;line-height:20px;color:#9A9AA6}
+.cap b{color:#E8E8F0;font-weight:600}
+.cap .tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;
+  margin-right:6px;font-weight:600;vertical-align:1px}
+.tag.bug{background:rgba(229,117,117,.18);color:#E57575}
+.tag.a11y{background:rgba(229,158,117,.18);color:#E59E75}
+.tag.ok{background:rgba(72,187,120,.18);color:#48BB78}
+
+/* ── 手机内 ── */
+.statusbar{position:absolute;top:0;left:0;right:0;height:44px;z-index:12;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px 0 26px;font-size:12px;font-weight:600;color:var(--n-tp);
+  background:var(--n-bgpage)}
+.statusbar .ic{display:flex;gap:5px;align-items:center}
+.body{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--n-bgpage);
+  padding-top:44px;overflow:hidden}
+.navtitle{height:56px;display:flex;align-items:center;padding:0 16px;
+  font-size:20px;font-weight:700;color:var(--n-tp);letter-spacing:.2px}
+.wrap{padding:0 16px}
+
+.pseg{width:268px;height:32px;margin:4px auto 0;background:var(--n-divider);
+  border-radius:16px;padding:2px;display:flex;position:relative}
+.pseg .thumb{position:absolute;top:2px;left:2px;width:66px;height:28px;
+  border-radius:14px;background:var(--brand);transition:transform .28s cubic-bezier(.3,1.3,.5,1)}
+.pseg .it{flex:1;height:28px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:var(--n-ts);position:relative;z-index:1}
+.pseg .it.on{color:var(--on);font-weight:500}
+
+.pager{height:44px;display:flex;align-items:center;position:relative}
+.pager .arw{width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--n-tt)}
+.pager .arw.off{color:var(--n-td)}
+.pager .date{flex:1;text-align:center;font-size:13px;color:var(--n-ts)}
+
+.hero{height:152px;border-radius:12px;position:relative;overflow:hidden;margin-top:12px;
+  background:linear-gradient(135deg,#3B4A6B 0%,#6B5B8E 46%,#C86B8A 100%)}
+.hero::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 24% 18%,rgba(255,255,255,.26),transparent 62%)}
+.hero .veil{position:absolute;left:0;right:0;bottom:0;height:62%;
+  background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0))}
+.hero .chip{position:absolute;left:10px;top:10px;height:22px;padding:0 8px;
+  border-radius:11px;background:rgba(0,0,0,.42);color:#fff;font-size:11px;font-weight:500;
+  display:flex;align-items:center}
+.hero .tt{position:absolute;left:12px;right:12px;bottom:26px;font-size:16px;font-weight:600;
+  color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hero .st{position:absolute;left:12px;right:12px;bottom:11px;font-size:11px;color:rgba(255,255,255,.82)}
+
+.sent{font-size:13px;color:var(--n-ts);text-align:center;margin-top:12px;line-height:20px}
+.kpi{display:flex;margin-top:16px}
+.kpi .c{flex:1;display:flex;flex-direction:column;align-items:center}
+.kpi .n{font-size:24px;font-weight:600;color:var(--n-tp);line-height:32px}
+.kpi .u{font-size:11px;color:var(--n-tt);margin-top:2px}
+
+.card{background:var(--surface);border-radius:12px;padding:14px 14px 8px;margin-top:16px}
+.card .hd{display:flex;align-items:center}
+.card .hd .t{font-size:16px;font-weight:600;color:var(--n-tp)}
+.card .hd .r{margin-left:auto;font-size:13px;color:var(--deep)}
+
+/* 时段条 */
+.segrow{display:flex;align-items:center;height:24px;margin-top:10px}
+.segrow .lbl{width:32px;font-size:13px;color:var(--n-ts);flex:none}
+.segrow .trk{flex:1;height:6px;border-radius:3px;background:var(--n-divider);margin-left:6px}
+.segrow .trk i{display:block;height:6px;border-radius:3px;background:var(--brand);opacity:.24}
+.segrow .val{font-size:11px;color:var(--n-tt);margin-left:8px;flex:none}
+
+/* 循环榜行 */
+.tlrow{display:flex;align-items:center;height:60px}
+.tlrow .rk{width:24px;text-align:center;font-size:24px;font-weight:600;flex:none}
+.tlrow .rk.g{color:var(--brand)}
+.tlrow .rk.n{color:var(--n-tt);opacity:.72}
+.tlrow .cov{width:44px;height:44px;border-radius:8px;margin-left:12px;flex:none;
+  background:linear-gradient(135deg,#4A5B7B,#8B6B9E)}
+.tlrow .meta{flex:1;margin-left:12px;min-width:0}
+.tlrow .meta .t{font-size:16px;color:var(--n-tp);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tlrow .meta .s{font-size:13px;color:var(--n-ts);margin-top:2px}
+.tlrow .cnt{margin-left:12px;font-size:18px;font-weight:600;color:var(--n-tp);flex:none}
+.tlrow .cnt em{font-style:normal;font-size:11px;color:var(--n-tt);margin-left:2px;font-weight:400}
+
+/* 标注高亮 */
+.badge{position:absolute;z-index:20;background:#E5484D;color:#fff;font-size:10px;font-weight:700;
+  border-radius:5px;padding:3px 7px;box-shadow:0 4px 12px rgba(229,72,77,.45);white-space:nowrap}
+.badge.amber{background:#D9822B;box-shadow:0 4px 12px rgba(217,130,43,.45)}
+.badge.grn{background:#2F9E58;box-shadow:0 4px 12px rgba(47,158,88,.45)}
+.badge::before{content:'';position:absolute;top:-5px;left:12px;border:5px solid transparent;
+  border-bottom-color:inherit;border-top:0;filter:brightness(.9)}
+
+/* 溢出模拟框 */
+.cut{outline:1.5px dashed #E5484D;outline-offset:1px;border-radius:4px}
+
+/* 大字体模式 */
+.big{font-size:115%}
+.big .kpi .n{font-size:30px}
+.big .tlrow .rk{font-size:30px}
+.big .segrow .lbl{font-size:15px}
+.big .tlrow .meta .t{font-size:19px}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>拾音页 · 二轮优化补充原型</h1>
+  <p>聚焦三个第一轮没覆盖的点：<b style="color:#E57575">① 月翻页日期溢出</b>（今天 10-31 点「上个月」仍是 10 月）、
+  <b style="color:#E59E75">② 大字体（系统无障碍）下固定宽度列被截断</b>、<b style="color:#48BB78">③ 修复后的效果</b>。
+  完整诊断见《拾音页-二轮优化-增补.md》。</p>
+  <div class="tools">
+    <span class="lbl">主题</span>
+    <button class="sw on" style="background:#FB7299" onclick="setTheme('pink')" title="粉"></button>
+    <span class="lbl" style="margin-left:8px">深浅</span>
+    <div class="seg" id="modeSeg">
+      <button class="on" onclick="setMode('dark')">深色</button>
+      <button onclick="setMode('light')">浅色</button>
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <!-- 屏 1：月翻页溢出 bug -->
+  <div class="cell">
+    <div class="phone" id="p1">
+      <div class="statusbar"><span>9:41</span><span class="ic">▂▄▆</span></div>
+      <div class="body">
+        <div class="navtitle">拾音</div>
+        <div class="wrap">
+          <div class="pseg" style="position:relative">
+            <div class="thumb" style="transform:translateX(132px)"></div>
+            <div class="it">日</div><div class="it">周</div><div class="it on">月</div><div class="it">年</div>
+          </div>
+          <div class="pager">
+            <div class="arw">‹</div>
+            <div class="date">2026 年 10 月</div>
+            <div class="arw off">›</div>
+          </div>
+          <div class="badge" style="top:190px;right:24px">点「上个月」后<br>仍显示 10 月</div>
+          <div class="hero"><div class="veil"></div>
+            <div class="chip">本月封面</div>
+            <div class="tt">夜航星</div><div class="st">洛天依 · 12 次</div>
+          </div>
+          <div class="sent">这个月，你反复遇见了 9 首歌</div>
+          <div class="kpi">
+            <div class="c"><div class="n">6.2</div><div class="u">小时</div></div>
+            <div class="c"><div class="n">126</div><div class="u">次播放</div></div>
+            <div class="c"><div class="n">38</div><div class="u">首歌曲</div></div>
+            <div class="c"><div class="n">21</div><div class="u">天听歌</div></div>
+          </div>
+          <div class="card">
+            <div class="hd"><div class="t">听歌时段</div><div class="r">晚上居多</div></div>
+            <div class="segrow"><div class="lbl">早上</div><div class="trk"><i style="width:12%"></i></div><div class="val">0.7 小时 · 12%</div></div>
+            <div class="segrow"><div class="lbl">中午</div><div class="trk"><i style="width:18%"></i></div><div class="val">1.1 小时 · 18%</div></div>
+            <div class="segrow"><div class="lbl">晚上</div><div class="trk"><i style="width:46%;opacity:1"></i></div><div class="val">2.9 小时 · 46%</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag bug">P0 bug</span><b>月翻页日期溢出</b>——<code>diaryShiftAnchor</code> 用
+      <code>setMonth</code>，今天 10-31 点「上个月」时 <code>setMonth(9)</code> 溢出到 10-01，
+      仍显示「2026 年 10 月」；再点一次才到 9 月，且锚点从此漂到每月 1 号。</div>
+  </div>
+
+  <!-- 屏 2：大字体溢出 -->
+  <div class="cell">
+    <div class="phone" id="p2">
+      <div class="statusbar"><span>9:41</span><span class="ic">▂▄▆</span></div>
+      <div class="body big">
+        <div class="navtitle">拾音</div>
+        <div class="wrap">
+          <div class="pseg" style="position:relative">
+            <div class="thumb" style="transform:translateX(132px)"></div>
+            <div class="it">日</div><div class="it">周</div><div class="it on">月</div><div class="it">年</div>
+          </div>
+          <div class="pager"><div class="arw">‹</div><div class="date">2026 年 10 月</div><div class="arw off">›</div></div>
+          <div class="hero"><div class="veil"></div><div class="chip">本月封面</div>
+            <div class="tt">夜航星</div><div class="st">洛天依 · 12 次</div></div>
+          <div class="sent">这个月，你反复遇见了 9 首歌</div>
+          <div class="kpi">
+            <div class="c"><div class="n">6.2</div><div class="u">小时</div></div>
+            <div class="c"><div class="n">126</div><div class="u">次播放</div></div>
+            <div class="c"><div class="n">38</div><div class="u">首歌曲</div></div>
+            <div class="c"><div class="n">21</div><div class="u">天听歌</div></div>
+          </div>
+          <div class="card">
+            <div class="hd"><div class="t">听歌时段</div><div class="r">晚上居多</div></div>
+            <div class="segrow"><div class="lbl cut">早上</div><div class="trk"><i style="width:12%"></i></div><div class="val">0.7 小时 · 12%</div></div>
+            <div class="segrow"><div class="lbl">中午</div><div class="trk"><i style="width:18%"></i></div><div class="val">1.1 小时 · 18%</div></div>
+            <div class="segrow"><div class="lbl cut">晚上</div><div class="trk"><i style="width:46%;opacity:1"></i></div><div class="val cut">2.9 小时 · 46%</div></div>
+          </div>
+          <div style="height:16px"></div>
+          <div style="font-size:18px;font-weight:600;color:var(--n-tp);margin-top:18px">本月循环</div>
+          <div class="tlrow"><div class="rk g cut">01</div><div class="cov"></div>
+            <div class="meta"><div class="t">夜航星</div><div class="s">洛天依 · 听了 12 天</div></div>
+            <div class="cnt">12<em>次</em></div></div>
+          <div class="badge amber" style="top:430px;left:16px">固定列宽被文字撑爆</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag a11y">无障碍</span><b>大字体下固定宽度列溢出</b>——系统字号放大后，
+      序号列 <code>width(24)</code>、时段标签列 <code>width(32)</code>、右侧时长列仍是固定宽，
+      数字/文字被「列宽」切掉（红虚框）。KPI 数字 24fp 也会挤破 83vp 列宽。</div>
+  </div>
+
+  <!-- 屏 3：修复后 -->
+  <div class="cell">
+    <div class="phone" id="p3">
+      <div class="statusbar"><span>9:41</span><span class="ic">▂▄▆</span></div>
+      <div class="body big">
+        <div class="navtitle">拾音</div>
+        <div class="wrap">
+          <div class="pseg" style="position:relative">
+            <div class="thumb" style="transform:translateX(198px)"></div>
+            <div class="it">日</div><div class="it">周</div><div class="it">月</div><div class="it on">年</div>
+          </div>
+          <!-- 修复：左箭头到保留期下限禁用 -->
+          <div class="pager"><div class="arw off">‹</div><div class="date">2025 年（最早可查）</div><div class="arw">›</div></div>
+          <div class="hero"><div class="veil"></div><div class="chip">2025 年封面</div>
+            <div class="tt">夜航星</div><div class="st">洛天依 · 12 次</div></div>
+          <div class="sent">这一年，你反复遇见了 41 首歌</div>
+          <div class="kpi">
+            <div class="c"><div class="n">96</div><div class="u">小时</div></div>
+            <div class="c"><div class="n">1284</div><div class="u">次播放</div></div>
+            <div class="c"><div class="n">302</div><div class="u">首歌曲</div></div>
+            <div class="c"><div class="n">247</div><div class="u">天听歌</div></div>
+          </div>
+          <div class="card">
+            <div class="hd"><div class="t">听歌时段</div><div class="r">晚上居多</div></div>
+            <!-- 修复：标签列改自适应（min-width），右侧时长被推开而非截断 -->
+            <div class="segrow"><div class="lbl" style="width:auto;min-width:32px">早上</div><div class="trk"><i style="width:12%"></i></div><div class="val">0.7h · 12%</div></div>
+            <div class="segrow"><div class="lbl" style="width:auto;min-width:32px">中午</div><div class="trk"><i style="width:18%"></i></div><div class="val">1.1h · 18%</div></div>
+            <div class="segrow"><div class="lbl" style="width:auto;min-width:32px">晚上</div><div class="trk"><i style="width:46%;opacity:1"></i></div><div class="val">2.9h · 46%</div></div>
+          </div>
+          <div style="height:16px"></div>
+          <div style="font-size:18px;font-weight:600;color:var(--n-tp);margin-top:18px">年度循环</div>
+          <div class="tlrow"><div class="rk g" style="width:auto;min-width:24px">01</div><div class="cov"></div>
+            <div class="meta"><div class="t">夜航星</div><div class="s">洛天依 · 听了 214 天</div></div>
+            <div class="cnt">214<em>次</em></div></div>
+          <div class="tlrow"><div class="rk n" style="width:auto;min-width:24px">02</div><div class="cov"></div>
+            <div class="meta"><div class="t">玫瑰少年</div><div class="s">五月天 · 听了 187 天</div></div>
+            <div class="cnt">187<em>次</em></div></div>
+          <div class="badge grn" style="top:150px;right:20px">到边即禁，不再翻到 2000 年</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag ok">修复后</span><b>大字体适配 + 保留期边界</b>——标签/序号列改
+      <code>min-width</code> 自适应，文字不再被切；KPI 大字档降档；年视图翻到 13 个月窗底时
+      左箭头禁用、日期标注「最早可查」，不再一路翻到 2000 年的空周期。</div>
+  </div>
+</div>
+
+<script>
+function setTheme(t){document.querySelectorAll('.sw').forEach(s=>s.classList.remove('on'));
+  document.querySelector('.sw[style*="FB7299"]').classList.add('on');}
+function setMode(m){
+  document.querySelectorAll('.phone').forEach(p=>p.classList.toggle('light', m==='light'));
+  document.querySelectorAll('#modeSeg button').forEach((b,i)=>
+    b.classList.toggle('on', (m==='dark'? i===0 : i===1)));
+}
+</script>
+</body>
+</html>

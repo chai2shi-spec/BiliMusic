@@ -22,16 +22,22 @@
  *    首项从标题栏底部起排，滚动时条目从沉浸材质下穿过，滚动模糊由 HDS scrollEffectOpts 接管；
  *  · 非列表分支（骨架 / 失败 / 空态）没有占位条目，各自补 padding top。
  *
- * 缓存策略：进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
+ * 缓存策略：未订阅的 UP 进页**不自动联网刷新**——命中 UpSpaceCacheStore 落盘缓存
  * 就直接恢复列表 + 资料 + 分页游标（重启 App 仍生效）；只有显式动作才联网：
  *  · 列表下拉刷新（Refresh 包 List）：强制重拉第一页与资料；
- *  · 头部「订阅」（仅未订阅时）：取投稿建歌单，成功后本页列表与缓存一并换新。
- * 本页不提供「拉取新投稿」：订阅歌单的更新入口在歌单详情页
- * （PlaylistDetail 的「拉取新投稿」按钮）。
+ *  · 头部「订阅」按钮（三态，设计方案 §4.1）：取投稿建歌单，成功后本页列表与
+ *    缓存一并换新；已订阅后按钮变为「✓ 已订阅」（与「订阅」同一套胶囊语言，
+ *    对勾为 SymbolGlyph 图标），点击可取消订阅。
+ * **已订阅的 UP 进页自动拉新**（autoPullLatestForSubscribed）：缓存视图先行，
+ * 后台静默拉一次最新投稿 → 换新页面列表 + 缓存，并把新投稿并入订阅歌单
+ * （mergeUpTracks 去重幂等，新的排前）；失败 / 无新投稿不打扰（60s 冷却防
+ * 反复进出页撞 B 站限流）。页面列表换新的各处（自动拉新 / 下拉刷新 / 无缓存
+ * 首载）都经 syncSubscriptionPlaylist 同步订阅歌单 —— 订阅流不落后于页面。
+ * 歌单详情页的「拉取新投稿」按钮保留，作为不进 UP 页的手动出口。
  * 无缓存（首次进入）仍走 loadCard + loadPage(1) 联网加载，成功后落盘。
  *
- * 投稿搜索（A+B 混合阶梯）：头部搜索框输入即**本地过滤**
- * 已加载列表（标题/歌手匹配，离线可用）；Enter /「搜索」按钮走远程搜索阶梯：
+ * 投稿搜索（A+B 混合阶梯）：点 🔍 进入搜索态（L2）后输入即**本地过滤**
+ * 已加载列表（标题/歌手匹配，离线可用）；键盘搜索键（Enter）触发远程搜索阶梯：
  * 空间接口 keyword 服务端搜索为主（`searchSpaceVideosByKeyword`，结果 = TA 的
  * 投稿里匹配关键词的全部），被风控 / 0 命中时落回 `searchUpVideosByKeyword`
  * （B 站全站搜关键词 → 按 mid 过滤回该 UP 的投稿）。
@@ -64,10 +70,11 @@ import {
   makeButtonMaterialModifier
 } from '../utils/HeaderBarMaterial';
 import { SearchBox } from '../components/SearchBox';
+import { HeaderIconButton } from '../components/HeaderIconButton';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
 import { common } from '@kit.AbilityKit';
 import { CustomContentDialog } from '@kit.ArkUI';
-import { CONTENT_END_OFFSET, STORE_SAFE_TOP, STORE_ITEM_DISPLAY_STYLE, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON } from '../common/Constants';
+import { CONTENT_END_OFFSET, STORE_SAFE_TOP, STORE_ITEM_DISPLAY_STYLE, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON, STORE_SELECT_ICONS_HINT_SHOWN } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
@@ -81,7 +88,9 @@ import {
   NAV_TRANSITION_MS,
   BUTTON_RADIUS_VP,
   LIST_FOOTER_HEIGHT_VP,
-  SEARCH_FILTER_DEBOUNCE_MS
+  SEARCH_FILTER_DEBOUNCE_MS,
+  ACTION_ROW_H,
+  SEARCH_MODE_MS
 } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
@@ -97,17 +106,21 @@ const PAGE_SIZE_LOGGED_IN: number = 50;
 const RETRY_COOLDOWN_MS: number = 4000;
 
 /**
+ * 已订阅 UP 进页自动拉新的冷却（ms，按 upMid 记忆）：B 站空间 / 搜索接口
+ * 按 IP 限流（-352 / 412 实测高发），每次进页都是一个新页面实例，没有冷却的
+ * 话「进出进出」会把同一 UP 的投稿接口打爆 —— 冷却内重进不重拉，
+ * 缓存视图照常显示，等下一轮进页再拉。
+ */
+const AUTO_PULL_COOLDOWN_MS: number = 60000;
+/** 各 UP 最近一次进页自动拉新的时间戳（模块级：跨页面实例存活） */
+const lastAutoPullAtMs: Map<string, number> = new Map<string, number>();
+
+/**
  * UP 资料头部区（bottomBuilder 承载）实测前的估计高度：头像行 + 元信息行 + padding。
  * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定；实测值
  * （headerAreaHeight）回来后覆盖，此值只防首次布局 0 高闪跳。
  */
-const UP_HEADER_ESTIMATE_HEIGHT: number = 206;
-
-/**
- * 头部操作行搜索区 ↔ 多选动作区的交叉淡化时长（ms）：两层同槽位叠放，
- * 一层淡出另一层淡入，布局稳定不跳。
- */
-const SELECT_FADE_MS: number = 250;
+const UP_HEADER_ESTIMATE_HEIGHT: number = 210;
 
 /**
  * 多选批量下载的串行入队间隔（ms）：requestDownload 内部每首都会调
@@ -205,6 +218,8 @@ export struct UpSpacePage {
   @State subscribed: boolean = false;
   /** 订阅 / 拉新进行中：按钮禁用并显示「处理中…」 */
   @State subBusy: boolean = false;
+  /** 进页自动拉新在途：期间下拉刷新 / 翻页让位（拉的就是同一份第一页，不叠加请求） */
+  private autoPulling: boolean = false;
   /** 重试冷却中：按钮禁用（真正的门在 retryLocked 成员，状态只是给用户看的） */
   @State retryCooling: boolean = false;
   /** 下拉刷新进行中（Refresh 双向绑定 $$refreshing，forceRefresh 复位） */
@@ -265,8 +280,20 @@ export struct UpSpacePage {
    */
   private lastCollectPartial: boolean = false;
 
-  // ===== 投稿多选（头部「选择」按钮进入，批量加入歌单 / 下载） =====
-  /** 多选模式：true = 头部「选择」已进入，点投稿切换选中、搜索区淡出为动作区、「⋯」隐藏 */
+  /** 搜索态（L2，设计方案 §4.2）：点 🔍 进入，取消 / 返回键退出；搜索框非常驻 */
+  @State searchMode: boolean = false;
+
+  /**
+   * ⋯ 标准菜单开关（bindMenu isShow 态驱动，API 11 重载）：点击 ⋯ 置 true，
+   * 菜单关闭后经 onDisappear 复位 false（V1 没有 $$ 对 bindMenu.isShow 的
+   * 双向绑定，手动复位是最稳写法；不复位会导致第二次点击 true→true 无变化、
+   * 菜单再也弹不出）。⚠️ 只能在点击回调里置 true，不能在构建中置 true
+   * （官方约束：菜单位置/形状会错）。
+   */
+  @State moreMenuOpen: boolean = false;
+
+  // ===== 投稿多选（⋯ 菜单「选择投稿」进入，批量加入歌单 / 下载） =====
+  /** 多选模式：true = 已进入多选，点投稿切换选中、操作行整行换层为多选动作行 */
   @State selecting: boolean = false;
   /**
    * 选中投稿 id 集（track.id = bvid）。切换一律**整表重赋值**（不用 push/splice
@@ -445,10 +472,90 @@ export struct UpSpacePage {
       this.sourceVia = cached.sourceVia;
       this.loadFailed = false;
       this.failReason = '';
+      // 已订阅的 UP：缓存视图先行，后台静默拉一次最新投稿（进页自动拉新）
+      this.autoPullLatestForSubscribed();
       return;
     }
     this.loadCard();
     this.loadPage(1);
+  }
+
+  /**
+   * 进页自动拉新（仅已订阅的 UP）：缓存命中恢复后，后台静默拉一次最新投稿。
+   *
+   * 为什么只对已订阅的 UP：未订阅的进页意图只是「看看」，缓存够用，自动联网
+   * 只会在 B 站限流边缘反复试探（-352 / 412 实测高发）；已订阅的进页意图是
+   * 「订阅流有没有更新」，拉新是刚需 —— 拉到的最新第一页既换新页面列表 +
+   * 缓存，也并入订阅歌单（mergeUpTracks 按 id 去重，幂等，新的排前）。
+   *
+   * 静默纪律：失败 / 三条路都没货不打扰（缓存视图原样保留 —— 进页自动拉新
+   * 是后台语义，绝不能把可用页面打成失败态）；有新投稿才 toast。
+   * 60s 冷却（模块级按 upMid 记忆）防反复进出页撞限流。
+   */
+  private autoPullLatestForSubscribed(): void {
+    if (!this.subscribed || this.loading || this.loadingMore || this.autoPulling) {
+      return;
+    }
+    const playlist: Playlist | null = LibraryStore.getPlaylistByUpMid(this.upMid);
+    if (playlist === null) {
+      // 本地已无订阅歌单（别处删过）：回正订阅态即可，不拉
+      this.refreshSubscriptionState();
+      return;
+    }
+    const now: number = Date.now();
+    if (now - (lastAutoPullAtMs.get(this.upMid) ?? 0) < AUTO_PULL_COOLDOWN_MS) {
+      return;
+    }
+    lastAutoPullAtMs.set(this.upMid, now);
+    this.autoPulling = true;
+    // 顺带刷新资料（fans / 投稿总数）：与下拉刷新同款搭配
+    this.loadCard();
+    BilibiliApi.collectUpVideos(this.upMid, this.upName, this.seedBvids(this.tracks), this.pageSize())
+      .then((res: BilibiliApi.UpVideosCollectResult): void => {
+        if (res.list.length === 0) {
+          // 三条路都没货：静默收场（后台语义，不弹失败打扰）
+          console.info(`up space autoPull empty: ${res.reason}`);
+          return;
+        }
+        // 拉到最新第一页：页面列表 / 缓存换新（与下拉刷新同语义）
+        this.sourceVia = res.via;
+        this.tracks = this.mapAll(res.list);
+        this.applyLocalFilter();
+        this.page = 1;
+        this.hasMore = res.via === BilibiliApi.UP_VIA_SPACE && this.tracks.length >= this.pageSize();
+        this.loadFailed = false;
+        this.failReason = '';
+        this.saveToCache();
+        // 并入订阅歌单：有新增才提示
+        this.syncSubscriptionPlaylist(this.tracks);
+      })
+      .catch((e: Error): void => {
+        console.error(`up space autoPull failed: ${e.message}`);
+      })
+      .then((): void => {
+        this.autoPulling = false;
+      });
+  }
+
+  /**
+   * 把刚拉到的最新一页并入订阅歌单（仅已订阅时；mergeUpTracks 按 id 去重、
+   * 幂等、新的排前）。页面列表换新的各处（自动拉新 / 下拉刷新 / 无缓存首载）
+   * 都调它 —— 订阅流不落后于页面。有新增才 toast（无新投稿静默，
+   * 每次进页都弹「已是最新」只会变成打扰）。
+   */
+  private syncSubscriptionPlaylist(fresh: Track[]): void {
+    if (!this.subscribed || fresh.length === 0) {
+      return;
+    }
+    const playlist: Playlist | null = LibraryStore.getPlaylistByUpMid(this.upMid);
+    if (playlist === null) {
+      this.refreshSubscriptionState();
+      return;
+    }
+    const r = LibraryStore.mergeUpTracks(playlist.id, fresh);
+    if (r.added > 0) {
+      showAppToast(`订阅已更新 · 新增 ${r.added} 首`, 1800);
+    }
   }
 
   aboutToDisappear(): void {
@@ -549,7 +656,8 @@ export struct UpSpacePage {
   *     （`hasMore` 直接置 false），底部不显示提示（footer 常驻空行）。
   */
   private async loadPage(pn: number): Promise<void> {
-    if (this.loading || this.loadingMore) {
+    // 自动拉新在途：第一页马上要整表换新，此刻翻页追加会被覆盖丢页，让位
+    if (this.loading || this.loadingMore || this.autoPulling) {
       return;
     }
     if (pn === 1) {
@@ -608,6 +716,8 @@ export struct UpSpacePage {
     this.loadFailed = false;
     this.failReason = '';
     this.saveToCache();
+    // 已订阅的 UP：页面列表换新的同时把订阅歌单同步换新（订阅流不落后于页面）
+    this.syncSubscriptionPlaylist(this.tracks);
   }
 
   /**
@@ -737,7 +847,8 @@ export struct UpSpacePage {
    * 同款纪律 —— 缺了 catch 时链上任何一步抛异常，刷新头会永远转圈）。
    */
   private forceRefresh(): void {
-    if (this.loading || this.loadingMore) {
+    // 自动拉新在途：拉的就是同一份第一页，不再叠加请求，收起刷新头即可
+    if (this.loading || this.loadingMore || this.autoPulling) {
       this.refreshing = false;
       return;
     }
@@ -1009,6 +1120,25 @@ export struct UpSpacePage {
   }
 
   /**
+   * 点 🔍 进入搜索态（L2，设计方案 §4.2）：整行原位切换为独占输入行 + 取消按钮；
+   * 若在多选先退出（常态 / 搜索 / 多选三态互斥）。
+   * 关键词从空起步 —— 取消 / 返回键出口都会清词，不存在「带着旧词进搜索态」。
+   */
+  private enterSearchMode(): void {
+    this.exitSelecting();
+    this.searchMode = true;
+  }
+
+  /**
+   * 搜索态统一出口（「取消」按钮 / 返回键，§4.2）：
+   * 清空关键词与远程结果 → 收起搜索态 → 列表恢复全量。
+   */
+  private cancelSearch(): void {
+    this.clearSearch();
+    this.searchMode = false;
+  }
+
+  /**
    * 兜底：把该 UP 的投稿页交给 B 站自己打开。
    *
    * 站内接口被风控时这是**唯一 100% 可用**的路 —— openLink 对 https 链接会交给系统
@@ -1141,12 +1271,50 @@ export struct UpSpacePage {
     showAppToast(`${prefix}，${parts.join('，')}`, this.lastCollectPartial ? 3000 : 2000);
   }
 
-  // ===== 投稿多选（头部「选择」按钮进入，批量加入歌单 / 下载） =====
+  /**
+   * 取消订阅（「✓ 已订阅」按钮 / ⋯ 菜单「取消订阅」，设计方案 §4.1 / §4.3）：
+   * 二次确认后删除订阅歌单并回未订阅态 —— 订阅歌单与普通歌单同一张表，
+   * getPlaylistByUpMid 定位 + deletePlaylist 删除即取消订阅（新能力，§4.3）。
+   */
+  private confirmUnsubscribe(): void {
+    const existing: Playlist | null = LibraryStore.getPlaylistByUpMid(this.upMid);
+    if (existing === null) {
+      // 本地已无该 UP 的订阅歌单（别处删过）：只回正订阅态显示
+      this.refreshSubscriptionState();
+      return;
+    }
+    showConfirm(this.getUIContext(), {
+      title: '取消订阅',
+      message: `将删除订阅歌单「${existing.name}」和其中的 ${existing.tracks.length} 首投稿，删除后不可恢复。`,
+      confirmText: '取消订阅',
+      onConfirm: (): void => {
+        LibraryStore.deletePlaylist(existing.id);
+        this.refreshSubscriptionState();
+        showAppToast('已取消订阅', 1600);
+      }
+    });
+  }
 
-  /** 进入多选（头部「选择」按钮）：选区从空起步，条目点击切换选中 */
+  // ===== 投稿多选（⋯ 菜单「选择投稿」进入，批量加入歌单 / 下载） =====
+
+  /**
+   * 进入多选（⋯ 菜单「选择投稿」，§4.3）：
+   * · 先退搜索态并清孤儿关键词 / 远程结果 —— 搜索框随 L2 卸载，留着会让
+   *   常态行下列表被无指示地筛过（旧 UI 搜索框常驻可回看，新 UI 必须清）；
+   * · 首次进入 toast 一次右侧图标语义（§3.6：图标化以「进多选时提示一次」补齐）。
+   */
   private enterSelecting(): void {
+    this.searchMode = false;
+    if (this.searchKeyword.length > 0 || this.remoteResults !== null) {
+      this.clearSearch();
+    }
     this.selecting = true;
     this.selectedIds = [];
+    const hinted: boolean = AppStorage.get<boolean>(STORE_SELECT_ICONS_HINT_SHOWN) ?? false;
+    if (!hinted) {
+      AppStorage.setOrCreate(STORE_SELECT_ICONS_HINT_SHOWN, true);
+      showAppToast('已进入多选 · 右下角可加入歌单 / 下载', 2200);
+    }
   }
 
   /** 切换选中（多选态点投稿 / 点勾选槽位） */
@@ -1768,9 +1936,38 @@ export struct UpSpacePage {
   }
 
   /**
+   * 头部「⋯」标准菜单项（条目「⋯」bindMenu 同款形态，真机反馈替换原底部
+   * bindSheet 面板）：纯文字项、锚定按钮就近弹出。只有两项是刻意的 ——
+   * UP 页可收进菜单的低频动作本来就只有这两个，不要为了填满而发明功能。
+   * · 选择投稿：进多选（enterSelecting 内先退搜索态并清孤儿关键词 / 远程结果）；
+   * · 取消订阅：破坏性操作，由紧随的 showConfirm 确认弹窗兜底（菜单项本身
+   *   不带 danger 色 —— bindMenu 标准菜单就是纯文字，与条目菜单完全一致）。
+   */
+  private upActionMenuItems(): MenuElement[] {
+    const items: MenuElement[] = [];
+    if (this.tracks.length > 0) {
+      items.push({
+        value: '选择投稿',
+        action: (): void => {
+          this.enterSelecting();
+        }
+      });
+    }
+    if (this.subscribed) {
+      items.push({
+        value: '取消订阅',
+        action: (): void => {
+          this.confirmUnsubscribe();
+        }
+      });
+    }
+    return items;
+  }
+
+  /**
    * 头部区（整体钉在悬浮固定栏内，不随列表滚动）—— 与 PlaylistDetail.PlaylistHeader 同款：
    * 左侧 96vp 圆角头像 + 右侧 28fp 大标题 + 元信息行；头像行下方是操作行
-   * （单行：播放全部 + 订阅（仅未订阅）+ 搜索框（框内 × 清除）+ 搜索）。
+   * （三层重构 §3：常态 CTA + 订阅三态 + 🔍 + ⋯ / 搜索态 / 多选态，Stack 换层）。
    *
    * 头像尺寸与圆角对齐歌单封面（96 / 12）：两个详情页的头部视觉语言一致，
    * 进哪个页都是同一套「大图 + 大标题」。
@@ -1812,113 +2009,170 @@ export struct UpSpacePage {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 操作行（外层 Row 与「投稿 / 合集 / 系列」页签行同槽位互斥换层）：
-      // 行内 Stack 整行换层 —— 常态行 = 播放全部 + 选择 + 订阅（仅未订阅）+
-      // 搜索框（含框内 × 清除）+ 搜索按钮，多选行 = 完成 + 全选 / 加入歌单 / 下载。
-      // 订阅处理中（subBusy）：常态行内搜索区暂离（既有 transition 淡出），
-      // 处理结束后淡入回归 —— subBusy 只影响搜索区，不影响整行换层。
-      // · 播放全部：有投稿才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
-      // · 订阅：本页核心动作（未订阅时显示，订阅后消失）——
-      //   按钮文案只留「订阅」两字：四字版会挤压同行搜索框。
-      //   （本页没有「拉取新投稿」，订阅歌单的更新入口在歌单详情页）。
-      // · 清除不用独立按钮：搜索框内右侧 × 承接（点击调 clearSearch，
-      //   有关键词或处于远程结果态时才出现）。
-      // ⚠️ 不用「按钮 visibility 摘布局 + 尾部槽位换层」旧结构：退出多选时常态
-      //   按钮瞬时回位，尾部槽位连同正在淡出的动作行一起被推向右侧（真机表现：
-      //   动作组「向右消失」而非淡出）。整行换层让两层几何在转场期间恒定，
-      //   交叉纯淡出（CollectionDetailPage 槽位行 B 同款模式）。
-      // ⚠️ 隐藏层必须条件渲染（不挂载），不能双层叠放 + 透明层：
-      //   HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
-      //   常态点搜索框位置误触透明的「加入歌单」/「下载」，搜索框要点多次）。
-      Row({ space: 8 }) {
-        Stack() {
-        if (!this.selecting) {
-        // 常态行：播放全部 + 选择 + 订阅 + 搜索框 + 搜索按钮
-        Row({ space: 8 }) {
-          if (this.tracks.length > 0) {
-          // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
-          Button('播放全部', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.player.playAll(this.tracks);
-            })
-          }
-        // 选择：多选入口（完成在多选行最前，两行整行交叉淡出）
-        if (this.tracks.length > 0) {
-          Button('选择', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.enterSelecting();
-            })
-        }
-        if (this.upMid.length > 0 && !this.subscribed) {
-          Button(this.subBusy ? '处理中…' : '订阅', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .enabled(!this.subBusy)
-            .onClick((): void => {
-              this.subscribe();
-            })
-        }
-        // 搜索区（常态行尾部 layoutWeight 1 收窄适应）：输入即过滤**已加载**的投稿
-        //（本地，离线可用，重算 200ms 防抖）；Enter / 「搜索」按钮发起远程搜索
-        //（空间接口 keyword 服务端搜索为主，被风控 / 0 命中时全站搜索 + mid 过滤
-        // 兜底，见 runRemoteSearch 阶梯）。框内右侧 × = 清除。UI 收口在 SearchBox
-        // 共享组件（材质 / × 清除逻辑三页同一份实现）。订阅处理中（subBusy）搜索区
-        // 暂离（既有 transition 淡出），处理结束淡入回归 —— subBusy 只影响搜索区，
-        // 不影响整行换层。
-        if (!this.subBusy) {
-          SearchBox({
-            placeholder: '搜索 TA 的投稿',
-            keyword: this.searchKeyword,
-            clearVisible: this.searchKeyword.trim().length > 0 || this.remoteResults !== null,
-            searchButtonLabel: this.remoteSearching ? '搜索中' : '搜索',
-            showSearchButton: true,
-            onKeywordChange: (v: string): void => {
-              this.searchKeyword = v;
-              this.onKeywordChanged();
-            },
-            onSubmit: (): void => {
-              this.runRemoteSearch();
-            },
-            onClear: (): void => {
-              this.clearSearch();
-            },
-            onSearchClick: (): void => {
-              this.runRemoteSearch();
+      // 操作行三层重构（设计方案 §3）：Stack 固定高 36 内三态条件渲染 +
+      // OPACITY 交叉淡出（SEARCH_MODE_MS）—— 隐藏层真不挂载（HitTestMode.None
+      // 透明层误触的坑见 §6②），退场节点脱离布局由固定高兜住（§6①）。
+      // · 常态行 = 播放全部主 CTA + 订阅三态按钮（§4.1：「订阅」必须留在主行，
+      //   埋进 ⋯ 等于把核心转化动作降到「找得到才算」）+ 🔍 + ⋯；
+      // · 搜索行 = SearchBox 独占 + 取消（§4.2：回车即远程搜索，可见「搜索」
+      //   按钮已删 —— 它做的事和键盘搜索键完全一样）；
+      // · 多选行 = 完成 / 全选 + 右侧图标化批量动作（§3.6，选择入口收进 ⋯ 菜单）。
+      Stack() {
+        // ── 常态行（L1）──
+        if (!this.selecting && !this.searchMode) {
+          Row({ space: 8 }) {
+            // 主 CTA：播放全部（有投稿才显示），layoutWeight(1) 吃掉剩余宽度；
+            // 品牌色实底 + themeOn 深字（§2 规则 2）
+            if (this.tracks.length > 0) {
+              Button() {
+                Row({ space: 6 }) {
+                  SymbolGlyph($r('sys.symbol.play_fill'))
+                    .fontSize(15)
+                    .fontColor([this.themeOn])
+                  Text('播放全部')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.themeOn)
+                }
+              }
+              .type(ButtonType.Normal)
+              .height(ACTION_ROW_H)
+              .borderRadius(10)
+              .backgroundColor(this.themePrimary)
+              .layoutWeight(1)
+              .onClick((): void => {
+                this.player.playAll(this.tracks);
+              })
             }
-          })
-          // layoutWeight 1 而非 width 100%：本行嵌在常态 Row 内，前面还有
-          // 播放全部 / 选择 / 订阅按钮，width 100% 按父行整宽排 → 溢出屏幕
-          //（真机复现：搜索按钮被推出屏外）。layoutWeight 只占剩余空间。
-          .layoutWeight(1)
+            // 订阅三态按钮（§4.1，留在主行）：
+            // · 未订阅 = 「订阅」浅粉底 + 粉字（核心转化动作）；
+            // · 处理中（subBusy）= 「处理中…」禁用，不挤走 🔍/⋯；
+            // · 已订阅 = 「✓ 已订阅」与「订阅」同一套胶囊语言（浅粉底 + 粉字 +
+            //   光感材质 + SymbolGlyph 对勾，真机反馈：透明底描边弱化样式与
+            //   同行按钮割裂，已废弃），点击弹「取消订阅」确认。
+            // 高度对齐 ACTION_ROW_H（36）：与同行播放全部 / 🔍 / ⋯ 同高
+            // （真机反馈：32 与同行 36 的图标不齐）。
+            if (this.upMid.length > 0) {
+              if (!this.subscribed) {
+                Button(this.subBusy ? '处理中…' : '订阅', { type: ButtonType.Normal })
+                  .fontSize(13)
+                  .height(ACTION_ROW_H)
+                  .borderRadius(BUTTON_RADIUS_VP)
+                  .padding({ left: 14, right: 14 })
+                  .backgroundColor(this.themeSurface)
+                  .fontColor(this.themePrimary)
+                  .attributeModifier(this.buttonMaterial)
+                  .enabled(!this.subBusy)
+                  .onClick((): void => {
+                    this.subscribe();
+                  })
+              } else {
+                Button() {
+                  Row({ space: 4 }) {
+                    SymbolGlyph($r('sys.symbol.checkmark'))
+                      .fontSize(15)
+                      .fontColor([this.themePrimary])
+                    Text('已订阅')
+                      .fontSize(13)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(this.themePrimary)
+                  }
+                }
+                .type(ButtonType.Normal)
+                .height(ACTION_ROW_H)
+                .borderRadius(BUTTON_RADIUS_VP)
+                .padding({ left: 12, right: 12 })
+                .backgroundColor(this.themeSurface)
+                .attributeModifier(this.buttonMaterial)
+                .onClick((): void => {
+                  this.confirmUnsubscribe();
+                })
+              }
+            }
+            // 🔍 搜索入口（L2 的门）：没有已加载投稿时没有可搜内容，不显示
+            if (this.tracks.length > 0) {
+              HeaderIconButton({
+                icon: $r('sys.symbol.magnifyingglass'),
+                accessibilityLabel: '搜索 TA 的投稿',
+                onClickAction: (): void => {
+                  this.enterSearchMode();
+                }
+              })
+            }
+            // ⋯ 更多入口（条目「⋯」同款 bindMenu 标准菜单，真机反馈替换原底部
+            // bindSheet 面板）：位置恒定在这一行最右（§2 规则 3）；菜单可能为空
+            // （无投稿且未订阅）时不渲染，避免空数组弹出空气泡。
+            // ⚠️ 必须用 isShow 态驱动重载（API 11）：无 isShow 的重载靠「点击
+            // 锚点」触发菜单，但本锚点是自定义组件、内部 Button 根节点自带
+            // onClick 手势，子节点赢得手势仲裁后菜单永远收不到点击（真机/
+            // 模拟器实测：点了没反应）；态驱动下点击经 onClickAction 显式置
+            // moreMenuOpen，菜单锚定本组件弹出，不依赖手势穿透。
+            if (this.tracks.length > 0 || this.subscribed) {
+              HeaderIconButton({
+                icon: $r('sys.symbol.more'),
+                accessibilityLabel: '更多 UP 主操作',
+                onClickAction: (): void => {
+                  this.moreMenuOpen = true;
+                }
+              })
+              .bindMenu(this.moreMenuOpen, this.upActionMenuItems(), {
+                // placement 显式 BottomRight（全局统一更多菜单方向）：右缘锚点
+                // 默认 BottomLeft 向右展开必超屏 → 走「自动调整」路径弹到左侧
+                //（PlaylistsTabBar 顶栏 ⋮ 同款结论）
+                placement: Placement.BottomRight,
+                onDisappear: (): void => {
+                  this.moreMenuOpen = false;
+                }
+              })
+            }
+          }
+          .width('100%')
           .transition(TransitionEffect.OPACITY
-            .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
+        // ── 搜索行（L2，§4.2）：SearchBox 独占 + 取消 ——
+        // 输入即本地过滤（200ms 防抖，见 onKeywordChanged），键盘搜索键（Enter）
+        // 触发 runRemoteSearch 远程阶梯（空间搜索为主，全站搜索兜底），框内 × 清除；
+        // 远程在途时 × 换成加载指示（SearchBox searching）。
+        // 「取消」与返回键统一走 cancelSearch（清词收起、列表恢复全量）。
+        if (this.searchMode) {
+          Row({ space: 8 }) {
+            SearchBox({
+              placeholder: '搜索 TA 的投稿',
+              keyword: this.searchKeyword,
+              clearVisible: this.searchKeyword.trim().length > 0 || this.remoteResults !== null,
+              searching: this.remoteSearching,
+              onKeywordChange: (v: string): void => {
+                this.searchKeyword = v;
+                this.onKeywordChanged();
+              },
+              onSubmit: (): void => {
+                this.runRemoteSearch();
+              },
+              onClear: (): void => {
+                this.clearSearch();
+              }
+            })
+              .layoutWeight(1)
+            Button('取消', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(ACTION_ROW_H)
+              .padding({ left: 12, right: 4 })
+              .backgroundColor(Color.Transparent)
+              .fontColor(this.themePrimary)
+              .onClick((): void => {
+                this.cancelSearch();
+              })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
-        .width('100%')
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
-        }
-        // 多选行：完成 + 全选 / 加入歌单 / 下载（与常态行整行交叉淡出）。
-        // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）。
+        // ── 多选行（§3.6）：完成 / 全选文字按钮 + 右侧图标化批量动作
+        // （＋ 加入歌单 / ↓ 下载）—— 图标语义由进入多选时的 toast 补齐
+        // （enterSelecting，会话级一次）；空选区由各动作方法 toast 兜底。
         if (this.selecting) {
-        Row({ space: 8 }) {
-          if (this.tracks.length > 0) {
+          Row({ space: 8 }) {
             Button('完成', { type: ButtonType.Normal })
               .fontSize(13)
               .height(32)
@@ -1929,64 +2183,70 @@ export struct UpSpacePage {
               .onClick((): void => {
                 this.exitSelecting();
               })
+            Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .padding({ left: 10, right: 10 })
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.toggleSelectAll();
+              })
+            Blank()
+              .layoutWeight(1)
+            HeaderIconButton({
+              icon: $r('sys.symbol.plus'),
+              accessibilityLabel: '加入歌单',
+              onClickAction: (): void => {
+                this.addSelectedToPlaylist();
+              }
+            })
+            HeaderIconButton({
+              icon: $r('sys.symbol.arrow_down_to_line'),
+              accessibilityLabel: '下载',
+              onClickAction: (): void => {
+                this.confirmDownloadSelected();
+              }
+            })
           }
-          Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.toggleSelectAll();
-            })
-          Button('加入歌单', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.addSelectedToPlaylist();
-            })
-          Button('下载', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.confirmDownloadSelected();
-            })
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
-        .width('100%')
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: SELECT_FADE_MS, curve: Curve.EaseInOut }))
-        }
-        }
-        // ⚠️ 固定高度（faqs-arkui-384 同款结论）：换层期间退场节点脱离布局，
-        // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 32 = 按钮高。
-        .layoutWeight(1)
-        .height(32)
       }
+      // ⚠️ 固定高度（faqs-arkui-384 同款结论，§6①）：换层期间退场节点脱离布局，
+      // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 36 = ACTION_ROW_H。
       .width('100%')
+      .height(ACTION_ROW_H)
       .margin({ top: 12 })
-      .alignItems(VerticalAlign.Center)
       // 操作行两隐藏场景：合集/系列页签（播放全部/搜索都是投稿语义）与封面点击
-      // 展开的页签行占用本槽位（tabRowVisible；与页签行同尺寸互斥换层，
-      // headerAreaHeight 实测不受影响）。
+      // 展开的页签行占用本槽位（tabRowVisible；互斥换层，headerAreaHeight 实测
+      // 自动跟随）。
       .visibility(this.spaceTab === 'videos' && !this.tabRowVisible ? Visibility.Visible : Visibility.None)
 
+      // 搜索态匹配计数行（§3.4）：列表上方一行「匹配 N 首」—— 让用户知道是
+      // 「被筛过了 / 远程结果」而不是「UP 的投稿变少了」；计数取当前渲染源
+      //（远程结果态 = 远程条数，本地过滤态 = 过滤条数，displayTracks 收口）。
+      if (this.searchMode && (this.searchKeyword.trim().length > 0 || this.remoteResults !== null)) {
+        Text(`匹配 ${this.displayTracks().length} 首`)
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+          .margin({ top: 8 })
+      }
+
       // 「投稿 / 合集 / 系列」页签行（默认隐藏：点封面展开，点「投稿」收起）：
-      // 与操作行同槽位互斥换层（两行同高：32vp 按钮 + margin 12，替换无布局跳变）；
+      // 与操作行同槽位互斥换层（两行同高：36vp 按钮（ACTION_ROW_H）+ margin 12，
+      // 替换无布局跳变 —— 按钮高度与操作行播放全部/订阅对齐，容器高与操作行
+      // Stack 固定 36 一致，headerAreaHeight 实测换层不跳）；
       // 合集/系列首次触达才拉取（switchSpaceTab 内懒加载）；当前页签实底高亮。
       // 三枚等宽（layoutWeight 1）。
       Row({ space: 8 }) {
         Button('投稿', { type: ButtonType.Normal })
           .fontSize(13)
-          .height(32)
+          .height(ACTION_ROW_H)
           .borderRadius(BUTTON_RADIUS_VP)
           .layoutWeight(1)
           .backgroundColor(this.spaceTab === 'videos' ? this.themePrimary : this.themeSurface)
@@ -1997,7 +2257,7 @@ export struct UpSpacePage {
           })
         Button('合集', { type: ButtonType.Normal })
           .fontSize(13)
-          .height(32)
+          .height(ACTION_ROW_H)
           .borderRadius(BUTTON_RADIUS_VP)
           .layoutWeight(1)
           .backgroundColor(this.spaceTab === 'seasons' ? this.themePrimary : this.themeSurface)
@@ -2008,7 +2268,7 @@ export struct UpSpacePage {
           })
         Button('系列', { type: ButtonType.Normal })
           .fontSize(13)
-          .height(32)
+          .height(ACTION_ROW_H)
           .borderRadius(BUTTON_RADIUS_VP)
           .layoutWeight(1)
           .backgroundColor(this.spaceTab === 'series' ? this.themePrimary : this.themeSurface)
@@ -2393,8 +2653,8 @@ export struct UpSpacePage {
                         .fontColor($r('app.color.text_tertiary'))
                     } else if (this.searchKeyword.trim().length > 0) {
                       Text(this.filteredTracks.length > 0
-                        ? `已加载投稿中命中 ${this.filteredTracks.length} 条，「搜索」可找全部`
-                        : '已加载的投稿里没有匹配，「搜索」可去 B 站找全部投稿')
+                        ? `已加载投稿中命中 ${this.filteredTracks.length} 条，回车可找全部`
+                        : '已加载的投稿里没有匹配，回车可去 B 站找全部投稿')
                         .fontSize(13)
                         .fontColor($r('app.color.text_tertiary'))
                     } else if (this.loadingMore) {
@@ -2506,10 +2766,15 @@ export struct UpSpacePage {
       return this.navTransitionDelegate(op, isEnter);
     })
     // 系统返回拦截（优先级从高到低）：
-    //   · 多选态：先退选择模式（选区丢弃），留在本页；
+    //   · 搜索态：先退搜索态（清词收起，§4.2），留在本页；
+    //   · 多选态：再退选择模式（选区丢弃），留在本页；
     //   · 播放页 overlay 打开时吞掉返回并发收起请求（留在本页），
     //     否则走默认 pop —— 详见 utils/SubPageBackPress。
     .onBackPressed((): boolean => {
+      if (this.searchMode) {
+        this.cancelSearch();
+        return true;
+      }
       if (this.selecting) {
         this.exitSelecting();
         return true;

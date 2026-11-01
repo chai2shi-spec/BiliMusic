@@ -11,7 +11,9 @@
  * 动态正文经 contentBuilder 读当次状态，与全站 6 页「加入歌单」弹窗同款口径）。
  * 行点击弹本窗，窗内放系统粘贴按钮（PasteButton 安全控件），点它完成授权 + 读取。
  *
- * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）。
+ * 顶栏为 HDS 沉浸光感标题栏（HdsNavDestination.titleBar，AboutPage 同款骨架）：
+ * 材质由 HDS 统一渲染，滚动渐变模糊由自绘 TopGradientBlurOverlay 承担
+ * （AppearanceSettingsPage 同款）。
  */
 
 import {
@@ -37,6 +39,8 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { BarNarrowShell } from '../components/BarNarrowShell';
+import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
+import { MaterialTokens } from '../common/style/MaterialTokens';
 
 /**
  * 剪贴板导入授权弹窗：官方 CustomContentDialog 承载（正文 + 系统粘贴按钮）。
@@ -64,6 +68,14 @@ export struct PlaylistBackupPage {
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
 
+  /** 自绘顶栏渐变模糊层进度更新器（AboutPage 同款命令式驱动，高频回调零重建） */
+  private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
+
+  private syncTopBlurProgress(): void {
+    this.topBlurUpdater.setProgress(
+      (this.pageScroller.currentOffset()?.yOffset ?? 0) / MaterialTokens.TITLE_BLUR_END_VP);
+  }
+
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
@@ -76,6 +88,8 @@ export struct PlaylistBackupPage {
   private pasteImportController: CustomDialogController | undefined = undefined;
 
   aboutToAppear(): void {
+    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier 补上）
+    this.syncTopBlurProgress();
     this.pasteImportController = new CustomDialogController({
       builder: CustomContentDialog({
         primaryTitle: '从剪贴板导入歌单',
@@ -275,6 +289,7 @@ export struct PlaylistBackupPage {
 
   build() {
     HdsNavDestination() {
+      Stack() {
       List({ scroller: this.pageScroller }) {
         // 顶部空白占位条目（官方沉浸口径）：高度 = safeTop + 56（MINI 标题栏），
         // 静止位首个真实条目恰从栏底起排，滚动时从材质下方穿过。
@@ -332,11 +347,26 @@ export struct PlaylistBackupPage {
       .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
       // 大屏适配：内容列收窄居中（与原设置页同口径走 TwoColumnLayout.contentMaxWidth）
       .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
+      // 自绘渐变模糊层驱动：逐帧更新 + 停止校准终态（渐变软边由 overlay 承担）
+      .onDidScroll((xOffset: number, yOffset: number): void => {
+        this.syncTopBlurProgress();
+      })
+      .onScrollStop((): void => {
+        this.syncTopBlurProgress();
+      })
+
+      // 顶栏渐变模糊层：盖 List 内容之上（z 序低于 HDS titleBar），进度命令式驱动
+      TopGradientBlurOverlay({
+        barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
+        updater: this.topBlurUpdater
+      })
+      }
     }
     // HDS 沉浸光感标题栏：材质 / 滚动模糊 / 温控统一由 HdsTitleBarStyle 决策
+    //（HDS 内置滚动效果关闭：渐变模糊由自绘 TopGradientBlurOverlay 承担，防双重模糊）
     .titleBar({
       avoidLayoutSafeArea: true,
-      style: HdsTitleBarStyle.styleOptions(),
+      style: HdsTitleBarStyle.styleOptions(undefined, undefined, false),
       content: {
         // 箭头包裹保证 builder 内 this 指向本组件（裸引用会丢失 this）
         stackBuilder: (): void => {

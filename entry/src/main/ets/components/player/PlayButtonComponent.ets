@@ -78,6 +78,9 @@ export struct PlayButtonComponent {
     }
     .width(PLAY_BUTTON_SIZE.getValue(this.currentBreakpoint))
     .height(PLAY_BUTTON_SIZE.getValue(this.currentBreakpoint))
+    // 图标在命中区内垂直居中：与 BounceIconButton 同口径，
+    // 否则三键行中播放图标相对上一首/下一首整体偏高（Column 主轴默认 Start）
+    .justifyContent(FlexAlign.Center)
     .scale({ x: this.playScaleX, y: this.playScaleY })
     .onClick((): void => {
       // 先翻转播放态（glyph 脉冲随 isActive 启停），再补一次点击回弹

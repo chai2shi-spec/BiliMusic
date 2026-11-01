@@ -35,6 +35,14 @@ export class FormFactorHolder {
    * 先落默认值（非折叠设备 / 能力缺失时保持 false），再尝试注册折叠监听。
    * 任何一步失败都不影响应用运行 —— 状态缺失一律按「非折叠」处理，
    * 宽度断点（sm/md/lg）继续兜底细粒度布局。
+   *
+   * 小折叠（Pocket / Nova Flip 系列）：display.isFoldable() 返回 false
+   * （官方《双折叠应用开发》），下方闸门早退，两键恒 false、折叠监听不注册
+   * —— 属预期而非缺陷：小折叠展开态内屏播放页与直板机完全同版式（用户拍板），
+   * 折叠态外屏只承载 ArkTS 卡片，应用不自定义外屏界面。即使未来机型
+   * isFoldable() 返回 true，展开内屏 FoldDisplayMode=MAIN（非 FULL）同样
+   * 不置 expanded，双重兜底仍走直板机版式。勿按「折叠屏」字面义为本类
+   * 加小折叠分支。
    */
   static init(): void {
     AppStorage.setOrCreate(STORE_FOLD_EXPANDED, false);

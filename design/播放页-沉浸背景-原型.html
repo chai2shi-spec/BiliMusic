@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>播放页 · 封面沉浸式背景</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0D0D11;color:#E8E8EE;
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  padding:22px 26px 34px}
+svg.art{display:block;width:100%;height:100%}
+
+/* ─────────── 顶栏 ─────────── */
+.bar{width:1232px;margin:0 auto 15px;display:flex;align-items:flex-end;justify-content:space-between}
+.bar .t{font-size:16px;font-weight:700;letter-spacing:.3px}
+.bar .t i{color:#FB7299;font-style:normal}
+.bar .s{font-size:11.5px;color:#7C7C88;margin-top:6px;letter-spacing:.2px;max-width:1030px;
+  line-height:1.55}
+.legend{display:flex;gap:16px;font-size:11px;color:#9C9CA8;padding-bottom:2px;align-items:center}
+.legend b{color:#E8E8EE;font-weight:600}
+.legend .sw{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px;
+  vertical-align:-1px}
+
+/* ─────────── 四屏 ─────────── */
+.grid{width:1232px;margin:0 auto;display:grid;grid-template-columns:repeat(4,293px);
+  gap:20px;justify-content:center}
+.cap-wrap{display:flex;flex-direction:column}
+.cap{margin-top:9px;display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.cap .k{font-size:11px;font-weight:700;color:#2B0016;background:#FB7299;border-radius:5px;
+  padding:2px 6px;letter-spacing:.2px;white-space:nowrap}
+.cap .k.gray{background:#2A2A33;color:#9C9CA8}
+.cap .n{font-size:12px;font-weight:600;color:#DCDCE4}
+.cap .d{font-size:10.5px;color:#6E6E7A;letter-spacing:.2px;line-height:1.5}
+.cap .d.warn{color:#C9855A}
+.cap .d.ok{color:#5BD6A8}
+
+.frame{position:relative;width:293px;height:620px;border-radius:24px;overflow:hidden;
+  background:#000;border:6px solid #23232B;
+  box-shadow:0 18px 44px rgba(0,0,0,.62),0 0 0 1px rgba(255,255,255,.05) inset}
+.phone{position:absolute;left:0;top:0;width:390px;height:844px;
+  transform:scale(.72);transform-origin:0 0;overflow:hidden;background:#050B11}
+
+/* ═══════════ 背景：全屏层 ═══════════ */
+.bg{position:absolute;inset:0;overflow:hidden}
+.bg>div{position:absolute}
+.base{inset:0;background:#050B11}
+.dim{inset:0}
+/* 顶部压暗：z-index 高于封面（.field=3 / 本层=4 / 标题控制区=5）
+   → 封面与其上方背景吃的是同一条渐变，上缘不会出现阶跃 */
+.etch{left:0;top:0;width:390px;height:196px;z-index:4;pointer-events:none;
+  background:linear-gradient(180deg,rgba(0,0,0,.34) 0%,rgba(0,0,0,.13) 40%,
+    rgba(0,0,0,0) 100%)}
+.grain{inset:0;opacity:.045;
+  background-image:radial-gradient(rgba(255,255,255,.92) .8px,transparent 1.15px);
+  background-size:4px 4px}
+
+/* 模糊方图：与封面同心同比例（封面 390@0,104 → 中心 195,299） */
+.sq{overflow:visible}
+.k14{left:-27px;top:77px;width:444px;height:444px}     /* 1.14 × */
+.k16{left:-117px;top:-13px;width:624px;height:624px}   /* 1.60 × */
+.k22{left:-234px;top:-130px;width:858px;height:858px}  /* 2.20 × */
+
+/* 现状：全屏 cover 裁切 + 半透明 */
+.full{left:0;top:0;width:390px;height:844px;overflow:hidden}
+.blur15{filter:blur(15px) saturate(.90) brightness(.86);opacity:.46}
+.dim.legacy{background:linear-gradient(180deg,rgba(8,23,34,.16) 0%,rgba(8,23,34,.30) 45%,
+  rgba(8,23,34,.52) 100%)}
+
+/* B1 注册式 */
+.b30{filter:blur(31px) saturate(1.10) brightness(1.04);opacity:.94}
+.dim.b1{background:linear-gradient(180deg,rgba(5,11,17,0) 0%,rgba(5,11,17,0) 52%,
+  rgba(5,11,17,.22) 58%,rgba(5,11,17,.62) 66%,rgba(5,11,17,.90) 73%,
+  rgba(5,11,17,1) 82%,rgba(5,11,17,1) 100%)}
+/* B2 铺满 */
+.b34{filter:blur(36px) saturate(1.14) brightness(1.02);opacity:.96}
+.dim.b2{background:linear-gradient(180deg,rgba(5,11,17,0) 0%,rgba(5,11,17,0) 62%,
+  rgba(5,11,17,.34) 68%,rgba(5,11,17,.78) 76%,rgba(5,11,17,.96) 86%,
+  rgba(5,11,17,1) 100%)}
+/* B3 双色 */
+.duo{inset:0;background:linear-gradient(160deg,#0B3A46 0%,#08202D 40%,#061520 70%,#040F18 100%)}
+.b38{filter:blur(38px) saturate(1.34) brightness(1.30);opacity:.24}
+.dim.b3{background:linear-gradient(180deg,rgba(4,15,24,0) 0%,rgba(4,15,24,0) 54%,
+  rgba(4,15,24,.30) 64%,rgba(4,15,24,.70) 73%,rgba(4,15,24,.96) 84%,
+  rgba(4,15,24,1) 100%)}
+
+/* ─────────── 顶栏 ─────────── */
+.top{position:absolute;left:0;top:32px;width:100%;height:48px;padding:0 20px;
+  display:flex;align-items:center;z-index:6}
+.top .ic{width:40px;height:40px;border-radius:20px;display:flex;align-items:center;
+  justify-content:center;color:#fff}
+.top .ic svg{width:24px;height:24px;stroke:#fff;stroke-width:2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.94}
+.top .sp{flex:1}
+
+/* ─────────── 封面场 ─────────── */
+.field{position:absolute;left:0;width:390px;z-index:3}
+.cover{position:absolute;left:0;top:0;width:390px;height:390px;overflow:hidden;background:#0A1B2C}
+.cover.edge{box-shadow:0 16px 46px rgba(0,0,0,.56),0 0 0 .5px rgba(255,255,255,.08) inset}
+.cover.soft{box-shadow:none}
+.vign{position:absolute;left:0;right:0;bottom:0;height:132px;
+  background:linear-gradient(180deg,rgba(6,17,26,0) 0%,rgba(6,17,26,.40) 62%,rgba(6,17,26,.66) 100%)}
+
+/* ─────────── 标题 / 控制区 ─────────── */
+.ttl{position:absolute;left:24px;width:342px;z-index:5}
+.ttl .n{font-size:20px;font-weight:700;line-height:27px;letter-spacing:.2px}
+.ttl .a{font-size:14px;color:rgba(255,255,255,.55);line-height:19px;margin-top:1px}
+.ttl .q{font-size:11px;color:rgba(255,255,255,.55);line-height:15px;margin-top:6px}
+
+.ctl{position:absolute;left:0;top:646px;width:100%;height:174px;z-index:5}
+.frow{height:40px;display:flex;align-items:center;padding:0 36px;justify-content:space-between}
+.frow span{width:40px;height:40px;border-radius:20px;display:flex;align-items:center;
+  justify-content:center}
+.frow svg{width:21px;height:21px;stroke:rgba(255,255,255,.86);stroke-width:1.9;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.prog{height:70px;padding:24px 36px 0;position:relative}
+.prog .rail{position:absolute;left:36px;right:36px;top:34px;height:3px;border-radius:2px;
+  background:rgba(255,255,255,.18)}
+.prog .rail i{position:absolute;left:0;top:0;height:100%;width:34%;border-radius:2px;background:#FB7299}
+.prog .rail b{position:absolute;left:34%;top:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+  border-radius:6px;background:#fff}
+.prog .tm{position:absolute;top:46px;font-size:10px;color:rgba(255,255,255,.5);
+  font-variant-numeric:tabular-nums}
+.prog .tm.l{left:36px}.prog .tm.r{right:36px}
+.trow{height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 62px}
+.trow svg{width:30px;height:30px;fill:rgba(255,255,255,.92)}
+.pbtn{width:64px;height:64px;border-radius:32px;background:#FB7299;display:flex;
+  align-items:center;justify-content:center;gap:5px}
+.pbtn i{display:block;width:4px;height:21px;border-radius:2px;background:#2B0016}
+
+/* ─────────── 屏内标注 ─────────── */
+.tag{position:absolute;z-index:8;font-size:9.5px;line-height:1;color:rgba(255,255,255,.88);
+  background:rgba(8,10,14,.80);padding:4px 6px;border-radius:4px;white-space:nowrap;
+  box-shadow:0 0 0 .5px rgba(255,255,255,.14) inset}
+.tag::before{content:"";display:inline-block;width:5px;height:5px;border-radius:3px;
+  margin-right:4px;vertical-align:0;background:#FB7299}
+.tag.ok::before{background:#5BD6A8}
+.tag.warn::before{background:#FF8B5E}
+
+/* ─────────── 1:1 切片 ─────────── */
+.slices{width:1232px;margin:28px auto 0}
+.slices .hd{display:flex;align-items:baseline;gap:10px;margin-bottom:11px}
+.slices .hd b{font-size:12px;color:#D7D7E0;letter-spacing:.3px}
+.slices .hd span{font-size:10.5px;color:#6E6E7A;letter-spacing:.2px}
+.sl3{display:flex;gap:31px}
+.sl{width:390px;flex:none}
+.slbox{position:relative;width:390px;height:500px;overflow:hidden;border-radius:12px;
+  box-shadow:0 10px 28px rgba(0,0,0,.5),0 0 0 .5px rgba(255,255,255,.07) inset}
+.pl{position:absolute;left:0;top:-60px;width:390px;height:844px;overflow:hidden;background:#050B11}
+.seam{position:absolute;left:0;width:100%;height:0;
+  border-top:1px dashed rgba(255,255,255,.28);z-index:9}
+.seam.top{top:44px}
+.seam.bot{top:434px}
+.seam span{position:absolute;right:9px;top:-15px;font-size:9px;line-height:1;
+  color:rgba(255,255,255,.74);background:rgba(8,10,14,.78);padding:4px 6px;border-radius:3px;
+  white-space:nowrap}
+.slcap{margin-top:9px;display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.slcap .k{font-size:10.5px;font-weight:700;color:#2B0016;background:#FB7299;border-radius:4px;
+  padding:2px 5px;white-space:nowrap}
+.slcap .k.gray{background:#2A2A33;color:#9C9CA8}
+.slcap .n{font-size:11.5px;font-weight:600;color:#DCDCE4}
+.slcap .d{font-size:10px;color:#6E6E7A}
+
+/* ─────────── 卡片区 ─────────── */
+.row{width:1232px;margin:26px auto 0;display:grid;gap:20px}
+.row.two{grid-template-columns:700px 1fr}
+.card{background:#15151B;border:1px solid #26262F;border-radius:12px;padding:15px 17px 16px}
+.card h4{font-size:12px;font-weight:700;color:#D7D7E0;letter-spacing:.3px;margin-bottom:3px}
+.card h4 em{font-style:normal;color:#6E6E7A;font-weight:400;font-size:10.5px;margin-left:7px}
+.card .sub{font-size:10.5px;color:#6E6E7A;line-height:1.62;margin-bottom:12px}
+.card .sub b{color:#C8C8D2;font-weight:600}
+
+.layers{display:grid;grid-template-columns:repeat(3,1fr);gap:11px 13px}
+.ly{display:flex;gap:9px}
+.ly .th{width:62px;height:62px;border-radius:8px;overflow:hidden;flex:none;
+  position:relative;background:#05080D;box-shadow:0 0 0 .5px rgba(255,255,255,.10) inset}
+.ly .th img,.ly .th svg{display:block;width:100%;height:100%}
+.ly .tx{min-width:0;padding-top:1px}
+.ly .tx b{display:block;font-size:10.5px;color:#DCDCE4;font-weight:700;letter-spacing:.2px}
+.ly .tx b i{font-style:normal;color:#FB7299;font-size:9.5px;font-weight:700;margin-right:4px}
+.ly .tx span{display:block;font-size:9.5px;color:#6E6E7A;line-height:1.5;margin-top:2px}
+.ly .tx code{font-size:9.5px;color:#8FA8C0;font-family:"Cascadia Mono",Consolas,monospace}
+
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{text-align:left;padding:5.5px 8px;border-bottom:1px solid #23232C;vertical-align:top}
+th{color:#6E6E7A;font-weight:600;font-size:10.5px;letter-spacing:.2px}
+td{color:#C8C8D2;font-variant-numeric:tabular-nums}
+td.k{color:#8E8E9C;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+tr.hl td{background:rgba(251,114,153,.07)}
+tr.hl td:first-child{border-radius:6px 0 0 6px}
+tr.hl td:last-child{border-radius:0 6px 6px 0}
+code{font-family:"Cascadia Mono",Consolas,monospace;font-size:10.5px;color:#8FA8C0}
+
+.minis{display:flex;gap:14px}
+.mini{flex:1;min-width:0}
+.mini .box{position:relative;width:100%;aspect-ratio:1/1;border-radius:9px;overflow:hidden;
+  background:#05080D;box-shadow:0 0 0 .5px rgba(255,255,255,.10) inset}
+.mini .box .inner{position:absolute;left:0;top:0;width:390px;height:390px;
+  transform:scale(var(--k));transform-origin:0 0;overflow:hidden}
+.mini .nm{font-size:10.5px;color:#DCDCE4;font-weight:600;margin-top:7px}
+.mini .cd{font-size:9.5px;color:#6E6E7A;line-height:1.55;margin-top:2px}
+.mini .cd b{color:#5BD6A8;font-weight:600}
+
+.note{font-size:10.5px;color:#6E6E7A;line-height:1.78;margin-top:11px;letter-spacing:.2px}
+.note b{color:#A9A9B6;font-weight:600}
+.note i{font-style:normal;color:#FB7299}
+.kv{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+.kv .r{display:flex;gap:8px;font-size:10.5px;line-height:1.62;color:#8E8E9C}
+.kv .r b{color:#DCDCE4;font-weight:600;flex:none;width:62px}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ 封面图源 ═══════════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="art" viewBox="0 0 512 512" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <linearGradient id="gSky" x1="0.08" y1="0" x2="0.62" y2="1">
+        <stop offset="0" stop-color="#04080F"/><stop offset="0.20" stop-color="#081726"/>
+        <stop offset="0.40" stop-color="#0E2E44"/><stop offset="0.56" stop-color="#154C57"/>
+        <stop offset="0.68" stop-color="#1C6A5C"/><stop offset="0.84" stop-color="#123B4A"/>
+        <stop offset="1" stop-color="#081A28"/>
+      </linearGradient>
+      <linearGradient id="gSea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#FFE7B4" stop-opacity="0.30"/>
+        <stop offset="1" stop-color="#FFE7B4" stop-opacity="0"/>
+      </linearGradient>
+      <radialGradient id="gGlow">
+        <stop offset="0" stop-color="#FFF0CC" stop-opacity="0.70"/>
+        <stop offset="0.38" stop-color="#FFD893" stop-opacity="0.20"/>
+        <stop offset="1" stop-color="#FFD893" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="gMoon">
+        <stop offset="0" stop-color="#FFFDF2"/><stop offset="0.76" stop-color="#FFF3D2"/>
+        <stop offset="1" stop-color="#FFE6AC"/>
+      </radialGradient>
+      <radialGradient id="gDeep">
+        <stop offset="0" stop-color="#0A2233" stop-opacity="0.85"/>
+        <stop offset="1" stop-color="#0A2233" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect width="512" height="512" fill="url(#gSky)"/>
+    <ellipse cx="140" cy="470" rx="300" ry="150" fill="url(#gDeep)"/>
+    <circle cx="326" cy="126" r="168" fill="url(#gGlow)"/>
+    <circle cx="326" cy="126" r="47" fill="url(#gMoon)"/>
+    <ellipse cx="326" cy="292" rx="132" ry="20" fill="url(#gSea)"/>
+    <ellipse cx="326" cy="352" rx="176" ry="15" fill="url(#gSea)" opacity="0.78"/>
+    <ellipse cx="326" cy="410" rx="224" ry="12" fill="url(#gSea)" opacity="0.56"/>
+    <ellipse cx="326" cy="464" rx="262" ry="9" fill="url(#gSea)" opacity="0.36"/>
+    <g fill="#EAF5FF">
+      <circle cx="86" cy="64" r="2.2" opacity=".92"/><circle cx="158" cy="40" r="1.5" opacity=".7"/>
+      <circle cx="214" cy="96" r="1.8" opacity=".8"/><circle cx="56" cy="156" r="1.6" opacity=".62"/>
+      <circle cx="132" cy="204" r="1.3" opacity=".5"/><circle cx="420" cy="58" r="1.9" opacity=".82"/>
+      <circle cx="470" cy="180" r="1.4" opacity=".58"/><circle cx="392" cy="236" r="1.2" opacity=".44"/>
+    </g>
+    <path d="M326 300 L306 512 L346 512 Z" fill="#FFF0C8" opacity="0.13"/>
+    <path d="M318 330 L310 512 L322 512 Z" fill="#FFFBEC" opacity="0.20"/>
+    <path d="M0 392 L58 366 L104 388 L152 358 L206 386 L262 372 L316 394 L368 368 L424 392 L478 372 L512 386 L512 512 L0 512 Z"
+      fill="#071725" opacity="0.94"/>
+    <path d="M0 424 L64 408 L126 428 L188 404 L248 426 L310 412 L370 432 L432 410 L492 428 L512 420 L512 512 L0 512 Z"
+      fill="#05101B" opacity="0.95"/>
+    <g fill="#030910">
+      <circle cx="198" cy="368" r="5.2"/>
+      <path d="M191.4 375 h13.2 l3.4 34 h-20 Z"/>
+      <path d="M186 380 l5 3 -2 22 -4 -1 Z"/><path d="M210 380 l-5 3 2 22 4 -1 Z"/>
+      <rect x="193" y="409" width="4.6" height="18" rx="2"/>
+      <rect x="201" y="409" width="4.6" height="18" rx="2"/>
+    </g>
+    <g font-family="HarmonyOS Sans SC,PingFang SC,Microsoft YaHei,sans-serif">
+      <rect x="96" y="60" width="34" height="1.5" fill="#FFE9BC" opacity="0.58"/>
+      <text x="96" y="80" font-size="11" fill="#FFFCF0" opacity="0.60" letter-spacing="3.2">NIGHT VOYAGER</text>
+      <text x="96" y="97" font-size="9.5" fill="#FFFCF0" opacity="0.34" letter-spacing="1.6">不才 · 2023</text>
+    </g>
+  </symbol>
+
+  <symbol id="artLight" viewBox="0 0 512 512" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <linearGradient id="lBg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#FBF6EE"/><stop offset="0.55" stop-color="#F2E8DC"/>
+        <stop offset="1" stop-color="#E7DACB"/>
+      </linearGradient>
+      <linearGradient id="lSw1" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#F6C9B8"/><stop offset="1" stop-color="#E8A88E"/>
+      </linearGradient>
+      <linearGradient id="lSw2" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#B7CBDD"/><stop offset="1" stop-color="#8FAAC4"/>
+      </linearGradient>
+    </defs>
+    <rect width="512" height="512" fill="url(#lBg)"/>
+    <circle cx="330" cy="210" r="128" fill="url(#lSw1)" opacity="0.86"/>
+    <rect x="96" y="286" width="200" height="132" rx="10" fill="url(#lSw2)" opacity="0.78"/>
+    <rect x="150" y="120" width="120" height="120" rx="60" fill="#EFD9A8" opacity="0.72"/>
+    <g font-family="HarmonyOS Sans SC,PingFang SC,Microsoft YaHei,sans-serif">
+      <rect x="96" y="84" width="30" height="1.6" fill="#4A4038" opacity="0.34"/>
+      <text x="96" y="112" font-size="15" fill="#3A322B" opacity="0.74" letter-spacing="4.4">SUN ROOM</text>
+      <text x="96" y="132" font-size="10" fill="#3A322B" opacity="0.42" letter-spacing="2">纯音乐 · 2024</text>
+    </g>
+  </symbol>
+
+  <symbol id="artBusy" viewBox="0 0 512 512" preserveAspectRatio="xMidYMid slice">
+    <rect width="512" height="512" fill="#1B0B2E"/>
+    <circle cx="150" cy="150" r="150" fill="#FF3D6E"/>
+    <circle cx="392" cy="132" r="118" fill="#FFC53D"/>
+    <rect x="228" y="150" width="230" height="230" fill="#0AD0C6" opacity="0.92"/>
+    <path d="M0 420 L160 300 L300 430 L430 330 L512 400 L512 512 L0 512 Z" fill="#7A3BFF"/>
+    <circle cx="120" cy="392" r="70" fill="#38E06B" opacity="0.86"/>
+    <text x="40" y="474" font-size="30" font-weight="700" fill="#FFFFFF" opacity="0.9"
+      font-family="HarmonyOS Sans SC,PingFang SC,sans-serif" letter-spacing="3">HYPER</text>
+  </symbol>
+
+  <symbol id="prev" viewBox="0 0 24 24"><path d="M18.4 4.6v14.8a.8.8 0 0 1-1.22.68l-9.2-5.92V19a1 1 0 0 1-2 0V5a1 1 0 0 1 2 0v4.84l9.2-5.92a.8.8 0 0 1 1.22.68Z"/></symbol>
+  <symbol id="next" viewBox="0 0 24 24"><path d="M5.6 4.6v14.8a.8.8 0 0 0 1.22.68l9.2-5.92V19a.8.8 0 0 0 1.6 0V5a.8.8 0 0 0-1.6 0v4.84l-9.2-5.92a.8.8 0 0 0-1.22.68Z"/></symbol>
+</defs></svg>
+
+<div class="bar">
+  <div>
+    <div class="t">播放页 · <i>封面沉浸式背景</i></div>
+    <div class="s">390 × 844 vp（safeTop 32 / safeBottom 24）· 封面 390 满幅出血 @y104 · 控制区 174 @y646 · 真实参数：TopArea 48 / IMAGE_BLUR 15 / 背景 op 0.5 / objectFit Cover / deepRgb 压深 0.05→0.45 / 噪点 0.05</div>
+  </div>
+  <div class="legend">
+    <span><i class="sw" style="background:#FB7299"></i><b>改动</b></span>
+    <span><i class="sw" style="background:#2A2A33"></i>保持</span>
+    <span>四屏等比缩至 72%</span>
+  </div>
+</div>
+
+<!-- ═══════════════ 四屏 ═══════════════ -->
+<div class="grid">
+
+  <!-- 屏 1 · 现状 -->
+  <div class="cap-wrap">
+    <div class="frame"><div class="phone">
+      <div class="bg">
+        <div class="base"></div>
+        <div class="full"><div class="blur15" style="position:absolute;inset:0">
+          <svg class="art"><use href="#art"/></svg></div></div>
+        <div class="dim legacy"></div>
+        <div class="grain"></div>
+      </div>
+      <div class="top">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        <div class="sp"></div>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 8.4v7.2M8.8 12h6.4"/></svg></div>
+      </div>
+      <div class="field" style="top:104px;height:390px">
+        <div class="cover edge"><svg class="art"><use href="#art"/></svg>
+          <div class="vign"></div></div>
+      </div>
+      <div class="ttl" style="top:514px">
+        <div class="n">夜航星</div><div class="a">不才</div>
+        <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+      </div>
+      <div class="ctl">
+        <div class="frow">
+          <span><svg viewBox="0 0 24 24"><path d="M12 20.4s-7.6-4.7-7.6-9.6a4.3 4.3 0 0 1 7.6-2.7 4.3 4.3 0 0 1 7.6 2.7c0 4.9-7.6 9.6-7.6 9.6Z"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 12h3l2.4-6 3.2 13 2.6-8.4 1.8 3.4H20"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.4v4.6l3 1.8"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></span>
+        </div>
+        <div class="prog">
+          <div class="rail"><i></i><b></b></div>
+          <div class="tm l">1:23</div><div class="tm r">3:45</div>
+        </div>
+        <div class="trow">
+          <svg viewBox="0 0 24 24"><use href="#prev"/></svg>
+          <div class="pbtn"><i></i><i></i></div>
+          <svg viewBox="0 0 24 24"><use href="#next"/></svg>
+        </div>
+      </div>
+      <div class="tag warn" style="left:auto;right:8px;top:502px">背景换成画面中段</div>
+    </div></div>
+    <div class="cap"><span class="k gray">现状</span><span class="n">全屏裁切 + 半透明</span></div>
+    <div class="cap" style="margin-top:3px"><span class="d warn">背景纵向被 Cover 裁到中段，与方封面的画面不连续 → 边缘必然出现阶跃</span></div>
+  </div>
+
+  <!-- 屏 2 · B1 -->
+  <div class="cap-wrap">
+    <div class="frame"><div class="phone">
+      <div class="bg">
+        <div class="base"></div>
+        <div class="sq k14"><div class="b30" style="position:absolute;inset:0">
+          <svg class="art"><use href="#art"/></svg></div></div>
+        <div class="dim b1"></div>
+        <div class="etch"></div>
+        <div class="grain"></div>
+      </div>
+      <div class="top">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        <div class="sp"></div>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 8.4v7.2M8.8 12h6.4"/></svg></div>
+      </div>
+      <div class="field" style="top:104px;height:390px">
+        <div class="cover soft"><svg class="art"><use href="#art"/></svg>
+          <div class="vign"></div></div>
+      </div>
+      <div class="ttl" style="top:514px">
+        <div class="n">夜航星</div><div class="a">不才</div>
+        <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+      </div>
+      <div class="ctl">
+        <div class="frow">
+          <span><svg viewBox="0 0 24 24"><path d="M12 20.4s-7.6-4.7-7.6-9.6a4.3 4.3 0 0 1 7.6-2.7 4.3 4.3 0 0 1 7.6 2.7c0 4.9-7.6 9.6-7.6 9.6Z"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 12h3l2.4-6 3.2 13 2.6-8.4 1.8 3.4H20"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.4v4.6l3 1.8"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></span>
+        </div>
+        <div class="prog">
+          <div class="rail"><i></i><b></b></div>
+          <div class="tm l">1:23</div><div class="tm r">3:45</div>
+        </div>
+        <div class="trow">
+          <svg viewBox="0 0 24 24"><use href="#prev"/></svg>
+          <div class="pbtn"><i></i><i></i></div>
+          <svg viewBox="0 0 24 24"><use href="#next"/></svg>
+        </div>
+      </div>
+      <div class="tag ok" style="left:8px;top:502px">同心 1.14× · 下缘连成一片</div>
+    </div></div>
+    <div class="cap"><span class="k">B1</span><span class="n">注册式（推荐）</span></div>
+    <div class="cap" style="margin-top:3px"><span class="d ok">方图与封面同心同比例 → 边缘像素天然连续，无需任何遮罩</span></div>
+  </div>
+
+  <!-- 屏 3 · B2 -->
+  <div class="cap-wrap">
+    <div class="frame"><div class="phone">
+      <div class="bg">
+        <div class="base"></div>
+        <div class="sq k16"><div class="b34" style="position:absolute;inset:0">
+          <svg class="art"><use href="#art"/></svg></div></div>
+        <div class="dim b2"></div>
+        <div class="etch"></div>
+        <div class="grain"></div>
+      </div>
+      <div class="top">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        <div class="sp"></div>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 8.4v7.2M8.8 12h6.4"/></svg></div>
+      </div>
+      <div class="field" style="top:104px;height:390px">
+        <div class="cover soft"><svg class="art"><use href="#art"/></svg>
+          <div class="vign"></div></div>
+      </div>
+      <div class="ttl" style="top:514px">
+        <div class="n">夜航星</div><div class="a">不才</div>
+        <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+      </div>
+      <div class="ctl">
+        <div class="frow">
+          <span><svg viewBox="0 0 24 24"><path d="M12 20.4s-7.6-4.7-7.6-9.6a4.3 4.3 0 0 1 7.6-2.7 4.3 4.3 0 0 1 7.6 2.7c0 4.9-7.6 9.6-7.6 9.6Z"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 12h3l2.4-6 3.2 13 2.6-8.4 1.8 3.4H20"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.4v4.6l3 1.8"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></span>
+        </div>
+        <div class="prog">
+          <div class="rail"><i></i><b></b></div>
+          <div class="tm l">1:23</div><div class="tm r">3:45</div>
+        </div>
+        <div class="trow">
+          <svg viewBox="0 0 24 24"><use href="#prev"/></svg>
+          <div class="pbtn"><i></i><i></i></div>
+          <svg viewBox="0 0 24 24"><use href="#next"/></svg>
+        </div>
+      </div>
+      <div class="tag" style="left:8px;top:502px">同心 1.60× · 画面占到 76%</div>
+    </div></div>
+    <div class="cap"><span class="k">B2</span><span class="n">铺满</span></div>
+    <div class="cap" style="margin-top:3px"><span class="d">方图放大到 1.6×，画面占屏 76% 后才转实色；最沉浸，注册误差 19%</span></div>
+  </div>
+
+  <!-- 屏 4 · B3 -->
+  <div class="cap-wrap">
+    <div class="frame"><div class="phone">
+      <div class="bg">
+        <div class="base"></div>
+        <div class="duo"></div>
+        <div class="sq k22"><div class="b38" style="position:absolute;inset:0">
+          <svg class="art"><use href="#art"/></svg></div></div>
+        <div class="dim b3"></div>
+        <div class="etch"></div>
+        <div class="grain"></div>
+      </div>
+      <div class="top">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        <div class="sp"></div>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 8.4v7.2M8.8 12h6.4"/></svg></div>
+      </div>
+      <div class="field" style="top:104px;height:390px">
+        <div class="cover soft"><svg class="art"><use href="#art"/></svg>
+          <div class="vign"></div></div>
+      </div>
+      <div class="ttl" style="top:514px">
+        <div class="n">夜航星</div><div class="a">不才</div>
+        <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+      </div>
+      <div class="ctl">
+        <div class="frow">
+          <span><svg viewBox="0 0 24 24"><path d="M12 20.4s-7.6-4.7-7.6-9.6a4.3 4.3 0 0 1 7.6-2.7 4.3 4.3 0 0 1 7.6 2.7c0 4.9-7.6 9.6-7.6 9.6Z"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 12h3l2.4-6 3.2 13 2.6-8.4 1.8 3.4H20"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.4v4.6l3 1.8"/></svg></span>
+          <span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h13"/></svg></span>
+        </div>
+        <div class="prog">
+          <div class="rail"><i></i><b></b></div>
+          <div class="tm l">1:23</div><div class="tm r">3:45</div>
+        </div>
+        <div class="trow">
+          <svg viewBox="0 0 24 24"><use href="#prev"/></svg>
+          <div class="pbtn"><i></i><i></i></div>
+          <svg viewBox="0 0 24 24"><use href="#next"/></svg>
+        </div>
+      </div>
+      <div class="tag" style="left:8px;top:502px">双色底 + 24% 纹理</div>
+    </div></div>
+    <div class="cap"><span class="k">B3</span><span class="n">双色漂移</span></div>
+    <div class="cap" style="margin-top:3px"><span class="d">图片只当纹理（24%），颜色由主色↔深辅色 160° 决定；任意封面都成立</span></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════ 1:1 边缘对比 ═══════════════ -->
+<div class="slices">
+  <div class="hd"><b>封面上、下缘 1:1 实拍</b>
+    <span>同一位置、同一缩放，唯一变量是背景层。两条虚线即封面上缘 y=104 与下缘 y=494</span></div>
+  <div class="sl3">
+
+    <div class="sl">
+      <div class="slbox">
+        <div class="pl">
+          <div class="bg">
+            <div class="base"></div>
+            <div class="full"><div class="blur15" style="position:absolute;inset:0">
+              <svg class="art"><use href="#art"/></svg></div></div>
+            <div class="dim legacy"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="field" style="top:104px;height:390px">
+            <div class="cover edge"><svg class="art"><use href="#art"/></svg>
+              <div class="vign"></div></div>
+          </div>
+          <div class="ttl" style="top:514px">
+            <div class="n">夜航星</div><div class="a">不才</div>
+            <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+          </div>
+        </div>
+        <div class="seam top"><span>上缘 y=104</span></div>
+        <div class="seam bot"><span>下缘 y=494</span></div>
+      </div>
+      <div class="slcap"><span class="k gray">现状</span><span class="n">上缘暗、下缘亮</span>
+        <span class="d">背景被裁到画面中段，上下都对不上</span></div>
+    </div>
+
+    <div class="sl">
+      <div class="slbox">
+        <div class="pl">
+          <div class="bg">
+            <div class="base"></div>
+            <div class="sq k14"><div class="b30" style="position:absolute;inset:0">
+              <svg class="art"><use href="#art"/></svg></div></div>
+            <div class="dim b1"></div>
+            <div class="etch"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="field" style="top:104px;height:390px">
+            <div class="cover soft"><svg class="art"><use href="#art"/></svg>
+              <div class="vign"></div></div>
+          </div>
+          <div class="ttl" style="top:514px">
+            <div class="n">夜航星</div><div class="a">不才</div>
+            <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+          </div>
+        </div>
+        <div class="seam top"><span>上缘 y=104</span></div>
+        <div class="seam bot"><span>下缘 y=494</span></div>
+      </div>
+      <div class="slcap"><span class="k">B1</span><span class="n">上下缘同时化开</span>
+        <span class="d">顶部压暗盖在封面之上，两侧同一条曲线</span></div>
+    </div>
+
+    <div class="sl">
+      <div class="slbox">
+        <div class="pl">
+          <div class="bg">
+            <div class="base"></div>
+            <div class="duo"></div>
+            <div class="sq k22"><div class="b38" style="position:absolute;inset:0">
+              <svg class="art"><use href="#art"/></svg></div></div>
+            <div class="dim b3"></div>
+            <div class="etch"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="field" style="top:104px;height:390px">
+            <div class="cover soft"><svg class="art"><use href="#art"/></svg>
+              <div class="vign"></div></div>
+          </div>
+          <div class="ttl" style="top:514px">
+            <div class="n">夜航星</div><div class="a">不才</div>
+            <div class="q">176 kbps · 大会员可听杜比 / 无损</div>
+          </div>
+        </div>
+        <div class="seam top"><span>上缘 y=104</span></div>
+        <div class="seam bot"><span>下缘 y=494</span></div>
+      </div>
+      <div class="slcap"><span class="k">B3</span><span class="n">靠色相统一吞掉</span>
+        <span class="d">两边同属一组双色，边界落在同色区</span></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════════ 层解构 + 参数 ═══════════════ -->
+<div class="row two">
+  <div class="card">
+    <h4>背景 5 层解构 <em>自下而上，每层只做一件事</em></h4>
+    <div class="sub">层数从现状 3 层变成 5 层，但<b>没有增加任何一次 blur 计算</b> —— 全部复用换歌时生成的那一份模糊 PixelMap。</div>
+    <div class="layers">
+
+      <div class="ly">
+        <div class="th"><div style="position:absolute;inset:0;background:#050B11"></div></div>
+        <div class="tx"><b><i>L0</i>基色实底</b><span>deepRgb 纯色<br><code>blur 失败兜底</code></span></div>
+      </div>
+
+      <div class="ly">
+        <div class="th"><svg class="art" style="filter:blur(7px) saturate(1.10);opacity:.94"><use href="#art"/></svg></div>
+        <div class="tx"><b><i>L1</i>注册方图</b><span>同心 1.14× 的方图<br><code>关键层 · 决定连续性</code></span></div>
+      </div>
+
+      <div class="ly">
+        <div class="th"><div style="position:absolute;inset:0;background:linear-gradient(180deg,
+          rgba(5,11,17,0) 0%,rgba(5,11,17,0) 52%,rgba(5,11,17,.62) 66%,rgba(5,11,17,1) 82%)"></div></div>
+        <div class="tx"><b><i>L2</i>下方渐隐</b><span>画面 → 实色，竖屏 180°<br><code>52% → 82% 到不透明</code></span></div>
+      </div>
+
+      <div class="ly">
+        <div class="th"><div style="position:absolute;inset:0;background:linear-gradient(180deg,
+          rgba(0,0,0,.40) 0%,rgba(0,0,0,0) 60%)"></div></div>
+        <div class="tx"><b><i>L3</i>顶部压暗</b><span>z 高于封面，两侧同吃<br><code>.34 → 0 @196vp</code></span></div>
+      </div>
+
+      <div class="ly">
+        <div class="th"><div style="position:absolute;inset:0;background:#0A121A"></div>
+          <div style="position:absolute;inset:0;opacity:.14;background-image:radial-gradient(
+            rgba(255,255,255,.95) .8px,transparent 1.1px);background-size:4px 4px"></div></div>
+        <div class="tx"><b><i>L4</i>噪点</b><span>128 平铺 · 去塑料感<br><code>op 0.05（不变）</code></span></div>
+      </div>
+
+      <div class="ly" style="opacity:.72">
+        <div class="th"><div style="position:absolute;inset:0;background:linear-gradient(160deg,
+          #0B3A46,#08202D 40%,#061520 70%,#040F18)"></div></div>
+        <div class="tx"><b><i>B3</i>双色底</b><span>仅 B3 使用，替换 L0<br><code>主色 ↔ 深辅色 160°</code></span></div>
+      </div>
+
+    </div>
+    <div class="note"><b>为什么现状一定有那条线：</b>代码里背景是 <code>Image(bgCover).width('100%').height('100%').objectFit(Cover)</code> —— 在 390×844 的容器里，<code>Cover</code> 会先把正方形封面按高度放大 2.16 倍再居中裁切，于是<b>背景只显示了封面中间 46% 的画面</b>。封面下缘是暗山，背景同位置却是海面亮带 → 阶跃。<i>这不是模糊半径或透明度能救的，是取景框错了。</i><br>
+      <b>顶部同理：</b>顶部压暗如果只铺在背景层（不在封面之上），上缘会出现<b>反向阶跃</b> —— 封面外被压暗 19%、封面内不压暗。所以 L3 必须 z 高于封面，让两侧吃同一条曲线。</div>
+
+    <div style="margin-top:13px;padding-top:12px;border-top:1px solid #23232C">
+      <div style="font-size:10.5px;color:#8E8E9C;margin-bottom:6px;letter-spacing:.2px">
+        横穿封面左缘的亮度剖面 <b style="color:#DCDCE4">L</b>（同一条水平线采样）
+      </div>
+      <svg viewBox="0 0 660 118" width="100%" height="118" style="display:block">
+        <defs>
+          <linearGradient id="pfBgA" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#121217"/><stop offset="1" stop-color="#1A1A22"/></linearGradient>
+        </defs>
+        <text x="2" y="9" font-size="9" fill="#6E6E7A" letter-spacing=".6">背景区</text>
+        <text x="328" y="9" font-size="9" fill="#6E6E7A" letter-spacing=".6">封面区内</text>
+        <rect x="0" y="14" width="322" height="74" fill="url(#pfBgA)"/>
+        <rect x="322" y="14" width="338" height="74" fill="#1D1D26"/>
+        <line x1="322" y1="11" x2="322" y2="92" stroke="#FB7299" stroke-width="1"
+          stroke-dasharray="3 3" opacity=".85"/>
+        <path d="M0 78 L316 78 L322 52 L660 50" fill="none" stroke="#C9855A"
+          stroke-width="2" stroke-linejoin="round"/>
+        <path d="M0 79 C110 78 240 76 320 75 L322 75 L660 74" fill="none" stroke="#5BD6A8"
+          stroke-width="2" stroke-linecap="round"/>
+        <g font-size="9" font-family="Cascadia Mono,Consolas,monospace">
+          <text x="338" y="70" fill="#C9855A">ΔL .14</text>
+          <text x="338" y="90" fill="#5BD6A8">ΔL .01</text>
+        </g>
+        <text x="322" y="112" font-size="9" fill="#FB7299" text-anchor="middle"
+          letter-spacing=".6">封面边缘 x = 0</text>
+      </svg>
+      <div style="display:flex;gap:20px;font-size:10px;color:#A9A9B6;margin-top:2px">
+        <span><i style="display:inline-block;width:14px;height:2px;background:#C9855A;
+          vertical-align:3px;margin-right:5px"></i>现状 · 阶跃</span>
+        <span><i style="display:inline-block;width:14px;height:2px;background:#5BD6A8;
+          vertical-align:3px;margin-right:5px"></i>B1 · 连续</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>参数表 <em>现状 → 建议</em></h4>
+    <div class="sub">竖屏 390vp 宽。横屏 / 平板按最长边等比放大 blur 与 k，保持视角一致。</div>
+    <table>
+      <tr><th>项</th><th>现状</th><th>建议</th><th>作用</th></tr>
+      <tr class="hl"><td class="k">取景</td><td>全屏 Cover</td><td>方图 1.14×</td><td>与封面同帧，边缘连续</td></tr>
+      <tr class="hl"><td class="k">对齐</td><td>屏幕居中</td><td>封面中心</td><td>同心才不错位</td></tr>
+      <tr><td class="k">模糊半径</td><td>15</td><td>31</td><td>消掉可辨认结构</td></tr>
+      <tr><td class="k">不透明度</td><td>0.50</td><td>0.94</td><td>背景即「延续」，不必压暗</td></tr>
+      <tr><td class="k">转实色起点</td><td>无</td><td>y 52%</td><td>底部交给控制区</td></tr>
+      <tr><td class="k">转实色终点</td><td>无</td><td>y 82%</td><td>白字 4.5:1 达标</td></tr>
+      <tr><td class="k">封面描边</td><td>0.5px 白</td><td>去掉</td><td>那条线本身就是硬边</td></tr>
+      <tr><td class="k">封面投影</td><td>46 扩散</td><td>去掉</td><td>投影≈在背景上画边框</td></tr>
+      <tr><td class="k">噪点</td><td>0.05</td><td>0.05</td><td>不变</td></tr>
+    </table>
+    <div class="kv" style="margin-top:11px">
+      <div class="r"><b>k 怎么取</b><span>k = 1 + 2×blurPx / 封面边长。<code>blur 31</code> 时 1+62/390 ≈ 1.16 —— 刚好让模糊的透明边落在方图内。</span></div>
+      <div class="r"><b>注册误差</b><span>封面边缘处背景显示的是图像 <code>0.5 + 0.5/k</code> 处。k=1.14 → 94%（差 6%，无感）；k=1.6 → 81%（差 19%，渐变被读成「错位」）。<b style="color:#FB7299">k 建议不超 1.3</b>。</span></div>
+      <div class="r"><b>性能</b><span>仍然只在换歌时生成一次 blur PixelMap，5 层全部复用；摊到每帧 0 成本。</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 鲁棒性 + 落地 ═══════════════ -->
+<div class="row two">
+  <div class="card">
+    <h4>三种极端封面 · 同一套背景 <em>B1 / B3 的选取依据</em></h4>
+    <div class="sub">风险不在深色封面，而在<b>浅封面上白字消失</b>与<b>杂色封面满屏发花</b>。三条红线要同时守住。</div>
+    <div class="minis">
+
+      <div class="mini">
+        <div class="box"><div class="inner" style="--k:0.49">
+          <div class="bg">
+            <div class="base"></div>
+            <div class="sq k14"><div class="b30" style="position:absolute;inset:0">
+              <svg class="art"><use href="#art"/></svg></div></div>
+            <div class="dim b1"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="cover soft" style="top:104px"><svg class="art"><use href="#art"/></svg></div>
+        </div></div>
+        <div class="nm">深色封面 · B1</div>
+        <div class="cd"><b>✓ 默认</b>　同色系延续，白字 12:1</div>
+      </div>
+
+      <div class="mini">
+        <div class="box"><div class="inner" style="--k:0.49">
+          <div class="bg">
+            <div class="base" style="background:#191410"></div>
+            <div class="sq k14"><div style="position:absolute;inset:0;
+              filter:blur(31px) saturate(.82) brightness(.52);opacity:.94">
+              <svg class="art"><use href="#artLight"/></svg></div></div>
+            <div class="dim" style="background:linear-gradient(180deg,rgba(14,11,9,0) 0%,
+              rgba(14,11,9,.30) 50%,rgba(14,11,9,.82) 62%,rgba(14,11,9,.97) 74%)"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="cover soft" style="top:104px"><svg class="art"><use href="#artLight"/></svg></div>
+        </div></div>
+        <div class="nm">浅色封面 · 强制压深</div>
+        <div class="cd"><b>✓ 加闸门</b>　主色亮度 &gt; .62 时提前到 62% 转实色</div>
+      </div>
+
+      <div class="mini">
+        <div class="box"><div class="inner" style="--k:0.49">
+          <div class="bg">
+            <div class="base"></div>
+            <div class="duo" style="background:linear-gradient(160deg,#5A1830 0%,#2C1436 46%,#0C0A16 100%)"></div>
+            <div class="sq k22"><div style="position:absolute;inset:0;
+              filter:blur(38px) saturate(1.34) brightness(1.30);opacity:.22">
+              <svg class="art"><use href="#artBusy"/></svg></div></div>
+            <div class="dim b3"></div>
+            <div class="grain"></div>
+          </div>
+          <div class="cover soft" style="top:104px"><svg class="art"><use href="#artBusy"/></svg></div>
+        </div></div>
+        <div class="nm">杂色封面 · B3</div>
+        <div class="cd"><b>✓ 降权</b>　纹理压到 22%，颜色交给双色底</div>
+      </div>
+
+    </div>
+    <div class="note"><b>判定（可直接落成 if）：</b>取 <code>deepRgb</code> 亮度 <i>L</i> 与主色饱和度 <i>S</i>。<i>L</i> &gt; .62 → <b>浅封面分支</b>（L2 起点提前到 62%、模糊层 brightness ×0.52）；<i>S</i> &gt; .55 且主辅色相差 &gt; 120° → <b>B3</b>；其余走 <b>B1</b>。三条分支共用同一套 5 层，只换参数。</div>
+  </div>
+
+  <div class="card">
+    <h4>落地要点 <em>只改 SurfaceLayers 一个 @Builder</em></h4>
+    <div class="sub">布局、封面组件、控制区都不动 —— 只替换 <code>SurfaceLayers()</code> 里的三层，并把背景 Image 的容器从「全屏」改成「正方形」。</div>
+    <div class="kv">
+      <div class="r"><b>关键改动</b><span>把 <code>Image(bgCover).width('100%').height('100%')</code> 换成固定边长 <code>coverSize × k</code> 的正方形容器，<code>.position()</code> 让它的中心落在封面中心。</span></div>
+      <div class="r"><b>不必裁剪</b><span>方图比屏幕小的地方交给 L2 渐变与 L0 实色，不需要 <code>clip</code>、不需要 <code>mask</code>、不需要第二张 blur。</span></div>
+      <div class="r"><b>换歌动画</b><span><code>imageColor</code> 已有 <code>animateTo</code>；L0 / L2 用 <code>buildRgba(deepRgb)</code> 跟着动画，L1 图片瞬时替换（0.9 透明度下看不出跳变）。</span></div>
+      <div class="r"><b>横屏</b><span>方图边长按 <code>min(w, h)</code> 定，仍与封面同心；L2 改为 90°，让右侧歌词落在实色区。</span></div>
+      <div class="r"><b>兜底</b><span>blur 失败 → 只留 L0 + L2 + L4，页面仍是「有主题色的深色」，不出现白块。</span></div>
+    </div>
+    <div class="note" style="margin-top:12px;padding-top:11px;border-top:1px solid #23232C">
+      <b>一句话验收：</b>把屏幕调到最暗、眯眼看 —— <i>看不出封面从哪开始、到哪结束</i>，但睁眼能立刻找到它。若眯眼时还是个「方块」，就说明方图仍没和封面同心。
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -10,8 +10,10 @@
  * avoidLayoutSafeArea 后栏顶 = safeTop，滚动时曲目从沉浸材质下穿过；
  * 侧滑返回是 Navigation 级能力，不受影响。
  *
- * 钉顶头部区：整个头部区「封面 + 28fp 大标题 + 元信息/简介 + 播放全部/拉取新投稿」
- * 接在标题行下，仅曲目列表滚动并从材质下透出；
+ * 钉顶头部区：整个头部区「封面 + 28fp 大标题 + 元信息/简介 + 三层操作行」
+ * （L1 播放全部主 CTA + 🔍/⋯ 图标位；L2 搜索态；L3 ⋯ bindMenu 更多菜单，
+ * 设计方案 design/头部操作区重构-设计方案.md）接在标题行下，
+ * 仅曲目列表滚动并从材质下透出；
  * 重命名 / 删除歌单入口在歌单列表页行内 ⋮ 菜单。
  */
 
@@ -41,7 +43,7 @@ import {
 } from '../service/FavPushRunner';
 import { PlaylistDetailRouteParam, NavRouteParamReader, UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP, SEARCH_FILTER_DEBOUNCE_MS } from '../common/constants/InteractionConstants';
+import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP, SEARCH_FILTER_DEBOUNCE_MS, ACTION_ROW_H, SEARCH_MODE_MS } from '../common/constants/InteractionConstants';
 import { HdsNavDestination, BottomBuilderShowType } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { CustomContentDialog } from '@kit.ArkUI';
@@ -50,6 +52,7 @@ import {
   makeButtonMaterialModifier
 } from '../utils/HeaderBarMaterial';
 import { SearchBox } from '../components/SearchBox';
+import { HeaderIconButton } from '../components/HeaderIconButton';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
 import {
   CONTENT_END_OFFSET,
@@ -60,7 +63,9 @@ import {
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
-  STORE_THEME_DEEP
+  STORE_THEME_DEEP,
+  STORE_THEME_ON,
+  STORE_SELECT_ICONS_HINT_SHOWN
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
@@ -96,9 +101,6 @@ const PD_REVEAL_PAGE_SIZE: number = 20;
  */
 const PD_ENQUEUE_GAP_MS: number = 350;
 
-/** 多选态搜索区 / 动作区交叉淡化时长（UpSpacePage SELECT_FADE_MS 同款） */
-const PD_SELECT_FADE_MS: number = 250;
-
 /** ArkTS 没有原生 sleep，用 setTimeout 包一个 Promise（批量下载串行节流用） */
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve: () => void): void => {
@@ -113,7 +115,7 @@ function delay(ms: number): Promise<void> {
  * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定；实测值
  * （headerAreaHeight）回来后覆盖，此值只防首次布局 0 高闪跳。
  */
-const PLAYLIST_HEADER_ESTIMATE_HEIGHT: number = 174;
+const PLAYLIST_HEADER_ESTIMATE_HEIGHT: number = 178;
 
 @Component
 export struct PlaylistDetail {
@@ -132,6 +134,14 @@ export struct PlaylistDetail {
   @State titleText: string = '歌单';
   /** 「拉取新投稿」进行中：防止连点重复发请求 */
   @State upRefreshing: boolean = false;
+
+  /**
+   * ⋯ 更多菜单开关（bindMenu isShow 态驱动，API 11 重载）：点击 ⋯ 置 true，
+   * 菜单关闭后经 onDisappear 复位 false（V1 没有 $$ 对 bindMenu.isShow 的
+   * 双向绑定，手动复位是最稳写法；不复位会导致第二次点击 true→true 无变化、
+   * 菜单再也弹不出）。
+   */
+  @State moreMenuOpen: boolean = false;
   /**
    * 歌单头部区实测高（vp，bottomBuilder 内层根节点 onAreaChange 回写，随简介行数浮动）。
    * ⚠️ 初值必须为 0：歌单数据来自本地缓存，
@@ -188,6 +198,8 @@ export struct PlaylistDetail {
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  /** 主 CTA 实底上的深字色（播放全部 themePrimary 底 + themeOn 字，设计方案 §2 规则 2） */
+  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
   /** 横竖屏（Index 常驻注册写入）：横屏宽屏时曲目条目两列显示 */
@@ -250,6 +262,15 @@ export struct PlaylistDetail {
    * 未滚动到的曲目也要能搜到（UpSpacePage 只过滤已加载分页，那是远端分页；此处有意差异）。
    */
   @State filteredTracks: Track[] = [];
+
+  // ===== 头部操作区三层（设计方案 §2/§3：L1 常态主行 / L2 搜索态 / L3 更多菜单） =====
+  /** 搜索态：点 🔍 进入（整行原位切换为独占输入行），取消 / 返回键退出（§3.4） */
+  @State searchMode: boolean = false;
+  /**
+   * 菜单排序项 ✓ 回显（会话级，无持久化）：自动排序本是一次性动作
+   * （sortPlaylistTracks 注释口径），✓ 只是当次会话的回显，重进页面即清。
+   */
+  @State lastSortKey: PlaylistSortKey | null = null;
 
   // ===== 曲目多选（头部「选择」按钮进入，批量加入歌单 / 下载 / 移除） =====
   /** 多选模式：true = 头部「选择」已进入，点条目切换选中、搜索区淡出为动作区、「⋯」隐藏 */
@@ -504,6 +525,25 @@ export struct PlaylistDetail {
     this.tracks = this.activeSource().slice(0, PD_REVEAL_PAGE_SIZE);
   }
 
+  /**
+   * 点 🔍 进入搜索态（L2，设计方案 §3.4）：整行原位切换为独占输入行 +
+   * 取消按钮；若在多选先退出（常态 / 搜索 / 多选三态互斥）。
+   * 关键词从空起步 —— 取消 / 返回键出口都会清词，不存在「带着旧词进搜索态」。
+   */
+  private enterSearchMode(): void {
+    this.exitSelecting();
+    this.searchMode = true;
+  }
+
+  /**
+   * 搜索态统一出口（「取消」按钮 / 返回键，§3.4「退出」）：
+   * 清空关键词 → 收起搜索态 → 列表恢复全量。
+   */
+  private cancelSearch(): void {
+    this.clearSearch();
+    this.searchMode = false;
+  }
+
   // ===== 定位当前播放（标题行「定位」按钮 + 歌单页签「定位」下钻入参） =====
 
   /**
@@ -616,50 +656,12 @@ export struct PlaylistDetail {
   }
 
   /**
-   * 「排序」菜单项（bindMenu）：按名称（拼音升序，复用
-   * LibraryStore.compareByTitle 同款比较器）/ 按时长（降序）/ 按播放量（降序）/
-   * 按加入时间（降序，新在前；存量无戳条目首排时物化，见 materializeAddedAt）。
-   * 自动排序是一次性动作，不启用 titleSorted 持续规则（见 sortPlaylistTracks 注释）。
-   * 自建歌单（sourceKind === ''）末尾追加「去重」入口（见 confirmDedup）。
+   * 更多菜单排序项点击：✓ 回显（会话级）+ 执行自动排序。
+   * bindMenu 选中项后菜单自动收起，无需手动关闭。
    */
-  private sortMenuItems(): MenuElement[] {
-    const items: MenuElement[] = [
-      {
-        value: '按名称',
-        action: (): void => {
-          this.applyAutoSort('title', '已按名称排序');
-        }
-      },
-      {
-        value: '按时长',
-        action: (): void => {
-          this.applyAutoSort('duration', '已按时长排序');
-        }
-      },
-      {
-        value: '按播放量',
-        action: (): void => {
-          this.applyAutoSort('playCount', '已按播放量排序');
-        }
-      },
-      {
-        value: '按加入时间',
-        action: (): void => {
-          this.applyAutoSort('addedTime', '已按加入时间排序');
-        }
-      }
-    ];
-    // 去重只对自建歌单开放：订阅歌单内容随投稿自动重建、收藏夹镜像
-    // 由 B 站服务端决定，去重成果都会被下次同步覆盖，开放只会误导。
-    if (this.playlist !== null && this.playlist.sourceKind === '') {
-      items.push({
-        value: '去重',
-        action: (): void => {
-          this.confirmDedup();
-        }
-      });
-    }
-    return items;
+  private applySortFromMenu(sortKey: PlaylistSortKey, toastText: string): void {
+    this.lastSortKey = sortKey;
+    this.applyAutoSort(sortKey, toastText);
   }
 
   /** 执行自动排序并 toast 回执（歌单不存在 = 菜单打开期间被删，静默返回） */
@@ -1047,10 +1049,24 @@ export struct PlaylistDetail {
 
   // ===== 曲目多选核心（UpSpacePage 同款口径） =====
 
-  /** 进入多选（头部「选择」按钮）：选区从空起步，条目点击切换选中 */
+  /**
+   * 进入多选（面板「选择曲目」，§3.5）：
+   * · 先退搜索态并清关键词 —— 搜索框随 L2 卸载，若留着孤儿过滤词，
+   *   常态行下列表被无指示地筛过（旧 UI 搜索框常驻可回看，新 UI 必须清）；
+   * · 首次进入 toast 一次右侧图标语义（§3.6：图标化以「进多选时提示一次」补齐）。
+   */
   private enterSelecting(): void {
+    this.searchMode = false;
+    if (this.searchKeyword.length > 0) {
+      this.clearSearch();
+    }
     this.selecting = true;
     this.selectedIds = [];
+    const hinted: boolean = AppStorage.get<boolean>(STORE_SELECT_ICONS_HINT_SHOWN) ?? false;
+    if (!hinted) {
+      AppStorage.setOrCreate(STORE_SELECT_ICONS_HINT_SHOWN, true);
+      this.toast('已进入多选 · 右下角可加入歌单 / 下载 / 移除', 2200);
+    }
   }
 
   /** 切换选中（多选态点条目 / 点勾选槽位） */
@@ -1330,6 +1346,81 @@ export struct PlaylistDetail {
   }
 
   /**
+   * 更多菜单（⋯ bindMenu，与曲目条目「⋯」同一套下拉菜单形态）：
+   * 排序方式（4 项，当前项尾部 ✓）/ 去重（仅自建歌单）/ 拉取新投稿（仅订阅
+   * UP 歌单）/ 选择曲目（进多选）。
+   * · 条件项按歌单类型动态进出（收藏夹镜像禁排序、订阅歌单禁去重）；
+   * · MenuElement 无选中态 / 副标注，当前排序用尾部 ✓ 文本标记
+   *   （AppearanceSettingsPage 同款约定）；
+   * · 选中项菜单即收起，确认弹窗（去重）在菜单收起后叠加。
+   */
+  private moreMenuItems(): MenuElement[] {
+    const items: MenuElement[] = [];
+    const p: Playlist | null = this.playlist;
+    if (p === null) {
+      return items;
+    }
+    // 排序：可排 + 非空才有 —— 收藏夹镜像顺序由 B 站服务端决定（canReorder 闸门）、
+    // 空歌单没东西可排
+    if (this.canReorder() && p.tracks.length > 0) {
+      items.push({
+        value: this.lastSortKey === 'title' ? '按名称 ✓' : '按名称',
+        action: (): void => {
+          this.applySortFromMenu('title', '已按名称排序');
+        }
+      });
+      items.push({
+        value: this.lastSortKey === 'duration' ? '按时长 ✓' : '按时长',
+        action: (): void => {
+          this.applySortFromMenu('duration', '已按时长排序');
+        }
+      });
+      items.push({
+        value: this.lastSortKey === 'playCount' ? '按播放量 ✓' : '按播放量',
+        action: (): void => {
+          this.applySortFromMenu('playCount', '已按播放量排序');
+        }
+      });
+      items.push({
+        value: this.lastSortKey === 'addedTime' ? '按加入时间 ✓' : '按加入时间',
+        action: (): void => {
+          this.applySortFromMenu('addedTime', '已按加入时间排序');
+        }
+      });
+    }
+    // 去重：仅自建歌单 —— 订阅歌单随投稿重建 / 镜像由 B 站决定，成果会被覆盖
+    if (p.sourceKind === '') {
+      items.push({
+        value: '去重',
+        action: (): void => {
+          this.confirmDedup();
+        }
+      });
+    }
+    // 拉取新投稿：仅订阅 UP 歌单 —— 收藏夹镜像不能走（会拿 fav_ id 去请求
+    // UP 投稿接口，refreshUpTracks 内同一闸门）；拉取中点击由其
+    // upRefreshing 重入闸门挡住，文案切「正在拉取…」提示在途。
+    if (LibraryStore.isUpSubscription(p)) {
+      items.push({
+        value: this.upRefreshing ? '正在拉取…' : '拉取新投稿',
+        action: (): void => {
+          this.refreshUpTracks();
+        }
+      });
+    }
+    // 选择曲目：进多选（enterSelecting 内先退搜索态并清孤儿过滤词）
+    if (p.tracks.length > 0) {
+      items.push({
+        value: '选择曲目',
+        action: (): void => {
+          this.enterSelecting();
+        }
+      });
+    }
+    return items;
+  }
+
+  /**
    * 头部区（整体钉在悬浮固定栏内，不随列表滚动）：
    * 左侧 96vp 圆角封面（CoverImage 自带空图 / 失败占位），
    * 右侧 28fp 大标题 + 元信息行 + 可选简介；封面行下方是操作按钮行
@@ -1365,7 +1456,7 @@ export struct PlaylistDetail {
           }
           if (this.descText.length > 0) {
             Text(this.descText)
-              .fontSize(12)
+              .fontSize(11)
               .fontColor($r('app.color.text_tertiary'))
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -1379,178 +1470,189 @@ export struct PlaylistDetail {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      // 操作按钮行：随头部区一起滚动（用户明确不要钉在顶部固定栏）。
-      // 行内 Stack 整行换层：常态行 = 播放全部 + 选择 + 拉取新投稿 + 排序 + 搜索框，
-      // 多选行 = 完成 + 全选 / 加入歌单 / 下载 / 移除。
-      // · 播放全部：有曲目才显示；样式与 RecentPage 逐字一致（真机约束，勿动）。
-      // · 拉取新投稿：订阅歌单（upMid 非空）才显示，空的订阅歌单也保留它 ——
-      //   正好是一键填歌单的入口。
-      // ⚠️ 不用「按钮 visibility 摘布局 + 尾部槽位换层」旧结构：退出多选时常态
-      //   按钮瞬时回位，尾部槽位连同正在淡出的动作行一起被推向右侧（真机表现：
-      //   动作组「向右消失」而非淡出）。整行换层让两层几何在转场期间恒定，
-      //   交叉纯淡出（CollectionDetailPage 槽位行 B 同款模式）。
-      // ⚠️ 隐藏层必须条件渲染（不挂载），不能双层叠放 + 透明层：
-      //   HitTestMode.None 只豁免容器自身，子按钮仍响应点击（真机复现：
-      //   常态点搜索框位置误触透明的「加入歌单」/「移除」，搜索框要点多次）。
-      Row({ space: 8 }) {
-        if (this.playlist && this.playlist.tracks.length > 0) {
-        Stack() {
-        if (!this.selecting) {
-        // 常态行：播放全部 + 选择 + 拉取新投稿 + 排序 + 搜索框
-        Row({ space: 8 }) {
-          // 真机要求：与 RecentPage 播放全部逐字一致（浅粉底 + 粉字 + 沉浸光感）
-          Button('播放全部', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              if (this.playlist) {
-                this.player.playAll(this.playlist.tracks);
+      // 操作行三层重构（设计方案 §3）：Stack 固定高 36 内三态条件渲染 +
+      // OPACITY 交叉淡出（SEARCH_MODE_MS）—— 隐藏层真不挂载（HitTestMode.None
+      // 透明层误触的坑见 §6②），退场节点脱离布局由固定高兜住（§6①）。
+      // · 常态行 = 播放全部主 CTA（品牌色实底 + themeOn 深字，§2 规则 2）+ 🔍 + ⋯，
+      //   排序 / 去重 / 拉取新投稿 / 选择曲目全收进 ⋯ 面板（L3）；
+      // · 搜索行 = SearchBox 独占 + 取消（搜索是「模式」不是控件，§2 规则 1）；
+      // · 多选行 = 完成 / 全选 + 右侧图标化批量动作（§3.6）。
+      Stack() {
+        // ── 常态行（L1）──
+        if (!this.selecting && !this.searchMode) {
+          Row({ space: 8 }) {
+            // 主 CTA：有曲目才显示；layoutWeight(1) 吃掉全部剩余宽度
+            if (this.playlist && this.playlist.tracks.length > 0) {
+              Button() {
+                Row({ space: 6 }) {
+                  SymbolGlyph($r('sys.symbol.play_fill'))
+                    .fontSize(15)
+                    .fontColor([this.themeOn])
+                  Text('播放全部')
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(this.themeOn)
+                }
+              }
+              .type(ButtonType.Normal)
+              .height(ACTION_ROW_H)
+              .borderRadius(10)
+              .backgroundColor(this.themePrimary)
+              .layoutWeight(1)
+              .onClick((): void => {
+                if (this.playlist) {
+                  this.player.playAll(this.playlist.tracks);
+                }
+              })
+            }
+            // 🔍 搜索入口（L2 的门）：空歌单没有可搜内容，不显示
+            if (this.playlist && this.playlist.tracks.length > 0) {
+              HeaderIconButton({
+                icon: $r('sys.symbol.magnifyingglass'),
+                accessibilityLabel: '搜索歌单内歌曲',
+                onClickAction: (): void => {
+                  this.enterSearchMode();
+                }
+              })
+            }
+            // ⋯ 更多入口（L3 菜单）：位置恒定在这一行最右（§2 规则 3），
+            // 下拉菜单与曲目条目「⋯」同一套弹窗形态（排序 / 去重 / 拉取新投稿 /
+            // 选择曲目）。⚠️ 必须 isShow 态驱动重载（API 11，UpSpacePage 真机
+            // 实测结论）：无 isShow 的重载靠「点击锚点」触发菜单，但本锚点是
+            // 自定义组件、内部 Button 根节点自带 onClick 手势，子节点赢得手势
+            // 仲裁后菜单永远收不到点击（真机实测：点了没反应）；态驱动下点击经
+            // onClickAction 显式置 moreMenuOpen，菜单锚定本组件弹出。
+            HeaderIconButton({
+              icon: $r('sys.symbol.more'),
+              accessibilityLabel: '更多歌单操作',
+              onClickAction: (): void => {
+                // 菜单可能为空（歌单未加载）：空数组不弹空气泡
+                if (this.moreMenuItems().length > 0) {
+                  this.moreMenuOpen = true;
+                }
               }
             })
-        // 选择：多选入口（完成在多选行最前，两行整行交叉淡出）
-        if (this.playlist && this.playlist.tracks.length > 0) {
-          Button('选择', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.enterSelecting();
+            .bindMenu(this.moreMenuOpen, this.moreMenuItems(), {
+              // placement 显式 BottomRight（全局统一更多菜单方向）：右缘锚点默认
+              // BottomLeft 向右展开必超屏 → 走「自动调整」路径弹到左侧
+              //（PlaylistsTabBar 顶栏 ⋮ 同款结论）
+              placement: Placement.BottomRight,
+              onDisappear: (): void => {
+                this.moreMenuOpen = false;
+              }
             })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
-        // 「拉取新投稿」只对订阅 UP 歌单开放；收藏夹镜像走同步页的「立即同步」，
-        // 不能出现在这里（会把 fav_ id 当 UP mid 去请求）
-        if (this.playlist && LibraryStore.isUpSubscription(this.playlist)) {
-          Button(this.upRefreshing ? '正在拉取…' : '拉取新投稿', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .enabled(!this.upRefreshing)
-            .onClick((): void => {
-              this.refreshUpTracks();
+        // ── 搜索行（L2，§3.4）：SearchBox 独占 + 取消 ——
+        // 本页纯本地过滤，键盘搜索键无远程动作（onSubmit 空实现仅收键盘）；
+        // 输入即过滤（200ms 防抖，见 onKeywordChanged），框内 × 清除，
+        // 「取消」与返回键统一走 cancelSearch（清词收起、列表恢复全量）。
+        if (this.searchMode) {
+          Row({ space: 8 }) {
+            SearchBox({
+              placeholder: '搜索歌单内歌曲',
+              keyword: this.searchKeyword,
+              clearVisible: this.searchKeyword.trim().length > 0,
+              onKeywordChange: (v: string): void => {
+                this.searchKeyword = v;
+                this.onKeywordChanged();
+              },
+              onSubmit: (): void => {
+              },
+              onClear: (): void => {
+                this.clearSearch();
+              }
             })
+              .layoutWeight(1)
+            Button('取消', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(ACTION_ROW_H)
+              .padding({ left: 12, right: 4 })
+              .backgroundColor(Color.Transparent)
+              .fontColor(this.themePrimary)
+              .onClick((): void => {
+                this.cancelSearch();
+              })
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
-        // 「排序」入口：长按拖动排序管「手动微调」，这颗按钮管
-        // 「一键排序」（按名称拼音升序 / 按时长降序 / 按播放量降序，见 sortMenuItems）。
-        // 与拖动同一闸门（canReorder）：收藏夹镜像顺序由 B 站服务端决定，不开放；
-        // 空歌单没东西可排，不显示。
-        if (this.canReorder() && this.playlist && this.playlist.tracks.length > 0) {
-          Button('排序', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .bindMenu(this.sortMenuItems())
-        }
-        // 搜索框（尾部 layoutWeight 1 收窄适应）：输入即本地过滤歌单内曲目
-        //（标题 / 歌手，离线可用；过滤重算 200ms 防抖，见 onKeywordChanged）；
-        // 框内右侧 × = 清除。无「搜索」按钮 —— 歌单数据全在本地，没有远程搜索。
-        // UI 收口在 SearchBox 共享组件（材质 / × 清除逻辑三页同一份实现）。
-          SearchBox({
-            placeholder: '搜索歌单内歌曲',
-            keyword: this.searchKeyword,
-            clearVisible: this.searchKeyword.trim().length > 0,
-            onKeywordChange: (v: string): void => {
-              this.searchKeyword = v;
-              this.onKeywordChanged();
-            },
-            onClear: (): void => {
-              this.clearSearch();
-            }
-          })
-          .layoutWeight(1)
-        }
-        .width('100%')
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
-        }
-        // 多选行：完成 + 全选 / 加入歌单 / 下载 / 移除（与常态行整行交叉淡出）。
-        // 动作按钮不带计数（窄屏放不下，空选区由各动作方法 toast 兜底）；
-        // 动作按钮左右 padding 收紧到 10vp：多选行 5 元素，
-        // 默认 16vp padding 在 360vp 窄屏放不下。
+        // ── 多选行（§3.6）：完成 / 全选文字按钮 + 右侧图标化批量动作
+        // （＋ 加入歌单 / ↓ 下载 / 🗑 移除）—— 5 个文字按钮在 316vp 可用宽已贴边
+        // （约 314vp），任一文案变长（「取消全选」）即溢出；图标化后留出 100+ 余量。
+        // 图标语义由进入多选时的 toast 补齐（enterSelecting，会话级一次）。
         if (this.selecting) {
-        Row({ space: 8 }) {
-          Button('完成', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.exitSelecting();
+          Row({ space: 8 }) {
+            Button('完成', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.exitSelecting();
+              })
+            Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
+              .fontSize(13)
+              .height(32)
+              .borderRadius(BUTTON_RADIUS_VP)
+              .padding({ left: 10, right: 10 })
+              .backgroundColor(this.themeSurface)
+              .fontColor(this.themePrimary)
+              .attributeModifier(this.buttonMaterial)
+              .onClick((): void => {
+                this.toggleSelectAll();
+              })
+            Blank()
+              .layoutWeight(1)
+            HeaderIconButton({
+              icon: $r('sys.symbol.plus'),
+              accessibilityLabel: '加入歌单',
+              onClickAction: (): void => {
+                this.addSelectedToPlaylist();
+              }
             })
-          Button(this.isAllSelected() ? '取消全选' : '全选', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.toggleSelectAll();
+            HeaderIconButton({
+              icon: $r('sys.symbol.arrow_down_to_line'),
+              accessibilityLabel: '下载',
+              onClickAction: (): void => {
+                this.confirmDownloadSelected();
+              }
             })
-          Button('加入歌单', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.addSelectedToPlaylist();
+            // 移除放最后：破坏性操作与安全操作分开（trackMenuItems 同款原则）
+            HeaderIconButton({
+              icon: $r('sys.symbol.trash'),
+              accessibilityLabel: '从歌单移除',
+              onClickAction: (): void => {
+                this.confirmRemoveSelected();
+              }
             })
-          Button('下载', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.confirmDownloadSelected();
-            })
-          // 移除放最后：破坏性操作与安全操作分开（trackMenuItems 同款原则）
-          Button('移除', { type: ButtonType.Normal })
-            .fontSize(13)
-            .height(32)
-            .borderRadius(BUTTON_RADIUS_VP)
-            .padding({ left: 10, right: 10 })
-            .backgroundColor(this.themeSurface)
-            .fontColor(this.themePrimary)
-            .attributeModifier(this.buttonMaterial)
-            .onClick((): void => {
-              this.confirmRemoveSelected();
-            })
-        }
-        .width('100%')
-        .transition(TransitionEffect.OPACITY
-          .animation({ duration: PD_SELECT_FADE_MS, curve: Curve.EaseInOut }))
-        }
-        }
-        // ⚠️ 固定高度（faqs-arkui-384 同款结论）：换层期间退场节点脱离布局，
-        // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 32 = 按钮高。
-        .layoutWeight(1)
-        .height(32)
+          }
+          .width('100%')
+          .transition(TransitionEffect.OPACITY
+            .animation({ duration: SEARCH_MODE_MS, curve: Curve.EaseInOut }))
         }
       }
+      // ⚠️ 固定高度（faqs-arkui-384 同款结论，§6①）：换层期间退场节点脱离布局，
+      // 容器无固定尺寸会塌缩、退场动画按塌缩位置渲染。固定 36 = ACTION_ROW_H。
       .width('100%')
+      .height(ACTION_ROW_H)
       .margin({ top: 12 })
-      .alignItems(VerticalAlign.Center)
+
+      // 搜索态匹配计数行（§3.4）：列表上方一行「匹配 N 首」—— 让用户知道是
+      // 「被筛过了」而不是「歌单变短了」；头部区高由 onAreaChange 实测机制自动跟随。
+      if (this.searchMode && this.searchKeyword.trim().length > 0) {
+        Text(`匹配 ${this.filteredTracks.length} 首`)
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+          .margin({ top: 8 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -2048,10 +2150,15 @@ export struct PlaylistDetail {
     .customTransition((op: NavigationOperation, isEnter: boolean): Array<NavDestinationTransition> | undefined => {
       return this.navTransitionDelegate(op, isEnter);
     })
-    // 系统返回拦截：多选态先退出多选（选区清空，留在本页）；否则播放页 overlay
+    // 系统返回拦截：搜索态先退搜索态（清词收起，§3.4「返回键先退搜索态
+    // 不退页面」）；多选态再退出多选（选区清空，留在本页）；否则播放页 overlay
     // 打开时吞掉返回并发收起请求（留在本页），再否则走默认 pop —— 详见
     // utils/SubPageBackPress。
     .onBackPressed((): boolean => {
+      if (this.searchMode) {
+        this.cancelSearch();
+        return true;
+      }
       if (this.selecting) {
         this.exitSelecting();
         return true;

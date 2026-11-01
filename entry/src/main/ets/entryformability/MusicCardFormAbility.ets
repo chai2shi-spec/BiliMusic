@@ -92,7 +92,8 @@ export default class MusicCardFormAbility extends FormExtensionAbility {
           width: cardWidth,
           height: cardHeight
         },
-        duration: OVERFLOW_DURATION_MS
+        duration: OVERFLOW_DURATION_MS,
+        useDefaultAnimation: false
       }).then((): void => {
         hilog.info(0x0000, TAG, 'requestOverflow result succeed');
       }).catch((error: BusinessError) => {

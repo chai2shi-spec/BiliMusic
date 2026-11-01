@@ -192,6 +192,26 @@ export const LIST_FOOTER_HEIGHT_VP: number = 48;
 export const SEARCH_FILTER_DEBOUNCE_MS: number = 200;
 
 /**
+ * ══════════ 头部操作区三层重构（design/头部操作区重构-设计方案.md）══════════
+ *
+ * 三个详情页（歌单详情 / UP 主页 / 合集分 P）操作行按「动作语义」分三层：
+ * L1 主行（唯一主 CTA + 36×36 图标按钮）、L2 搜索态（点 🔍 整行原位切换）、
+ * L3 更多面板（bindSheet 收纳低频动作）。宽度分配由设计稿实测：
+ * 356vp 画布 / 316vp 可用宽下，旧结构歌单详情最坏固定占位 329vp（搜索框 -13）、
+ * UP 主页 290vp（搜索框 26）；新结构主 CTA 228 / 162，搜索态输入框 278。
+ */
+/** L1 主行高（vp）：主 CTA 与图标按钮同高，整行固定防换层塌缩 */
+export const ACTION_ROW_H: number = 36;
+/** 图标按钮视觉尺寸（vp，36×36）：不写 44 —— 44 会撑高行、把头部往下推 */
+export const ICON_BTN_SIZE: number = 36;
+/** 图标按钮命中区（vp）：responseRegion 外扩到 44（最小触达边长），不改布局 */
+export const ICON_BTN_HIT: number = 44;
+/** 常态 ↔ 搜索态交叉淡出时长（ms，EaseInOut） */
+export const SEARCH_MODE_MS: number = 160;
+/** 更多面板（bindSheet）标准行高（vp） */
+export const SHEET_ROW_H: number = 44;
+
+/**
  * ══════════ 搜索页下拉刷新（骨架接管）══════════
  *
  * 刷新指示器复用 SkeletonTrackItem，不新增任何视觉元素：下拉时骨架行从

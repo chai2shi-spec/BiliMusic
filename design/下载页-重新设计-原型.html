@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>下载页 · 重新设计 · 交互原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#0E0E12;color:#EDEDF2;padding:34px 40px 48px}
+:root{--brand:#FB7299;--deepL:#C2185B;--deepD:#FF8BAC;--surL:#FFF1F5;--surD:#33222B;--on:#3D0018;
+  --n-bgpage:#121216;--n-bgcard:#1E1E24;--n-divider:#33333C;
+  --n-tp:#F5F5F7;--n-ts:#ABABB5;--n-tt:#83838F;--n-td:#55555F;
+  --n-press:rgba(255,255,255,.08);--n-track:#2A2A32}
+
+.head{max-width:1000px;margin:0 auto 24px}
+.head h1{font-size:24px;font-weight:700;margin:0 0 9px}
+.head p{margin:0;font-size:13.5px;line-height:22px;color:#9A9AA6;max-width:940px}
+.head b{color:#E8E8F0}
+.tools{display:flex;gap:10px;align-items:center;margin-top:14px}
+.lbl{font-size:12px;color:#7E7E8C}
+.seg{display:flex;background:#22222A;border-radius:9px;padding:3px;gap:2px}
+.seg button{background:transparent;border:0;color:#9A9AA6;font-size:12px;font-family:inherit;
+  padding:4px 12px;border-radius:7px;cursor:pointer}
+.seg button.on{background:#3A3A46;color:#fff}
+
+.grid{display:flex;flex-wrap:wrap;gap:32px 44px;justify-content:center;max-width:920px;margin:0 auto}
+.cell{width:376px}
+.cap{margin-top:12px;font-size:12.5px;line-height:19.5px;color:#9A9AA6}
+.cap b{color:#E8E8F0;font-weight:600}
+.tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;margin-right:6px;
+  font-weight:600;vertical-align:1px}
+.tag.bad{background:rgba(229,117,117,.18);color:#E57575}
+.tag.fix{background:rgba(72,187,120,.18);color:#48BB78}
+.tag.warn{background:rgba(217,130,43,.18);color:#D9822B}
+
+/* ===== 手机（内容宽 360，按真机 360vp 绘制） ===== */
+.phone{width:376px;height:796px;position:relative;border-radius:34px;background:#000;
+  border:8px solid #2A2A31;overflow:hidden;flex:none;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  --deep:var(--deepD);--surface:var(--surD);--bg:var(--n-bgpage)}
+.phone.light{--n-bgpage:#F5F5F5;--n-bgcard:#FFF;--n-divider:#E8E8EC;
+  --n-tp:#1A1A1A;--n-ts:#6B6B70;--n-tt:#8A8A90;--n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06);--n-track:#E6E6EA;--deep:var(--deepL);--surface:var(--surL)}
+
+.sb{position:absolute;top:0;left:0;right:0;height:44px;z-index:12;display:flex;
+  align-items:center;justify-content:space-between;padding:0 22px 0 26px;
+  font-size:12px;font-weight:600;color:var(--n-tp);background:var(--n-bgpage)}
+.sb .ic{display:flex;gap:5px;align-items:center;font-size:10px;color:var(--n-ts)}
+
+.body{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--n-bgpage);padding-top:44px}
+
+/* 标题行 56 */
+.tb{height:56px;display:flex;align-items:center;padding:0 16px;position:relative;z-index:11;
+  background:var(--n-bgpage)}
+.tb .back{width:44px;height:44px;margin-left:-8px;flex:none;display:flex;align-items:center;
+  justify-content:center;font-size:20px;color:var(--n-tp)}
+.tb .twrap{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;margin-left:2px}
+.tb .tt{font-size:20px;font-weight:700;color:var(--n-tp);line-height:26px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .tsub{font-size:11px;line-height:15px;color:var(--n-tt);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .acts{display:flex;gap:8px;flex:none;align-items:center}
+
+/* 现状：13fp 文字胶囊 */
+.tbtn{height:32px;border-radius:8px;background:var(--surface);color:var(--deep);
+  font-size:13px;display:flex;align-items:center;justify-content:center;
+  padding:0 10px;flex:none;white-space:nowrap}
+/* 改后：36 图标钮 */
+.ibtn{width:36px;height:36px;border-radius:10px;background:var(--surface);color:var(--deep);
+  display:flex;align-items:center;justify-content:center;font-size:16px;flex:none}
+.ibtn.off{background:var(--n-divider);color:var(--n-td)}
+
+/* 列表 */
+.row{display:flex;align-items:center;padding:10px 4px 10px 16px;position:relative;
+  min-height:84px}
+.row.sub{padding-left:44px}
+.subln{position:absolute;left:30px;top:0;bottom:0;width:1.5px;background:var(--n-divider);z-index:1}
+.cov{width:64px;height:64px;border-radius:8px;flex:none;position:relative;overflow:hidden;
+  background:linear-gradient(135deg,#3B4A6B,#6B5B8E 48%,#C86B8A)}
+.cov::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 25% 18%,rgba(255,255,255,.24),transparent 62%)}
+.cov.b{background:linear-gradient(135deg,#2E4B4A,#4A7C6B 55%,#8FB97A)}
+.cov.c{background:linear-gradient(135deg,#4B3B6B,#7E5B8E 50%,#B06B8A)}
+.cov.d{background:linear-gradient(135deg,#3B4A5B,#5B7E8E 50%,#8AA6B9)}
+.meta{flex:1;min-width:0;margin-left:12px}
+.rtline{display:flex;align-items:center;gap:6px}
+.rt{font-size:16px;line-height:21px;color:var(--n-tp);flex:1;min-width:0;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.rs{font-size:13px;line-height:17px;margin-top:4px;color:var(--n-ts);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rs.err{color:#E57575}
+.prog{height:4px;border-radius:2px;background:var(--n-track);margin-top:6px;overflow:hidden}
+.prog i{display:block;height:100%;background:var(--brand);border-radius:2px}
+.prog i.pz{background:#7E8B99}
+.more{width:44px;height:44px;flex:none;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tt);font-size:19px;margin-right:4px}
+.chev{width:18px;height:16px;flex:none;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tt);font-size:13px;line-height:1;margin-left:2px}
+.chev.closed{transform:rotate(-90deg)}
+
+/* 徽章：11fp / 高 18 / 圆角 9 / pad 6 —— 与歌单页「收藏夹」徽章同规格 */
+.bdg{flex:none;height:18px;border-radius:9px;padding:0 6px;font-size:11px;line-height:18px;
+  display:flex;align-items:center;background:var(--surface);color:var(--deep);
+  white-space:nowrap;font-weight:500}
+.bdg.gray{background:var(--n-divider);color:var(--n-ts);font-weight:400}
+.bdg.fail{background:rgba(229,117,117,.20);color:#E57575;font-weight:500}
+
+/* 勾选 */
+.row.sel{padding-left:16px}
+.selbox{width:44px;flex:none;display:flex;align-items:center;justify-content:center}
+.chk{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--n-td);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:transparent}
+.chk.on{background:var(--brand);border-color:var(--brand);color:var(--on);font-weight:700}
+
+/* 空态 */
+.empty{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:0 24px 40px}
+.empty .e1{font-size:16px;color:var(--n-ts)}
+.empty .e2{font-size:13px;color:var(--n-tt);margin-top:8px}
+.guide{width:260px;border-radius:12px;background:var(--n-bgcard);padding:14px 16px;margin-top:22px;
+  display:flex;flex-direction:column;gap:10px;
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset}
+.gstep{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--n-ts)}
+.gnum{width:18px;height:18px;border-radius:9px;background:var(--surface);color:var(--deep);
+  font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none}
+.gstep .ell{color:var(--n-tt)}
+
+/* 标注 */
+.pin{position:absolute;z-index:20;background:#E5484D;color:#fff;font-size:10px;font-weight:700;
+  border-radius:6px;padding:3px 7px;white-space:nowrap;box-shadow:0 4px 12px rgba(229,72,77,.4)}
+.pin.g{background:#2F9E58;box-shadow:0 4px 12px rgba(47,158,88,.4)}
+.pin.a{background:#D9822B;box-shadow:0 4px 12px rgba(217,130,43,.4)}
+.ring{position:absolute;border:1.5px dashed #E5484D;border-radius:8px;z-index:19;pointer-events:none}
+.ring.g{border-color:#2F9E58}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>下载页 · 重新设计（对齐歌单页语言）</h1>
+  <p>下载页是<b>二级页</b>（从歌单页标题行 ↓ 图标进入），不是第四个 tab。它其实<b>不挤</b>——首屏 8.2 行，
+    比歌单页的 7.4 行还多。问题全在<b>「信息怎么说」</b>：状态词挤掉了最精确的进度、组头看不出能展开、多选按钮在 360 屏溢出。</p>
+  <div class="tools">
+    <span class="lbl">配色</span>
+    <div class="seg" id="modeSeg">
+      <button class="on" onclick="setMode('dark')">深色</button>
+      <button onclick="setMode('light')">浅色</button>
+    </div>
+    <span class="lbl">原型按 360vp 真实内容宽绘制 —— 截图里的截断是真的在截断</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ============ 屏 1 · 现状 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>21:04</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="back">‹</div>
+          <div class="twrap"><div class="tt">下载</div></div>
+          <div class="acts">
+            <div class="tbtn">选择</div>
+            <div class="tbtn">全部开始</div>
+            <div class="tbtn">全部暂停</div>
+          </div>
+        </div>
+
+        <!-- 组头 1（歌单卡，全完成） -->
+        <div class="row">
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">夜航星 2026 精选集</div></div>
+            <div class="rs">5 首  ·  已完成 · 共 5 首</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 单曲 · 下载中（真实截断） -->
+        <div class="row">
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">海底</div></div>
+            <div class="rs">下载中 42%  ·  1.2 MB/s  ·  3.4MB/8.0MB</div>
+            <div class="prog"><i style="width:42%"></i></div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 单曲 · 已完成 -->
+        <div class="row">
+          <div class="cov c"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">起风了</div></div>
+            <div class="rs">已完成  ·  320kbps  ·  8.4MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 组头 2（合集，全完成） -->
+        <div class="row">
+          <div class="cov d"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">某 UP 主投稿合集</div></div>
+            <div class="rs">3 个分P  ·  已完成 · 共 3 首</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <div class="row">
+          <div class="cov c"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">惑</div></div>
+            <div class="rs">已完成  ·  176kbps  ·  6.1MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <div class="row">
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">不眠</div></div>
+            <div class="rs">已完成  ·  320kbps  ·  7.8MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <div class="row">
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">星海</div></div>
+            <div class="rs err">WiFi 未连接，已暂停</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <div class="ring" style="left:135px;top:53px;width:212px;height:38px"></div>
+        <div class="ring" style="left:89px;top:222px;width:222px;height:23px"></div>
+        <div class="ring" style="left:286px;top:370px;width:26px;height:27px"></div>
+
+        <div class="pin" style="left:12px;top:694px">① 三胶囊 206vp · 占 63% · 粉字分不清能否点</div>
+        <div class="pin" style="left:12px;top:720px">② 241 &gt; 216 截断 · 组头无箭头且文案重复</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag bad">现状</span><b>三个问题同框</b>——标题行三个文字胶囊吃掉 63% 宽度；
+      下载中的状态行 241vp 超出可用 216vp，被省略号切掉的正巧是「已经下了多少」；
+      两个组头都看不出能点开，文案还把「5 首」说了两遍。</div>
+  </div>
+
+  <!-- ============ 屏 2 · 方案 A ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>21:04</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="back">‹</div>
+          <div class="twrap">
+            <div class="tt">下载</div>
+            <div class="tsub">23 首 · 1.24 GB · 2 个下载中</div>
+          </div>
+          <div class="acts">
+            <div class="ibtn">❚❚</div>
+            <div class="ibtn">☑</div>
+            <div class="ibtn">⋯</div>
+          </div>
+        </div>
+
+        <!-- 组头 · 歌单卡 -->
+        <div class="row">
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline">
+              <div class="rt">夜航星 2026 精选集</div>
+              <div class="bdg gray">歌单</div>
+              <div class="chev closed">▾</div>
+            </div>
+            <div class="rs">已缓存 5 首 · 42.1MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 单曲 · 下载中 -->
+        <div class="row">
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline">
+              <div class="rt">海底</div>
+              <div class="bdg">42%</div>
+            </div>
+            <div class="rs">1.2 MB/s · 3.4MB/8.0MB</div>
+            <div class="prog"><i style="width:42%"></i></div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 单曲 · 已完成（无徽章） -->
+        <div class="row">
+          <div class="cov c"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">起风了</div></div>
+            <div class="rs">320kbps · 8.4MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 组头 · 合集（展开态） -->
+        <div class="row">
+          <div class="cov d"></div>
+          <div class="meta">
+            <div class="rtline">
+              <div class="rt">某 UP 主投稿合集</div>
+              <div class="bdg gray">合集</div>
+              <div class="chev">▾</div>
+            </div>
+            <div class="rs">已缓存 3 个分P · 28.6MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 子行（带竖线） -->
+        <div class="row sub">
+          <div class="subln"></div>
+          <div class="cov c" style="width:64px;height:64px"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">P1 · 夜航星</div></div>
+            <div class="rs">320kbps · 9.2MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+        <div class="row sub">
+          <div class="subln"></div>
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">P2 · 沉入海底</div></div>
+            <div class="rs">320kbps · 9.6MB</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <!-- 失败 -->
+        <div class="row">
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline">
+              <div class="rt">星海</div>
+              <div class="bdg fail">失败</div>
+            </div>
+            <div class="rs err">WiFi 未连接，已暂停</div>
+          </div>
+          <div class="more">⋯</div>
+        </div>
+
+        <div class="ring g" style="left:51px;top:75px;width:172px;height:21px"></div>
+        <div class="ring g" style="left:217px;top:51px;width:130px;height:42px"></div>
+        <div class="ring g" style="left:270px;top:199px;width:41px;height:24px"></div>
+        <div class="ring g" style="left:245px;top:372px;width:66px;height:24px"></div>
+
+        <div class="pin g" style="left:12px;top:694px">① 副行 11fp（同 plSubtitle）· 三图标钮</div>
+        <div class="pin g" style="left:12px;top:720px">② 状态进徽章 · 类型徽章 + ▾ · 子行竖线</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">方案 A</span><b>信息层重构，几何零改动</b>——标题行加 11fp 统计副行、
+      三个 13fp 文字胶囊换成 36×36 图标钮（与歌单页 <code>[↓][+][⋮]</code> 同规格）；
+      状态从句子提成徽章，副行只剩数据；组头补类型徽章与展开箭头。
+      <br><b>行高全部不变（84 / 92），首屏仍是 8.2 行 —— 不牺牲容量。</b></div>
+  </div>
+
+  <!-- ============ 屏 3 · 多选态 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>21:04</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="back">‹</div>
+          <div class="twrap"><div class="tt">已选 3</div></div>
+          <div class="acts">
+            <div class="tbtn">取消全选</div>
+            <div class="tbtn">完成</div>
+            <div class="ibtn">⋯</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk on">✓</div></div>
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">夜航星 2026 精选集</div></div>
+            <div class="rs">已缓存 5 首 · 42.1MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk on">✓</div></div>
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">海底</div></div>
+            <div class="rs">320kbps · 8.0MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk"></div></div>
+          <div class="cov c"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">起风了</div></div>
+            <div class="rs">320kbps · 8.4MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk on">✓</div></div>
+          <div class="cov d"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">某 UP 主投稿合集</div></div>
+            <div class="rs">已缓存 3 个分P · 28.6MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk"></div></div>
+          <div class="cov c"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">惑</div></div>
+            <div class="rs">176kbps · 6.1MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk"></div></div>
+          <div class="cov b"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">不眠</div></div>
+            <div class="rs">320kbps · 7.8MB</div>
+          </div>
+        </div>
+
+        <div class="row sel">
+          <div class="selbox"><div class="chk"></div></div>
+          <div class="cov"></div>
+          <div class="meta">
+            <div class="rtline"><div class="rt">星海</div></div>
+            <div class="rs err">WiFi 未连接，已暂停</div>
+          </div>
+        </div>
+
+        <div class="ring g" style="left:51px;top:56px;width:126px;height:32px"></div>
+        <div class="ring g" style="left:171px;top:51px;width:176px;height:42px"></div>
+
+        <div class="pin g" style="left:12px;top:694px">① 264vp &lt; 360 ✓（现状 368vp 溢出 8vp）</div>
+        <div class="pin a" style="left:12px;top:720px">② 「已选 3」不再清空 · 动作收进 ⋮</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag warn">多选态</span><b>从 5 个文字按钮收到 3 个位</b>——现状
+      「完成+全选+重试+加入歌单+删除」实测 288vp，加返回键与边距共 368vp，在 360 屏上溢出 8vp，
+      且标题被清成空串、用户不知道自己在哪页。改后与歌单页多选完全同构：左侧「已选 N」，右侧
+      <code>[全选][完成][⋮]</code>。</div>
+  </div>
+
+  <!-- ============ 屏 4 · 空态 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>21:04</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="back">‹</div>
+          <div class="twrap"><div class="tt">下载</div></div>
+        </div>
+
+        <div class="empty">
+          <div class="e1">还没有下载任务</div>
+          <div class="e2">下载的歌曲会保存在本机，无网也能听</div>
+          <div class="guide">
+            <div class="gstep"><div class="gnum">1</div><span>搜索歌曲、歌单或 UP 主</span></div>
+            <div class="gstep"><div class="gnum">2</div><span>点歌曲右侧的 <span class="ell">⋯</span></span></div>
+            <div class="gstep"><div class="gnum">3</div><span>选「下载」</span></div>
+          </div>
+        </div>
+
+        <div class="ring g" style="left:47px;top:350px;width:266px;height:109px"></div>
+        <div class="ring" style="left:120px;top:281px;width:120px;height:29px"></div>
+
+        <div class="pin" style="left:12px;top:500px">① 现状两行说明文各 26/29 字 · 13fp 单行只放 24 字</div>
+        <div class="pin g" style="left:12px;top:526px">② 改后：引导卡 260 宽 / 圆角 12 / 三步带序号</div>
+        <div class="pin a" style="left:12px;top:552px">③ 不放 CTA —— 本页没有可执行的下载入口</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">空态</span><b>从「说明文」变成「行动指引」</b>——
+      现状三行纯文字里有两行会折行贴屏（没有 maxWidth 约束）。改后对齐歌单页空态的结构：
+      16fp 主文案 + 13fp 副文案 + 宽 260 引导卡，与歌单页三个 CTA 同宽同位。
+      <br>不放按钮的理由：歌单页空态的按钮都是「在本页能完成的事」，而下载动作发生在搜索页和歌单详情页。</div>
+  </div>
+
+</div>
+
+<script>
+function setMode(m){
+  document.querySelectorAll('.phone').forEach(function(p){
+    if(m==='light'){p.classList.add('light')}else{p.classList.remove('light')}
+  });
+  document.querySelectorAll('#modeSeg button').forEach(function(b,i){
+    b.classList.toggle('on', (m==='dark'&&i===0)||(m==='light'&&i===1));
+  });
+}
+(function(){
+  var m = /mode=(light|dark)/.exec(location.hash || '');
+  if (m) { setMode(m[1]); }
+})();
+</script>
+
+</body>
+</html>

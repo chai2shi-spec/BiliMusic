@@ -6,13 +6,16 @@
  * SearchStateHolder（页面 / 标题栏行同源）；每次进入本页都从全新状态开始
  * （aboutToAppear 清 holder，不恢复上次搜索的关键词与结果）。
  *
- * 结果形态（一次搜索并发返回两类，结果区分「视频 | UP主」页签独立展示）：
+ * 结果形态（一次搜索并发返回三类，结果区分「视频 | UP主 | 歌单」页签独立展示）：
  *   · 视频 —— 默认页签，原列表形态（TrackItem 长条 / 大封面网格 / 宽屏
  *     两列），分页 / 上拉加载 / 下拉刷新围绕它；
  *   · UP 主 —— 竖排列表行（圆形头像 + 昵称 + 认证小标 + 粉丝/投稿，
  *     点行进 UP 主页），searchUser 真分页（page / page_size=20，numPages
  *     判到底）。两页签共用一个 List（滚动 / 下拉刷新 / 顶栏模糊联动全
  *     复用），条目区按 resultTab 条件渲染，新搜索重置回「视频」页签。
+ *   · 歌单 —— 网易云歌单搜索（api/search/get/web type=1000，匿名 + 隐私
+ *     三件套），NeteasePlaylistRow 长条行，点行进 NeteasePlaylist 预览页；
+ *     offset 游标真分页（playlistCount 判到底）。
  *
  * 结构（RecentPage 二级页样板同款）：
  *   · HdsNavDestination + HDS 沉浸光感标题栏（titleBar.stackBuilder 承载
@@ -30,6 +33,8 @@
 
 import * as BilibiliApi from '../api/BilibiliApi';
 import { UserSearchResult, SearchResultItem } from '../api/BilibiliApi';
+import { searchNeteasePlaylists, NeteasePlaylistSummary, NeteasePlaylistSearchResult } from '../api/NeteaseApi';
+import { NeteasePlaylistRow } from '../components/NeteasePlaylistItem';
 import { Playlist, Track, VideoDetail, buildTrack, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { LibraryStore } from '../service/LibraryStore';
 import { TrackItem } from '../components/TrackItem';
@@ -47,7 +52,7 @@ import {
 } from '@kit.ArkUI';
 import { SearchStateHolder } from '../service/SearchStateHolder';
 import { NavStackHolder } from '../service/NavStackHolder';
-import { UpSpaceRouteParam } from '../service/NavRouteParams';
+import { UpSpaceRouteParam, NavRouteParamReader, SearchRouteParam } from '../service/NavRouteParams';
 import { SearchHistoryStore } from '../service/SearchHistoryStore';
 import { PLAYBACK_LOG_INFO, PLAYBACK_LOG_ERROR, recordPlaybackLog } from '../service/PlaybackLogStore';
 import { AppPreferences } from '../preferences/AppPreferences';
@@ -172,6 +177,8 @@ const UP_ROW_AVATAR_VP: number = 48;
 const UP_ROW_AVATAR_THUMB_PX: number = 128;
 /** UP 主搜索每页条数（searchUser 官方默认 page_size；视频仍用 SEARCH_PAGE_SIZE） */
 const USER_PAGE_SIZE: number = 20;
+/** 歌单搜索每页条数（网易云 type=1000 的 limit，offset 游标分页） */
+const NETEASE_SEARCH_PAGE_SIZE: number = 30;
 
 /** 诊断：SearchPage 实例号（排查「平板下 searchSubmit 绑到旧实例」） */
 let searchPageInstanceSeq: number = 0;
@@ -201,6 +208,14 @@ export struct SearchPage {
   @State searched: boolean = false;
   /** 诊断用实例号（aboutToAppear 分配） */
   private pageId: number = 0;
+  /**
+   * 进页自动搜索的关键词（听歌日记「周期标签」等带词入口）：
+   * aboutToAppear 读路由参数暂存，**onAppear 一次性消费**（同 searchSubmit
+   * 的防护层：aboutToAppear 阶段平板临时实例也会走，不能在那里发起搜索）。
+   */
+  private initialKeyword: string = '';
+  /** initialKeyword 一次性闸门：返回本页（onAppear 再次触发）不重搜 */
+  private initialSearchDone: boolean = false;
   /** 底部安全区高度（vp）：列表末尾让位要自己叠上这一份（含二级页悬浮播放条避让） */
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   /**
@@ -354,8 +369,25 @@ export struct SearchPage {
   /** 结果页签分段按钮条目：静态一次构造 */
   private resultSegItems: SegmentButtonV2Items = new SegmentButtonV2Items([
     { text: '视频' },
-    { text: 'UP主' }
+    { text: 'UP主' },
+    { text: '歌单' }
   ]);
+
+  /**
+   * 歌单搜索结果（网易云 type=1000）：与视频 / UP 主**同一次搜索并发返回**，
+   * 渲染在结果页签「歌单」的 NeteasePlaylistRow 竖排列表里（组件自带点击
+   * → NeteasePlaylist 预览页），offset 游标真分页（loadMoreNeteasePlaylists）。
+   */
+  @State @Watch('onListSourceChanged') playlistResults: NeteasePlaylistSummary[] = [];
+  /** 歌单页签列表数据源（LazyForEach 渲染）：与 userSource 同口径（@Watch reload） */
+  private playlistSource: ArrayDataSource<NeteasePlaylistSummary> =
+    new ArrayDataSource<NeteasePlaylistSummary>([]);
+  /** 歌单搜索 offset 游标（已取条数，翻页 +=） */
+  private playlistOffset: number = 0;
+  /** 歌单搜索服务端总数（playlistCount；0 = 未知，hasMore 放行试探一页） */
+  private playlistTotal: number = 0;
+  /** 歌单页签上拉加载更多进行中（onReachEnd 闸门与 footer 状态共用） */
+  @State playlistLoadingMore: boolean = false;
 
   /**
    * 请求序号（竞态保护）：快速连搜两次时，先发的那次可能后返回，
@@ -374,6 +406,8 @@ export struct SearchPage {
       this.resultPairs.sync();
     } else if (propName === 'userResults') {
       this.userSource.reload(this.userResults);
+    } else if (propName === 'playlistResults') {
+      this.playlistSource.reload(this.playlistResults);
     }
   }
 
@@ -382,6 +416,7 @@ export struct SearchPage {
     this.resultSource.reload(this.results);
     this.resultPairs.sync();
     this.userSource.reload(this.userResults);
+    this.playlistSource.reload(this.playlistResults);
   }
 
   /**
@@ -407,12 +442,15 @@ export struct SearchPage {
     this.loadingMore = false;
     this.searchPage = 1;
     this.searchTotalPages = 0;
-    // 结果页签与 UP 翻页状态一并归零（userResults 清空在上面，
-    // userSource 由下方 syncAllListSources 兜底）
+    // 结果页签与 UP / 歌单翻页状态一并归零（userResults / playlistResults 清空
+    // 在上面，userSource / playlistSource 由下方 syncAllListSources 兜底）
     this.resultTab = 'video';
     this.userPage = 1;
     this.userTotalPages = 0;
     this.userLoadingMore = false;
+    this.playlistOffset = 0;
+    this.playlistTotal = 0;
+    this.playlistLoadingMore = false;
     // @Watch 触发的数据源同步与这里显式同步双保险（aboutToAppear 同款口径）
     this.syncAllListSources();
     // 列表归位 + 顺带校准自绘顶栏模糊层进度
@@ -423,6 +461,11 @@ export struct SearchPage {
     // 每次进入都从头开始：不恢复上次的关键词与结果。
     // 重置逻辑与「清空输入框回初始页」共用 resetToLanding（见其注释）。
     this.resetToLanding();
+    // 带词入口（听歌日记周期标签等）：读参数暂存，onAppear 真正挂载后一次性
+    // 自动搜索（读参放这里是为了赶在 onAppear 之前就绪；临时实例只读不发请求）
+    const p: SearchRouteParam | null = NavRouteParamReader.readSearchParam(NavStackHolder.stack);
+    this.initialKeyword = p !== null ? p.keyword.trim() : '';
+    this.initialSearchDone = false;
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
@@ -613,7 +656,7 @@ export struct SearchPage {
 
   /** 结果区是否有可见内容（视频或 UP 主任一非空）：空态判定与下拉骨架闸门用。 */
   private hasAnyResult(): boolean {
-    return this.results.length > 0 || this.userResults.length > 0;
+    return this.results.length > 0 || this.userResults.length > 0 || this.playlistResults.length > 0;
   }
 
   /**
@@ -632,16 +675,18 @@ export struct SearchPage {
   }
 
   /**
-   * 合并搜索：同一关键词并发发起视频搜索（searchVideo）与 UP 主搜索
-   * （searchUser），各取第一页；视频落「视频」页签（分页 / 会话保持围绕
-   * 它），UP 主落「UP主」页签（翻页状态在此重置，后续上拉走 loadMoreUsers）。
+   * 合并搜索：同一关键词并发发起视频搜索（searchVideo）、UP 主搜索
+   * （searchUser）与网易云歌单搜索（searchNeteasePlaylists），各取第一页；
+   * 视频落「视频」页签（分页 / 会话保持围绕它），UP 主落「UP主」页签
+   * （翻页状态在此重置，后续上拉走 loadMoreUsers），歌单落「歌单」页签
+   * （游标在此重置，后续上拉走 loadMoreNeteasePlaylists）。
    *
-   * 竞态保护：searchSeq 作废制对两条请求**各自独立**生效 —— 任一响应返回
+   * 竞态保护：searchSeq 作废制对三条请求**各自独立**生效 —— 任一响应返回
    * 时号对不上（用户已清空 / 重新搜索 / 下拉刷新）就整体丢弃。
-   * `loading` 等两部分**都落定**才复位（pending 计数归零）：骨架屏盖住整个
+   * `loading` 等三部分**都落定**才复位（pending 计数归零）：骨架屏盖住整个
    * 合并搜索过程，不闪「视频先到、UP 后到」的中间态。
-   * UP 部分失败只记日志不打断：视频结果仍然可用，UP 缺席不该以
-   * 「搜索失败」的姿态打断用户（风控对两类接口的宽严程度不同）。
+   * UP / 歌单部分失败只记日志不打断：视频结果仍然可用，任一配角缺席不该以
+   * 「搜索失败」的姿态打断用户（风控对三类接口的宽严程度不同）。
    */
   private doSearch(): void {
     const kw: string = this.keyword.trim();
@@ -657,15 +702,16 @@ export struct SearchPage {
     // 先记历史再发请求：被风控 / 断网导致搜不出结果时，这次搜索同样算「搜过」，
     // 否则用户会遇到「明明搜过却不在历史里」。
     this.history = SearchHistoryStore.addSearchHistory(kw);
-    let pending: number = 2;
+    let pending: number = 3;
     let videoFailed: boolean = false;
     const settlePart = (): void => {
       pending--;
       if (pending === 0 && seq === this.searchSeq) {
         this.loading = false;
-        // 两类都空且视频没失败才提示「没搜到」：视频失败有自己的报错 toast，
-        // UP 单独缺席不构成「没搜到」。
-        if (this.results.length === 0 && this.userResults.length === 0 && !videoFailed) {
+        // 三类都空且视频没失败才提示「没搜到」：视频失败有自己的报错 toast，
+        // UP / 歌单单独缺席不构成「没搜到」（网易云与 B 站风控互不相干）。
+        if (this.results.length === 0 && this.userResults.length === 0
+          && this.playlistResults.length === 0 && !videoFailed) {
           this.toast('没有搜索到结果，请换个关键词或稍后再试', 2000);
         }
       }
@@ -719,11 +765,31 @@ export struct SearchPage {
       .then((): void => {
         settlePart();
       });
+    // ── 歌单部分：「歌单」页签数据（网易云第一页，游标在此重置）──
+    searchNeteasePlaylists(kw, NETEASE_SEARCH_PAGE_SIZE, 0)
+      .then((r: NeteasePlaylistSearchResult): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        this.playlistResults = r.playlists;
+        this.playlistOffset = r.playlists.length;
+        this.playlistTotal = r.total;
+        console.info(`[Search] playlist done id=${this.pageId} n=${r.playlists.length} total=${r.total}`);
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        console.error(`doSearch playlist failed: ${JSON.stringify(e)}`);
+      })
+      .then((): void => {
+        settlePart();
+      });
   }
 
   /**
-   * 下拉刷新：与 doSearch 同款两路并发（视频 + UP 主各刷新第一页），
-   * 不重记历史（刷新不算新搜索）。`refreshing` 等两部分都落定才复位
+   * 下拉刷新：与 doSearch 同款三路并发（视频 + UP 主 + 歌单各刷新第一页），
+   * 不重记历史（刷新不算新搜索）。`refreshing` 等三部分都落定才复位
    * （Refresh 的 $$ 双向绑定，不落回 false 刷新头不收起）。
    * seq 竞态保护：刷新在途时提交新搜索（doSearch 会 ++searchSeq）或
    * 再次刷新，旧响应必须整体丢弃；同时使同关键词在途的上拉翻页作废
@@ -737,7 +803,7 @@ export struct SearchPage {
       return;
     }
     const seq: number = ++this.searchSeq;
-    let pending: number = 2;
+    let pending: number = 3;
     const settlePart = (): void => {
       pending--;
       if (pending === 0) {
@@ -781,6 +847,25 @@ export struct SearchPage {
           return;
         }
         console.error(`refreshSearch user failed: ${JSON.stringify(e)}`);
+      })
+      .then((): void => {
+        settlePart();
+      });
+    searchNeteasePlaylists(kw, NETEASE_SEARCH_PAGE_SIZE, 0)
+      .then((r: NeteasePlaylistSearchResult): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        // 刷新整表换源：歌单游标归零重置
+        this.playlistResults = r.playlists;
+        this.playlistOffset = r.playlists.length;
+        this.playlistTotal = r.total;
+      })
+      .catch((e: Error): void => {
+        if (seq !== this.searchSeq) {
+          return;
+        }
+        console.error(`refreshSearch playlist failed: ${JSON.stringify(e)}`);
       })
       .then((): void => {
         settlePart();
@@ -848,13 +933,21 @@ export struct SearchPage {
    * 否则短列表在首帧布局时就会连环触发，一口气把后面几页全拉下来。
    */
   private onReachEnd(): void {
-    if (this.refreshing || this.loadingMore || this.loading || this.userLoadingMore) {
+    if (this.refreshing || this.loadingMore || this.loading || this.userLoadingMore
+      || this.playlistLoadingMore) {
       return;
     }
     // UP 页签：自己的翻页链路（空页 ≠ 到底、seq 竞态见 loadMoreUsers）
     if (this.resultTab === 'up') {
       if (this.userHasMore()) {
         this.loadMoreUsers();
+      }
+      return;
+    }
+    // 歌单页签：网易云 offset 游标翻页（空页收口见 loadMoreNeteasePlaylists）
+    if (this.resultTab === 'playlist') {
+      if (this.playlistHasMore()) {
+        this.loadMoreNeteasePlaylists();
       }
       return;
     }
@@ -987,6 +1080,73 @@ export struct SearchPage {
   }
 
   /**
+   * 歌单页签还有没有下一页：总数未知（0，接口没带 playlistCount）时先允许
+   * 试一页；真到底由服务端 playlistCount 判定（loadMore 空页会收口 total）。
+   */
+  private playlistHasMore(): boolean {
+    if (this.playlistResults.length === 0) {
+      return false;
+    }
+    if (this.playlistTotal <= 0) {
+      return true;
+    }
+    return this.playlistOffset < this.playlistTotal;
+  }
+
+  /**
+   * 歌单页签上拉加载更多（网易云 type=1000，offset 游标翻页）。
+   * seq 竞态保护与 loadMoreUsers 同口径（只读不自增）：翻页在途时提交新搜索
+   * 或下拉刷新，旧响应整体丢弃。空页 = 服务端没给更多：直接收口 total
+   * （footer 转「已经到底啦」），不报错 —— 网易云搜索到底就是空页。
+   */
+  private async loadMoreNeteasePlaylists(): Promise<void> {
+    const kw: string = this.searchKeyword.trim();
+    if (kw.length === 0) {
+      return;
+    }
+    this.playlistLoadingMore = true;
+    const seq: number = this.searchSeq;
+    try {
+      const nextOffset: number = this.playlistOffset;
+      const r: NeteasePlaylistSearchResult =
+        await searchNeteasePlaylists(kw, NETEASE_SEARCH_PAGE_SIZE, nextOffset);
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      if (r.playlists.length === 0) {
+        // 到底：收口 total，footer 转「已经到底啦」
+        this.playlistTotal = nextOffset;
+        return;
+      }
+      // 按 id 去重后增量 push（接口翻页偶发跨页重复；push 触发 @Watch →
+      // playlistSource 整表 reload，LazyForEach 只重建可视区）
+      const seen: Set<string> = new Set<string>();
+      for (let i = 0; i < this.playlistResults.length; i++) {
+        seen.add(this.playlistResults[i].id);
+      }
+      for (let i = 0; i < r.playlists.length; i++) {
+        const p: NeteasePlaylistSummary = r.playlists[i];
+        if (!seen.has(p.id)) {
+          seen.add(p.id);
+          this.playlistResults.push(p);
+        }
+      }
+      this.playlistOffset = nextOffset + r.playlists.length;
+      if (r.total > 0) {
+        this.playlistTotal = r.total;
+      }
+    } catch (e) {
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      console.error(`loadMoreNeteasePlaylists failed: ${JSON.stringify(e)}`);
+      this.toast('加载更多失败，请稍后重试', 1800);
+    } finally {
+      this.playlistLoadingMore = false;
+    }
+  }
+
+  /**
    * 加载中 / 空态的统一展示区。
    * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条，纯静态占位），
    * 占位形状对齐内容布局，加载完成内容「落位」不跳。
@@ -1040,7 +1200,7 @@ export struct SearchPage {
   }
 
   /**
-   * 结果页签分段行：「视频 | UP主」官方分段按钮（CapsuleSegmentButtonV2，
+   * 结果页签分段行：「视频 | UP主 | 歌单」官方分段按钮（CapsuleSegmentButtonV2，
    * B 站粉经 itemSelectedBackgroundColor 覆写，HistorySection 同一套语言）
    * + 右侧当前页签结果计数。只在搜出内容后渲染（build 内闸门）。
    * ⚠️ V2 分段按钮给多大渲染多大（均摊到各段），必须显式宽度。
@@ -1050,9 +1210,9 @@ export struct SearchPage {
     Row() {
       CapsuleSegmentButtonV2({
         items: this.resultSegItems,
-        selectedIndex: this.resultTab === 'up' ? 1 : 0,
+        selectedIndex: this.resultTab === 'up' ? 1 : (this.resultTab === 'playlist' ? 2 : 0),
         onItemClicked: (index: number): void => {
-          this.switchResultTab(index === 1 ? 'up' : 'video');
+          this.switchResultTab(index === 1 ? 'up' : (index === 2 ? 'playlist' : 'video'));
         },
         itemSelectedBackgroundColor: this.segColors().selectedBg,
         itemSelectedFontColor: this.segColors().selectedFont,
@@ -1070,14 +1230,16 @@ export struct SearchPage {
         itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
       })
         .height(32)
-        // 显式宽度：背板 4×2 + 「视频」(≈26+16) + 「UP主」(≈28+16)
-        .width(100)
+        // 显式宽度：背板 4×2 + 「视频」(≈26+16) + 「UP主」(≈28+16) + 「歌单」(≈26+16)
+        .width(148)
       Blank()
         .layoutWeight(1)
       // 当前页签结果数：翻页后增长，直观反馈「还能翻」
       Text(this.resultTab === 'video'
         ? `${this.results.length} 个`
-        : `${this.userResults.length} 个`)
+        : (this.resultTab === 'up'
+          ? `${this.userResults.length} 个`
+          : `${this.playlistResults.length} 个`))
         .fontSize(13)
         .fontColor($r('app.color.text_tertiary'))
     }
@@ -1340,6 +1502,60 @@ export struct SearchPage {
               .fontColor($r('app.color.text_tertiary'))
               .margin({ left: 8 })
           } else if (!this.userHasMore()) {
+            Text('已经到底啦')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          } else {
+            Text('上拉加载更多')
+              .fontSize(13)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+        }
+        .width('100%')
+        .height(LIST_FOOTER_HEIGHT_VP)
+        .justifyContent(FlexAlign.Center)
+      }
+    }
+  }
+
+  /**
+   * 歌单页签条目区：网易云歌单行（NeteasePlaylistRow，组件自带点击 →
+   * NeteasePlaylist 预览页）+ 加载更多状态条；空态（其它页签有内容时）
+   * 占位说明，三类都空由 SearchStateArea 整页空态接管。
+   */
+  @Builder
+  PlaylistTabContent(): void {
+    if (this.playlistResults.length === 0) {
+      ListItem() {
+        Text('没有找到相关歌单')
+          .fontSize(16)
+          .fontColor($r('app.color.text_secondary'))
+      }
+      .width('100%')
+      .margin({ top: 48 })
+    } else {
+      LazyForEach(
+        this.playlistSource,
+        (p: NeteasePlaylistSummary): void => {
+          ListItem() {
+            NeteasePlaylistRow({ summary: p })
+          }
+        },
+        (p: NeteasePlaylistSummary): string => `pl_${p.id}`
+      )
+      // 加载更多状态条（与视频 / UP 页签同款：常驻 + 固定高度，防 extent 抖动）
+      ListItem() {
+        Row() {
+          if (this.playlistLoadingMore) {
+            LoadingProgress()
+              .width(18)
+              .height(18)
+              .color($r('app.color.text_tertiary'))
+            Text('加载中…')
+              .fontSize(12)
+              .fontColor($r('app.color.text_tertiary'))
+              .margin({ left: 8 })
+          } else if (!this.playlistHasMore()) {
             Text('已经到底啦')
               .fontSize(13)
               .fontColor($r('app.color.text_tertiary'))
@@ -2248,9 +2464,9 @@ export struct SearchPage {
                 }
               }
 
-              // 两页签共用一个 List（滚动容器 / 下拉刷新 / 顶栏模糊联动全部
+              // 三页签共用一个 List（滚动容器 / 下拉刷新 / 顶栏模糊联动全部
               // 复用），条目区按 resultTab 条件渲染；切换即换源并归位
-              // （switchResultTab）。空页签在页签内占位说明，两类都空由
+              // （switchResultTab）。空页签在页签内占位说明，三类都空由
               // SearchStateArea 整页空态接管。
               if (this.resultTab === 'video') {
                 if (this.results.length === 0) {
@@ -2265,8 +2481,10 @@ export struct SearchPage {
                 } else {
                   this.VideoTabContent()
                 }
-              } else {
+              } else if (this.resultTab === 'up') {
                 this.UpTabContent()
+              } else {
+                this.PlaylistTabContent()
               }
             }
             .width('100%')
@@ -2355,6 +2573,15 @@ export struct SearchPage {
         TabScrollerHolder.searchReset = (): void => {
           this.resetToLanding();
         };
+        // 带词入口一次性自动搜索：词已由 aboutToAppear 读参数暂存；
+        // 闸门防「从 UP 主主页等上层页返回本页（onAppear 再次触发）」重搜
+        if (!this.initialSearchDone && this.initialKeyword.length > 0) {
+          this.initialSearchDone = true;
+          const kw: string = this.initialKeyword;
+          this.initialKeyword = '';
+          this.keyword = kw;
+          this.doSearch();
+        }
         console.info(`[Search] bind id=${this.pageId}`);
       })
       .onDisAppear((): void => {

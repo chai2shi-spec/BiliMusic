@@ -13,7 +13,9 @@
  *   · 下载串行：听歌场景下一首接一首 completed，队列天然平滑；并发只会把
  *     带宽切碎并挤占正在播的音频首包。
  *   · 直链优先用**刚播的那条**（播放内核传入，免一次 playurl 解析）；
- *     CDN 签名过期 / 下载失败时兜底 `extractAudioFromVideo` 重解析一次再试。
+ *     失败梯度对齐播放恢复链：备用直链 → extractAudioFromVideo 重解析
+ *     （refresh 绕过 sourceCache，否则 30 分钟缓存期内会拿到同一条失败直链）
+ *     → 重解析结果的备用直链。
  *   · 流量门控跟随「仅 WiFi 下载」（wifiOnlyDownload）：开着且当前是蜂窝时
  *     出队即放弃（不打扰用户，下次听完自然会再触发）。
  *   · 魔数校验照抄 DownloadManager（B 站 CDN 直链过期会回 HTTP 200 + HTML 错误页，
@@ -258,16 +260,33 @@ async function cacheOne(job: ListenCacheJob): Promise<void> {
       storedPath = destPath;
     }
   }
+  // ① 备用直链（与播放恢复链 recoverFromStall ① 同款，最多 3 条）：
+  // dash 的 backupUrl 挂在不同镜像 host 上，主直链 503 / 单节点故障时
+  // 换一条通常就好，比重解析省一次 playurl 请求。
+  const backups: string[] = track.audioBackupUrls ?? [];
+  for (let i = 0; !ok && i < backups.length && i < 3; i++) {
+    ok = await downloadTo(backups[i], destPath);
+    if (ok) {
+      storedPath = destPath;
+    }
+  }
   if (!ok) {
-    // 刚播的直链过期 / 下载失败：重解析一次拿新直链（档位沿用播放档，缓存的就是听到的品质）
+    // ② 重解析拿新直链（档位沿用播放档，缓存的就是听到的品质）。
+    // refresh=true 绕过 sourceCache —— 刚播的解析结果还在 30 分钟缓存期内，
+    // 不绕过会把刚 503 的那条直链原样再下一遍，兜底等于没重试。
     try {
       const source = await extractAudioFromVideo(track.bvid || track.id, {
         aid: track.aid,
         cid: track.cid
-      }, job.qualityId);
+      }, job.qualityId, true);
       const reExt: string = audioFileExt(source.audioQuality, source.audioMimeType);
       const rePath: string = `${cacheDir}/${safeName(track.id)}.${reExt.length > 0 ? reExt : 'm4a'}`;
       ok = await downloadTo(source.audioUrl, rePath);
+      // ③ 新直链仍失败（playurl 正常但 CDN 节点持续 503）：再试它的备用直链
+      const reBackups: string[] = source.audioBackupUrls;
+      for (let i = 0; !ok && i < reBackups.length && i < 3; i++) {
+        ok = await downloadTo(reBackups[i], rePath);
+      }
       if (ok) {
         storedPath = rePath;
       }
@@ -504,6 +523,57 @@ async function pruneIfNeeded(): Promise<void> {
 /** 缓存曲目数（设置页展示用） */
 export function countListenCache(): number {
   return listenIndex.size;
+}
+
+/**
+ * trackId → 安全文件名的归一化（导出给缓存歌曲列表页：
+ * 会话日志存原 trackId、缓存索引键是安全名，两侧匹配要用同一套规则）。
+ */
+export function listenCacheSafeName(name: string): string {
+  return safeName(name);
+}
+
+/** 缓存条目（缓存歌曲列表页展示用） */
+export interface ListenCacheEntry {
+  /** 索引键（= 文件名去扩展名；不含特殊字符的 id 即原样，多 P 为安全名） */
+  key: string;
+  /** 音频文件绝对路径 */
+  path: string;
+  /** 文件字节数 */
+  size: number;
+  /** 最近使用时间（ms；写入 / 命中播放都会刷新），列表按它降序 = 最近在前 */
+  mtime: number;
+}
+
+/**
+ * 枚举全部听后缓存条目（缓存歌曲列表页用）：
+ * 逐条 stat 取大小与最近使用时间，stat 失败（文件刚被 LRU 淘汰 / 外部删除）
+ * 的条目跳过。mtime 统一换算成 ms（fs.Stat.mtime 是秒级，touchListenCache
+ * 传的也是秒），调用方免于记这套单位。
+ */
+export async function listListenCacheEntries(): Promise<ListenCacheEntry[]> {
+  const out: ListenCacheEntry[] = [];
+  if (cacheDir.length === 0) {
+    return out;
+  }
+  const keys: string[] = [];
+  listenIndex.forEach((_path: string, key: string): void => {
+    keys.push(key);
+  });
+  for (let i = 0; i < keys.length; i++) {
+    const path: string | undefined = listenIndex.get(keys[i]);
+    if (path === undefined) {
+      continue;
+    }
+    try {
+      const st: fs.Stat = await fs.stat(path);
+      out.push({ key: keys[i], path: path, size: st.size, mtime: st.mtime * 1000 });
+    } catch (e) {
+      // 单个 stat 失败跳过：不阻塞其余条目展示
+    }
+  }
+  out.sort((a: ListenCacheEntry, b: ListenCacheEntry): number => b.mtime - a.mtime);
+  return out;
 }
 
 /** 缓存区总占用（字节，设置页展示用；异步 stat 循环，文件数百级不阻塞主线程） */

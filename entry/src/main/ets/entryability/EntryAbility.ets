@@ -21,10 +21,12 @@ import { publishThemeColors, isAppDark } from '../common/ThemeColors';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { flushPendingLibraryPersist } from '../service/LibraryStore';
 import { initLogStore, flushLogStoreNow } from '../service/PlaybackLogStore';
+import { initPlaySessionStore, flushPlaySessionsNow } from '../service/PlaySessionStore';
+import { initVideoTagStore, flushVideoTagsNow } from '../service/VideoTagStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
 import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
-import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_LOUDNESS_NORM_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER } from '../common/Constants';
+import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER } from '../common/Constants';
 
 /**
  * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
@@ -133,6 +135,12 @@ export default class EntryAbility extends UIAbility {
     // 收割（所有模块的 catch 错误自动入档，跨重启保留）。必须最先执行 ——
     // 之后任何初始化链的错误才进入收割口径。
     initLogStore(this.context);
+    // 播放会话日志（听歌日记数据底座）：建目录 + 清理保留期外旧分片。
+    // 必须在 MusicPlayer 首次播放前完成（未 init 时 appendSession 静默丢弃）。
+    initPlaySessionStore(this.context);
+    // 视频标签缓存（听歌日记「周期标签」数据底座）：只记录缓存文件路径，
+    // 懒加载（首次取标签才读盘），未 init 时 getTags 退化为只拉不存。
+    initVideoTagStore(this.context);
     // 卡片路由：冷启动直达播放页（Index aboutToAppear 补刀消费 seq）
     this.handleCardRouter(want);
     // 卡片播控 / 收藏 call 通道（postCardAction CALL → callee）
@@ -193,6 +201,8 @@ export default class EntryAbility extends UIAbility {
       console.error(`[EntryAbility] callee unregister failed: ${JSON.stringify(e)}`);
     }
     MusicPlayer.getInstance().release();
+    // 会话日志同款冲刷：接管写链尾，进程退出前事件循环把在途追加跑完
+    flushPlaySessionsNow();
   }
 
   /**
@@ -224,6 +234,10 @@ export default class EntryAbility extends UIAbility {
       flushPendingLibraryPersist();
       // 应用日志同款冲刷：去抖窗口内的错误记录立即落盘。
       flushLogStoreNow();
+      // 会话日志同款冲刷（写入本身即时追加，这里只接管链尾防未观察拒绝）。
+      flushPlaySessionsNow();
+      // 视频标签缓存同款冲刷：去抖窗口内的缓存增量立即落盘。
+      flushVideoTagsNow();
       MusicPlayer.getInstance().persistPlaybackSnapshotNow();
     } catch (e) {
       console.error(`save player state on background failed: ${JSON.stringify(e)}`);
@@ -311,12 +325,12 @@ export default class EntryAbility extends UIAbility {
         // 「进入 UP 主页」入口开关（设置页可改）：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_UP_SPACE_ENTRY_ENABLED, settings.upSpaceEntryEnabled);
+        // 「单曲音量」入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_TRACK_VOLUME_ENTRY_ENABLED, settings.trackVolumeEntryEnabled);
         // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
         // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);
-        // 响度均衡开关同批首发：MusicPlayer prepared 挂点读它决定是否应用
-        // LoudnessStore 增益，首播 prepared 回调前必须就位。
-        AppStorage.setOrCreate(STORE_LOUDNESS_NORM_ENABLED, settings.loudnessNormalizationEnabled);
         // 「在 B 站打开原视频」开关同批首发：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则关掉开关的
         // 用户启动时会先看到跳转图标再消失。

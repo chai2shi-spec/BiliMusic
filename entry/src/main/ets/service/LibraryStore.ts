@@ -969,6 +969,74 @@ function isTitleSorted(p: Playlist): boolean {
   return p.titleSorted === true;
 }
 
+/**
+ * ⋮ 菜单「按名称排序全部曲目」：对每个歌单按名称（拼音 / 字母）排序曲目，
+ * 并置起 `titleSorted` 持续规则 —— 此后追加曲目（addTrackToPlaylist /
+ * addTracksToPlaylist）与合并（mergePlaylists）都会按名插入
+ * （isTitleSorted 分支就此激活，此前该能力有实现无入口）。
+ *
+ * 排序在内存完成（万首级 localeCompare 毫秒级）；落盘走既有分片让出架构
+ * （PERSIST_YIELD_EVERY_CHUNKS），无 THREAD_BLOCK_6S 风险。
+ * updatedAt 一并刷新：排序也是一次用户可见的修改（副行相对时间随之更新）。
+ */
+export function sortAllPlaylistsByTitle(): void {
+  const list: Playlist[] = getPlaylists();
+  const now: string = new Date().toISOString();
+  const next: Playlist[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const p: Playlist = list[i];
+    next.push({
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      coverUrl: p.coverUrl,
+      createdAt: p.createdAt,
+      updatedAt: now,
+      upMid: p.upMid,
+      upName: p.upName,
+      sourceKind: p.sourceKind,
+      titleSorted: true,
+      tracks: sortTracksByTitle(p.tracks)
+    });
+  }
+  persistPlaylists(next);
+}
+
+/**
+ * ⋮ 菜单「取消按名称排序」：只关掉 `titleSorted` 持续规则，**不动现有顺序**
+ * （此后新增曲目恢复追加到末尾）。无歌单开启规则时零写入。
+ * 不刷 updatedAt：规则开关不是内容变更。
+ */
+export function clearTitleSorted(): void {
+  const list: Playlist[] = getPlaylists();
+  const next: Playlist[] = [];
+  let changed: boolean = false;
+  for (let i = 0; i < list.length; i++) {
+    const p: Playlist = list[i];
+    if (p.titleSorted === true) {
+      changed = true;
+      next.push({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        coverUrl: p.coverUrl,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+        upMid: p.upMid,
+        upName: p.upName,
+        sourceKind: p.sourceKind,
+        titleSorted: false,
+        tracks: p.tracks
+      });
+    } else {
+      next.push(p);
+    }
+  }
+  if (changed) {
+    persistPlaylists(next);
+  }
+}
+
 
 /**
  * 清掉某个歌单的落盘数据：写删除墓碑 + 移除它的曲目分片 key。
@@ -2245,6 +2313,8 @@ export const LibraryStore = {
   favMediaIdFromSourceId,
   isUpSubscription,
   isFavMirror,
+  sortAllPlaylistsByTitle,
+  clearTitleSorted,
   getFavMirrorByMediaId,
   favMediaIdOf,
   applyFavMirror,

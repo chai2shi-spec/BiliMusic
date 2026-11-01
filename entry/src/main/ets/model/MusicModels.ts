@@ -156,6 +156,35 @@ export interface Track {
    * 只在「从下载管理页播放」这条链路上写入；线上下发的曲目永远为空。
    */
   localFilePath?: string;
+  /**
+   * 分区名（B 站 tname，如「音乐」「鬼畜」）。仅首页三源（热门/推荐/排行榜）映射时
+   * 落值，「首页筛选」的分区屏蔽/仅看按它匹配。可缺 = 数据源没给 → 筛选按
+   * 「字段缺失放行」跳过该维度。只在内存与首页缓存（home_feed_cache 文件）里
+   * 存活，slimTrack 不带（歌单/最近播放等落盘场景用不上）。
+   */
+  category?: string;
+  /**
+   * 推荐理由（rcmd_reason.content，如「热门」「百万播放」）。首页筛选的关键词
+   * 匹配把它并入文本域。存活范围同 category。
+   */
+  rcmdReason?: string;
+  /**
+   * 点赞数。0 = 数据源没给（feed/rcmd 通道 stat 往往只有 view）—— 首页筛选的
+   * 赞率维度按「0 = 未知」放行，不误滤。存活范围同 category。
+   */
+  likeCount?: number;
+  /**
+   * 直播标记：true = 这是一条「B 站直播间」条目（听直播），duration 恒为 0，
+   * bvid/aid/cid 为空，播放走 audioUrl 里的直播流（HLS m3u8 / FLV，地址几分钟
+   * 过期 → 每次播放按 roomId 实时解析，不进 sourceCache、不落盘缓存）。
+   * 播放内核据此：跳过点播解析链（extractAudioFromVideo）、忽略续播位置、
+   * completed 不自动切歌、卡顿恢复改为按房间号重新取流。
+   * slimTrack 必须保留：队列快照 / 最近播放恢复后，直播条目仍靠
+   * roomId + isLive 走直播重取流链路（否则会被当 bvid='' 的坏点播条目）。
+   */
+  isLive?: boolean;
+  /** 直播间房间号（isLive=true 时有效），恢复 / 重取流按它重新解析 */
+  roomId?: number;
 }
 
 export function buildTrack(partial: Partial<Track>): Track {
@@ -181,7 +210,15 @@ export function buildTrack(partial: Partial<Track>): Track {
     audioBandwidth: partial.audioBandwidth ?? 0,
     audioMimeType: partial.audioMimeType ?? '',
     // 空串表示「这条曲目没有本地文件」（播放在线源）；非空即播放内核直接读本地文件
-    localFilePath: partial.localFilePath ?? ''
+    localFilePath: partial.localFilePath ?? '',
+    // 首页筛选元数据（可缺）：undefined 不参与 JSON.stringify，对落盘预算零影响
+    category: partial.category,
+    rcmdReason: partial.rcmdReason,
+    likeCount: partial.likeCount,
+    // 直播条目标记与房间号（可缺）：undefined 不参与 JSON.stringify；
+    // slimTrack / 播放内核据此走直播专用链路
+    isLive: partial.isLive,
+    roomId: partial.roomId
   };
 }
 
@@ -207,6 +244,10 @@ export function sanitizePersistedTrack(track: Track): Track {
   const fixed: Track = buildTrack(track);
   fixed.addedAt = track.addedAt;
   fixed.audioBackupUrls = track.audioBackupUrls;
+  // 直播标记与房间号（可选字段，buildTrack 不覆盖）：队列快照恢复后
+  // 直播条目仍需按它们走直播重取流链路
+  fixed.isLive = track.isLive;
+  fixed.roomId = track.roomId;
   return fixed;
 }
 
@@ -279,7 +320,15 @@ export function slimTrack(track: Track): Track {
     // 本地路径要保留：否则「播着下载好的歌 → 关 App → 重开」之后，
     // 恢复出来的队列会退回线上解析（离线时直接播不出来）。
     // 它只有几十字节，对 8192 字节的 Preferences 上限没有实质影响。
-    localFilePath: track.localFilePath
+    localFilePath: track.localFilePath,
+    // 直播标记与房间号要保留（合计约 20 字节/条，仅直播条目携带）：
+    // 队列快照 / 最近播放恢复后，直播条目仍按 roomId 重新取流，
+    // 丢字段会被当 bvid='' 的坏点播条目、播放直接失败。
+    isLive: track.isLive,
+    roomId: track.roomId
+    // 刻意不带 category / rcmdReason / likeCount：首页筛选元数据只在内存与
+    // 首页缓存文件（HomeFeedCacheStore，走整表 JSON 无 8192 预算）里存活，
+    // 歌单 / 最近播放 / 队列快照等落盘场景用不上，带了白涨字节预算。
   };
 }
 
@@ -321,7 +370,9 @@ export interface Playlist {
    * 只看 `tracks` 现状无法判断它是排过的还是碰巧看着整齐，
    * 而用户的要求是「存量数据不管，只对以后排序过的歌单生效」。
    *
-   * 由歌单页顶栏「一键排全部」置起，用户可再对单个歌单取消（见 LibraryStore）。
+    * 由歌单一级页 ⋮ 菜单「按名称排序全部曲目」置起
+    *（LibraryStore.sortAllPlaylistsByTitle），用户可经同一菜单「取消按名称排序」
+    * 或对单个歌单取消（见 LibraryStore）。
    */
   titleSorted?: boolean;
 }
@@ -382,7 +433,7 @@ export const IMMERSIVE_TIER_OPTIONS: string[] = [
 ];
 
 // ===== 播放页功能行功能项 id（AppSettings.funcItemOrder 的取值域）=====
-// 功能行共 9 个功能项：核心 4 项恒显示，5 个开关入口项受各自入口开关控制
+// 功能行共 10 个功能项：核心 4 项恒显示，6 个开关入口项受各自入口开关控制
 //（关 = 不渲染该槽位）。funcItemOrder 存整体顺序，前 4 位 = 播放页默认页。
 /** 播放模式（核心，恒显示） */
 export const PLAYER_FUNC_REPEAT: string = 'repeat';
@@ -402,9 +453,11 @@ export const PLAYER_FUNC_SLEEP: string = 'sleepTimer';
 export const PLAYER_FUNC_BILI: string = 'openInBili';
 /** 进入 UP 主页（开关入口：AppSettings.upSpaceEntryEnabled） */
 export const PLAYER_FUNC_UP_SPACE: string = 'upSpace';
+/** 单曲音量（开关入口：AppSettings.trackVolumeEntryEnabled；需有当前曲） */
+export const PLAYER_FUNC_VOLUME: string = 'trackVolume';
 /**
  * 功能行默认顺序（AppSettings.funcItemOrder 缺省值）：
- * 前 4 位（核心键）= 默认页，5 个开关入口项顺延其后 —— 与历史版本布局逐位
+ * 前 4 位（核心键）= 默认页，6 个开关入口项顺延其后 —— 与历史版本布局逐位
  * 一致，老版本升级（无该字段）归一化回落到本序，零迁移零感知。
  */
 export const DEFAULT_FUNC_ITEM_ORDER: string[] = [
@@ -416,7 +469,8 @@ export const DEFAULT_FUNC_ITEM_ORDER: string[] = [
   PLAYER_FUNC_SKIP,
   PLAYER_FUNC_SLEEP,
   PLAYER_FUNC_BILI,
-  PLAYER_FUNC_UP_SPACE
+  PLAYER_FUNC_UP_SPACE,
+  PLAYER_FUNC_VOLUME
 ];
 
 export interface AppSettings {
@@ -427,6 +481,9 @@ export interface AppSettings {
   autoPlay: boolean;
   /** 启动时自动播放：开启后应用冷启动时从上次播放的曲目/进度继续播放（默认关 —— 无交互不出声） */
   autoPlayOnStart: boolean;
+  /** 续播（设置 → 播放；默认开）：开启后切歌/新播放从「上次听到」记忆位置起播；
+   *  关闭后一律从头起播（「限定播放进度·跳过片头」仍生效）。位置记录不受影响 */
+  resumeFromProgress: boolean;
   wifiOnlyDownload: boolean;
   /** 仅 WiFi 播放：开启后移动网络下不播放在线歌曲（本地已下载曲目不受限） */
   wifiOnlyPlay: boolean;
@@ -439,7 +496,7 @@ export interface AppSettings {
   progressStyle: string;
   /** 播放页收起动画风格：PLAYER_CLOSE_STYLE_MORPH（柔退）/ MORPH_SWIPE（柔退+手势）/ SLIDE（下滑） */
   closeAnimStyle: string;
-  /** 播放页封面风格：PLAYER_COVER_STYLE_DISC（唱片）/ SQUARE（方卡） */
+  /** 播放页封面风格：PLAYER_COVER_STYLE_DISC（唱片）/ SQUARE（方卡）/ FULL（满幅，横屏大窗走封面舞台） */
   playerCoverStyle: string;
   /** 条目展示：ITEM_DISPLAY_LIST（长条，默认）/ ITEM_DISPLAY_GRID（大封面双列） */
   itemDisplayStyle: string;
@@ -457,13 +514,6 @@ export interface AppSettings {
   playbackSpeed: number;
   /** 与其他应用同时播放（设置 → 播放；默认关）：开启后激活 AudioSession（CONCURRENCY_MIX_WITH_OTHERS，与其他应用音频双向混音），关闭停用会话恢复默认焦点行为 */
   audioMixEnabled: boolean;
-  /**
-   * 响度均衡（设置 → 播放；默认关，实验性）：开启后按 B 站 playurl 下发的
-   * 服务端响度预测（volume.measured_i）把偏响的歌衰减到目标响度（-14 LUFS 量级），
-   * 不同歌曲音量听感一致。只衰减不放大；本机没解析过音源的曲目不生效。
-   * 运行时镜像 STORE_LOUDNESS_NORM_ENABLED（EntryAbility 启动时写入）。
-   */
-  loudnessNormalizationEnabled: boolean;
   /** 在 B 站打开原视频（设置 → 播放；默认开）：开启后播放页功能行出现跳转 B 站客户端入口 */
   openInBilibiliEnabled: boolean;
   /** 定时停止入口（设置 → 播放；默认关）：开启后播放页功能行出现定时停止快捷入口（图标 / 倒计时） */
@@ -476,6 +526,11 @@ export interface AppSettings {
   skipIntroEntryEnabled: boolean;
   /** 进入 UP 主页入口（设置 → 播放；默认关）：开启后播放页功能行出现「进入 UP 主页」跳转入口 */
   upSpaceEntryEnabled: boolean;
+  /**
+   * 单曲音量入口（设置 → 播放；默认关）：开启后播放页功能行出现按曲
+   * 「单曲音量」调节入口（气泡滑条，0-100% 仅衰减，系数存 TrackVolumeStore）。
+   */
+  trackVolumeEntryEnabled: boolean;
   /** 歌词居中显示（长按歌词面板可切，默认关）：开启后每行歌词水平居中绘制（Apple Music 风格） */
   lyricCentered: boolean;
   /**
@@ -520,7 +575,7 @@ export interface AppSettings {
   autoPickedCdnLine: string;
   /**
    * 播放页功能行功能项顺序（取值域与默认序见 DEFAULT_FUNC_ITEM_ORDER）：
-   * 前 4 位 = 播放页默认页图标，其余经左右滑动分页切换查看；5 个开关入口项
+   * 前 4 位 = 播放页默认页图标，其余经左右滑动分页切换查看；6 个开关入口项
    * 仍受各自入口开关控制（关 = 不渲染该槽位，但占位顺序保留）。
    * 运行时镜像 STORE_FUNC_ITEM_ORDER（EntryAbility 启动首发、排序页拖动后重发）。
    */
@@ -534,6 +589,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   downloadDir: '',
   autoPlay: true,
   autoPlayOnStart: false,
+  resumeFromProgress: true,
   wifiOnlyDownload: DEFAULT_WIFI_ONLY_DOWNLOAD,
   wifiOnlyPlay: false,
   themeMode: ThemeMode.SYSTEM,
@@ -548,11 +604,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   speedEnabled: false,
   playbackSpeed: 1.0,
   audioMixEnabled: false,
-  loudnessNormalizationEnabled: false,
   openInBilibiliEnabled: true,
   sleepTimerEntryEnabled: false,
   skipIntroEntryEnabled: false,
   upSpaceEntryEnabled: false,
+  trackVolumeEntryEnabled: false,
   lyricCentered: false,
   immersiveMaterialTier: IMMERSIVE_TIER_EXQUISITE,
   listenCacheEnabled: true,
@@ -894,20 +950,6 @@ export interface PlayUrlData {
   dash?: DashData;
   /** 老视频 / 降级响应的分段流；与 dash 互斥（dash 缺失时才有值） */
   durl?: DurlItem[];
-  /**
-   * 服务端响度预测（dash 响应携带；durl 降级 / 部分老视频缺失）。
-   * measured_i = 整合响度实测值，target_i = 目标响度（-14 LUFS 量级）。
-   * 缺失时响度均衡对该曲目不生效（增益按 1.0 处理）。
-   */
-  volume?: BiliVolumeData;
-}
-
-/** playurl 响应 volume 对象的直译：B 站服务端对音轨的响度预测结果 */
-interface BiliVolumeData {
-  /** 整合响度实测值（LUFS，通常为负数；0 视为「无数据」） */
-  measured_i: number;
-  /** 目标响度（LUFS；0 视为缺失，应用侧兜 -14） */
-  target_i: number;
 }
 
 export interface TrackSource {
@@ -925,9 +967,5 @@ export interface TrackSource {
   audioMimeType: string;
   /** 所选音轨的实测带宽（bps）。见 DownloadTask.audioBandwidth 的说明。 */
   audioBandwidth: number;
-  /** 服务端响度预测（playurl volume.measured_i；0 = 该响应未携带，响度均衡不生效） */
-  loudnessMeasuredI: number;
-  /** 目标响度（playurl volume.target_i；0 = 缺失，应用侧兜 -14） */
-  loudnessTargetI: number;
 }
 

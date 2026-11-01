@@ -152,6 +152,14 @@ export struct LrcView {
    * 滑切动画全程主线程零突发，settle 后 onActiveChanged 单次对齐落位。
    */
   @Prop @Watch('onActiveChanged') pageActive: boolean = true;
+  /**
+   * 常规行字号（vp，默认 20）：封面舞台按窗口高度分档透传（22/19）。
+   * 字号影响折行 / 行高 / 副行截断 —— 变化时布局缓存必须失效（@Watch
+   * onTextSizeChanged），与 onAlignmentChanged 的「只重绘」不同。
+   */
+  @Prop @Watch('onTextSizeChanged') normalTextSize: number = 20;
+  /** 当前行字号（vp，默认 24）：封面舞台分档透传（30/26），同上失效重建 */
+  @Prop @Watch('onTextSizeChanged') currentTextSize: number = 24;
   lyricTopPosition: LyricTopPosition = LyricTopPosition.Top;
 
   private readonly mNormalTextColor: string = '#99ffffff';
@@ -166,9 +174,7 @@ export struct LrcView {
   private initFirstLineY: number = 0;
   /** 滚动补间（aboutToAppear 里经 UIContext 创建） */
   private animator: AnimatorResult | null = null;
-  private mNormalTextSize: number = 20;
   private mDividerHeight: number = 24;
-  private mCurrentTextSize: number = 24;
   private fontFamily: string = 'HarmonyHeiTi';
   private mCurrentTextColor: string = '#FFFFFF';
   private fontWeight: string = 'bold';
@@ -570,6 +576,23 @@ export struct LrcView {
     this.drawContent(this.curCanvasOffsetY);
   }
 
+  /**
+   * 歌词字号切换（封面舞台按窗口高度分档透传，normalTextSize /
+   * currentTextSize 双写同触发，第二个 @Watch 到达时缓存已失效为幂等）：
+   * 字号影响折行 / 行高 / 副行截断 —— 与 onAlignmentChanged 的「保持偏移
+   * 重绘」不同，布局缓存必须失效，且行高变化后旧偏移口径作废 → 瞬时
+   * 对齐到当前行（不做跨行补间）。未激活只失效，激活时一次做完。
+   */
+  onTextSizeChanged(): void {
+    this.invalidateLayout();
+    if (!this.pageActive) {
+      return;
+    }
+    this.alignImmediately();
+    this.scheduleWake();
+    this.syncWordSweep();
+  }
+
   /** 文本对齐：居中开关开 = center（歌词区水平中心），否则 start（左边界） */
   private applyTextAlign(): void {
     this.context.textAlign = this.lyricCentered ? 'center' : 'start';
@@ -652,11 +675,11 @@ export struct LrcView {
     }
     const layouts: LrcLineLayout[] = [];
     let topOffset: number = 0;
-    const subSize: number = this.mNormalTextSize * SUB_TEXT_SCALE;
+    const subSize: number = this.normalTextSize * SUB_TEXT_SCALE;
     for (let i = 0; i < list.length; i++) {
       const lyric: LrcEntry = list[i];
       // 常规字号：整行宽高 + 折行断点各算一次
-      this.context.font = this.fontWeight + ' ' + this.mNormalTextSize + 'vp ' + this.fontFamily;
+      this.context.font = this.fontWeight + ' ' + this.normalTextSize + 'vp ' + this.fontFamily;
       const mNormal: TextMetrics = this.context.measureText(lyric.lineWords);
       const wrapsNormal: boolean = mNormal.width > this.lrcWidth;
       const breakEndNormal: number = wrapsNormal ? this.findWrapEnd(lyric.lineWords) : -1;
@@ -664,7 +687,7 @@ export struct LrcView {
         ? mNormal.height + (breakEndNormal < lyric.lineWords.length - 1 ? mNormal.height : 0)
         : mNormal.height;
       // 当前行字号：同上（当前行绘制用更大字号，宽度与断点口径不同）
-      this.context.font = this.fontWeight + ' ' + this.mCurrentTextSize + 'vp ' + this.fontFamily;
+      this.context.font = this.fontWeight + ' ' + this.currentTextSize + 'vp ' + this.fontFamily;
       const mCurrent: TextMetrics = this.context.measureText(lyric.lineWords);
       const wrapsCurrent: boolean = mCurrent.width > this.lrcWidth;
       const breakEndCurrent: number = wrapsCurrent ? this.findWrapEnd(lyric.lineWords) : -1;
@@ -782,10 +805,10 @@ export struct LrcView {
                 let progress = wordPassedProgress + wordProgress;
                 this.context.fillStyle = this.progressGrad(startX, gradY, endX, gradY, progress);
                 this.context.font =
-                  this.fontWeight + ' ' + (this.mCurrentTextSize + this.TEXT_ADD_SIZE) + 'vp ' + this.fontFamily;
+                  this.fontWeight + ' ' + (this.currentTextSize + this.TEXT_ADD_SIZE) + 'vp ' + this.fontFamily;
                 this.context.fillText(lyric.words[i].text, wordX, this.lrcY + this.TEXT_ADD_SIZE / 2, this.lrcWidth);
               } else {
-                this.context.font = this.fontWeight + ' ' + this.mCurrentTextSize + 'vp ' + this.fontFamily;
+                this.context.font = this.fontWeight + ' ' + this.currentTextSize + 'vp ' + this.fontFamily;
                 this.context.fillText(lyric.words[i].text, wordX, this.lrcY, this.lrcWidth);
               }
               wordX += this.context.measureText(lyric.words[i].text).width;
@@ -811,6 +834,7 @@ export struct LrcView {
 
             let progress = 0;
             let findPlayingWord = false;
+            let passedWordCount = 0;
             for (let i = 0; i < lyric.words.length; i++) {
               let wordStartTime = lyric.lineStartTime + lyric.words[i].wordStartTime;
               let wordEndTime = lyric.lineStartTime + lyric.words[i].wordStartTime + lyric.words[i].duration;
@@ -821,6 +845,8 @@ export struct LrcView {
                 progress = wordPassedProgress + wordProgress;
                 findPlayingWord = true;
                 break;
+              } else if (wordEndTime < this.playheadMs) {
+                passedWordCount++;
               }
             }
             if (!findPlayingWord) {
@@ -829,7 +855,10 @@ export struct LrcView {
               } else if (this.playheadMs >= lyric.lineStartTime + lyric.lineDuration) {
                 progress = GRADIENT_PROGRESS_MAX;
               } else {
-                console.error('This should not be happening.');
+                // 行内字间空隙（字级时间轴不连续：行首前奏/换气停顿/行尾余量）。
+                // 渐变边界停在已唱完整字的占比上，与播放中公式在字收尾瞬间连续；
+                // 全部唱完但未到 lineDuration 时按行尾封顶，避免 addColorStop 越界。
+                progress = Math.min(passedWordCount / lyric.words.length, GRADIENT_PROGRESS_MAX);
               }
             }
 
@@ -852,6 +881,8 @@ export struct LrcView {
             let starRotate = 0;
             this.context.textAlign = 'start';
             let findPlayingWordStar = false;
+            // 行内空隙时星标预定落点：第一个未唱字的中心（-1 = 尚未遇到）
+            let gapStarX = -1;
             for (let i = 0; i < lyric.words.length; i++) {
               let wordStartTime = lyric.lineStartTime + lyric.words[i].wordStartTime;
               let wordEndTime = lyric.lineStartTime + lyric.words[i].wordStartTime + lyric.words[i].duration;
@@ -861,13 +892,16 @@ export struct LrcView {
                 let wordPassedProgress = i / lyric.words.length;
                 let progress = wordPassedProgress + wordProgress;
                 this.context.fillStyle = this.progressGrad(textStartX, gradY_Star, textEndX, gradY_Star, progress);
-                this.context.font = this.fontWeight + ' ' + this.mCurrentTextSize + 'vp ' + this.fontFamily;
+                this.context.font = this.fontWeight + ' ' + this.currentTextSize + 'vp ' + this.fontFamily;
                 this.context.fillText(lyric.words[i].text, wordXX, this.lrcY, this.lrcWidth);
                 findPlayingWordStar = true;
                 starX = wordXX + this.context.measureText(lyric.words[i].text).width / 2;
               } else {
-                this.context.font = this.fontWeight + ' ' + this.mCurrentTextSize + 'vp ' + this.fontFamily;
+                this.context.font = this.fontWeight + ' ' + this.currentTextSize + 'vp ' + this.fontFamily;
                 this.context.fillText(lyric.words[i].text, wordXX, this.lrcY, this.lrcWidth);
+                if (gapStarX < 0 && wordStartTime > this.playheadMs) {
+                  gapStarX = wordXX + this.context.measureText(lyric.words[i].text).width / 2;
+                }
               }
               wordXX += this.context.measureText(lyric.words[i].text).width;
             }
@@ -878,8 +912,13 @@ export struct LrcView {
               } else if (this.playheadMs > lyric.lineStartTime + lyric.lineDuration) {
                 starX = this.lrcX + textWidth / 2 -
                   this.context.measureText(lyric.words[lyric.words.length - 1].text).width / 2;
+              } else if (gapStarX >= 0) {
+                // 行内字间空隙：星标提前候在下一个未唱字的中心
+                starX = gapStarX;
               } else {
-                console.error('This should not be happening.');
+                // 行尾余量（所有字已唱完、未到 lineDuration）：星标落末字中心
+                starX = this.lrcX + textWidth / 2 -
+                  this.context.measureText(lyric.words[lyric.words.length - 1].text).width / 2;
               }
             }
             let starY = this.lrcY - textHeight;
@@ -911,7 +950,7 @@ export struct LrcView {
     if (subs === undefined || subs.length === 0) {
       return 0;
     }
-    const size: number = this.mNormalTextSize * SUB_TEXT_SCALE;
+    const size: number = this.normalTextSize * SUB_TEXT_SCALE;
     let count: number = 0;
     for (let i = 0; i < subs.length; i++) {
       if (subs[i].length > 0) {
@@ -954,7 +993,7 @@ export struct LrcView {
     const fittedSubs: string[] = index >= 0 && index < layouts.length
       ? layouts[index].fittedSubs
       : subs;
-    const size: number = this.mNormalTextSize * SUB_TEXT_SCALE;
+    const size: number = this.normalTextSize * SUB_TEXT_SCALE;
     this.context.font = this.fontWeight + ' ' + size + 'vp ' + this.fontFamily;
     this.context.fillStyle = isCurrent ? this.mCurrentTextColor : this.mNormalTextColor;
     this.context.globalAlpha = isCurrent ? 0.82 : 0.64;
@@ -977,13 +1016,13 @@ export struct LrcView {
   private drawLyricLine(lyric: LrcEntry, isCurrent: boolean, index: number): number {
     let lineHeight = 0;
     if (isCurrent) {
-      this.context.font = this.fontWeight + ' ' + this.mCurrentTextSize + 'vp ' + this.fontFamily;
+      this.context.font = this.fontWeight + ' ' + this.currentTextSize + 'vp ' + this.fontFamily;
       this.context.fillStyle = this.mCurrentTextColor;
       // 当前行柔和文字发光：低强度白影，只烘托高亮、不做闪烁
       this.context.shadowBlur = 12;
       this.context.shadowColor = 'rgba(255, 255, 255, 0.35)';
     } else {
-      this.context.font = this.fontWeight + ' ' + this.mNormalTextSize + 'vp ' + this.fontFamily;
+      this.context.font = this.fontWeight + ' ' + this.normalTextSize + 'vp ' + this.fontFamily;
       this.context.fillStyle = this.mNormalTextColor;
     }
     this.context.textBaseline = 'bottom';

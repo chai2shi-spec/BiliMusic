@@ -229,6 +229,9 @@ export struct PlaylistImportPage {
       return;
     }
     this.inputText = trimmed;
+    // 粘贴即识别：剪贴板拿到内容后直接走 recognize（链接直连 / 短链反查 /
+    // 文本解析），省掉「粘贴 → 再点识别」的第二次点击。
+    await this.recognize();
   }
 
   /**
@@ -430,7 +433,7 @@ export struct PlaylistImportPage {
     }
     this.reviewQueue = queue;
     this.reviewIndex = 0;
-    this.loadReviewItem();
+    this.loadReviewItem(true);
     this.pagePhase = PagePhase.REVIEW;
   }
 
@@ -484,15 +487,35 @@ export struct PlaylistImportPage {
     return this.reviewQueue[this.reviewIndex];
   }
 
-  /** 取当前复核条目快照（进入复核 / 手动搜索后重取，驱动候选区刷新） */
-  private loadReviewItem(): void {
+  /**
+   * 取当前复核条目快照（进入复核 / 手动搜索后重取，驱动候选区刷新）。
+   *
+   * @param resetKeyword 切到新条目时 true（预填默认搜索词）；手动搜索后重取快照传
+   * false —— 保留用户刚输入的关键词，否则搜索一完成词就被清掉，没法微调再搜。
+   */
+  private loadReviewItem(resetKeyword: boolean): void {
     const idx: number = this.currentReviewIdx();
     if (idx < 0 || idx >= this.importState.items.length) {
       this.reviewItem = null;
       return;
     }
     this.reviewItem = this.importState.items[idx];
-    this.manualKeyword = '';
+    if (resetKeyword) {
+      this.manualKeyword = this.defaultManualKeyword(this.reviewItem);
+    }
+  }
+
+  /**
+   * 复核默认搜索词：歌曲标题。自动预填后点「搜索」即出结果，不用手打；
+   * 也兜住旧版「关键词为空点搜索 → searchManual 原样返回候选，界面没反应」的坑。
+   * 标题为空（罕见）才退回歌手名。
+   */
+  private defaultManualKeyword(item: ImportItem): string {
+    const title: string = item.song.title.trim();
+    if (title.length > 0) {
+      return title;
+    }
+    return item.song.artist.trim();
   }
 
   /** 复核选中某候选：置为强匹配并前进到下一条 */
@@ -523,7 +546,7 @@ export struct PlaylistImportPage {
       this.pagePhase = PagePhase.REPORT;
       return;
     }
-    this.loadReviewItem();
+    this.loadReviewItem(true);
   }
 
   /** 复核态手动搜索（路线 C）：替换候选后重取快照刷新候选区 */
@@ -535,10 +558,14 @@ export struct PlaylistImportPage {
     if (idx < 0) {
       return;
     }
+    if (this.manualKeyword.trim().length === 0) {
+      this.toast('先输入搜索关键词', 1600);
+      return;
+    }
     this.manualSearching = true;
     try {
       await ImportTaskManager.getInstance().searchManual(idx, this.manualKeyword);
-      this.loadReviewItem();
+      this.loadReviewItem(false);
     } catch (e) {
       const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
       console.error(`playlist import manual search failed: ${detail}`);

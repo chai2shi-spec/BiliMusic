@@ -45,6 +45,10 @@
       "value": "#FFFF6B5E"
     },
     {
+      "name": "state_error_bg_soft",
+      "value": "#1FFF6B5E"
+    },
+    {
       "name": "state_warning",
       "value": "#FFFFB454"
     },

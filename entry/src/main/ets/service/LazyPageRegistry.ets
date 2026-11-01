@@ -66,6 +66,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.FollowsPageWrapped);
       break;
     }
+    case 'Live': {
+      const m = await import('../pages/LivePage');
+      builders.set(name, m.LivePageWrapped);
+      break;
+    }
     case 'UpSpace': {
       const m = await import('../pages/UpSpacePage');
       builders.set(name, m.UpSpacePageWrapped);
@@ -96,6 +101,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.PlaylistImportPageWrapped);
       break;
     }
+    case 'NeteasePlaylist': {
+      const m = await import('../pages/NeteasePlaylistPage');
+      builders.set(name, m.NeteasePlaylistPageWrapped);
+      break;
+    }
     case 'About': {
       const m = await import('../pages/AboutPage');
       builders.set(name, m.AboutPageWrapped);
@@ -104,6 +114,11 @@ async function loadByName(name: string): Promise<void> {
     case 'PlaybackSettings': {
       const m = await import('../pages/PlaybackSettingsPage');
       builders.set(name, m.PlaybackSettingsPageWrapped);
+      break;
+    }
+    case 'HomeFeedFilter': {
+      const m = await import('../pages/HomeFeedFilterPage');
+      builders.set(name, m.HomeFeedFilterPageWrapped);
       break;
     }
     case 'PlayerFuncOrder': {
@@ -136,6 +151,26 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.PlaybackLogPageWrapped);
       break;
     }
+    case 'Downloads': {
+      const m = await import('../pages/DownloadsPage');
+      builders.set(name, m.DownloadsPageWrapped);
+      break;
+    }
+    case 'ListenCacheList': {
+      const m = await import('../pages/ListenCacheListPage');
+      builders.set(name, m.ListenCacheListPageWrapped);
+      break;
+    }
+    case 'DiaryNewFaces': {
+      const m = await import('../pages/DiaryNewFacesPage');
+      builders.set(name, m.DiaryNewFacesPageWrapped);
+      break;
+    }
+    case 'DiaryTimeline': {
+      const m = await import('../pages/DiaryTimelinePage');
+      builders.set(name, m.DiaryTimelinePageWrapped);
+      break;
+    }
     case 'Reward': {
       const m = await import('../pages/RewardPage');
       builders.set(name, m.RewardPageWrapped);
@@ -152,9 +187,9 @@ async function loadByName(name: string): Promise<void> {
 }
 
 /** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
-const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'Recent', 'Follows',
+const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'NeteasePlaylist', 'Recent', 'Follows', 'Live',
   'UpSpace', 'SeasonSeriesDetail', 'CollectionDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
-  'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'PlaylistBackup', 'PlaybackLog', 'Reward', 'About', 'Login'];
+  'HomeFeedFilter', 'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'Downloads', 'ListenCacheList', 'PlaylistBackup', 'PlaybackLog', 'DiaryNewFaces', 'DiaryTimeline', 'Reward', 'About', 'Login'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {
@@ -175,6 +210,16 @@ function preloadAt(index: number): void {
 /** 首帧后延时调用：把全部懒加载子页面依次预热进内存（串行，避免抢首帧资源）。 */
 export function preloadAllLazyPages(): void {
   preloadAt(0);
+}
+
+/**
+ * 预热单个懒加载子页（已加载 no-op，并发调用共用同一 Promise）。
+ * 供调用方按需提前触发：如 netease tab 激活时预取 'NeteasePlaylist'
+ * 预览页 —— 首启预热序列按 PRELOAD_ORDER 串行跑，目标页排在后面时，
+ * 用户在预热完成前点击会先落进 LazyDest 转圈兜底（透明底整页闪一下）。
+ */
+export function ensureLazyPageLoaded(name: string): Promise<void> {
+  return ensureLazyPage(name);
 }
 
 /**
@@ -216,6 +261,9 @@ export struct LazyDest {
       .width('100%')
       .height('100%')
       .justifyContent(FlexAlign.Center)
+      // 兜底态给页面底色：透明底在转场里露出下层内容 + 模块就绪整页弹出，
+      // 用户感知为「闪屏」；实底让短暂兜底看起来只是正常页面加载。
+      .backgroundColor($r('app.color.bg_page'))
     }
   }
 }

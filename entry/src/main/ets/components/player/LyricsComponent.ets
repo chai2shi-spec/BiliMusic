@@ -76,6 +76,10 @@ struct LrcViewHost {
   @Prop lyricCentered: boolean = false;
   /** 歌词页可见性门控（SM/阔折叠由外层 Swiper 下标派生；分栏布局恒 true） */
   @Prop pageActive: boolean = true;
+  /** 常规行字号（vp）：封面舞台按窗口高度分档透传；默认 20 = LrcView 缺省档 */
+  @Prop normalTextSize: number = 20;
+  /** 当前行字号（vp）：封面舞台分档透传；默认 24 = LrcView 缺省档 */
+  @Prop currentTextSize: number = 24;
   /** 长按歌词区回调（打开「歌词设置」面板） */
   onLongPress: () => void = (): void => {
   };
@@ -88,6 +92,8 @@ struct LrcViewHost {
       isPlay: this.isPlay,
       lyricCentered: this.lyricCentered,
       pageActive: this.pageActive,
+      normalTextSize: this.normalTextSize,
+      currentTextSize: this.currentTextSize,
       lyricTopPosition: LyricTopPosition.Middle
     })
       .layoutWeight(1)
@@ -113,6 +119,10 @@ export struct LyricsComponent {
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   /** 是否随歌词渲染底部控制区（SM 歌词页 true；LG/折叠分栏布局 false，控制区在封面侧） */
   isShowControl: boolean = true;
+  /** 常规行字号（vp，默认 20 = LrcView 缺省档） */
+  normalTextSize: number = 20;
+  /** 当前行字号（vp，同上；默认 24 = LrcView 缺省档） */
+  currentTextSize: number = 24;
   /** 歌词页可见性门控：SM/阔折叠由外层 Swiper 下标派生（===1），分栏布局恒 true */
   @Prop pageActive: boolean = true;
   /**
@@ -1494,6 +1504,8 @@ export struct LyricsComponent {
                   lyricScrollEffect: this.lyricScrollEffect,
                   lyricCentered: this.lyricCentered,
                   pageActive: this.pageActive,
+                  normalTextSize: this.normalTextSize,
+                  currentTextSize: this.currentTextSize,
                   onLongPress: (): void => {
                     this.showLyricSheet = true;
                   }
@@ -1510,6 +1522,8 @@ export struct LyricsComponent {
           lyricScrollEffect: this.lyricScrollEffect,
           lyricCentered: this.lyricCentered,
           pageActive: this.pageActive,
+          normalTextSize: this.normalTextSize,
+          currentTextSize: this.currentTextSize,
           onLongPress: (): void => {
             this.showLyricSheet = true;
           }
@@ -1530,6 +1544,8 @@ export struct LyricsComponent {
       // FIT_CONTENT：内容只有 ~230vp，固定半屏高在大屏真机上会留大片空白；
       // 贴合内容后与 SettingsPage 弹窗口径一致。
       height: SheetSize.FIT_CONTENT,
+      // preferType：大窗（≥840vp）默认跟手样式收不回，锁底部样式（手机默认本就底部）
+      preferType: SheetType.BOTTOM,
       dragBar: true,
       showClose: false,
       // 弹窗关闭即复位搜索区（含手选成功关弹窗的路径）：下次打开是干净入口态

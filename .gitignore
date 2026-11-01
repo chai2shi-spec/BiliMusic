@@ -32,6 +32,13 @@ build_stdout.log
 /.deveco/
 /.ui_verify/
 /.tmp-ui/
+/.backup/
+/.verify1/
+/.deveco-tmp/
+/.deveco-tmp-icon11.json
+
+# Local scratch images
+/11.png
 
 # Diagnostics
 /er/

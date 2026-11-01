@@ -57,7 +57,7 @@
     "abilities": [
       {
         "name": "EntryAbility",
-        "srcEntry": "./ets/entryability/EntryAbility.ts",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
         "description": "$string:EntryAbility_desc",
         // 2026-10-08 图标分层（应用市场审核要求）：应用图标必须为前景/背景两层、
         // 各 1024×1024、不自裁圆角、不加内间距。icon 改指分层描述 layered_image.json

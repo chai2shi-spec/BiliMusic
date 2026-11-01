@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>歌单一级页 · 顶部与布局优化 · 交互原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#0E0E12;color:#EDEDF2;padding:36px 40px 52px}
+:root{--brand:#FB7299;--deepL:#C2185B;--deepD:#FF8BAC;--surL:#FFF1F5;--surD:#33222B;--on:#3D0018;
+  --n-bgpage:#121216;--n-bgcard:#1E1E24;--n-divider:#33333C;
+  --n-tp:#F5F5F7;--n-ts:#ABABB5;--n-tt:#83838F;--n-td:#55555F;
+  --n-press:rgba(255,255,255,.08)}
+
+.phone{width:372px;height:796px;position:relative;border-radius:36px;background:#000;
+  border:8px solid #2A2A31;overflow:hidden;flex:none;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  --deep:var(--deepD);--surface:var(--surD)}
+.phone.light{--n-bgpage:#F5F5F5;--n-bgcard:#FFF;--n-divider:#E8E8EC;
+  --n-tp:#1A1A1A;--n-ts:#6B6B70;--n-tt:#8A8A90;--n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06);--deep:var(--deepL);--surface:var(--surL)}
+
+.head{max-width:1000px;margin:0 auto 26px}
+.head h1{font-size:25px;font-weight:700;margin:0 0 9px}
+.head p{margin:0;font-size:13.5px;line-height:22px;color:#9A9AA6;max-width:960px}
+.head b{color:#E8E8F0}
+.tools{display:flex;gap:10px;align-items:center;margin-top:15px}
+.lbl{font-size:12px;color:#7E7E8C}
+.seg{display:flex;background:#22222A;border-radius:9px;padding:3px;gap:2px}
+.seg button{background:transparent;border:0;color:#9A9AA6;font-size:12px;font-family:inherit;
+  padding:4px 12px;border-radius:7px;cursor:pointer}
+.seg button.on{background:#3A3A46;color:#fff}
+
+.grid{display:flex;flex-wrap:wrap;gap:34px 44px;justify-content:center;max-width:900px;margin:0 auto}
+.cell{width:372px}
+.cap{margin-top:13px;font-size:12.5px;line-height:19.5px;color:#9A9AA6}
+.cap b{color:#E8E8F0;font-weight:600}
+.tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;margin-right:6px;
+  font-weight:600;vertical-align:1px}
+.tag.bad{background:rgba(229,117,117,.18);color:#E57575}
+.tag.fix{background:rgba(72,187,120,.18);color:#48BB78}
+.tag.warn{background:rgba(217,130,43,.18);color:#D9822B}
+
+/* ===== 手机内 ===== */
+.sb{position:absolute;top:0;left:0;right:0;height:44px;z-index:12;display:flex;
+  align-items:center;justify-content:space-between;padding:0 22px 0 26px;
+  font-size:12px;font-weight:600;color:var(--n-tp);background:var(--n-bgpage)}
+.body{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--n-bgpage);
+  padding-top:44px;overflow:hidden}
+
+/* 标题行 56 */
+.tb{height:56px;display:flex;align-items:center;padding:0 16px;position:relative;z-index:11;
+  background:var(--n-bgpage)}
+.tb .twrap{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
+.tb .tt{font-size:20px;font-weight:700;color:var(--n-tp);line-height:26px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .tsub{font-size:11px;line-height:15px;color:var(--n-tt);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .acts{display:flex;gap:8px;flex:none;align-items:center}
+/* 现状：文字按钮 13fp / 高 32 / 默认 padding16 */
+.tbtn{height:32px;border-radius:8px;background:var(--surface);color:var(--deep);
+  font-size:13px;display:flex;align-items:center;justify-content:center;
+  padding:0 16px;flex:none;white-space:nowrap}
+.tbtn.p10{padding:0 10px}
+/* 改后：36 图标按钮 */
+.ibtn{width:36px;height:36px;border-radius:10px;background:var(--surface);color:var(--deep);
+  display:flex;align-items:center;justify-content:center;font-size:17px;flex:none;position:relative}
+.ibtn.primary{background:var(--brand);color:var(--on);font-size:19px;font-weight:500}
+.ibtn .badge{position:absolute;top:-3px;right:-3px;min-width:15px;height:15px;border-radius:8px;
+  background:var(--brand);color:var(--on);font-size:9px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;padding:0 3px;
+  border:1.5px solid var(--n-bgpage)}
+.ibtn.fail .badge{background:#E5484D;color:#fff}
+
+/* 列表 */
+.plist{padding-top:0}
+.prow{display:flex;align-items:center;height:84px;padding:0 4px 0 16px}
+.prow.h76{height:76px}
+.prow.sub .prow-in{padding-left:44px}
+.prow-in{display:flex;align-items:center;width:100%;height:100%;transition:none}
+.pcov{width:64px;height:64px;border-radius:8px;flex:none;
+  background:linear-gradient(135deg,#3B4A6B,#6B5B8E 48%,#C86B8A);position:relative;overflow:hidden}
+.pcov::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 25% 18%,rgba(255,255,255,.24),transparent 62%)}
+.pcov.s56{width:56px;height:56px}
+.pcov.sym{background:var(--surface);display:flex;align-items:center;justify-content:center;
+  color:var(--deep);font-size:20px}
+.pcov.sym::after{display:none}
+.pm{flex:1;min-width:0;margin-left:12px}
+.pt{font-size:16px;line-height:21px;color:var(--n-tp);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ps{font-size:13px;line-height:17px;margin-top:4px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ps .s2{color:var(--n-ts)}
+.ps .s3{color:var(--n-tt)}
+.pmore{width:44px;height:44px;flex:none;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tt);font-size:20px;border-radius:22px}
+/* 多选勾选 */
+.chk{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--n-td);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:transparent}
+.chk.on{background:var(--brand);border-color:var(--brand);color:var(--on);font-weight:700}
+.slot{width:44px;flex:none;display:flex;align-items:center;justify-content:center;margin-right:0}
+
+/* 底部页签（悬浮胶囊） */
+.tabbar{position:absolute;left:0;right:0;bottom:0;height:64px;z-index:14;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(to top,var(--n-bgpage) 46%,transparent)}
+.capsule{display:flex;align-items:center;gap:4px;height:48px;padding:0 8px;border-radius:24px;
+  background:rgba(40,40,48,.86);backdrop-filter:blur(18px);
+  box-shadow:0 6px 20px rgba(0,0,0,.4),0 0 0 .5px rgba(255,255,255,.08)}
+.phone.light .capsule{background:rgba(255,255,255,.9);box-shadow:0 6px 20px rgba(0,0,0,.12),
+  0 0 0 .5px rgba(0,0,0,.06)}
+.tabi{width:64px;height:40px;border-radius:20px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:1px;color:var(--n-tt);font-size:9px}
+.tabi .g{font-size:15px;line-height:15px}
+.tabi.on{background:var(--surface);color:var(--deep)}
+
+/* 标注 */
+.pin{position:absolute;z-index:20;background:#E5484D;color:#fff;font-size:10px;font-weight:700;
+  border-radius:6px;padding:3px 7px;white-space:nowrap;box-shadow:0 4px 12px rgba(229,72,77,.4)}
+.pin.g{background:#2F9E58;box-shadow:0 4px 12px rgba(47,158,88,.4)}
+.pin.a{background:#D9822B;box-shadow:0 4px 12px rgba(217,130,43,.4)}
+.ring{position:absolute;border:1.5px dashed #E5484D;border-radius:8px;z-index:19;pointer-events:none}
+.ring.g{border-color:#2F9E58}
+.hl{box-shadow:inset 3px 0 0 #E5484D}
+.hl.g{box-shadow:inset 3px 0 0 #2F9E58}
+.note{position:absolute;z-index:20;background:rgba(229,72,77,.13);
+  border:1px solid rgba(229,72,77,.42);border-radius:10px;padding:10px 12px}
+.note .nt{font-size:11px;font-weight:700;color:#E57575;margin-bottom:6px}
+.note .nl{font-size:10.5px;line-height:16px;color:#C9C9D4}
+.note .nl b{color:#fff}
+.phone.light .note{background:rgba(229,72,77,.07);border-color:rgba(229,72,77,.32)}
+.phone.light .note .nt{color:#C43C41}
+.phone.light .note .nl{color:#5A5A66}
+.phone.light .note .nl b{color:#1A1A1A}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>歌单一级页 · 顶部与布局优化</h1>
+  <p>四屏：<b>① 现状</b>（下载入口占列表第一行，首屏只有 6 个歌单）→ <b>② 方案 A</b>（下载移进标题行，首屏 7 个）→
+  <b>③ 方案 B</b>（再压行高 84→76，首屏 8 个）→ <b>④ 多选态宽度账</b>（4 个文字按钮 + 标题 = 326vp，可用只有 324vp）。
+  完整规格、代码映射与验收清单见《歌单一级页-顶部与布局优化-方案.md》。</p>
+  <div class="tools">
+    <span class="lbl">深浅</span>
+    <div class="seg" id="modeSeg">
+      <button class="on" onclick="setMode('dark')">深色</button>
+      <button onclick="setMode('light')">浅色</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ============ ① 现状 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="twrap"><div class="tt">歌单</div></div>
+          <div class="acts">
+            <div class="tbtn">定位</div>
+            <div class="tbtn">选择</div>
+            <div class="tbtn">新建</div>
+          </div>
+        </div>
+        <div class="plist">
+          <div class="prow hl">
+            <div class="prow-in">
+              <div class="pcov sym">↓</div>
+              <div class="pm">
+                <div class="pt">下载</div>
+                <div class="ps"><span class="s2">3 个任务 · 1 个下载中</span></div>
+              </div>
+              <div class="pmore" style="visibility:hidden">⋯</div>
+            </div>
+          </div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">夜航星 2026 精选集</div>
+              <div class="ps"><span class="s2">32 首</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某某的收藏夹</div>
+              <div class="ps"><span class="s2">84 首</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">通勤路上</div>
+              <div class="ps"><span class="s2">18 首</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">睡前轻音乐</div>
+              <div class="ps"><span class="s2">46 首</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某UP主投稿</div>
+              <div class="ps"><span class="s2">386 个投稿</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">深夜 coding</div>
+              <div class="ps"><span class="s2">27 首</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi"><span class="g">⌂</span>首页</div>
+          <div class="tabi on"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+        <div class="pin" style="top:132px;right:6px">84vp</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag bad">现状</span><b>下载入口占列表第一行</b>——84vp，视觉与歌单行几乎一样（64 图标位 + 16fp 标题 + 13fp 副行 + 0.9 按压），
+      滚下去就看不见进度。<b>标题行零信息</b>：三个文字按钮吃掉 190vp（可用 324 的 59%），「定位」在没在播时点下去只弹一句提示。</div>
+  </div>
+
+  <!-- ============ ② 方案 A ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="twrap">
+            <div class="tt">歌单</div>
+            <div class="tsub">7 个歌单 · 271 首</div>
+          </div>
+          <div class="acts">
+            <div class="ibtn"><span>↓</span><span class="badge">1</span></div>
+            <div class="ibtn primary">＋</div>
+            <div class="ibtn">⋯</div>
+          </div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">夜航星 2026 精选集</div>
+              <div class="ps"><span class="s2">32 首</span><span class="s3"> · 3 天前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某某的收藏夹</div>
+              <div class="ps"><span class="s3">收藏夹</span><span class="s2"> · 84 首</span><span class="s3"> · 今天</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">通勤路上</div>
+              <div class="ps"><span class="s2">18 首</span><span class="s3"> · 2 周前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">睡前轻音乐</div>
+              <div class="ps"><span class="s2">46 首</span><span class="s3"> · 1 个月前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某UP主投稿</div>
+              <div class="ps"><span class="s3">UP 订阅</span><span class="s2"> · 386 个投稿</span><span class="s3"> · 今天</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">深夜 coding</div>
+              <div class="ps"><span class="s2">27 首</span><span class="s3"> · 5 天前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">童年回忆</div>
+              <div class="ps"><span class="s2">61 首</span><span class="s3"> · 3 个月前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi"><span class="g">⌂</span>首页</div>
+          <div class="tabi on"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+        <div class="pin g" style="top:694px;right:10px">首屏 6 → 7 个 · 下载进标题行</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">方案 A</span><b>下载入口移进标题行</b>——36×36 图标 + 进行中数量角标（失败改红点），
+      进度从此<b>永远可见</b>（原来滚两屏就没了）。标题行补上「7 个歌单 · 271 首」副行，三个文字按钮收成
+      <b>[↓][＋][⋯]</b>（124vp，留 204 给标题）。副行改三段式，收藏夹与 UP 订阅<b>一眼可辨</b>。
+      <b>零取舍，纯结构改动。</b></div>
+  </div>
+
+  <!-- ============ ③ 方案 B ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <div class="twrap">
+            <div class="tt">歌单</div>
+            <div class="tsub">7 个歌单 · 271 首</div>
+          </div>
+          <div class="acts">
+            <div class="ibtn"><span>↓</span><span class="badge">1</span></div>
+            <div class="ibtn primary">＋</div>
+            <div class="ibtn">⋯</div>
+          </div>
+        </div>
+        <div class="plist">
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">夜航星 2026 精选集</div>
+              <div class="ps"><span class="s2">32 首</span><span class="s3"> · 3 天前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">某某某的收藏夹</div>
+              <div class="ps"><span class="s3">收藏夹</span><span class="s2"> · 84 首</span><span class="s3"> · 今天</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">通勤路上</div>
+              <div class="ps"><span class="s2">18 首</span><span class="s3"> · 2 周前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">睡前轻音乐</div>
+              <div class="ps"><span class="s2">46 首</span><span class="s3"> · 1 个月前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">某某UP主投稿</div>
+              <div class="ps"><span class="s3">UP 订阅</span><span class="s2"> · 386 个投稿</span><span class="s3"> · 今天</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">深夜 coding</div>
+              <div class="ps"><span class="s2">27 首</span><span class="s3"> · 5 天前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">童年回忆</div>
+              <div class="ps"><span class="s2">61 首</span><span class="s3"> · 3 个月前</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+          <div class="prow h76"><div class="prow-in">
+            <div class="pcov s56"></div>
+            <div class="pm"><div class="pt">雨天钢琴</div>
+              <div class="ps"><span class="s2">23 首</span><span class="s3"> · 昨天</span></div></div>
+            <div class="pmore">⋯</div></div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi"><span class="g">⌂</span>首页</div>
+          <div class="tabi on"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+        <div class="pin g" style="top:712px;right:10px">首屏 8 个 · 行高 84→76</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">方案 B</span><b>再压行高 84 → 76</b>——封面 64→56、歌单名从 2 行改 1 行。
+      16fp 一行在 228vp 里能放 <b>14 个汉字</b>，覆盖绝大多数真实歌单名（「夜航星 2026 精选集」12 字）。
+      代价：超长名被省略，点进详情才看全。<b>首屏 6 → 8，+33%。</b>
+      不想承担就只做 A（+1 行），收益已在 A 里。</div>
+  </div>
+
+  <!-- ============ ④ 多选态 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb" style="overflow:visible">
+          <div class="twrap"><div class="tt">歌单</div></div>
+          <div class="acts">
+            <div class="tbtn p10">完成</div>
+            <div class="tbtn p10">取消全选</div>
+            <div class="tbtn p10">删除选中</div>
+            <div class="tbtn p10">合并选中</div>
+          </div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="prow-in">
+            <div class="slot"><div class="chk on">✓</div></div>
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">夜航星 2026 精选集</div>
+              <div class="ps"><span class="s2">32 首</span></div></div>
+            <div class="pmore" style="visibility:hidden">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="slot"><div class="chk on">✓</div></div>
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某某的收藏夹</div>
+              <div class="ps"><span class="s2">84 首</span></div></div>
+            <div class="pmore" style="visibility:hidden">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="slot"><div class="chk on">✓</div></div>
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">通勤路上</div>
+              <div class="ps"><span class="s2">18 首</span></div></div>
+            <div class="pmore" style="visibility:hidden">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="slot"><div class="chk"></div></div>
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">睡前轻音乐</div>
+              <div class="ps"><span class="s2">46 首</span></div></div>
+            <div class="pmore" style="visibility:hidden">⋯</div></div></div>
+          <div class="prow"><div class="prow-in">
+            <div class="slot"><div class="chk"></div></div>
+            <div class="pcov"></div>
+            <div class="pm"><div class="pt">某某UP主投稿</div>
+              <div class="ps"><span class="s2">386 个投稿</span></div></div>
+            <div class="pmore" style="visibility:hidden">⋯</div></div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi"><span class="g">⌂</span>首页</div>
+          <div class="tabi on"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+
+        <div class="ring" style="top:48px;left:8px;right:2px;height:48px"></div>
+        <div class="note" style="top:534px;left:16px;right:16px">
+          <div class="nt">三个问题（都已对着源码核过）</div>
+          <div class="nl">· 4 个按钮 286 + 标题 40 + 页边 32 = <b>326vp</b>，360 屏可用只有 324</div>
+          <div class="nl">· 标题「歌单」被压到 0 宽，第 4 个按钮溢出屏幕右缘被裁</div>
+          <div class="nl">· 不显示选中数量；空选区时「删除选中」仍可点，只 toast 兜底</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag bad">现状</span><b>多选态宽度账</b>——4 个文字按钮（13fp / padding 10 / space 8）：
+      完成 46 + 取消全选 72 + 删除选中 72 + 合并选中 72 + 间距 24 = <b>286</b>，加「歌单」标题 40 + 页边 32 = <b>326vp</b>，
+      而 360 屏可用只有 324。<b>系统字体放到 1.45 倍必然溢出。</b>
+      而且<b>不显示选中数量</b>（`selectedIds.length` 现成却不展示），选 20 个只能靠数勾选圈；
+      空选区时「删除选中」仍可点，只 toast 兜底。
+      <br><br><b>改法</b>：标题换「已选 3」，按钮收成 <b>[全选][完成][⋯]</b>（删除/合并进菜单），
+      最坏 260vp，字体放大也安全；空选区与选 1 个时「合并」置灰。</div>
+  </div>
+
+</div>
+
+<script>
+function setMode(m){
+  document.querySelectorAll('.phone').forEach(function(p){
+    if(m==='light'){p.classList.add('light')}else{p.classList.remove('light')}
+  });
+  document.querySelectorAll('#modeSeg button').forEach(function(b,i){
+    b.classList.toggle('on', (m==='dark'&&i===0)||(m==='light'&&i===1));
+  });
+}
+(function(){
+  var m = /mode=(light|dark)/.exec(location.hash || '');
+  if (m) { setMode(m[1]); }
+})();
+</script>
+</body>
+</html>

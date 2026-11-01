@@ -6,6 +6,8 @@ export const BILI_API: string = 'https://api.bilibili.com';
 export const BILI_REFERER: string = 'https://www.bilibili.com';
 /** B 站账号体系（passport）：扫码登录的生成 / 轮询 / 登出接口都在这个域 */
 export const BILI_PASSPORT: string = 'https://passport.bilibili.com';
+/** B 站直播域：直播间信息 / 取流 / 关注开播列表接口都在这个域（Cookie 与主站互通） */
+export const BILI_LIVE_API: string = 'https://api.live.bilibili.com';
 /**
  * B 站 App（iPhone 版）UA —— passport 登录链路专用（对齐 BBPlayer 的 PASSPORT_UA）。
  *
@@ -446,6 +448,13 @@ export const STORE_SKIP_INTRO_ENTRY_ENABLED: string = 'skipIntroEntryEnabled';
 export const STORE_UP_SPACE_ENTRY_ENABLED: string = 'upSpaceEntryEnabled';
 
 /**
+ * 单曲音量入口开关镜像（AppSettings.trackVolumeEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行「单曲音量」气泡滑条入口是否渲染（默认关）。
+ */
+export const STORE_TRACK_VOLUME_ENTRY_ENABLED: string = 'trackVolumeEntryEnabled';
+
+/**
  * 歌词居中显示开关镜像（AppSettings.lyricCentered 的运行时镜像）：
  * EntryAbility 启动首发、长按歌词面板切换时重发，LyricsComponent
  * @StorageProp 订阅并透传 LrcView —— 控制每行歌词水平居中 / 左对齐绘制（默认关）。
@@ -461,13 +470,6 @@ export const STORE_LYRIC_CENTERED: string = 'lyricCenteredShown';
  * 重建即时生效；标题栏在页面下次重建（重新进入）时生效。
  */
 export const STORE_IMMERSIVE_MATERIAL_TIER: string = 'immersiveMaterialTier';
-
-/**
- * 响度均衡开关镜像（AppSettings.loudnessNormalizationEnabled 的运行时镜像）：
- * EntryAbility 启动首发、设置页切换时重发，MusicPlayer prepared 挂点读取 ——
- * 开启后按 LoudnessStore 记录把偏响的歌衰减到目标响度（只衰减不放大，默认关）。
- */
-export const STORE_LOUDNESS_NORM_ENABLED: string = 'loudnessNormalizationEnabled';
 
 /**
  * 「在 B 站打开原视频」开关镜像（AppSettings.openInBilibiliEnabled 的运行时镜像）：
@@ -552,6 +554,10 @@ export const STORE_DL_BAR_HAS_TASKS: string = 'dlBarHasTasks';
 export const STORE_DL_BAR_ALL_SELECTED: string = 'dlBarAllSelected';
 export const STORE_DL_BAR_QUEUE_ACTIVE: string = 'dlBarQueueHasActive';
 export const STORE_DL_BAR_QUEUE_PAUSED: string = 'dlBarQueueHasPaused';
+/** 下载多选已选数量：DownloadsPage.syncBarState 推，DlSelectToggle 多选 ⋮ 菜单置灰门控订阅 */
+export const STORE_DL_BAR_SELECTED_COUNT: string = 'dlBarSelectedCount';
+/** 下载任务表存在失败项：DownloadsPage.syncBarState 推，多选 ⋮ 菜单「重试」置灰门控订阅 */
+export const STORE_DL_BAR_CAN_RETRY: string = 'dlBarCanRetry';
 
 /**
   * 歌单页顶栏状态镜像键（机制同 STORE_DL_BAR_*：顶栏在根 HdsNavigation
@@ -562,6 +568,10 @@ export const STORE_DL_BAR_QUEUE_PAUSED: string = 'dlBarQueueHasPaused';
 export const STORE_PL_BAR_SELECTING: string = 'plBarSelecting';
 export const STORE_PL_BAR_CAN_SELECT: string = 'plBarCanSelect';
 export const STORE_PL_BAR_ALL_SELECTED: string = 'plBarAllSelected';
+/** 歌单页标题行统计副行（「N 个歌单 · M 首」；空串 = 无歌单不渲染）：PlaylistsPage.syncBarState 推，Index.tabTitleRow 订阅 */
+export const STORE_PL_BAR_SUBTITLE: string = 'plBarSubtitle';
+/** 歌单多选已选数量：PlaylistsPage.syncBarState 推，Index（「已选 N」标题）与 PlTitleActions（多选 ⋮ 菜单置灰门控）订阅 */
+export const STORE_PL_BAR_SELECTED_COUNT: string = 'plBarSelectedCount';
 
 /**
  * 根壳返回键「退出多选」请求（seq 递增）：Index.onBackPress 写，
@@ -571,10 +581,13 @@ export const STORE_PL_BAR_ALL_SELECTED: string = 'plBarAllSelected';
 export const STORE_PL_EXIT_SELECT_REQUEST: string = 'plExitSelectRequest';
 
 /**
- * 同上，下载页签（DownloadsPage）。Index.onBackPress 写，
- * 页内 @StorageProp @Watch 消费后退出选择模式并清空选区。
+ * 多选动作图标化提示「本次会话是否已 toast 过」（头部操作区重构 §3.6）：
+ * 多选批量动作改为图标按钮后，图标语义靠进入多选时的一次性 toast 补齐
+ * （已进入多选 · 右下角可加入歌单 / 下载 / 移除）。会话级标记 ——
+ * AppStorage 不持久化，重启 App 重新提示一次；仅首次进入多选的页面
+ * 写入 true，后续任何页面进入多选不再重复提示。
  */
-export const STORE_DL_EXIT_SELECT_REQUEST: string = 'dlExitSelectRequest';
+export const STORE_SELECT_ICONS_HINT_SHOWN: string = 'selectIconsHintShown';
 
 /**
   * 搜索状态键（搜索独立成 'Search' 二级页，首页三 chip 化）。
@@ -736,6 +749,23 @@ export const STORE_LOGIN_REV: string = 'loginRev';
  * 写入：service/FavSyncManager.ts；消费：同步页 @StorageLink + @Watch 刷新状态。
  */
 export const STORE_FAV_SYNC_REV: string = 'favSyncRev';
+
+/**
+ * 首页筛选规则版本号：规则任何变更（开关/阈值/名单/方案/快捷屏蔽）时递增
+ * （写入方：service/HomeFeedFilterStore.ts）。筛选只作用于首页「推荐」tab；
+ * 推荐 tab 是常驻 Tab，aboutToAppear 只触发一次，规则改完返回必须靠这个信号
+ * @Watch 驱动「从 recommendRaw 数组即时重滤」—— 不发网络请求，
+ * 与 STORE_LIBRARY_REV 同一套版本号驱动模式。
+ */
+export const STORE_FEED_FILTER_REV: string = 'feedFilterRev';
+
+/**
+ * 播放会话版本号：PlaySessionStore.appendSession 每落一条会话递增。
+ * 拾音页是 Tabs 常驻页且全量会话查询门控在页签首次激活，快照会随播放过期；
+ * 拾音页 @Watch 本信号判断快照过期（sessionRev ≠ 已加载 rev）→ 重查
+ * querySessions 刷新报告 —— 与 STORE_LIBRARY_REV 同一套版本号驱动模式。
+ */
+export const STORE_SESSION_REV: string = 'sessionRev';
 
 /**
  * 歌单导入任务状态（`ImportState`，见 service/PlaylistImporter.ts）。

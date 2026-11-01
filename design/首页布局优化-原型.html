@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>首页 · 布局优化 · 交互原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#0E0E12;color:#EDEDF2;padding:36px 40px 52px}
+:root{--brand:#FB7299;--deepL:#C2185B;--deepD:#FF8BAC;--surL:#FFF1F5;--surD:#33222B;--on:#3D0018;
+  --n-bgpage:#121216;--n-bgcard:#1E1E24;--n-divider:#33333C;
+  --n-tp:#F5F5F7;--n-ts:#ABABB5;--n-tt:#83838F;--n-td:#55555F;
+  --n-press:rgba(255,255,255,.08)}
+
+.phone{width:372px;height:796px;position:relative;border-radius:36px;background:#000;
+  border:8px solid #2A2A31;overflow:hidden;flex:none;
+  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  --deep:var(--deepD);--surface:var(--surD)}
+.phone.light{--n-bgpage:#F5F5F5;--n-bgcard:#FFF;--n-divider:#E8E8EC;
+  --n-tp:#1A1A1A;--n-ts:#6B6B70;--n-tt:#8A8A90;--n-td:#BDBDC4;
+  --n-press:rgba(0,0,0,.06);--deep:var(--deepL);--surface:var(--surL)}
+
+.head{max-width:1000px;margin:0 auto 26px}
+.head h1{font-size:25px;font-weight:700;margin:0 0 9px}
+.head p{margin:0;font-size:13.5px;line-height:22px;color:#9A9AA6;max-width:960px}
+.head b{color:#E8E8F0}
+.tools{display:flex;gap:10px;align-items:center;margin-top:15px}
+.lbl{font-size:12px;color:#7E7E8C}
+.seg{display:flex;background:#22222A;border-radius:9px;padding:3px;gap:2px}
+.seg button{background:transparent;border:0;color:#9A9AA6;font-size:12px;font-family:inherit;
+  padding:4px 12px;border-radius:7px;cursor:pointer}
+.seg button.on{background:#3A3A46;color:#fff}
+
+.grid{display:flex;flex-wrap:wrap;gap:34px 44px;justify-content:center;max-width:900px;margin:0 auto}
+.cell{width:372px}
+.cap{margin-top:13px;font-size:12.5px;line-height:19.5px;color:#9A9AA6}
+.cap b{color:#E8E8F0;font-weight:600}
+.tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;margin-right:6px;
+  font-weight:600;vertical-align:1px}
+.tag.bad{background:rgba(229,117,117,.18);color:#E57575}
+.tag.fix{background:rgba(72,187,120,.18);color:#48BB78}
+.tag.warn{background:rgba(217,130,43,.18);color:#D9822B}
+
+/* ===== 手机内 ===== */
+.sb{position:absolute;top:0;left:0;right:0;height:44px;z-index:12;display:flex;
+  align-items:center;justify-content:space-between;padding:0 22px 0 26px;
+  font-size:12px;font-weight:600;color:var(--n-tp);background:var(--n-bgpage)}
+.body{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--n-bgpage);
+  padding-top:44px;overflow:hidden}
+
+/* 标题栏 56 */
+.tb{height:56px;display:flex;align-items:center;padding:0 16px;gap:0;position:relative;z-index:11;
+  background:var(--n-bgpage)}
+.tb .brand{font-size:22px;font-weight:700;color:var(--n-tp);line-height:26px;white-space:nowrap}
+.tb .greet{font-size:14px;color:var(--n-ts);margin-left:6px;white-space:nowrap}
+.tb .navtabs{display:flex;gap:4px;margin-left:8px}
+.tb .navtab{width:40px;height:40px;border-radius:20px;display:flex;align-items:center;
+  justify-content:center;font-size:17px;color:var(--n-ts)}
+.tb .navtab.on{color:var(--brand)}
+.tb .navtabs.hid{opacity:0}
+.tb .mag{margin-left:auto;width:40px;height:40px;border-radius:20px;display:flex;
+  align-items:center;justify-content:center;font-size:18px;color:var(--n-tp)}
+.tb .mag.hid{opacity:0}
+
+/* 搜索框 */
+.srow{height:56px;padding:0 16px;display:flex;align-items:flex-end;padding-bottom:12px}
+.srow.tight{height:48px;padding-bottom:8px}
+.sbox{width:100%;height:44px;border-radius:22px;background:var(--n-bgcard);
+  border:.5px solid var(--n-divider);display:flex;align-items:center;gap:8px;padding:0 16px}
+.sbox .ic{font-size:17px;color:var(--n-ts)}
+.sbox .ph{font-size:14px;color:var(--n-ts);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 快捷卡 */
+.cards{display:flex;gap:12px;padding:0 16px;overflow:hidden}
+.qcard{width:156px;height:184px;border-radius:16px;flex:none;position:relative;overflow:hidden;
+  background:linear-gradient(135deg,#3B4A6B,#6B5B8E 48%,#C86B8A)}
+.qcard.sm{width:132px;height:152px;border-radius:14px}
+.qcard::before{content:'';position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 25% 18%,rgba(255,255,255,.24),transparent 62%)}
+.qcard.add{background:rgba(128,128,128,.10);border:1.5px dashed var(--brand);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+.qcard.add::before{display:none}
+.qcard.add .pl{font-size:30px;color:var(--brand);line-height:1}
+.qcard.add .tx{font-size:13px;color:var(--brand)}
+.qinfo{position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.30);
+  backdrop-filter:blur(14px);padding:6px 10px 10px 12px}
+.qcard.sm .qinfo{padding:5px 8px 8px 10px}
+.qbadge{display:flex;align-items:center;gap:4px;font-size:11px;line-height:14px;
+  font-weight:500;color:#fff;padding-top:4px;padding-left:0}
+.qrow{display:flex;align-items:center;gap:6px;margin-top:2px}
+.qtext{flex:1;min-width:0}
+.qtitle{font-size:13px;line-height:17px;font-weight:500;color:#fff;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qsub{font-size:11px;line-height:14px;color:rgba(255,255,255,.72);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qplay{width:34px;height:34px;border-radius:17px;background:rgba(255,255,255,.22);flex:none;
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px}
+.qcard.sm .qplay{width:30px;height:30px;border-radius:15px;font-size:13px}
+
+/* 收起态横条 */
+.strip{height:56px;margin:0 16px;border-radius:12px;background:var(--n-bgcard);
+  border:.5px solid var(--n-divider);display:flex;align-items:center;gap:10px;padding:0 8px 0 10px}
+.strip .cv{width:40px;height:40px;border-radius:8px;flex:none;
+  background:linear-gradient(135deg,#3B4A6B,#6B5B8E 48%,#C86B8A)}
+.strip .tx{flex:1;min-width:0}
+.strip .t1{font-size:13px;line-height:17px;color:var(--n-tp);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .t2{font-size:11px;line-height:14px;color:var(--n-tt);margin-top:1px}
+.strip .ib{width:36px;height:36px;border-radius:18px;flex:none;display:flex;
+  align-items:center;justify-content:center;color:var(--n-ts);font-size:15px}
+
+/* chips */
+.chips{display:flex;gap:8px;padding:12px 16px;overflow:hidden}
+.chips.tight{padding:8px 16px}
+.chip{height:36px;border-radius:18px;padding:0 16px;flex:none;display:flex;align-items:center;
+  gap:6px;font-size:12px;color:var(--n-ts);background:var(--n-bgcard);
+  border:.5px solid var(--n-divider)}
+.chip.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:500}
+.chips.tight .chip{height:32px;border-radius:16px;padding:0 14px}
+
+/* 列表 */
+.plist{padding-top:0}
+.prow{display:flex;align-items:center;height:84px;padding:0 4px 0 16px}
+.pcov{width:64px;height:64px;border-radius:8px;flex:none;position:relative;overflow:hidden;
+  background:linear-gradient(135deg,#3B4A6B,#6B5B8E 48%,#C86B8A)}
+.pcov::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 25% 18%,rgba(255,255,255,.24),transparent 62%)}
+.pm{flex:1;min-width:0;margin-left:12px}
+.pt{font-size:16px;line-height:21px;color:var(--n-tp);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ps{font-size:13px;line-height:17px;margin-top:4px;color:var(--n-ts);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmore{width:44px;height:44px;flex:none;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tt);font-size:20px;border-radius:22px}
+
+/* 底部页签 */
+.tabbar{position:absolute;left:0;right:0;bottom:0;height:64px;z-index:14;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(to top,var(--n-bgpage) 46%,transparent)}
+.capsule{display:flex;align-items:center;gap:4px;height:48px;padding:0 8px;border-radius:24px;
+  background:rgba(40,40,48,.86);backdrop-filter:blur(18px);
+  box-shadow:0 6px 20px rgba(0,0,0,.4),0 0 0 .5px rgba(255,255,255,.08)}
+.phone.light .capsule{background:rgba(255,255,255,.9);box-shadow:0 6px 20px rgba(0,0,0,.12),
+  0 0 0 .5px rgba(0,0,0,.06)}
+.tabi{width:64px;height:40px;border-radius:20px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:1px;color:var(--n-tt);font-size:9px}
+.tabi .g{font-size:15px;line-height:15px}
+.tabi.on{background:var(--surface);color:var(--deep)}
+
+/* 标注 */
+.pin{position:absolute;z-index:20;background:#E5484D;color:#fff;font-size:10px;font-weight:700;
+  border-radius:6px;padding:3px 7px;white-space:nowrap;box-shadow:0 4px 12px rgba(229,72,77,.4)}
+.pin.g{background:#2F9E58;box-shadow:0 4px 12px rgba(47,158,88,.4)}
+.pin.a{background:#D9822B;box-shadow:0 4px 12px rgba(217,130,43,.4)}
+.band{position:absolute;left:0;right:0;border-top:1.5px dashed #E5484D;
+  border-bottom:1.5px dashed #E5484D;z-index:19;pointer-events:none}
+.band.g{border-color:#2F9E58}
+.note{position:absolute;z-index:20;background:rgba(217,130,43,.14);
+  border:1px solid rgba(217,130,43,.45);border-radius:10px;padding:9px 11px}
+.note .nt{font-size:11px;font-weight:700;color:#E0A050;margin-bottom:5px}
+.note .nl{font-size:10.5px;line-height:16px;color:#C9C9D4}
+.note .nl b{color:#fff}
+.phone.light .note{background:rgba(217,130,43,.08);border-color:rgba(217,130,43,.3)}
+.phone.light .note .nt{color:#A5641A}
+.phone.light .note .nl{color:#5A5A66}
+.phone.light .note .nl b{color:#1A1A1A}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>首页 · 布局优化</h1>
+  <p>四屏：<b>① 现状</b>（头部 300vp 占可视区 49%，首屏只见 3.71 个曲目）→ <b>② 方案 A+B</b>（chips 压薄 + 卡片缩小，头部 248，4.33 个）→
+  <b>③ 方案 C 收起态</b>（卡片行收成 56 高横条，头部 152，5.48 个）→ <b>④ 滚动之后</b>（chips 上移进标题栏，列表 7.33 个）。
+  完整规格、代码映射与验收清单见《首页布局优化-方案.md》。</p>
+  <div class="tools">
+    <span class="lbl">深浅</span>
+    <div class="seg" id="modeSeg">
+      <button class="on" onclick="setMode('dark')">深色</button>
+      <button onclick="setMode('light')">浅色</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ============ ① 现状 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <span class="brand">BiliMusic</span><span class="greet">晚上好</span>
+          <div class="navtabs hid">
+            <div class="navtab on">▶</div><div class="navtab">☰</div><div class="navtab">〜</div>
+          </div>
+          <div class="mag">⌕</div>
+        </div>
+        <div class="srow"><div class="sbox"><span class="ic">⌕</span><span class="ph">搜索歌曲、歌单、UP主</span></div></div>
+        <div class="cards">
+          <div class="qcard">
+            <div class="qinfo">
+              <div class="qbadge">◷ 最近播放</div>
+              <div class="qrow"><div class="qtext"><div class="qtitle">夜航星</div><div class="qsub">25 首</div></div>
+                <div class="qplay">▶</div></div>
+            </div>
+          </div>
+          <div class="qcard" style="background:linear-gradient(135deg,#4A3B6B,#8E6B9E 48%,#C86B8A)">
+            <div class="qinfo">
+              <div class="qbadge">♫ 收藏歌单</div>
+              <div class="qrow"><div class="qtext"><div class="qtitle">通勤路上</div><div class="qsub">18 首</div></div>
+                <div class="qplay">▶</div></div>
+            </div>
+          </div>
+          <div class="qcard add"><span class="pl">＋</span><span class="tx">添加</span></div>
+        </div>
+        <div class="chips">
+          <div class="chip on">▶ 推荐</div>
+          <div class="chip">☰ 排行榜</div>
+          <div class="chip">〜 音乐中心</div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">夜航星</div><div class="ps">洛天依</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">玫瑰少年</div><div class="ps">五月天</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">海底</div><div class="ps">一支榴莲</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">光年之外</div><div class="ps">邓紫棋</div></div><div class="pmore">⋯</div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi on"><span class="g">⌕</span>搜索</div>
+          <div class="tabi"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+
+        <div class="band" style="top:100px;height:300px"></div>
+        <div class="pin" style="top:162px;right:8px">头部 300vp = 可视区 49%</div>
+        <div class="pin a" style="top:660px;right:10px">首屏 3.71 个</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag bad">现状</span><b>头部 300vp</b>——搜索框 56 + 快捷卡 184 + chips 60。
+      可视区只有 612vp（780 − 96 占位 − 72 页签），列表只剩 312 → <b>首屏 3.71 个曲目，第 4 个露 76%</b>。
+      比歌单详情页的 178 还高 122，是三个页面里最挤的。卡片 184 占首屏 30%，换来的只有
+      <b>2 张整卡</b>——第三张在 360 屏上只露 8px（等于看不见，包括那个「＋添加」入口）。</div>
+  </div>
+
+  <!-- ============ ② A+B ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <span class="brand">BiliMusic</span><span class="greet">晚上好</span>
+          <div class="navtabs hid">
+            <div class="navtab on">★</div><div class="navtab">≣</div><div class="navtab">♪</div>
+          </div>
+          <div class="mag">⌕</div>
+        </div>
+        <div class="srow tight"><div class="sbox"><span class="ic">⌕</span><span class="ph">搜索歌曲、歌单、UP主</span></div></div>
+        <div class="cards">
+          <div class="qcard sm">
+            <div class="qinfo">
+              <div class="qbadge">◷ 最近播放</div>
+              <div class="qrow"><div class="qtext"><div class="qtitle">夜航星</div><div class="qsub">25 首</div></div>
+                <div class="qplay">▶</div></div>
+            </div>
+          </div>
+          <div class="qcard sm" style="background:linear-gradient(135deg,#4A3B6B,#8E6B9E 48%,#C86B8A)">
+            <div class="qinfo">
+              <div class="qbadge">♫ 收藏歌单</div>
+              <div class="qrow"><div class="qtext"><div class="qtitle">通勤路上</div><div class="qsub">18 首</div></div>
+                <div class="qplay">▶</div></div>
+            </div>
+          </div>
+          <div class="qcard add sm"><span class="pl">＋</span><span class="tx">添加</span></div>
+        </div>
+        <div class="chips tight">
+          <div class="chip on">★ 推荐</div>
+          <div class="chip">≣ 排行榜</div>
+          <div class="chip">♪ 音乐中心</div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">夜航星</div><div class="ps">洛天依</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">玫瑰少年</div><div class="ps">五月天</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">海底</div><div class="ps">一支榴莲</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">光年之外</div><div class="ps">邓紫棋</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">起风了</div><div class="ps">买辣椒也用券</div></div><div class="pmore">⋯</div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi on"><span class="g">⌕</span>搜索</div>
+          <div class="tabi"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+
+        <div class="band g" style="top:100px;height:248px"></div>
+        <div class="pin g" style="top:154px;right:8px">头部 248vp（−52）</div>
+        <div class="pin g" style="top:660px;right:10px">首屏 4.33 个</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">方案 A+B</span><b>chips 36→32、留白 12→8、搜索框下距 12→8</b>（省 20）+
+      <b>卡片 156×184 → 132×152</b>（省 32）。头部 300 → 248，首屏 3.71 → <b>4.33</b>。
+      顺带修了 chip 图标语义：<b>「推荐」的播放三角 → 点赞</b>、<b>「排行榜」的列表符号 → ranking</b>
+      （两个符号已在 sysResource.js 符号表核实）。A 全是留白、零风险；B 改实体尺寸，需真机看一眼裁切。
+      <br><b>B 还顺带修了一件事</b>：132 宽后第三张卡露 56px，「＋添加」入口终于能被看见。</div>
+  </div>
+
+  <!-- ============ ③ 收起态 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <span class="brand">BiliMusic</span><span class="greet">晚上好</span>
+          <div class="navtabs hid">
+            <div class="navtab on">★</div><div class="navtab">≣</div><div class="navtab">♪</div>
+          </div>
+          <div class="mag">⌕</div>
+        </div>
+        <div class="srow tight"><div class="sbox"><span class="ic">⌕</span><span class="ph">搜索歌曲、歌单、UP主</span></div></div>
+        <div style="padding-top:0">
+          <div class="strip">
+            <div class="cv"></div>
+            <div class="tx">
+              <div class="t1">继续听 · 夜航星</div>
+              <div class="t2">最近播放 25 首</div>
+            </div>
+            <div class="ib">▶</div>
+            <div class="ib">⌄</div>
+          </div>
+        </div>
+        <div class="chips tight" style="padding-top:12px">
+          <div class="chip on">★ 推荐</div>
+          <div class="chip">≣ 排行榜</div>
+          <div class="chip">♪ 音乐中心</div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">夜航星</div><div class="ps">洛天依</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">玫瑰少年</div><div class="ps">五月天</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">海底</div><div class="ps">一支榴莲</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">光年之外</div><div class="ps">邓紫棋</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">起风了</div><div class="ps">买辣椒也用券</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">孤勇者</div><div class="ps">陈奕迅</div></div><div class="pmore">⋯</div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi on"><span class="g">⌕</span>搜索</div>
+          <div class="tabi"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+
+        <div class="band g" style="top:100px;height:156px"></div>
+        <div class="pin g" style="top:660px;right:10px">首屏 5.48 个</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag warn">方案 C</span><b>卡片行可收起为 56 高横条</b>——头部 248 → 156，首屏 4.33 → <b>5.48</b>。
+      这是收益最大的一层（省 92vp），但也是唯一有风险的：<b>ListItem 高度变化会让下方内容上窜 92vp</b>，
+      必须在同一次 animateTo 里 scrollBy 补偿；动画期间还要冻结 chips 翻转判定，否则阈值来回抖。
+      <b>先把 A+B 做掉，C 单独真机验。</b></div>
+  </div>
+
+  <!-- ============ ④ 滚动后 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span>▂▄▆</span></div>
+      <div class="body">
+        <div class="tb">
+          <span class="brand">BiliMusic</span><span class="greet">晚上好</span>
+          <div class="navtabs">
+            <div class="navtab on">★</div><div class="navtab">≣</div><div class="navtab">♪</div>
+          </div>
+          <div class="mag hid">⌕</div>
+        </div>
+        <div class="plist">
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">玫瑰少年</div><div class="ps">五月天</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">海底</div><div class="ps">一支榴莲</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">光年之外</div><div class="ps">邓紫棋</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">起风了</div><div class="ps">买辣椒也用券</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">孤勇者</div><div class="ps">陈奕迅</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">星辰大海</div><div class="ps">黄霄雲</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">雨天钢琴</div><div class="ps">relaxdaily</div></div><div class="pmore">⋯</div></div>
+          <div class="prow"><div class="pcov"></div><div class="pm"><div class="pt">童年回忆</div><div class="ps">群星</div></div><div class="pmore">⋯</div></div>
+        </div>
+        <div class="tabbar"><div class="capsule">
+          <div class="tabi on"><span class="g">⌕</span>搜索</div>
+          <div class="tabi"><span class="g">♪</span>歌单</div>
+          <div class="tabi"><span class="g">↓</span>下载</div>
+          <div class="tabi"><span class="g">⚙</span>设置</div>
+        </div></div>
+
+        <div class="pin g" style="top:660px;right:10px">7.33 个 · 首页滚完很高效</div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag fix">滚动后</span>偏移过 <b>248vp</b> 后，chip 条滚出、标题栏三图标淡入接管（这套双形态机制<b>现成就有</b>，
+      `Index.ets:1511` 的 `opacity(homeChipsActive ? 0 : 1)`）。此时列表占满 <b>7.33 个曲目</b>。
+      <br><br><b>所以首页不是「滚不动」，而是「第一屏太少」</b>——滚一下就好多了。这也是为什么方案的重心全在压缩头部，
+      而不是重构滚动结构。
+      <br><br><b>顺带修一个真问题（方案 D）</b>：切 tab 时不重置滚动位置。用户滚到第 5 屏点「排行榜」，
+      看到的是第 20 名而不是榜首。改法：切 tab 时若偏移 &gt; 240，滚到 248（复用现有常量，无新魔数）。</div>
+  </div>
+
+</div>
+
+<script>
+function setMode(m){
+  document.querySelectorAll('.phone').forEach(function(p){
+    if(m==='light'){p.classList.add('light')}else{p.classList.remove('light')}
+  });
+  document.querySelectorAll('#modeSeg button').forEach(function(b,i){
+    b.classList.toggle('on', (m==='dark'&&i===0)||(m==='light'&&i===1));
+  });
+}
+(function(){
+  var m = /mode=(light|dark)/.exec(location.hash || '');
+  if (m) { setMode(m[1]); }
+})();
+</script>
+</body>
+</html>

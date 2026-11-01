@@ -328,11 +328,11 @@ export struct AppearanceSettingsPage {
   }
 
   /**
-   * 选择播放页封面风格：唱片（圆形，默认）/ 方卡（方形圆角极简）。写偏好 +
-   * 写 AppStorage 镜像（STORE_PLAYER_COVER_STYLE）—— CoverDiscComponent 的
-   * 封面形态与 PlayerInfoComponent 的 SurfaceLayers 背景分层据此分流，即时
-   * 生效无需重启。不设全屏档（linearGradientBlur 逐帧实时模糊为播放页最贵
-   * 开销），存量偏好由 normalizeCoverStyle 白名单归一化回落唱片档。
+   * 选择播放页封面风格：唱片（圆形，默认）/ 方卡（方形圆角极简）。
+   * 写偏好 + 写 AppStorage 镜像
+   * （STORE_PLAYER_COVER_STYLE）—— CoverDiscComponent 的封面形态与
+   * PlayerInfoComponent 的布局分支据此分流，即时生效无需重启。
+   * 存量偏好由 normalizeCoverStyle 白名单归一化回落唱片档。
    */
   private selectPlayerCoverStyle(next: string): void {
     this.closeMenu();
@@ -677,10 +677,11 @@ export struct AppearanceSettingsPage {
 
             CardDivider()
 
-            // 播放页封面风格（菜单弹层选择）：唱片（圆形封面，默认）/ 方卡（方形圆角极简 + 主色
-            // 净底）。写偏好 + AppStorage 镜像（STORE_PLAYER_COVER_STYLE），
-            // CoverDiscComponent 封面形态与 SurfaceLayers 背景分层据此分流，
-            // 即时生效。播放页全形态存在 → 本行不做断点隐藏。
+            // 播放页封面风格（菜单弹层选择）：唱片（圆形封面，默认）/ 方卡（方形圆角极简 +
+            // 主色净底）。写偏好 + AppStorage 镜像
+            // （STORE_PLAYER_COVER_STYLE），CoverDiscComponent 封面形态与
+            // SurfaceLayers 背景分层据此分流，即时生效。播放页全形态存在 →
+            // 本行不做断点隐藏。
             HdsListItemCard({
               textItem: {
                 primaryText: { text: '播放页封面风格' },
@@ -911,6 +912,8 @@ export struct AppearanceSettingsPage {
     // 内容避让（官方组件级沉浸口径，AboutPage 同款）；内容层避让由 plain padding 自理
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .bindSheet($$this.showSheet, this.ThemeColorSheetContent(), {
+      // preferType：大窗（≥840vp）默认跟手样式收不回，锁底部样式（手机默认本就底部）
+      preferType: SheetType.BOTTOM,
       height: SheetSize.FIT_CONTENT,
       dragBar: true,
       showClose: false

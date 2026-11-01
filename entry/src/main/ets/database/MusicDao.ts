@@ -226,6 +226,26 @@ export async function updateDownloadStatus(id: string, status: DownloadStatus, l
   }
 }
 
+/**
+ * 播放链路发现 COMPLETED 任务的文件被外部删除（文件管理器删/移）时改标失败：
+ * status 与 errorMessage 一起落库（updateDownloadStatus 不含 errorMessage 列），
+ * localFilePath 同步清空 —— 失效路径不残留，续传 / 删除文件等逻辑不误用。
+ */
+export async function markDownloadFileMissing(id: string, errorMessage: string): Promise<void> {
+  const pred: relationalStore.RdbPredicates = new relationalStore.RdbPredicates(TABLE_DOWNLOAD);
+  pred.equalTo('id', id);
+  const values: relationalStore.ValuesBucket = {
+    status: DownloadStatus.ERROR,
+    errorMessage: errorMessage,
+    localFilePath: ''
+  };
+  try {
+    await getRdb().update(values, pred);
+  } catch (e) {
+    console.error(`mark download file missing failed: ${JSON.stringify(e)}`);
+  }
+}
+
 export async function deleteDownload(id: string): Promise<void> {
   const pred: relationalStore.RdbPredicates = new relationalStore.RdbPredicates(TABLE_DOWNLOAD);
   pred.equalTo('id', id);

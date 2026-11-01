@@ -78,6 +78,26 @@
       "updateDuration": 1,
       "defaultDimension": "2*4",
       "supportDimensions": ["2*4"]
+    },
+    {
+      "name": "PlayControlCardFold",
+      "displayName": "$string:widget_display_name_control",
+      "description": "$string:widget_desc_control",
+      "src": "./ets/widget/pages/PlayControlCardFold.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "colorMode": "auto",
+      "isDynamic": true,
+      "isDefault": false,
+      "updateEnabled": false,
+      "scheduledUpdateTime": "10:30",
+      "updateDuration": 1,
+      "defaultDimension": "2*2",
+      "supportDimensions": ["2*2"],
+      "supportShapes": ["rect", "circle"]
     }
   ]
 }

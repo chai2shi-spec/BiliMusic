@@ -1,11 +1,13 @@
 /**
  * 应用图标页（2026-10-25 桌面图标切换）：
  * 利用 API 26 的 alternateIcons 备用图标机制（app.json5 声明 + bundleManager
- * 运行时切换），让用户在默认图标与 14 套预设设计（第一组 design/icon 粉底 5 套：
- * 声波柱 / 耳机 / 音频环 / 黑胶 / 音乐小电视；第二组 design/app-icon-v2 彩色底
- * 4 套：电蓝声波柱 / 橙红播放环 / 石板灰音箱 / 靛蓝黑胶；第三组
+ * 运行时切换），让用户在默认图标与 14 套预设设计（第一组 design/icon 粉底 4 套：
+ * 声波柱 / 耳机 / 黑胶 / 音乐小电视；第二组 design/app-icon-v2 彩色底
+ * 3 套：电蓝声波柱 / 石板灰音箱 / 靛蓝黑胶；第三组
  * design/app-icon-v3 拟物 5 套：复古 MP3 / 磁带随身听 / 黑胶唱机 / MD 随身听 /
- * 小电视）之间切换桌面图标，立即生效、无需发版。
+ * 小电视；第四组 design/app-icon-v5 满幅 1 套：粉框 3D 耳机音符；第五组
+ * design/app-icon-v6 满幅 1 套：粉底唱片机）之间切换
+ * 桌面图标，立即生效、无需发版。
  *
  *   · 数据模型 AppIconOption：key 对应 app.json5 alternateIcons 的 name
  *     （'' = 恢复默认），bg / fg 为预览分层资源；
@@ -33,7 +35,7 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
-import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { InsetCard } from '../components/InsetCardGroup';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
@@ -41,6 +43,11 @@ import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { BarNarrowShell } from '../components/BarNarrowShell';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
+
+/** 图标格预览尺寸（vp）：一行三列的紧凑口径，比列表行 48vp 略大保证辨识度 */
+const ICON_CELL_SIZE: number = 56;
+/** 图标格圆角（vp）：约 25% 口径，与系统桌面遮罩视觉接近 */
+const ICON_CELL_RADIUS: number = 14;
 
 /**
  * 备选图标数据模型：key 为 app.json5 alternateIcons 的 name 字段（'' = 默认，
@@ -99,10 +106,14 @@ export struct AppIconSettingsPage {
 
   /**
    * 15 个选项：默认（'' 恢复）+ 14 套预设设计。key 与 AppScope/app.json5
-   * alternateIcons 的 name 一一对应；01–04 副标题沿用 design/app-icon/README.md
-   * 的小尺寸可读性结论（04 黑胶 32px 纹理退化需提示），05–08 沿用
+   * alternateIcons 的 name 一一对应；01/02/04 副标题沿用 design/app-icon/README.md
+   * 的小尺寸可读性结论（04 黑胶 32px 纹理退化需提示），05/07/08 沿用
    * design/app-icon-v2/README.md 的对比度 / 32px 结论，09–13 沿用
-   * design/app-icon-v3/README.md 的使用建议（11 唱臂小尺寸会糊需提示）。
+   * design/app-icon-v3/README.md 的使用建议（11 唱臂小尺寸会糊需提示），
+   * 15 沿用 design/app-icon-v5/README.md（满幅粉底、四角与背景连续不露白），
+   * 16 沿用 design/app-icon-v6/README.md（图案 0 改动只重做四周，满幅粉底
+   * 连续不露白，图案外接圆 42% 在 24px 下仍居中完整）。
+   *（03 音频环 / 06 播放环 2026-10-31 移除，资源文件一并清理。）
    */
   private readonly options: AppIconOption[] = [
     new AppIconOption('', '默认', '原始粉环图标',
@@ -111,8 +122,6 @@ export struct AppIconSettingsPage {
       $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_01')),
     new AppIconOption('headphones', '耳机', '识别最快',
       $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_02')),
-    new AppIconOption('audio_ring', '音频环', '延续现有环造型',
-      $r('app.media.alt_icon_bg_deep'), $r('app.media.alt_icon_fg_03')),
     new AppIconOption('vinyl', '黑胶', '小尺寸下纹理会简化',
       $r('app.media.alt_icon_bg_deep'), $r('app.media.alt_icon_fg_04')),
     // 2026-10-29 新增（design/app-icon-v4）：满幅不透明整图（bg 层仅占位），
@@ -121,8 +130,6 @@ export struct AppIconSettingsPage {
       $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_14')),
     new AppIconOption('wave_bars_v2', '声波柱 · 电蓝', '第二组 · 32px 最稳',
       $r('app.media.alt_icon_bg_blue'), $r('app.media.alt_icon_fg_05')),
-    new AppIconOption('play_circle', '播放环 · 橙红', '第二组 · 最通用',
-      $r('app.media.alt_icon_bg_orange'), $r('app.media.alt_icon_fg_06')),
     new AppIconOption('speaker', '音箱 · 石板灰', '第二组 · 对比度最高',
       $r('app.media.alt_icon_bg_slate'), $r('app.media.alt_icon_fg_07')),
     new AppIconOption('vinyl_v2', '黑胶 · 靛蓝', '第二组 · 小尺寸纹理会简化',
@@ -136,7 +143,27 @@ export struct AppIconSettingsPage {
     new AppIconOption('md_walkman', 'MD 随身听', '第三组 · 差异化高级感',
       $r('app.media.alt_icon_bg_cocoa'), $r('app.media.alt_icon_fg_12')),
     new AppIconOption('mini_tv', '小电视', '第三组 · B 站识别推荐',
-      $r('app.media.alt_icon_bg_ink'), $r('app.media.alt_icon_fg_13'))
+      $r('app.media.alt_icon_bg_ink'), $r('app.media.alt_icon_fg_13')),
+    // 2026-10-30 新增（design/app-icon-v5）：满幅不透明整图（bg 层仅占位），
+    // 粉色圆角方框 + 3D 耳机音符，四角填粉与背景连续，系统裁形不露白
+    new AppIconOption('pink_headphones', '粉框耳机', '第四组 · 3D 质感',
+      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_15')),
+    // 2026-10-31 新增（design/app-icon-v6）：满幅不透明整图（bg 层仅占位），
+    // 唱片机图案 0 改动只重做四周 —— 圆角外白底与方框光晕填成连续粉底，
+    // 系统裁形不露白；24px 下图案仍居中完整
+    new AppIconOption('pink_turntable', '粉底唱片机', '第五组 · 满幅粉底',
+      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_16'))
+  ];
+
+  /**
+   * 网格行下标（2026-10-30 一行三列改版）：15 项按 3 个一行切片，整除无残行。
+   */
+  private readonly gridRows: number[][] = [
+    [0, 1, 2],
+    [3, 4, 5],
+    [6, 7, 8],
+    [9, 10, 11],
+    [12, 13, 14]
   ];
 
   aboutToAppear(): void {
@@ -202,48 +229,66 @@ export struct AppIconSettingsPage {
   }
 
   /**
-   * 选项行：48vp 分层预览（bg + fg 叠放、圆角遮罩）+ 名称/副标题 + 官方
-   * Radio 单选指示器（主题色）。点击调 choose（同值 / unsupported / 切换中被拦）。
+   * 图标格（一行三列网格的单元格）：56vp 分层预览（bg + fg 叠放、圆角遮罩）
+   * + 名称；点击整格调 choose（同值 / unsupported / 切换中被拦）。
+   * 选中态三重反馈：主题色外扩描边环（环体不遮图标本体）+ 右下角对勾角标
+   * （position/markAnchor 钉角）+ 名称着主题色（原列表行的 Radio 随改版移除）。
    */
   @Builder
-  optionRow(option: AppIconOption) {
-    Row({ space: 14 }) {
+  iconCell(option: AppIconOption) {
+    Column({ space: 6 }) {
       Stack() {
-        Image(option.bg)
-          .width(48)
-          .height(48)
-        Image(option.fg)
-          .width(48)
-          .height(48)
-      }
-      .width(48)
-      .height(48)
-      .borderRadius(12)
-      .clip(true)
+        Stack() {
+          Image(option.bg)
+            .width(ICON_CELL_SIZE)
+            .height(ICON_CELL_SIZE)
+          Image(option.fg)
+            .width(ICON_CELL_SIZE)
+            .height(ICON_CELL_SIZE)
+        }
+        .width(ICON_CELL_SIZE)
+        .height(ICON_CELL_SIZE)
+        .borderRadius(ICON_CELL_RADIUS)
+        .clip(true)
 
-      Column({ space: 2 }) {
-        Text(option.label)
-          .fontSize(16)
-          .fontColor($r('app.color.text_primary'))
-        Text(option.subtitle)
-          .fontSize(12)
-          .fontColor($r('app.color.text_secondary'))
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
+        // 选中：主题色描边环（外扩 2vp，中心对齐不遮图标）
+        if (this.selectedName === option.key) {
+          Column()
+            .width(ICON_CELL_SIZE + 4)
+            .height(ICON_CELL_SIZE + 4)
+            .borderRadius(ICON_CELL_RADIUS + 2)
+            .border({ width: 2, color: this.themePrimary })
+        }
 
-      // 官方单选指示器：checked 表选中，主题色圆点；
-      // HitTestMode.None 让点击穿透到行 onClick，交互路径保持唯一
-      //（行点击 → choose → selectedName 写 → Radio checked 跟随）。
-      Radio({ value: option.key, group: 'appIconGroup' })
-        .checked(this.selectedName === option.key)
-        .radioStyle({ checkedBackgroundColor: this.themePrimary })
-        .width(22)
-        .height(22)
-        .hitTestBehavior(HitTestMode.None)
+        // 选中：右下角对勾角标（钉在格子右下角，压图标角上一圈）
+        if (this.selectedName === option.key) {
+          Column() {
+            Text('✓')
+              .fontSize(11)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+          }
+          .width(18)
+          .height(18)
+          .borderRadius(9)
+          .backgroundColor(this.themePrimary)
+          .justifyContent(FlexAlign.Center)
+          .position({ x: '100%', y: '100%' })
+          .markAnchor({ x: '100%', y: '100%' })
+        }
+      }
+      .width(ICON_CELL_SIZE + 4)
+      .height(ICON_CELL_SIZE + 4)
+
+      Text(option.label)
+        .fontSize(12)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .fontColor(this.selectedName === option.key ? this.themePrimary : $r('app.color.text_secondary'))
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+    .padding({ top: 10, bottom: 4 })
     .onClick(() => {
       this.choose(option);
     })
@@ -340,63 +385,20 @@ export struct AppIconSettingsPage {
 
           ListItem() {
             InsetCard() {
-              this.optionRow(this.options[0])
-
-              CardDivider()
-
-              this.optionRow(this.options[1])
-
-              CardDivider()
-
-              this.optionRow(this.options[2])
-
-              CardDivider()
-
-              this.optionRow(this.options[3])
-
-              CardDivider()
-
-              this.optionRow(this.options[4])
-
-              CardDivider()
-
-              this.optionRow(this.options[5])
-
-              CardDivider()
-
-              this.optionRow(this.options[6])
-
-              CardDivider()
-
-              this.optionRow(this.options[7])
-
-              CardDivider()
-
-              this.optionRow(this.options[8])
-
-              CardDivider()
-
-              this.optionRow(this.options[9])
-
-              CardDivider()
-
-              this.optionRow(this.options[10])
-
-              CardDivider()
-
-              this.optionRow(this.options[11])
-
-              CardDivider()
-
-              this.optionRow(this.options[12])
-
-              CardDivider()
-
-              this.optionRow(this.options[13])
-
-              CardDivider()
-
-              this.optionRow(this.options[14])
+              // 一行三列图标网格：行下标切片渲染，格宽 layoutWeight 三等分，
+              // 整格点击选择（紧凑改版：不再逐行罗列副标题与单选指示器）
+              Column({ space: 12 }) {
+                ForEach(this.gridRows, (row: number[]) => {
+                  Row() {
+                    ForEach(row, (idx: number) => {
+                      this.iconCell(this.options[idx])
+                    }, (idx: number) => `icon-cell-${idx}`)
+                  }
+                  .width('100%')
+                }, (row: number[]) => `icon-row-${row[0]}`)
+              }
+              .width('100%')
+              .padding({ left: 8, right: 8, top: 6, bottom: 6 })
             }
           }
         }

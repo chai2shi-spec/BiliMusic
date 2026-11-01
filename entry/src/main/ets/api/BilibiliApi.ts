@@ -24,6 +24,7 @@ import {
   AUDIO_Q_HIRES,
   BILI_API,
   BILI_APP_UA,
+  BILI_LIVE_API,
   BILI_PASSPORT,
   BILI_TV_UA
 } from '../common/Constants';
@@ -2303,12 +2304,7 @@ function buildTrackSource(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth,
-    // 服务端响度预测：dash 响应携带；durl 降级 / 老视频缺失时兜 0，
-    // 应用侧遇 0 跳过（响度均衡对该曲目不生效）。sourceCache 旧缓存条目
-    // 缺这两个字段 → undefined，在 `> 0` 判定下同样安全跳过，无需清缓存。
-    loudnessMeasuredI: playData.volume?.measured_i ?? 0,
-    loudnessTargetI: playData.volume?.target_i ?? 0
+    audioBandwidth: best.bandwidth
   };
 }
 
@@ -2322,6 +2318,17 @@ export interface PopularVideo {
   duration: number;
   /** 视频发布时间（unix 秒）。原始响应带；可缺 —— 缺则 UI 不显示发布时间 */
   pubdate?: number;
+  /**
+   * 分区名（tname）。首页筛选按它做分区屏蔽/仅看。
+   * 各通道完备度不一：热门/排行榜带；推荐流实测是否带由响应决定 ——
+   * 可缺（undefined），筛选引擎按「字段缺失放行」的 miss 语义兜底。
+   */
+  tname?: string;
+  /**
+   * 推荐理由（rcmd_reason.content，如「热门」「百万播放」）。
+   * 首页筛选的关键词匹配把它并入文本域；可缺。
+   */
+  rcmdReason?: string;
 }
 
 export async function getPopularVideos(ps: number = 10, pn: number = 1): Promise<PopularVideo[]> {
@@ -2342,11 +2349,19 @@ export async function getPopularVideos(ps: number = 10, pn: number = 1): Promise
  * 要翻页请用下面的 `getRecommendedFeed`。
  */
 export async function getRecommendedVideos(ps: number = 10): Promise<PopularVideo[]> {
-  const data: { item: PopularVideo[] } = await biliFetch<{ item: PopularVideo[] }>(
+  const data: { item: RcmdFeedItem[] } = await biliFetch<{ item: RcmdFeedItem[] }>(
     '/x/web-interface/index/top/rcmd',
     { ps: ps }
   );
-  return data.item || [];
+  const list: RcmdFeedItem[] = data.item || [];
+  const out: PopularVideo[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const v: PopularVideo | null = mapRcmdItem(list[i]);
+    if (v !== null) {
+      out.push(v);
+    }
+  }
+  return out;
 }
 
 /**
@@ -2362,9 +2377,49 @@ interface RcmdFeedItem {
   pic: string;
   owner: { mid: number; name: string; face: string } | null;
   duration: number;
-  stat?: { view: number };
+  stat?: { view: number; like?: number; coin?: number; favorite?: number; danmaku?: number };
   /** 视频发布时间（unix 秒），可缺 —— 缺则 UI 不显示 */
   pubdate?: number;
+  /** 分区名，可缺（推荐流是否下发以响应为准） */
+  tname?: string;
+  /** 推荐理由（如「热门」「百万播放」），可缺 */
+  rcmd_reason?: { content?: string };
+}
+
+/**
+ * rcmd 系原始条目 → PopularVideo 的统一映射：
+ * 剔除登录引导 / 广告卡片（无 bvid 或无 owner），透传分区名 / 推荐理由 / 点赞数。
+ * 首屏 top/rcmd 与翻页 feed/rcmd 两个接口共用，保证两个通道字段口径一致。
+ */
+function mapRcmdItem(it: RcmdFeedItem): PopularVideo | null {
+  if (!it.bvid || it.bvid.length === 0) {
+    return null;
+  }
+  const owner: { mid: number; name: string; face: string } | null = it.owner;
+  if (owner === null) {
+    return null;
+  }
+  return {
+    bvid: it.bvid,
+    aid: it.aid ?? 0,
+    title: it.title ?? '',
+    pic: it.pic ?? '',
+    owner: { mid: owner.mid, name: owner.name, face: owner.face },
+    stat: {
+      view: it.stat ? it.stat.view : 0,
+      // like 以下字段 feed/rcmd 通道可能不下发（实测 stat 往往只有 view）：
+      // 拿不到就填 0，筛选引擎按「0 = 未知」的 miss 语义放行，不误滤
+      danmaku: (it.stat && it.stat.danmaku) ? it.stat.danmaku : 0,
+      like: (it.stat && it.stat.like) ? it.stat.like : 0,
+      coin: (it.stat && it.stat.coin) ? it.stat.coin : 0,
+      favorite: (it.stat && it.stat.favorite) ? it.stat.favorite : 0,
+      share: 0
+    },
+    duration: it.duration ?? 0,
+    pubdate: it.pubdate,
+    tname: it.tname,
+    rcmdReason: it.rcmd_reason?.content ?? ''
+  };
 }
 
 /**
@@ -2389,32 +2444,36 @@ export async function getRecommendedFeed(freshIdx: number, ps: number = 20): Pro
   const list: RcmdFeedItem[] = data.item || [];
   const out: PopularVideo[] = [];
   for (let i = 0; i < list.length; i++) {
-    const it: RcmdFeedItem = list[i];
-    // 登录引导 / 广告卡片：没有 bvid、没有 owner，映射出来就是一行空白
-    if (!it.bvid || it.bvid.length === 0) {
-      continue;
+    // 登录引导 / 广告卡片（无 bvid / 无 owner）在 mapRcmdItem 里统一剔除
+    const v: PopularVideo | null = mapRcmdItem(list[i]);
+    if (v !== null) {
+      out.push(v);
     }
-    const owner: { mid: number; name: string; face: string } | null = it.owner;
-    if (owner === null) {
-      continue;
+  }
+  return out;
+}
+
+/** /x/tag/archive/tags 的原始条目（data 直接是数组，无 list 包装） */
+export interface VideoTagItem {
+  tag_name: string;
+}
+
+/**
+ * 视频标签（听歌日记「周期标签」用）。
+ *
+ * · B 站官方匿名接口：data = tag 数组，无需登录（buvid 由 biliFetch 保留）；
+ * · 失败（风控 / 断网）向上抛，由调用方（VideoTagStore）按「不缓存、本次记空」
+ *   兜底 —— 失败结果绝不落缓存，避免脏缓存让标签永远拉不回来。
+ */
+export async function getVideoTags(bvid: string): Promise<string[]> {
+  const data: VideoTagItem[] = await biliFetch<VideoTagItem[]>(
+    '/x/tag/archive/tags', { bvid: bvid });
+  const out: string[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const name: string = data[i].tag_name ?? '';
+    if (name.length > 0) {
+      out.push(name);
     }
-    out.push({
-      bvid: it.bvid,
-      aid: it.aid ?? 0,
-      title: it.title ?? '',
-      pic: it.pic ?? '',
-      owner: { mid: owner.mid, name: owner.name, face: owner.face },
-      stat: {
-        view: it.stat ? it.stat.view : 0,
-        danmaku: 0,
-        like: 0,
-        coin: 0,
-        favorite: 0,
-        share: 0
-      },
-      duration: it.duration ?? 0,
-      pubdate: it.pubdate
-    });
   }
   return out;
 }
@@ -2447,6 +2506,8 @@ export interface RankingVideoItem {
   duration: number;
   /** 视频发布时间（unix 秒）。原始响应带；可缺 */
   pubdate?: number;
+  /** 分区名，首页筛选用；可缺 */
+  tname?: string;
 }
 
 /** 全站排行榜（ranking/v2?rid=0，每日更新）。字段与"视频详情"一致：有 owner 对象、有 cid */
@@ -3742,11 +3803,7 @@ async function extractAudioByAvidCid(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth,
-    // 服务端响度预测（dash 响应携带；durl 降级 / 老视频缺失时兜 0），
-    // 与 buildTrackSource 同一兜底口径
-    loudnessMeasuredI: playData.volume?.measured_i ?? 0,
-    loudnessTargetI: playData.volume?.target_i ?? 0
+    audioBandwidth: best.bandwidth
   };
 }
 
@@ -4158,6 +4215,314 @@ export async function revokeLogin(biliJct: string): Promise<void> {
     method: http.RequestMethod.POST,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `bili_jct=${encodeURIComponent(biliJct)}&csrf=${encodeURIComponent(biliJct)}`
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// B 站直播（「听直播」）
+//
+// 直播域 api.live.bilibili.com 与主站 Cookie 互通（buvid / SESSDATA 均有效），
+// 接口无需 WBI 签名、无需 gaia 风控指纹；参数必须**内联进 URL**（同 biliFetch
+// 头注释：本引擎 queryParams 会静默发空参请求）。
+// 直播流地址几分钟就过期 —— 调用方每次播放实时解析，绝不缓存、绝不落盘。
+// ════════════════════════════════════════════════════════════════════════
+
+/** 直播流解析产物：HLS（m3u8，首选）与 FLV（兜底）完整直链，取不到为空串 */
+export interface LiveStreamUrls {
+  hlsUrl: string;
+  flvUrl: string;
+}
+
+/** getRoomPlayInfo 响应外层（BiliEnvelope 同形） */
+interface LivePlayInfoEnvelope {
+  code: number;
+  message: string;
+  data: LivePlayInfoData;
+}
+
+interface LivePlayInfoData {
+  room_id: number;
+  short_id: number;
+  uid: number;
+  /** 0=未开播 1=直播中 2=轮播中 */
+  live_status: number;
+  playurl_info?: LivePlayUrlInfo;
+}
+
+interface LivePlayUrlInfo {
+  playurl?: LivePlayUrl;
+}
+
+interface LivePlayUrl {
+  stream?: LivePlayUrlStream[];
+}
+
+interface LivePlayUrlStream {
+  /** http_hls（m3u8）/ http_stream（flv） */
+  protocol_name: string;
+  format?: LivePlayFormat[];
+}
+
+interface LivePlayFormat {
+  /** ts / fmp4（HLS）；flv（http_stream） */
+  format_name: string;
+  codec?: LivePlayCodec[];
+}
+
+interface LivePlayCodec {
+  codec_name: string;
+  base_url: string;
+  url_info?: LiveUrlInfo[];
+}
+
+interface LiveUrlInfo {
+  host: string;
+  extra: string;
+  is_refer_enabled?: boolean;
+}
+
+/**
+ * 解析直播间流地址（HLS 首选 / FLV 兜底）。
+ *
+ * 端点：`/xlive/web-room/v2/index/getRoomPlayInfo`（稳定公开接口，匿名可用）。
+ * `protocol=0,1` 一次要齐 http_stream(FLV) 与 http_hls(HLS) 两族；
+ * HLS 内优先 ts 分段（最经典的 HLS 形态，解复用兼容性最好），fmp4 次之。
+ * URL 拼接规则（B 站直播特有）：`url_info[0].host + codec.base_url + url_info[0].extra`。
+ *
+ * @throws BiliApiError 直播间不存在 / 未开播 / 无可用流
+ */
+export async function fetchLiveStreamUrls(roomId: number): Promise<LiveStreamUrls> {
+  const path: string = '/xlive/web-room/v2/index/getRoomPlayInfo';
+  const url: string = `${BILI_LIVE_API}${path}` +
+    `?room_id=${roomId}&protocol=0,1&format=1,2&codec=0&qn=0` +
+    `&platform=web&ptype=16&dolby=5&panorama=1`;
+  const resp: LivePlayInfoEnvelope = await HttpUtil.requestJson<LivePlayInfoEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const d: LivePlayInfoData = resp.data;
+  if (d.live_status !== 1) {
+    throw new BiliApiError(1, '直播间未开播', path);
+  }
+  let hlsTsUrl: string = '';
+  let hlsFmp4Url: string = '';
+  let flvUrl: string = '';
+  const streams: LivePlayUrlStream[] = d.playurl_info?.playurl?.stream ?? [];
+  for (let i = 0; i < streams.length; i++) {
+    const stream: LivePlayUrlStream = streams[i];
+    const formats: LivePlayFormat[] = stream.format ?? [];
+    for (let j = 0; j < formats.length; j++) {
+      const format: LivePlayFormat = formats[j];
+      const codecs: LivePlayCodec[] = format.codec ?? [];
+      for (let k = 0; k < codecs.length; k++) {
+        const codec: LivePlayCodec = codecs[k];
+        const infos: LiveUrlInfo[] = codec.url_info ?? [];
+        if (codec.base_url.length === 0 || infos.length === 0 || infos[0].host.length === 0) {
+          continue;
+        }
+        const full: string = `${infos[0].host}${codec.base_url}${infos[0].extra}`;
+        if (stream.protocol_name === 'http_hls' && format.format_name === 'ts' && hlsTsUrl.length === 0) {
+          hlsTsUrl = full;
+        } else if (stream.protocol_name === 'http_hls' && format.format_name === 'fmp4'
+          && hlsFmp4Url.length === 0) {
+          hlsFmp4Url = full;
+        } else if (stream.protocol_name === 'http_stream' && flvUrl.length === 0) {
+          flvUrl = full;
+        }
+      }
+    }
+  }
+  const hlsUrl: string = hlsTsUrl.length > 0 ? hlsTsUrl : hlsFmp4Url;
+  if (hlsUrl.length === 0 && flvUrl.length === 0) {
+    throw new BiliApiError(2, '直播间无可用流地址', path);
+  }
+  return { hlsUrl: hlsUrl, flvUrl: flvUrl };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 直播列表与房间信息（LivePage 用）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 直播间信息（关注列表条目 / 房间号查询共用形态，只取页面要用的字段）。
+ * liveStatus：0=未开播 1=直播中 2=轮播中（轮播也出流，可听）。
+ */
+export interface LiveRoomInfo {
+  /** 真实房间号（GetWebList 的 roomid 已是真实号，短号由服务端解析） */
+  roomId: number;
+  title: string;
+  uname: string;
+  face: string;
+  cover: string;
+  liveStatus: number;
+  /** 观看数人话文案（watched_show.text_small，如「1.2万」），空串 = 接口没给 */
+  watchedText: string;
+  areaName: string;
+}
+
+/** 关注主播直播列表分页数据 */
+export interface FollowedLivePage {
+  /** 全部条目（含未开播的关注主播）——页面自行过滤开播中的 */
+  rooms: LiveRoomInfo[];
+  /** 是否还有下一页（GetWebList 的 has_more） */
+  hasMore: boolean;
+}
+
+/** GetWebList 响应模型（字段名与 B 站接口原样，下划线风格） */
+interface LiveFollowListEnvelope {
+  code: number;
+  message: string;
+  data?: LiveFollowListData;
+}
+
+interface LiveFollowListData {
+  count?: number;
+  has_more?: number;
+  list?: LiveFollowItemRaw[];
+}
+
+interface LiveFollowItemRaw {
+  roomid?: number;
+  title?: string;
+  uname?: string;
+  face?: string;
+  cover?: string;
+  live_status?: number;
+  area_name?: string;
+  watched_show?: LiveWatchedShowRaw;
+}
+
+interface LiveWatchedShowRaw {
+  text_small?: string;
+}
+
+/**
+ * 关注主播的直播间列表（「听直播」页数据源）。
+ *
+ * 端点：`/xlive/web-ucenter/v1/xfetter/GetWebList`（需登录，HttpUtil 自动带
+ * SESSDATA）。返回**全部关注主播**（开播在前），页面按 liveStatus 过滤。
+ * pagesize=30 与官方网页版同口径。
+ *
+ * @throws BiliApiError -101 未登录 / 风控码（页面据此分化提示）
+ */
+export async function getFollowedLiveList(page: number): Promise<FollowedLivePage> {
+  const path: string = '/xlive/web-ucenter/v1/xfetter/GetWebList';
+  const url: string = `${BILI_LIVE_API}${path}?page=${page}&pagesize=30`;
+  const resp: LiveFollowListEnvelope = await HttpUtil.requestJson<LiveFollowListEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const src: LiveFollowItemRaw[] = resp.data?.list ?? [];
+  const rooms: LiveRoomInfo[] = src.map((it: LiveFollowItemRaw): LiveRoomInfo => {
+    return {
+      roomId: it.roomid ?? 0,
+      title: (it.title ?? '').length > 0 ? stripHtmlTags(decodeHtmlEntities(it.title ?? '')) : '',
+      uname: it.uname ?? '',
+      face: it.face ?? '',
+      cover: it.cover ?? '',
+      liveStatus: it.live_status ?? 0,
+      watchedText: it.watched_show?.text_small ?? '',
+      areaName: it.area_name ?? ''
+    };
+  });
+  return {
+    rooms: rooms,
+    hasMore: resp.data?.has_more === 1
+  };
+}
+
+/** getInfoByRoom 响应模型 */
+interface LiveRoomInfoEnvelope {
+  code: number;
+  message: string;
+  data?: LiveRoomInfoData;
+}
+
+interface LiveRoomInfoData {
+  room_info?: LiveRoomBriefRaw;
+  anchor_info?: LiveAnchorInfoRaw;
+  watched_show?: LiveWatchedShowRaw;
+}
+
+interface LiveRoomBriefRaw {
+  room_id?: number;
+  title?: string;
+  live_status?: number;
+  cover?: string;
+  area_name?: string;
+}
+
+interface LiveAnchorInfoRaw {
+  base_info?: LiveAnchorBaseRaw;
+}
+
+interface LiveAnchorBaseRaw {
+  uname?: string;
+  face?: string;
+}
+
+/**
+ * 按房间号查直播间信息（手动输入房间号 / 链接的落地查询，匿名可用）。
+ *
+ * 端点：`/xlive/web-room/v1/index/getInfoByRoom`。
+ *
+ * @throws BiliApiError 房间不存在（code 1900x / -400 等）时原样抛，页面人话化
+ */
+export async function getRoomInfoByRoom(roomId: number): Promise<LiveRoomInfo> {
+  const path: string = '/xlive/web-room/v1/index/getInfoByRoom';
+  const url: string = `${BILI_LIVE_API}${path}?room_id=${roomId}`;
+  const resp: LiveRoomInfoEnvelope = await HttpUtil.requestJson<LiveRoomInfoEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const room: LiveRoomBriefRaw = resp.data?.room_info ?? {};
+  const base: LiveAnchorBaseRaw = resp.data?.anchor_info?.base_info ?? {};
+  return {
+    roomId: room.room_id ?? roomId,
+    title: stripHtmlTags(decodeHtmlEntities(room.title ?? '')),
+    uname: base.uname ?? '',
+    face: base.face ?? '',
+    cover: room.cover ?? '',
+    liveStatus: room.live_status ?? 0,
+    watchedText: resp.data?.watched_show?.text_small ?? '',
+    areaName: room.area_name ?? ''
+  };
+}
+
+/**
+ * 解析用户输入的直播间定位：纯数字房间号或 `live.bilibili.com/(h5/)?房间号` 链接。
+ *
+ * @returns 房间号；无法解析返回 -1（调用方提示格式不支持）
+ */
+export function parseLiveInput(input: string): number {
+  const trimmed: string = input.trim();
+  if (trimmed.length === 0) {
+    return -1;
+  }
+  if (/^\d{1,12}$/.test(trimmed)) {
+    return parseInt(trimmed);
+  }
+  const linkPattern: RegExp = /live\.bilibili\.com\/(?:h5\/)?(\d{1,12})/;
+  const matched: RegExpMatchArray | null = trimmed.match(linkPattern);
+  if (matched !== null && matched.length > 1) {
+    return parseInt(matched[1]);
+  }
+  return -1;
+}
+
+/**
+ * 直播间条目 → isLive Track（audioUrl 留空：播放内核 loadAndPlay 的直播分支
+ * 会按 roomId 实时取流，与本文件「直播地址绝不缓存」的约定一致）。
+ */
+export function buildLiveRoomTrack(room: LiveRoomInfo): Track {
+  return buildTrack({
+    id: `live-${room.roomId}`,
+    title: room.title.length > 0 ? room.title : `直播间 ${room.roomId}`,
+    artist: room.uname.length > 0 ? room.uname : 'B 站直播',
+    coverUrl: room.cover.length > 0 ? toHttpsUrl(room.cover) : toHttpsUrl(room.face),
+    duration: 0,
+    isLive: true,
+    roomId: room.roomId
   });
 }
 

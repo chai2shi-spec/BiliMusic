@@ -61,6 +61,10 @@
       "value": "#FFD93026"
     },
     {
+      "name": "state_error_bg_soft",
+      "value": "#1FD93026"
+    },
+    {
       "name": "state_warning",
       "value": "#FFC26A00"
     },

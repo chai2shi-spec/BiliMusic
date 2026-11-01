@@ -1,5 +1,5 @@
 /**
- * 播放日志页（设置页「日志记录」进入）。
+ * 播放日志页（设置页「报错记录」进入）。
  *
  * 背景：三方应用读不到系统 hilog，用户遇到「无法播放」等故障时没有可提交的现场。
  * service/PlaybackLogStore 收割全应用错误（console.error 全局 hook +
@@ -128,7 +128,12 @@ export struct PlaybackLogPage {
     try {
       await fs.write(file.fd, formatPlaybackLogsAsText());
     } finally {
-      await fs.close(file);
+      try {
+        await fs.close(file);
+      } catch (e) {
+        // 关闭失败不影响导出结果，仅记录；吞掉避免覆盖 write 的原始异常
+        console.error(`[PlaybackLogPage] close export file failed: ${e}`);
+      }
     }
     showAppToast(`已导出「${fileName}」`, 2400);
   }
@@ -197,10 +202,10 @@ export struct PlaybackLogPage {
     return undefined;
   }
 
-  /** 标题栏内容：「日志记录」标题（返回键为 HDS 默认键） */
+  /** 标题栏内容：「报错记录」标题（返回键为 HDS 默认键） */
   @Builder
   logBar() {
-    NavTitleRow({ title: '日志记录' })
+    NavTitleRow({ title: '报错记录' })
   }
 
   /** 标题行收窄容器（BarNarrowShell 共用件，平板模式宽度适配） */

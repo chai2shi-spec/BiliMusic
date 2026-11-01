@@ -9,7 +9,12 @@
 import { UIExtensionContentSession } from '@kit.AbilityKit';
 import { LiveFormExtensionAbility, LiveFormInfo } from '@kit.FormKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ensureCardEnv, readCardSnapshot } from '../service/card/CardPayloadBuilder';
+import {
+  DEFAULT_COLOR_HEX,
+  ensureCardEnv,
+  readCardSnapshot,
+  readLocalOverflowCover
+} from '../service/card/CardPayloadBuilder';
 
 const TAG: string = 'CardLiveFormAbility';
 
@@ -29,6 +34,13 @@ export default class CardLiveFormAbility extends LiveFormExtensionAbility {
       storage.setOrCreate('trackArtist', track !== null ? track.artist : '');
       storage.setOrCreate('coverUrl', track !== null ? track.coverUrl : '');
       storage.setOrCreate('isCollected', track !== null && track.isLiked);
+      // 本地封面优先（Form 进程推卡时落盘的 card_cover_<id>.jpg + 主色文件）：
+      // 点播放 = 继续播放不打断当前曲目，本地文件与溢出页应显封面必然同曲，
+      // 命中即传路径 + 主色让溢出页首帧显示正确封面与底色；未命中传空串 +
+      // 品牌色，溢出页回落 coverUrl 网络下载路径。
+      const localCover = track !== null ? readLocalOverflowCover(this.context, track) : null;
+      storage.setOrCreate('coverLocalPath', localCover !== null ? localCover.path : '');
+      storage.setOrCreate('imageColorHex', localCover !== null ? localCover.colorHex : DEFAULT_COLOR_HEX);
     } catch (e) {
       hilog.error(0x0000, TAG, `load snapshot failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
     }

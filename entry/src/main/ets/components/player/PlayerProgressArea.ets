@@ -140,6 +140,15 @@ export struct PlayerProgressArea {
     return this.currentTrack?.duration ?? 0;
   }
 
+  /**
+   * 直播条目（isLive）：实时流没有总时长，进度条 / 拖拽 / 剩余时间全部无
+   * 意义（seek 对直播会被服务端拉回或拒绝）——进度区降级为
+   * 「直播中」徽标 + 已收听时长（STORE_PROGRESS 对直播从起播累计推进）。
+   */
+  private isLivePlaying(): boolean {
+    return this.currentTrack !== null && this.currentTrack.isLive === true;
+  }
+
   // ===== 自绘进度条（流光 / 波点 / 频谱）的拖拽回调 =====
   // 交互契约与经典 Slider 完全一致：按下/拖动只写本地隔离值，松手才 seek。
 
@@ -164,6 +173,25 @@ export struct PlayerProgressArea {
 
   build() {
     Column() {
+      // 直播条目：实时流无总时长，进度条 / 拖拽 / 剩余时间无意义 → 直播徽标 + 已收听时长
+      if (this.isLivePlaying()) {
+        Row({ space: 6 }) {
+          Circle({ width: 8, height: 8 })
+            .fill('#FF4D4F')
+          Text('直播中')
+            .fontColor($r('app.color.play_text_color'))
+            .fontSize($r('app.float.singer_title_sm'))
+            .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
+            .lineHeight('14vp')
+          Text(`已收听 ${formatTime(this.progress)}`)
+            .fontColor($r('app.color.play_text_color'))
+            .fontSize($r('app.float.singer_title_sm'))
+            .fontFamily(PlayerConstants.FONT_FAMILY_BLACK)
+            .lineHeight('14vp')
+        }
+        .width(StyleConstants.FULL_WIDTH)
+        .justifyContent(FlexAlign.Center)
+      } else {
       // 进度条四分支（设置 → 外观「播放页进度条样式」）：三种自绘样式共用
       // value/max/拖拽回调契约，经典 Slider 保持原样（含未知值兜底）。
       if (this.progressStyle === PROGRESS_STYLE_SHIMMER) {
@@ -302,6 +330,7 @@ export struct PlayerProgressArea {
       }
       .width(StyleConstants.FULL_WIDTH)
       .justifyContent(FlexAlign.SpaceBetween)
+      }
     }
     .margin({
       top: $r('app.float.slider_margin_top'),

@@ -29,7 +29,7 @@ const TAG: string = 'CardPayloadBuilder';
 /** 无歌词 / 纯音乐时的固定文案 */
 const LYRIC_FALLBACK: string = '纯音乐，请欣赏';
 /** 默认品牌色（封面取色失败 / 无封面时的卡片底色） */
-const DEFAULT_COLOR_HEX: string = 'fb7299';
+export const DEFAULT_COLOR_HEX: string = 'fb7299';
 const DEFAULT_COLOR_RGBA: string = 'rgba(251, 114, 153, 1)';
 /** 心动歌词卡展示行数（连续随机截取） */
 const HEART_LYRIC_LINE_COUNT: number = 4;
@@ -61,6 +61,8 @@ class CardPayload {
   imageColorHex: string = DEFAULT_COLOR_HEX;
   lrcArray: string[] = [LYRIC_FALLBACK];
   currentLyricIndex: number = 0;
+  progress: number = 0;
+  duration: number = 0;
 }
 
 /** 构建结果：payload + 待关闭的封面 fd（-1 = 无封面） */
@@ -78,6 +80,13 @@ class PlayStatusData {
 class LyricWindowData {
   lrcArray: string[] = [];
   currentLyricIndex: number = 0;
+  isPlay: boolean = false;
+}
+
+/** 轻量推送：播放进度（外屏播控卡） */
+class ProgressData {
+  progress: number = 0;
+  duration: number = 0;
   isPlay: boolean = false;
 }
 
@@ -229,10 +238,20 @@ async function prepareCover(context: common.Context, track: Track): Promise<Card
     }
     const buffer: ArrayBuffer = resp.result;
     const color: CoverColor = await computeCoverColor(buffer);
-    const safeId: string = track.id.replace(/[^0-9A-Za-z_-]/g, '_');
+    const safeId: string = coverSafeId(track.id);
     const path: string = `${context.tempDir}/card_cover_${safeId}.jpg`;
     coverFile = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     fs.writeSync(coverFile.fd, buffer);
+    // 主色落盘小文件：溢出页（liveForm）本地命中封面时同步取底色用（读写失败
+    // 仅留痕，不影响推送 —— 溢出页读不到回落品牌色）。
+    try {
+      const colorFile: fs.File = fs.openSync(`${context.tempDir}/card_cover_color.txt`,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(colorFile.fd, color.hex);
+      fs.closeSync(colorFile);
+    } catch (e) {
+      console.error(`[${TAG}] write cover color failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
     // 图片标识每次推送必须不同：formImages 渲染端以「imgName 是否变化」决定是否刷新图片
     const imgKey: string = `cover_${Date.now()}`;
     const formImages: Record<string, number> = {};
@@ -265,6 +284,45 @@ async function prepareCover(context: common.Context, track: Track): Promise<Card
 /** 读播放快照（Form 进程 / 主进程同沙箱同文件） */
 export async function readCardSnapshot(): Promise<PersistedPlayerState | null> {
   return readPlayerStateFile();
+}
+
+/** 封面临时文件名用的曲目 id 清洗（prepareCover 落盘文件与溢出页本地复用同一路径） */
+function coverSafeId(trackId: string): string {
+  return trackId.replace(/[^0-9A-Za-z_-]/g, '_');
+}
+
+/** 溢出页本地封面命中结果：临时文件路径 + 卡片底色主色 */
+export class OverflowLocalCover {
+  path: string = '';
+  colorHex: string = DEFAULT_COLOR_HEX;
+}
+
+/**
+ * 读 Form 进程推卡时落盘的本地封面（card_cover_<safeId>.jpg + 主色小文件）：
+ * 溢出页（liveForm）优先走这里秒显封面 —— 点播放 = 继续播放不打断当前曲目，
+ * 本地文件与溢出页应显示的封面必然同曲；未命中（tempDir 被系统清理 / 首次推送
+ * 尚未完成）返回 null，调用方回落网络下载路径。
+ */
+export function readLocalOverflowCover(context: common.Context, track: Track): OverflowLocalCover | null {
+  if (track.coverUrl.length === 0) {
+    return null;
+  }
+  const path: string = `${context.tempDir}/card_cover_${coverSafeId(track.id)}.jpg`;
+  try {
+    fs.accessSync(path);
+  } catch (e) {
+    return null;
+  }
+  const result: OverflowLocalCover = new OverflowLocalCover();
+  result.path = path;
+  try {
+    const stored: string = fs.readTextSync(`${context.tempDir}/card_cover_color.txt`).trim();
+    result.colorHex = stored.length > 0 ? stored : DEFAULT_COLOR_HEX;
+  } catch (e) {
+    // 主色文件缺失 / 损坏：回落品牌色（不挡封面显示）
+    result.colorHex = DEFAULT_COLOR_HEX;
+  }
+  return result;
 }
 
 /** 溢出页（liveForm）封面结果：临时文件路径 + 主色 */
@@ -397,6 +455,8 @@ async function buildCardPayload(context: common.Context, formName: string,
   payload.singer = track.artist;
   payload.songId = track.id;
   payload.isCollected = track.isLiked;
+  payload.progress = snapshot.progress;
+  payload.duration = snapshot.duration;
   if (formName === FormCardName.LYRICS) {
     payload.lrcArray = await pickRandomLyricLines(track);
   } else if (formName === FormCardName.DYNAMIC_LYRICS) {
@@ -458,5 +518,19 @@ export async function pushLyricWindowToForm(formId: string, lines: string[],
     await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
   } catch (e) {
     console.error(`[${TAG}] pushLyricWindowToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+  }
+}
+
+/** 轻量推送：播放进度（外屏播控卡进度条，主进程 1s 节拍调用） */
+export async function pushProgressToForm(formId: string, progress: number,
+  duration: number, isPlay: boolean): Promise<void> {
+  try {
+    const data: ProgressData = new ProgressData();
+    data.progress = progress;
+    data.duration = duration;
+    data.isPlay = isPlay;
+    await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
+  } catch (e) {
+    console.error(`[${TAG}] pushProgressToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }
 }

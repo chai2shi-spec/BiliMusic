@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>播放页 · 三种样式 · 交互原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#08080B;color:#EDEDF2;padding:38px 40px 54px}
+:root{--brand:#FB7299;--w:255,255,255}
+
+.head{max-width:1000px;margin:0 auto 30px}
+.head h1{font-size:25px;font-weight:700;margin:0 0 10px;letter-spacing:.2px}
+.head p{margin:0;font-size:13.5px;line-height:22px;color:#9A9AA6;max-width:960px}
+.head b{color:#E8E8F0;font-weight:600}
+.head .k{color:#FF8BAC;font-weight:600}
+.legend{display:flex;gap:18px;margin-top:16px;flex-wrap:wrap;font-size:12px;color:#8A8A96}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:0px}
+.legend .l1 i{background:#FB7299}
+.legend .l2 i{background:#5EC8A0}
+.legend .l3 i{background:#8AA0FF}
+
+.grid{display:flex;flex-wrap:wrap;gap:34px 44px;justify-content:center;max-width:900px;margin:0 auto}
+.cell{width:372px}
+.cap{margin-top:14px;font-size:12.5px;line-height:19.5px;color:#9A9AA6}
+.cap b{color:#E8E8F0;font-weight:600}
+.tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;margin-right:6px;
+  font-weight:600;vertical-align:1px;letter-spacing:.2px}
+.tag.a{background:rgba(251,114,153,.18);color:#FB7299}
+.tag.b{background:rgba(94,200,160,.18);color:#5EC8A0}
+.tag.c{background:rgba(138,160,255,.18);color:#8AA0FF}
+.tag.n{background:rgba(217,130,43,.18);color:#D9822B}
+
+/* ===== 手机壳 ===== */
+.phone{width:372px;height:796px;position:relative;border-radius:38px;background:#000;
+  border:8px solid #26262E;overflow:hidden;flex:none;
+  box-shadow:0 20px 54px rgba(0,0,0,.62),0 0 0 1px rgba(255,255,255,.055) inset}
+.stage{position:absolute;inset:0;overflow:hidden}
+
+/* 背景：封面放大虚化 + 压深 */
+.bg{position:absolute;left:-30%;top:-14%;width:170%;height:130%;
+  background:linear-gradient(148deg,#0C1430 0%,#232A66 30%,#5B3A85 58%,#C0708E 84%,#F0A8B8 100%);
+  filter:blur(42px) saturate(1.22)}
+.bg::before{content:'';position:absolute;left:10%;top:0;width:80%;height:70%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);
+  transform:rotate(-22deg)}
+.dim{position:absolute;inset:0}
+.dim.s1{background:linear-gradient(to bottom,rgba(6,8,20,.46) 0%,rgba(6,8,20,.30) 42%,
+  rgba(4,5,14,.62) 78%,rgba(3,4,12,.86) 100%)}
+.dim.s2{background:linear-gradient(to bottom,rgba(4,6,16,.72) 0%,rgba(4,6,16,.78) 46%,
+  rgba(3,4,12,.90) 88%,rgba(2,3,10,.94) 100%)}
+.dim.s3{background:linear-gradient(to bottom,rgba(5,7,18,.62) 0%,rgba(5,7,18,.70) 40%,
+  rgba(3,4,12,.88) 100%)}
+
+/* 状态栏 */
+.status{position:absolute;top:0;left:0;right:0;height:44px;z-index:9;
+  display:flex;align-items:center;justify-content:space-between;padding:0 24px;
+  font-size:12.5px;font-weight:600;color:#fff;letter-spacing:.3px}
+.sicons{display:flex;align-items:center;gap:6px}
+.bat{width:21px;height:11px;border:1.2px solid rgba(255,255,255,.62);border-radius:3.5px;position:relative}
+.bat::before{content:'';position:absolute;left:1.6px;top:1.6px;bottom:1.6px;width:12px;
+  background:#fff;border-radius:1.6px}
+.bat::after{content:'';position:absolute;right:-3.4px;top:3px;width:2px;height:5px;
+  background:rgba(255,255,255,.62);border-radius:0 1px 1px 0}
+.wif{font-size:10px;letter-spacing:.6px;color:rgba(255,255,255,.9)}
+
+/* 顶栏 */
+.top{position:absolute;top:44px;left:0;right:0;height:48px;z-index:8;
+  display:flex;align-items:center;justify-content:space-between;padding:0 16px}
+.top.only-r{justify-content:flex-end}
+.tbi{width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.86)}
+.tbi svg{display:block}
+
+/* 封面图（三种样式共用同一张） */
+.cv{position:relative;overflow:hidden;flex:none;
+  background:linear-gradient(148deg,#0C1430 0%,#232A66 30%,#5B3A85 58%,#C0708E 84%,#F0A8B8 100%)}
+.cv::before{content:'';position:absolute;left:-24%;top:-14%;width:150%;height:66%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.20),transparent);
+  transform:rotate(-24deg)}
+.cv::after{content:'';position:absolute;right:26%;top:28%;width:5px;height:5px;border-radius:50%;
+  background:#fff;box-shadow:0 0 14px 4px rgba(255,255,255,.62)}
+
+/* ================= 样式一：唱片 ================= */
+.stage1{position:absolute;left:0;right:0;top:92px;height:440px}
+.arm{position:absolute;left:74px;top:22px;width:7px;height:92px;z-index:4;
+  transform-origin:50% 0;transform:rotate(26deg)}
+.arm i{position:absolute;inset:0;border-radius:3px;
+  background:linear-gradient(to bottom,rgba(255,255,255,.72),rgba(255,255,255,.46))}
+.arm b{position:absolute;left:-7px;top:-9px;width:20px;height:20px;border-radius:50%;
+  background:rgba(255,255,255,.30);border:1px solid rgba(255,255,255,.45)}
+.arm s{position:absolute;left:-6px;bottom:-13px;width:18px;height:15px;border-radius:3px;
+  background:rgba(255,255,255,.60);text-decoration:none}
+
+.disc{position:absolute;left:50%;top:56px;width:328px;height:328px;margin-left:-164px;
+  border-radius:50%;overflow:hidden;
+  box-shadow:0 24px 64px rgba(0,0,0,.56),0 0 0 1px rgba(255,255,255,.10) inset}
+.disc .cv{position:absolute;inset:0;border-radius:50%}
+.ring{position:absolute;border-radius:50%;border:1px solid rgba(255,255,255,.055)}
+.r1{inset:8px}.r2{inset:26px}.r3{inset:46px}
+.gleam{position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 300deg,rgba(255,255,255,.20) 0deg,rgba(255,255,255,0) 56deg,
+  rgba(255,255,255,0) 300deg,rgba(255,255,255,.10) 340deg,rgba(255,255,255,.20) 360deg)}
+.hole{position:absolute;left:50%;top:50%;width:30px;height:30px;margin:-15px 0 0 -15px;
+  border-radius:50%;background:#0A0D1C;border:1px solid rgba(255,255,255,.22)}
+.hole::after{content:'';position:absolute;left:50%;top:50%;width:6px;height:6px;
+  margin:-3px 0 0 -3px;border-radius:50%;background:rgba(255,255,255,.30)}
+
+.tblk{position:absolute;left:0;right:0;top:532px;text-align:center;padding:0 24px}
+.tblk .t1{font-size:22px;font-weight:700;color:#fff;line-height:28px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tblk .t2{font-size:13px;color:rgba(255,255,255,.55);margin-top:6px}
+
+/* 控制区（通长三行） */
+.ctrl{position:absolute;left:0;right:0;bottom:34px;padding:0 16px}
+.prog{display:flex;align-items:center;gap:10px}
+.track{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.20);position:relative}
+.track i{position:absolute;left:0;top:0;bottom:0;width:37%;border-radius:2px;background:#fff}
+.track i::after{content:'';position:absolute;right:-5px;top:-3px;width:10px;height:10px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45)}
+.tm{font-size:11px;color:rgba(255,255,255,.55);font-variant-numeric:tabular-nums;min-width:30px}
+.tm.r{text-align:right}
+.funcrow{display:flex;align-items:center;justify-content:space-between;margin-top:16px;padding:0 12px}
+.fi{width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.72);font-size:18px}
+.keys{display:flex;align-items:center;justify-content:center;gap:44px;margin-top:14px;height:52px}
+.sk{display:inline-flex;align-items:center;gap:2px;color:rgba(255,255,255,.90)}
+.sk .b{width:3px;height:15px;background:currentColor;border-radius:1.5px}
+.sk .t{width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent}
+.sk .t.l{border-right:8px solid currentColor}
+.sk .t.r{border-left:8px solid currentColor}
+.pbtn{width:64px;height:64px;border-radius:32px;background:#fff;display:flex;
+  align-items:center;justify-content:center;box-shadow:0 6px 22px rgba(0,0,0,.42)}
+.playt{width:0;height:0;border-top:10px solid transparent;border-bottom:10px solid transparent;
+  border-left:16px solid #14141A;margin-left:4px}
+.pauset{display:flex;gap:5px}
+.pauset i{width:5px;height:20px;border-radius:2px;background:#14141A}
+
+/* ================= 样式二：沉浸歌词 ================= */
+.infobar{position:absolute;left:0;right:0;top:44px;height:64px;z-index:8;
+  display:flex;align-items:center;gap:12px;padding:0 16px}
+.infobar .cv{width:44px;height:44px;border-radius:10px;
+  box-shadow:0 4px 14px rgba(0,0,0,.42)}
+.ib-tx{flex:1;min-width:0}
+.ib-tx .t1{font-size:15px;font-weight:600;color:#fff;line-height:20px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib-tx .t2{font-size:12px;color:rgba(255,255,255,.52);line-height:17px;margin-top:1px}
+
+.lyrics{position:absolute;left:0;right:0;top:150px;bottom:130px;
+  display:flex;flex-direction:column;justify-content:center;padding:0 30px;gap:26px}
+.ln{font-size:17px;line-height:24px;color:rgba(255,255,255,.36);text-align:center;
+  transition:.3s}
+.ln.on{font-size:23px;line-height:32px;font-weight:700;color:#fff}
+.ln.on span{color:var(--brand)}
+.ln.near{color:rgba(255,255,255,.52)}
+
+.thinprog{position:absolute;left:24px;right:24px;bottom:112px;height:20px}
+.tp-bar{height:2px;border-radius:1px;background:rgba(255,255,255,.22);position:relative}
+.tp-bar i{position:absolute;left:0;top:0;bottom:0;width:37%;border-radius:1px;
+  background:rgba(255,255,255,.92)}
+.tp-bar i::after{content:'';position:absolute;right:-4px;top:-3px;width:8px;height:8px;
+  border-radius:50%;background:#fff}
+.tp-time{display:flex;justify-content:space-between;margin-top:7px;font-size:11px;
+  color:rgba(255,255,255,.48);font-variant-numeric:tabular-nums}
+
+.floatbar{position:absolute;left:24px;right:24px;bottom:34px;height:76px;border-radius:38px;
+  display:flex;align-items:center;justify-content:center;gap:52px;padding:0 20px;
+  background:rgba(255,255,255,.085);border:.5px solid rgba(255,255,255,.145);
+  box-shadow:0 10px 30px rgba(0,0,0,.40);backdrop-filter:blur(22px)}
+.floatbar .fbn{position:absolute;right:22px}
+.floatbar .pbtn{width:56px;height:56px;border-radius:28px}
+.floatbar .playt{border-top-width:9px;border-bottom-width:9px;border-left-width:14px}
+.floatbar .sk .b{height:13px}
+.floatbar .sk .t{border-top-width:6px;border-bottom-width:6px}
+.floatbar .sk .t.l{border-right-width:7px}
+.floatbar .sk .t.r{border-left-width:7px}
+.fbn{color:rgba(255,255,255,.80);font-size:20px;width:32px;text-align:center}
+
+/* ================= 样式三：编辑卡片 ================= */
+.ehead{position:absolute;left:16px;right:16px;top:92px;height:120px;display:flex;gap:16px}
+.ehead .cv{width:96px;height:96px;border-radius:12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.46)}
+.einfo{flex:1;min-width:0;padding-top:2px}
+.einfo .t1{font-size:18px;font-weight:700;color:#fff;line-height:24px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.einfo .t2{font-size:13px;color:rgba(255,255,255,.58);margin-top:6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.einfo .t3{font-size:11px;color:rgba(255,255,255,.38);margin-top:5px}
+
+.unhead{position:absolute;left:16px;right:16px;top:224px;height:32px;
+  display:flex;align-items:center;justify-content:space-between}
+.unhead .h{font-size:13px;font-weight:600;color:rgba(255,255,255,.80);letter-spacing:.2px}
+.unhead .m{font-size:12px;color:rgba(255,255,255,.42)}
+
+.upnext{position:absolute;left:0;right:0;top:256px;padding:0 16px}
+.un{display:flex;align-items:center;gap:12px;height:56px}
+.un .cv{width:28px;height:28px;border-radius:6px}
+.un .k{width:12px;text-align:center;font-size:11px;color:rgba(255,255,255,.30);
+  font-variant-numeric:tabular-nums}
+.un.b{background:rgba(255,255,255,.07);border-radius:12px;padding:0 10px;margin:0 -10px}
+.un-t{flex:1;min-width:0;font-size:14px;color:rgba(255,255,255,.86);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.un-d{font-size:11px;color:rgba(255,255,255,.34);font-variant-numeric:tabular-nums}
+
+.ccard{position:absolute;left:16px;right:16px;bottom:34px;padding:16px;
+  border-radius:24px;background:rgba(255,255,255,.085);
+  border:.5px solid rgba(255,255,255,.145);
+  box-shadow:0 12px 34px rgba(0,0,0,.42);backdrop-filter:blur(22px)}
+.cfunc{display:flex;align-items:center;justify-content:space-between;margin-top:14px}
+.cfunc .fi{width:36px;height:36px;font-size:16px}
+.ccard .keys{gap:40px;margin-top:12px}
+.ccard .pbtn{width:56px;height:56px;border-radius:28px}
+.ccard .playt{border-top-width:9px;border-bottom-width:9px;border-left-width:14px}
+
+/* ================= 屏 4：控制区对照 ================= */
+.cmpcard{width:372px;height:796px;border-radius:38px;position:relative;
+  background:#101015;border:8px solid #26262E;overflow:hidden;
+  box-shadow:0 18px 46px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+  padding:22px 20px}
+.cmpcard h3{margin:0 0 4px;font-size:14px;font-weight:700;color:#F2F2F6}
+.cmpcard .sub{margin:0 0 18px;font-size:11.5px;line-height:17px;color:#7C7C88}
+.zone{margin-bottom:16px;border-radius:16px;padding:14px 14px 12px;
+  background:rgba(255,255,255,.035);border:.5px solid rgba(255,255,255,.075)}
+.zt{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+.zt .n{font-size:12px;font-weight:700;color:#F2F2F6}
+.zt .v{font-size:11px;color:#8A8A96;font-variant-numeric:tabular-nums}
+.zt .pill{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:6px;
+  font-weight:600}
+.zt .p1{background:rgba(251,114,153,.16);color:#FB7299}
+.zt .p2{background:rgba(94,200,160,.16);color:#5EC8A0}
+.zt .p3{background:rgba(138,160,255,.16);color:#8AA0FF}
+.demo{position:relative}
+.demo .track{height:4px}
+.demo .tm{font-size:10px}
+.demo .funcrow{margin-top:12px;padding:0 4px}
+.demo .fi{width:34px;height:34px;font-size:16px}
+.demo .keys{margin-top:10px;height:46px;gap:34px}
+.demo .pbtn{width:56px;height:56px;border-radius:28px}
+.demo .playt{border-top-width:9px;border-bottom-width:9px;border-left-width:14px}
+.demo .sk .b{height:13px}
+.demo .sk .t{border-top-width:6px;border-bottom-width:6px}
+.demo .sk .t.l{border-right-width:7px}
+.demo .sk .t.r{border-left-width:7px}
+.flt{display:flex;align-items:center;justify-content:center;gap:44px;padding:0 16px;
+  height:64px;border-radius:32px;background:rgba(255,255,255,.075);
+  border:.5px solid rgba(255,255,255,.13);position:relative}
+.flt .fbn{position:absolute;right:18px}
+.cardz{padding:14px;border-radius:20px;background:rgba(255,255,255,.075);
+  border:.5px solid rgba(255,255,255,.13)}
+.note{margin-top:auto;font-size:11px;line-height:17px;color:#6E6E7A;
+  padding-top:8px;border-top:.5px solid rgba(255,255,255,.07)}
+.note b{color:#9A9AA6;font-weight:600}
+
+/* 屏内标注 pin */
+.pin{position:absolute;font-size:10px;font-weight:600;padding:2px 7px;border-radius:6px;
+  white-space:nowrap;z-index:11;letter-spacing:.2px}
+.pin.a{background:rgba(251,114,153,.92);color:#2A0010}
+.pin.b{background:rgba(94,200,160,.92);color:#00251A}
+.pin.c{background:rgba(138,160,255,.92);color:#000A2E}
+.dash{position:absolute;border:1.2px dashed rgba(251,114,153,.55);border-radius:14px;z-index:10}
+.dash.b{border-color:rgba(94,200,160,.55)}
+.dash.c{border-color:rgba(138,160,255,.55)}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>播放页 · 三种样式</h1>
+  <p>三种样式<b>共用同一套内核与状态</b>（<span class="k">MusicPlayer</span> + 全部 <span class="k">STORE_*</span>），
+     差异只在三处：<b>封面占多大、在哪儿</b> · <b>歌词是「第二页」还是「主角」</b> · <b>控制区通长三行 / 浮动条 / 卡片</b>。
+     四台设备用<b>同一张封面</b>，所以看到的差别全部来自版式。</p>
+  <div class="legend">
+    <span class="l1"><i></i>唱片 disc — 现状加固，零风险</span>
+    <span class="l2"><i></i>沉浸歌词 lyric — 歌词 +25%</span>
+    <span class="l3"><i></i>编辑卡片 editorial — 队列常驻</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ============ 样式一 · 唱片 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="stage">
+        <div class="bg"></div><div class="dim s1"></div>
+
+        <div class="status">
+          <span>20:27</span>
+          <span class="sicons"><span class="wif">5G</span><span class="bat"></span></span>
+        </div>
+
+        <div class="top">
+          <div class="tbi">
+            <svg width="20" height="20" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"
+              stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"
+              stroke-linejoin="round"/></svg>
+          </div>
+          <div class="tbi">
+            <svg width="20" height="20" viewBox="0 0 24 24"><rect x="3" y="5" width="18"
+              height="13" rx="2.6" stroke="currentColor" stroke-width="1.8" fill="none"/>
+              <path d="M12 15.6a1.25 1.25 0 100 2.5 1.25 1.25 0 000-2.5" fill="currentColor"/></svg>
+          </div>
+        </div>
+
+        <!-- 封面区 440 -->
+        <div class="stage1">
+          <div class="disc">
+            <div class="cv"></div>
+            <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+            <div class="gleam"></div>
+            <div class="hole"></div>
+          </div>
+          <div class="arm"><b></b><i></i><s></s></div>
+        </div>
+
+        <div class="pin a" style="left:146px;top:96px">唱针 · 播放摆入 / 暂停摆出</div>
+
+        <!-- 标题块 -->
+        <div class="tblk">
+          <div class="t1">夜航星</div>
+          <div class="t2">某某某 · 176 kbps · Hi-Res 无损</div>
+        </div>
+
+        <!-- 控制区 158 -->
+        <div class="ctrl">
+          <div class="prog">
+            <span class="tm">1:23</span>
+            <div class="track"><i></i></div>
+            <span class="tm r">3:45</span>
+          </div>
+          <div class="funcrow">
+            <div class="fi">↻</div><div class="fi">↓</div>
+            <div class="fi">♡</div><div class="fi">≡</div>
+          </div>
+          <div class="keys">
+            <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+            <div class="pbtn"><span class="playt"></span></div>
+            <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag a">样式 A</span><b>唱片 disc</b> —— 结构完全不动，只加两件装饰：
+      <b>唱针</b>（5×74，播放 24° / 暂停 6°，320ms spring）与 <b>同心纹路 + 轴孔</b>。
+      圆盘仍是 328（宽度驱动，减行数不会变大，所以不为省空间做取舍）。
+      <br>零布局风险，唯一要注意：<b>唱针必须是封面组件的兄弟节点</b>，塞进去会跟着一镜到底飞。</div>
+  </div>
+
+  <!-- ============ 样式二 · 沉浸歌词 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="stage">
+        <div class="bg"></div><div class="dim s2"></div>
+
+        <div class="status">
+          <span>20:27</span>
+          <span class="sicons"><span class="wif">5G</span><span class="bat"></span></span>
+        </div>
+
+        <!-- 信息带 64（顶栏并入） -->
+        <div class="infobar">
+          <div class="cv"></div>
+          <div class="ib-tx">
+            <div class="t1">夜航星</div>
+            <div class="t2">某某某</div>
+          </div>
+          <div class="tbi" style="width:36px;height:36px">
+            <svg width="18" height="18" viewBox="0 0 24 24"><rect x="3" y="5" width="18"
+              height="13" rx="2.6" stroke="currentColor" stroke-width="1.8" fill="none"/>
+              <path d="M12 15.6a1.25 1.25 0 100 2.5 1.25 1.25 0 000-2.5" fill="currentColor"/></svg>
+          </div>
+        </div>
+
+        <!-- 歌词区 548 -->
+        <div class="lyrics">
+          <div class="ln">海面倒映着</div>
+          <div class="ln near">星光照进海底</div>
+          <div class="ln on">夜航星 <span>沉入海</span></div>
+          <div class="ln near">我还在等一个回答</div>
+          <div class="ln">潮汐带来你的消息</div>
+          <div class="ln">而你在很远的地方</div>
+        </div>
+
+        <div class="pin b" style="left:236px;top:126px">歌词 548 · +108</div>
+
+        <!-- 细进度 20 -->
+        <div class="thinprog">
+          <div class="tp-bar"><i></i></div>
+          <div class="tp-time"><span>1:23</span><span>3:45</span></div>
+        </div>
+
+        <!-- 浮动胶囊 76 -->
+        <div class="floatbar">
+          <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+          <div class="pbtn"><span class="playt"></span></div>
+          <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+          <span class="fbn">≡</span>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag b">样式 B</span><b>沉浸歌词 lyric</b> —— 取消 Swiper，
+      歌词从「第二页」变主舞台：<b>440 → 548（+25% 行数）</b>。
+      顶栏并入 64 信息带（省 48），控制区收成细进度 20 + 浮动胶囊 76（省 64）。
+      <br>代价写清楚：功能行 4 键收进 <b>≡</b>，从「一眼可见」变成「多点一次」。</div>
+  </div>
+
+  <!-- ============ 样式三 · 编辑卡片 ============ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="stage">
+        <div class="bg"></div><div class="dim s3"></div>
+
+        <div class="status">
+          <span>20:27</span>
+          <span class="sicons"><span class="wif">5G</span><span class="bat"></span></span>
+        </div>
+
+        <div class="top only-r">
+          <div class="tbi">
+            <svg width="20" height="20" viewBox="0 0 24 24"><rect x="3" y="5" width="18"
+              height="13" rx="2.6" stroke="currentColor" stroke-width="1.8" fill="none"/>
+              <path d="M12 15.6a1.25 1.25 0 100 2.5 1.25 1.25 0 000-2.5" fill="currentColor"/></svg>
+          </div>
+        </div>
+
+        <!-- 头部 120 -->
+        <div class="ehead">
+          <div class="cv"></div>
+          <div class="einfo">
+            <div class="t1">夜航星</div>
+            <div class="t2">某某某</div>
+            <div class="t3">176 kbps · Hi-Res 无损</div>
+          </div>
+        </div>
+
+        <!-- 接下来播放 -->
+        <div class="unhead">
+          <span class="h">接下来播放</span>
+          <span class="m">队列 ›</span>
+        </div>
+        <div class="upnext">
+          <div class="un"><span class="k">1</span><div class="cv"></div>
+            <div class="un-t">海底</div><div class="un-d">2:58</div></div>
+          <div class="un"><span class="k">2</span><div class="cv"></div>
+            <div class="un-t">起风了</div><div class="un-d">3:12</div></div>
+          <div class="un"><span class="k">3</span><div class="cv"></div>
+            <div class="un-t">夜空中最亮的星</div><div class="un-d">2:41</div></div>
+          <div class="un"><span class="k">4</span><div class="cv"></div>
+            <div class="un-t">光年之外</div><div class="un-d">3:24</div></div>
+        </div>
+
+        <div class="pin c" style="left:110px;top:496px">队列常驻 · 读 STORE_QUEUE</div>
+
+        <!-- 控制卡片 196 -->
+        <div class="ccard">
+          <div class="prog">
+            <span class="tm">1:23</span>
+            <div class="track"><i></i></div>
+            <span class="tm r">3:45</span>
+          </div>
+          <div class="cfunc">
+            <div class="fi">↻</div><div class="fi">♡</div>
+            <div class="fi">♪</div><div class="fi">≡</div>
+          </div>
+          <div class="keys">
+            <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+            <div class="pbtn"><span class="playt"></span></div>
+            <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag c">样式 C</span><b>编辑卡片 editorial</b> —— 封面缩到 96 方卡偏左上，
+      信息左对齐；中部是<b>「接下来播放」4 条</b>（其它两种都没有），控制区收进圆角 24 的卡片。
+      <br>这是唯一能回答「下一首是什么」的样式。代价最大：封面从 328 缩到 96，歌词进半屏 sheet。</div>
+  </div>
+
+  <!-- ============ 屏 4 · 控制区三形态 ============ -->
+  <div class="cell">
+    <div class="cmpcard">
+      <h3>控制区 · 三种形态</h3>
+      <p class="sub">三种样式最大的结构差异在这里，不在封面。<br>高度差 62vp，正好是一条队列 + 半行歌词。</p>
+
+      <div class="zone">
+        <div class="zt"><span class="n">A · 通长三行</span><span class="v">158vp</span>
+          <span class="pill p1">唱片 / 现状</span></div>
+        <div class="demo">
+          <div class="prog">
+            <span class="tm">1:23</span>
+            <div class="track"><i></i></div>
+            <span class="tm r">3:45</span>
+          </div>
+          <div class="funcrow">
+            <div class="fi">↻</div><div class="fi">↓</div><div class="fi">♡</div><div class="fi">≡</div>
+          </div>
+          <div class="keys">
+            <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+            <div class="pbtn"><span class="playt"></span></div>
+            <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="zone">
+        <div class="zt"><span class="n">B · 细进度 + 浮动胶囊</span><span class="v">96vp</span>
+          <span class="pill p2">沉浸歌词</span></div>
+        <div class="demo">
+          <div class="thinprog" style="position:static;left:auto;right:auto;bottom:auto;margin-bottom:12px">
+            <div class="tp-bar"><i></i></div>
+            <div class="tp-time"><span>1:23</span><span>3:45</span></div>
+          </div>
+          <div class="flt">
+            <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+            <div class="pbtn" style="width:52px;height:52px;border-radius:26px">
+              <span class="playt" style="border-top-width:8px;border-bottom-width:8px;border-left-width:13px"></span>
+            </div>
+            <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+            <span class="fbn" style="font-size:18px">≡</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="zone" style="margin-bottom:0">
+        <div class="zt"><span class="n">C · 控制卡片</span><span class="v">196vp</span>
+          <span class="pill p3">编辑卡片</span></div>
+        <div class="demo cardz">
+          <div class="prog">
+            <span class="tm">1:23</span>
+            <div class="track"><i></i></div>
+            <span class="tm r">3:45</span>
+          </div>
+          <div class="cfunc" style="margin-top:12px">
+            <div class="fi">↻</div><div class="fi">♡</div><div class="fi">♪</div><div class="fi">≡</div>
+          </div>
+          <div class="keys" style="margin-top:10px;height:46px;gap:34px">
+            <span class="sk"><i class="b"></i><i class="t l"></i><i class="t l"></i></span>
+            <div class="pbtn" style="width:52px;height:52px;border-radius:26px">
+              <span class="playt" style="border-top-width:8px;border-bottom-width:8px;border-left-width:13px"></span>
+            </div>
+            <span class="sk"><i class="t r"></i><i class="t r"></i><i class="b"></i></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="note" style="margin-top:18px">
+        <b>为什么不能都做「浮动胶囊」</b>：<br>
+        HDS 的 <b>systemMaterial 在自绘容器上真机静默全透明</b>（<b>SubPagePlayBar</b> 文件头有实测记录），
+        所以 B / C 的毛玻璃只能用「半透明白 + 0.5 高光边 + 背景本身已模糊」模拟 —— 这正是 Spotify 的做法，零风险。
+      </div>
+    </div>
+    <div class="cap"><span class="tag n">差异</span><b>同一副骨架，三种外壳。</b>
+      控制区高度 158 / 96 / 196 —— 但它们的<b>按键顺序、命中区、按压态、功能行排序全部一致</b>，
+      所以三种样式可以共用同一个 <b>ControlAreaComponent</b>，只是加 <b>floatingMode</b> / <b>cardMode</b> 两个 <b>@Prop</b>。</div>
+  </div>
+
+</div>
+
+</body>
+</html>

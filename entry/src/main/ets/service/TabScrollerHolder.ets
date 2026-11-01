@@ -20,8 +20,8 @@
 export class TabScrollerHolder {
   /** 设置页列表控制器（SettingsPage 的 List 直挂此实例；根 HdsNavigation 绑定它驱动顶栏滚动模糊） */
   static settings: Scroller = new Scroller();
-  /** 下载页列表控制器（DownloadsPage 的 List 直挂此实例） */
-  static downloads: Scroller = new Scroller();
+  /** 拾音页滚动控制器（ListenDiaryPage 的 Scroll 直挂此实例；根栏绑定它驱动顶栏滚动模糊） */
+  static diary: Scroller = new Scroller();
 
   // ---- 下载页顶栏动作（DownloadsPage 注册；DownloadsTabBar 调用） ----
   /** 「选择 / 完成」切换（进出多选模式，同时清空选区） */
@@ -57,6 +57,10 @@ export class TabScrollerHolder {
   static plDeleteSelected: () => void = (): void => {};
   /** 「定位当前播放」：滚动到包含当前播放曲目的歌单（不在则页面 toast 兜底） */
   static plLocateCurrent: () => void = (): void => {};
+  /** ⋮ 菜单「按名称排序全部曲目」：全部歌单曲目按拼音序重排并置起 titleSorted 规则 */
+  static plSortAllByTitle: () => void = (): void => {};
+  /** ⋮ 菜单「取消按名称排序」：只关规则不动现有顺序 */
+  static plClearTitleSorted: () => void = (): void => {};
 
   /** 首页列表控制器（HomePage 的 List 直挂此实例；Index 根栏绑定它驱动顶栏滚动模糊） */
   static home: Scroller = new Scroller();

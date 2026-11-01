@@ -491,7 +491,11 @@ export struct TrackItem {
       .visibility(this.selecting ? Visibility.None : Visibility.Visible)
       .accessibilityText('更多操作')
       .accessibilityLevel('yes')
-      .bindMenu(this.moreMenuItems(this.track))
+      .bindMenu(this.moreMenuItems(this.track), {
+        // 全局统一更多菜单方向：菜单右缘对齐 ⋯ 按钮、从按钮下方向外弹出
+        //（PlaylistsTabBar 顶栏 ⋮ 同款 placement 约定）
+        placement: Placement.BottomRight
+      })
     }
     .width('100%')
     .padding({ left: 16, right: 4, top: 10, bottom: 10 })

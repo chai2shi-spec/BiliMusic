@@ -23,6 +23,7 @@
  */
 
 import { STORE_THEME_PRIMARY, STORE_THEME_SURFACE } from '../common/Constants';
+import { reuseParamMissing } from '../utils/ReuseUtil';
 
 /**
  * @Reusable：行内封面随宿主列表（LazyForEach）复用 ——
@@ -61,23 +62,50 @@ export struct CoverImage {
     this.loadFailed = false;
   }
 
+  /**
+   * @Reuse 复用陷阱兜底：各调用点传参子集不同（空态占位 / 新面孔头像
+   * 不传 altText、宽高），复用时未传的 @Prop 被置 undefined 会让
+   * update func 读 `.length` 直接闪退（听歌日记切周期：Swiper 封面
+   * 回收 → 空态占位复用即触发）。复用进来先把缺省项回落默认值。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    if (reuseParamMissing(params, 'url')) {
+      this.url = '';
+    }
+    if (reuseParamMissing(params, 'imgWidth')) {
+      this.imgWidth = 48;
+    }
+    if (reuseParamMissing(params, 'imgHeight')) {
+      this.imgHeight = 48;
+    }
+    if (reuseParamMissing(params, 'imgRadius')) {
+      this.imgRadius = 8;
+    }
+    if (reuseParamMissing(params, 'altText')) {
+      this.altText = '';
+    }
+    if (reuseParamMissing(params, 'fillParent')) {
+      this.fillParent = false;
+    }
+  }
+
   /** 显示宽：填充模式交给父容器（100%），否则按传入宽（vp） */
   private sizeW(): Length {
-    return this.fillParent ? '100%' : this.imgWidth;
+    return this.fillParent ? '100%' : (this.imgWidth ?? 48);
   }
 
   /** 显示高：填充模式交给父容器（100%），否则按传入高（vp） */
   private sizeH(): Length {
-    return this.fillParent ? '100%' : this.imgHeight;
+    return this.fillParent ? '100%' : (this.imgHeight ?? 48);
   }
 
   /** 占位音符字号（vp）：大卡固定 40（填充模式下 imgWidth/imgHeight 不代表实际尺寸），行内按短边 0.4 */
   private glyphSize(): number {
-    return this.fillParent ? 40 : Math.min(this.imgWidth, this.imgHeight) * 0.4;
+    return this.fillParent ? 40 : Math.min(this.imgWidth ?? 48, this.imgHeight ?? 48) * 0.4;
   }
 
   build() {
-    if (this.url.length === 0 || this.loadFailed) {
+    if ((this.url ?? '').length === 0 || this.loadFailed) {
       Stack() {
         SymbolGlyph($r('sys.symbol.waveform'))
           .fontSize(this.glyphSize())
@@ -88,18 +116,18 @@ export struct CoverImage {
       }
       .width(this.sizeW())
       .height(this.sizeH())
-      .borderRadius(this.imgRadius)
+      .borderRadius(this.imgRadius ?? 8)
       .backgroundColor(this.themeSurface)
       // 占位态仍念歌名：失败/无图不代表这行内容变没了
-      .accessibilityText(this.altText)
-      .accessibilityLevel(this.altText.length > 0 ? 'yes' : 'no')
+        .accessibilityText(this.altText ?? '')
+      .accessibilityLevel((this.altText ?? '').length > 0 ? 'yes' : 'no')
     } else {
       // 网络图：**永远渲染**（可见性不依赖任何回调）。加载中的提示就是它
       // 自带的 brand_surface 底色 —— 像素到达前透出浅粉，不留白也不叠覆盖层。
       Image(this.url)
         .width(this.sizeW())
         .height(this.sizeH())
-        .borderRadius(this.imgRadius)
+        .borderRadius(this.imgRadius ?? 8)
         .objectFit(ImageFit.Cover)
         .backgroundColor(this.themeSurface)
         // Image 默认启用长按拖拽，会抢占宿主 bindContextMenu 的长按菜单手势
@@ -109,8 +137,8 @@ export struct CoverImage {
         .onError((): void => {
           this.loadFailed = true;
         })
-        .accessibilityText(this.altText)
-        .accessibilityLevel(this.altText.length > 0 ? 'yes' : 'no')
+      .accessibilityText(this.altText ?? '')
+        .accessibilityLevel((this.altText ?? '').length > 0 ? 'yes' : 'no')
     }
   }
 }

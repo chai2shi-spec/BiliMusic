@@ -19,6 +19,7 @@ export enum FormCardName {
   CONTROL_2X2 = 'PlayControlCard2x2',
   CONTROL_2X4 = 'PlayControlCard2x4',
   DYNAMIC_LYRICS = 'DynamicLyrics',
+  CONTROL_FOLD = 'PlayControlCardFold',
 }
 
 export enum PlayActionType {

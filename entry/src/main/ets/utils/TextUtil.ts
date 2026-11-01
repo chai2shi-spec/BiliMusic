@@ -441,3 +441,41 @@ export function parseDurationText(raw: string): number {
   }
   return seconds;
 }
+
+/**
+ * ISO 时间串 → 人话相对时间（「刚刚 / N 分钟前 / N 小时前 / N 天前」）。
+ *
+ * 头部操作区重构（设计方案 §3.5）「拉取新投稿 · 3 天前」副标注用：
+ * 数据源 `playlist.updatedAt`（ISO 串）。解析失败 / 时间非法 / 距今超过
+ * 30 天一律返回空串 —— 副标注整行不显示，不把 `Invalid Date` 之类甩给用户。
+ */
+export function formatRelativeTime(iso: string): string {
+  if (!iso || iso.length === 0) {
+    return '';
+  }
+  const ts: number = Date.parse(iso);
+  if (!Number.isFinite(ts)) {
+    return '';
+  }
+  const diffMs: number = Date.now() - ts;
+  if (diffMs < 0) {
+    return '';
+  }
+  const minuteMs: number = 60 * 1000;
+  const hourMs: number = 60 * minuteMs;
+  const dayMs: number = 24 * hourMs;
+  if (diffMs < minuteMs) {
+    return '刚刚';
+  }
+  if (diffMs < hourMs) {
+    return `${Math.floor(diffMs / minuteMs)} 分钟前`;
+  }
+  if (diffMs < dayMs) {
+    return `${Math.floor(diffMs / hourMs)} 小时前`;
+  }
+  const days: number = Math.floor(diffMs / dayMs);
+  if (days <= 30) {
+    return `${days} 天前`;
+  }
+  return '';
+}
