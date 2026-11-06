@@ -5,7 +5,8 @@
  * CHAIN_FILL_INTERVAL_MS 再配下一首，直到整个歌单填满。不一次全加：
  * 整单连发请求必撞 B 站风控（真机史见 PlaylistImporter.isRiskError 注释），
  * 间隔拉开请求密度；也不一曲一配（队列里永远只多一首，填充进度不可见）。
- *   1. start() 只匹配第 0 首（1~2s 起播），**接管队列**（setQueue([track])，
+ *   1. start() 向前扫描匹配首首可播放歌曲（无 B 站音源 / 匹配异常自动跳过，
+ *      直到首中，1~2s 起播），**接管队列**（setQueue([track])，
  *      播放全部 = 旧队列让位，与 playAll 同语义 —— 不接管的话 playNow 前插
  *      会把旧队列曲目横在链曲与预匹配曲之间，首曲播完 next() 放的是旧歌，
  *      bvid 不在链集合被误判「播了链外的歌」而断链，后续全不预匹配）；
@@ -14,7 +15,7 @@
  *   3. 撞风控（HTTP 412）退避 CHAIN_RISK_BACKOFF_MS 后重试同首，连续
  *      CHAIN_RISK_MAX_STREAK 次仍风控才停链（已入队的歌继续播）；
  *   4. 无音源 / 匹配异常跳过继续，跳过串按 CHAIN_MATCH_GAP_MS 节流、连续
- *      CHAIN_MISS_BREAKER 首未命中即熔断止损（见 prematchNext）。
+ *      CHAIN_MISS_BREAKER 首未命中即熔断止损（见 start 首曲扫描与 prematchNext）。
  *
  * 链追踪按 **bvid 集合**而不是 track.id：playNow 会把多 P 合集铺进队列
  * （分 P id = `bvid#cid`），按 id 判「播了链外的歌」会在分 P 切换时误断链；
@@ -116,10 +117,13 @@ export class NeteasePlayChain {
   }
 
   /**
-   * 启动连播：匹配第 0 首并 playNow（store 监听接管后续预匹配）。
+   * 启动连播：向前扫描匹配首首可播放歌曲并 playNow（无 B 站音源 / 匹配异常
+   * 的歌曲自动跳过，节流 / 风控退避 / 熔断与 prematchNext 同款），store 监听
+   * 接管后续预匹配。
    * 已在连播中再次 start = 换歌单 / 重播语义（先断旧链再起）。
-   * 返回的 Promise 在**首曲匹配落定**后 resolve（页面用它清 CTA loading 态；
-   * 首曲失败时链已自断并提示，Promise 照常 resolve 不 reject）。
+   * 返回的 Promise 在**首曲起播落定**（或整单无源 / 熔断终止）后 resolve
+   * （页面用它清 CTA loading 态；链终止时已自断并提示，Promise 照常 resolve
+   * 不 reject）。
    */
   async start(songs: ExternalSong[]): Promise<void> {
     if (songs.length === 0) {
@@ -128,8 +132,10 @@ export class NeteasePlayChain {
     if (this.active) {
       this.cancel();
     }
-    // 代际守卫：cancel / 新 start 都递增 startSeq —— 首曲匹配落定时若已被
-    // 取代（匹配窗口内用户点了单曲 / 重新点了播放全部），直接自弃，不得抢播。
+    // 代际守卫：cancel / 新 start 都递增 startSeq —— 扫描窗口（含每次 await：
+    // 节流 / 匹配 / 风控退避）内若已被取代（用户点了单曲 / 重新点了播放全部），
+    // 直接自弃，不得抢播。⚠️ 不能用 !this.active 作守卫：首中前 active 恒为
+    // false，cancel() 递增 startSeq 才是作废在途扫描的依据。
     const seq: number = ++this.startSeq;
     this.songs = songs.slice();
     this.cursor = -1;
@@ -138,46 +144,79 @@ export class NeteasePlayChain {
     this.riskStreak = 0;
     this.chainedBvids.clear();
     this.lastMatchAt = Date.now();
-    const first: ExternalSong = this.songs[0];
-    let track: Track | null = null;
-    try {
-      track = await matchSongForPlayback(first);
-    } catch (e) {
+    // 首曲向前扫描：无音源 / 异常跳过继续（跳过串按 CHAIN_MATCH_GAP_MS 节流），
+    // 连续 CHAIN_MISS_BREAKER 首未命中熔断止损；撞风控退避 CHAIN_RISK_BACKOFF_MS
+    // 重试同首，连续 CHAIN_RISK_MAX_STREAK 次仍风控即停 —— 容错语义与
+    // prematchNext 一致。
+    while (this.cursor + 1 < this.songs.length) {
+      const next: ExternalSong = this.songs[this.cursor + 1];
+      await this.waitMatchGap();
       if (seq !== this.startSeq) {
         return;
       }
-      if (ImportTaskManager.isRiskError(e)) {
-        this.notifyHint('触发 B 站风控，连播已暂停', 2600);
-      } else {
+      let track: Track | null = null;
+      try {
+        track = await matchSongForPlayback(next);
+      } catch (e) {
+        if (ImportTaskManager.isRiskError(e)) {
+          this.riskStreak++;
+          if (this.riskStreak >= CHAIN_RISK_MAX_STREAK) {
+            this.notifyHint('触发 B 站风控，连播已停止', 2600);
+            this.cancel();
+            return;
+          }
+          // 首次风控：退避后重试同首（不推进 cursor）。退避中 cancel（点播 /
+          // 清队列 / 重开连播）→ 醒来自弃。
+          this.notifyHint('触发 B 站风控，60 秒后自动重试', 2200);
+          this.log(`连播匹配「${next.title}」撞风控，退避重试`);
+          await sleep(CHAIN_RISK_BACKOFF_MS);
+          if (seq !== this.startSeq) {
+            return;
+          }
+          continue;
+        }
+        // 其它异常（网络抖动等）：按无音源跳过，不让单首故障打断整链
         const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
-        console.error(`netease play chain first match failed: ${detail}`);
-        this.notifyHint('匹配失败，请稍后再试', 2200);
+        console.error(`netease play chain start match failed: ${detail}`);
+        this.log(`连播匹配异常「${next.title}」：${detail}`);
       }
-      this.cancel();
+      if (seq !== this.startSeq) {
+        return;
+      }
+      if (track === null) {
+        // 没找到 B 站音源（含异常跳过）：跳过继续（计数并入链尾统一报数）
+        this.skipped++;
+        this.missStreak++;
+        this.cursor++;
+        this.log(`连播跳过「${next.title}」（无 B 站音源）`);
+        if (this.missStreak >= CHAIN_MISS_BREAKER) {
+          this.cancel();
+          this.notifyHint('连续多首未找到 B 站音源，连播已停止', 2600);
+          return;
+        }
+        continue;
+      }
+      // 队列接管：播放全部 = 旧队列让位（与 playAll 同语义）。setQueue([track])
+      // 后 playNow 去重前插结果仍为 [track]，expandMultiParts 合集铺开（多 P）
+      // 与落盘逻辑全部保留。active 延后到这里才挂闸：扫描窗口内旧歌自动切歌等
+      // CURRENT_TRACK 变化不误伤断链（storeListener 判 active）。
+      this.cursor++;
+      this.missStreak = 0;
+      this.riskStreak = 0;
+      this.active = true;
+      this.chainedBvids.add(track.bvid);
+      this.player.setQueue([track]);
+      this.player.playNow(track);
+      this.log(`连播开始「${next.title}」`);
+      // 首曲落定即起渐进填充循环（不并入本 Promise：页面 CTA loading 只等首曲）。
+      // 不依赖 playNow 乐观写 store 触发监听 —— 在播曲目恰好同曲时监听不触发，
+      // 填充就永远起不来。
+      this.prematchNext();
       return;
     }
-    if (seq !== this.startSeq) {
-      return;
-    }
-    if (track === null) {
-      this.notifyHint('没找到可播放的 B 站音源', 2600);
-      this.cancel();
-      return;
-    }
-    // 队列接管：播放全部 = 旧队列让位（与 playAll 同语义）。setQueue([track])
-    // 后 playNow 去重前插结果仍为 [track]，expandMultiParts 合集铺开（多 P）
-    // 与落盘逻辑全部保留。active 延后到这里才挂闸：匹配窗口（1~2s）内旧歌
-    // 自动切歌等 CURRENT_TRACK 变化不再提前误伤断链。
-    this.cursor = 0;
-    this.active = true;
-    this.chainedBvids.add(track.bvid);
-    this.player.setQueue([track]);
-    this.player.playNow(track);
-    this.log(`连播开始「${first.title}」`);
-    // 首曲落定即起渐进填充循环（不并入本 Promise：页面 CTA loading 只等首曲）。
-    // 不依赖 playNow 乐观写 store 触发监听 —— 在播曲目恰好同曲时监听不触发，
-    // 填充就永远起不来。
-    this.prematchNext();
+    // 整单扫描完毕仍无可播放歌曲：断链并明确提示（skipped 已在循环内计数）。
+    this.cancel();
+    this.notifyHint('歌单内没有可播放的 B 站音源', 2600);
   }
 
   /**

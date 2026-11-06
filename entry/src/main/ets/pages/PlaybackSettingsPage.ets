@@ -1,7 +1,9 @@
 /**
- * 播放设置页（按类别分三张分组卡片，SectionHeader 标类别）：
- *   · 播放：自动播放下一首 / 启动时自动播放 / 与其他应用同时播放
+ * 播放设置页（按类别分五张分组卡片，SectionHeader 标类别）：
+ *   · 播放：自动播放下一首 / 启动时自动播放 / 与其他应用同时播放 / 淡入淡出（SelectDialog 弹窗）
  *   · 播放页入口：倍速播放 / 在 B 站打开原视频 / 定时停止入口 / 限定播放进度入口 / 进入 UP 主页入口 / 单曲音量入口
+ *   · 锁屏卡片：定时停止默认档位（SelectDialog 弹窗）
+ *   · 桌面歌词：总开关（AVSession 系统歌词组件）/ 锁定位置（系统组件能力）
  *   · 网络与音源：仅 WiFi 播放 / 播放音质（SelectDialog 弹窗）/ 播放线路（SelectDialog 弹窗）
  *
  * （1.3.6 起不再设「记录与定时」分组：累计听歌由拾音页周期时长覆盖，
@@ -25,9 +27,15 @@ import {
   STORE_SKIP_INTRO_ENTRY_ENABLED,
   STORE_UP_SPACE_ENTRY_ENABLED,
   STORE_TRACK_VOLUME_ENTRY_ENABLED,
+  STORE_CHAPTERS_ENTRY_ENABLED,
+  STORE_DESC_ENTRY_ENABLED,
   STORE_THEME_PRIMARY
 } from '../common/Constants';
-import { AppSettings, DEFAULT_APP_SETTINGS } from '../model/MusicModels';
+import {
+  AppSettings,
+  DEFAULT_APP_SETTINGS
+} from '../model/MusicModels';
+import { DesktopLyricController } from '../service/DesktopLyricController';
 import { BarNarrowShell } from '../components/BarNarrowShell';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { MusicPlayer } from '../player/MusicPlayer';
@@ -45,7 +53,7 @@ import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { CDN_LINE_OPTIONS, CdnLineOption, cdnLineLabelOf } from '../utils/CdnLine';
-import { QUALITY_OPTIONS, QualityOption } from '../utils/SettingsShared';
+import { QUALITY_OPTIONS, QualityOption, SLEEP_OPTIONS, formatSleepMinutes, FADE_DURATION_OPTIONS, FadeDurationOption, fadeDurationLabelOf } from '../utils/SettingsShared';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
@@ -78,6 +86,10 @@ export struct PlaybackSettingsPage {
   private playQualityDialog: CustomDialogController | null = null;
   /** 播放线路选择弹窗（SelectDialog，同播放音质弹窗的「每次打开重建 controller」口径） */
   private cdnLineDialog: CustomDialogController | null = null;
+  /** 锁屏卡片定时档位弹窗（SelectDialog，同播放线路弹窗的「每次打开重建 controller」口径） */
+  private lockCardSleepDialog: CustomDialogController | null = null;
+  /** 淡入淡出档位弹窗（SelectDialog，同播放音质弹窗的「每次打开重建 controller」口径） */
+  private fadeDurationDialog: CustomDialogController | null = null;
   /** 滚动控制器：bindToScrollable 绑给 HDS 标题栏，滚动模糊效果依赖此绑定 */
   private pageScroller: Scroller = new Scroller();
 
@@ -170,6 +182,59 @@ export struct PlaybackSettingsPage {
   }
 
   /**
+   * 选中淡入淡出档位。只写偏好 —— 播放内核每次过渡开始时就近读取
+   *（AppPreferences 内存缓存），下一次切歌 / 暂停 / 恢复立即生效，
+   * 正在进行的过渡不受影响。
+   */
+  private pickFadeDuration(ms: number): void {
+    this.update((s: AppSettings): void => {
+      s.fadeDurationMs = ms;
+    });
+    this.toast(`淡入淡出：${fadeDurationLabelOf(ms)}`, 1500);
+  }
+
+  /**
+   * 打开淡入淡出档位弹窗（SelectDialog，单选列表 + 取消）。
+   * 选中态按当前偏好预选；点选项即生效（写偏好 + toast）并关闭弹窗。
+   */
+  private openFadeDurationDialog(): void {
+    const current: number = this.settings.fadeDurationMs;
+    const items: SheetInfo[] = [];
+    let selectedIndex: number = -1;
+    for (let i = 0; i < FADE_DURATION_OPTIONS.length; i++) {
+      const opt: FadeDurationOption = FADE_DURATION_OPTIONS[i];
+      if (opt.ms === current) {
+        selectedIndex = i;
+      }
+      items.push({
+        title: opt.label,
+        action: (): void => {
+          this.pickFadeDuration(opt.ms);
+          this.fadeDurationDialog?.close();
+        }
+      });
+    }
+    const dialog: CustomDialogController = new CustomDialogController({
+      builder: SelectDialog({
+        title: '淡入淡出',
+        content: '切歌与暂停/恢复时的音量过渡时长；来电等系统打断始终立即停止',
+        selectedIndex: selectedIndex,
+        confirm: {
+          value: '取消',
+          // 同播放音质弹窗：confirm.action 会替换默认关闭行为，必须显式 close
+          action: (): void => {
+            this.fadeDurationDialog?.close();
+          }
+        },
+        radioContent: items
+      }),
+      autoCancel: true
+    });
+    this.fadeDurationDialog = dialog;
+    dialog.open();
+  }
+
+  /**
    * 选中播放线路。只写偏好 —— 线路在音源组装时（BilibiliApi 的 resolveAudioSelection
    * 收口）施加，播放中的歌曲不强制重载，下一首生效。
    * 任何选择（含切回「自动」）都清空上一次自动探测的命中结果：旧探测值对新选择
@@ -222,6 +287,117 @@ export struct PlaybackSettingsPage {
     });
     this.cdnLineDialog = dialog;
     dialog.open();
+  }
+
+  /** 选中锁屏卡片定时停止默认档位（写 AppSettings.lockCardSleepMinutes，下一轮 chip 开启生效） */
+  private pickLockCardSleepMinutes(minutes: number): void {
+    this.update((s: AppSettings): void => {
+      s.lockCardSleepMinutes = minutes;
+    });
+    this.toast(`锁屏卡片定时档位：${formatSleepMinutes(minutes)}`, 1500);
+  }
+
+  /**
+   * 打开锁屏卡片定时档位弹窗（SelectDialog，单选列表 + 取消）。
+   * 选中态按当前偏好预选；点选项即生效（写偏好 + toast）并关闭弹窗。
+   * 档位是锁屏 / 桌面「定时停止卡片」chip 在**未开启**定时时的默认时长；
+   * 已开启的定时不受影响（chip 再点一下即取消）。
+   */
+  private openLockCardSleepDialog(): void {
+    const current: number = this.settings.lockCardSleepMinutes;
+    const items: SheetInfo[] = [];
+    let selectedIndex: number = -1;
+    for (let i = 0; i < SLEEP_OPTIONS.length; i++) {
+      const minutes: number = SLEEP_OPTIONS[i];
+      if (minutes === current) {
+        selectedIndex = i;
+      }
+      items.push({
+        title: formatSleepMinutes(minutes),
+        action: (): void => {
+          this.pickLockCardSleepMinutes(minutes);
+          this.lockCardSleepDialog?.close();
+        }
+      });
+    }
+    const dialog: CustomDialogController = new CustomDialogController({
+      builder: SelectDialog({
+        title: '定时停止默认档位',
+        content: '「定时停止卡片」chip 在未开启定时时的默认时长；开启后再点 chip 即取消',
+        selectedIndex: selectedIndex,
+        confirm: {
+          value: '取消',
+          // 同播放音质弹窗：confirm.action 会替换默认关闭行为，必须显式 close
+          action: (): void => {
+            this.lockCardSleepDialog?.close();
+          }
+        },
+        radioContent: items
+      }),
+      autoCancel: true
+    });
+    this.lockCardSleepDialog = dialog;
+    dialog.open();
+  }
+
+  // ===== 桌面歌词（AVSession 系统歌词组件，样式由系统统一渲染） =====
+
+  /**
+   * 桌面歌词总开关翻转。开 = 先探测系统歌词组件能力，再 enable + 显示；
+   * 成功才落盘 + 镜像，失败（设备不支持 / 系统异常）开关视觉回弹并提示。
+   * 关 = 隐藏系统歌词组件 + 落盘。
+   */
+  private toggleFloatLyric(on: boolean): void {
+    const controller: DesktopLyricController = DesktopLyricController.getInstance();
+    if (!on) {
+      controller.setEnabled(false, this.settings.floatLyricLocked).then((ok: boolean): void => {
+        if (!ok) {
+          this.toast('桌面歌词关闭失败，请稍后重试', 2000);
+          return;
+        }
+        // 控制器已落盘：重读快照刷新开关视觉（@State 不会自动同步 Preferences）
+        this.settings = AppPreferences.getSettings();
+      }).catch((): void => {
+        this.toast('桌面歌词关闭异常，请稍后重试', 2000);
+      });
+      return;
+    }
+    // 翻转前值守卫（见「启动时自动播放」注释）：只有真的从关到开才走开启链
+    if (this.settings.floatLyricEnabled) {
+      return;
+    }
+    controller.isSupported().then(async (supported: boolean): Promise<void> => {
+      if (!supported) {
+        this.toast('当前设备/系统不支持桌面歌词组件', 2400);
+        return;
+      }
+      const shown: boolean = await controller.setEnabled(true, this.settings.floatLyricLocked);
+      if (!shown) {
+        this.toast('桌面歌词开启失败，请确认正在播放音乐后重试', 2400);
+        return;
+      }
+      this.settings = AppPreferences.getSettings();
+      this.toast('已开启：歌词将由系统在桌面悬浮显示', 1800);
+    }).catch((): void => {
+      this.toast('桌面歌词开启异常，请稍后重试', 2000);
+    });
+  }
+
+  /**
+   * 锁定歌词组件翻转。锁定 = 系统歌词组件固定位置、禁止拖拽与设置面板
+   * （样式由系统渲染，应用侧无字号/颜色自定义）。
+   * 落盘 + 镜像 + 即时下发（组件未开启时只落盘，下次开启生效）。
+   */
+  private toggleFloatLyricLocked(on: boolean): void {
+    DesktopLyricController.getInstance().setLocked(on).then((): void => {
+      // 控制器已落盘：重读快照刷新开关视觉
+      this.settings = AppPreferences.getSettings();
+    }).catch((): void => {
+      this.toast('锁定状态下发失败，请稍后重试', 2000);
+    });
+    if (on) {
+      this.toast('已锁定：歌词组件位置固定、禁止拖动', 2200);
+    }
   }
 
   /**
@@ -399,6 +575,28 @@ export struct PlaybackSettingsPage {
               cardBackgroundColor: Color.Transparent,
               cardPrefixMargin: 0,
               cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 淡入淡出：切歌旧曲淡出/新曲淡入、暂停淡出/恢复淡出的音量过渡时长
+            //（SelectDialog 档位弹窗；关 = 现状瞬切，仅保留首播一次性 800ms 淡入）。
+            // 播放内核每次过渡开始时就近读偏好，改完下一次过渡立即生效；
+            // 来电等系统打断不淡出（立即停）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '淡入淡出' }
+              },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: fadeDurationLabelOf(this.settings.fadeDurationMs) },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.openFadeDurationDialog();
+              }
             })
           }
         }
@@ -594,7 +792,67 @@ export struct PlaybackSettingsPage {
 
             CardDivider()
 
-            // 自定义功能栏：播放页功能行 10 个功能项整体排序 —— 前 4 位为默认页
+            // 分段列表入口：开启后播放页功能行出现「分段列表」入口
+            //（ControlAreaComponent：x/player/wbi/v2 的 view_points 章节数据，
+            // 点击弹章节列表 seek 跳转；四款进度条同时画分段刻度）。
+            // 无分段视频点击后弹层展示空态；关闭只隐藏入口，章节数据不受影响。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '分段列表入口' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.chaptersEntryEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.chaptersEntryEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.chaptersEntryEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_CHAPTERS_ENTRY_ENABLED, v);
+                  if (turningOn) {
+                    this.toast('已开启：播放页可查看分段列表', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 视频简介入口：开启后播放页功能行出现「视频简介」入口
+            //（ControlAreaComponent，点击弹半模态弹层 —— 上半视频简介
+            //（getVideoDetail 的 desc，长文可展开）、下半置顶评论
+            //（无置顶回落热门首评，/x/v2/reply/wbi/main））。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '视频简介入口' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.descEntryEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不再弹提示：翻转前值守卫（见「启动时自动播放」注释）
+                  const turningOn: boolean = v && !this.settings.descEntryEnabled;
+                  this.update((s: AppSettings): void => {
+                    s.descEntryEnabled = v;
+                  });
+                  AppStorage.setOrCreate(STORE_DESC_ENTRY_ENABLED, v);
+                  if (turningOn) {
+                    this.toast('已开启：播放页可查看视频简介', 1500);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 自定义功能栏：播放页功能行 12 个功能项整体排序 —— 前 4 位为默认页
             // 图标，其余经左右滑动分页切换查看；进「自定义功能栏」页长按拖动
             // 调整顺序（PlayerFuncOrderPage，AppSettings.funcItemOrder 持久化）。
             HdsListItemCard({
@@ -611,6 +869,85 @@ export struct PlaybackSettingsPage {
               onClick: (): void => {
                 NavStackHolder.stack.pushPath({ name: 'PlayerFuncOrder' });
               }
+            })
+          }
+        }
+
+        ListItem() {
+          SectionHeader({ headerText: '锁屏卡片' })
+        }
+
+        ListItem() {
+          InsetCard() {
+            // 「定时停止卡片」（1×2，锁屏卡片 renderingMode=autoColor）chip 的
+            // 默认定时档位：未开启定时点 chip 按此档开启（活跃时点 chip 取消、
+            // 显「HH:mm 停」）。档位五选一（SelectDialog），写
+            // AppSettings.lockCardSleepMinutes 跨进程供卡片 call 链读取。
+            // 说明：上锁屏需在 AGC 申请「锁屏卡片」开放能力并通过审核（手动
+            // 签名），审批前卡片可先添加到桌面验证交互，审批通过后零改动上锁屏。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '定时停止默认档位' },
+                secondaryText: { text: '「定时停止卡片」chip 未开启定时时的默认时长；卡片当前可添加到桌面，上锁屏需 AGC 开放能力审核通过' }
+              },
+              suffixItem: new SuffixArrowIconText({
+                text: { text: formatSleepMinutes(this.settings.lockCardSleepMinutes) },
+                endArrow: {}
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.openLockCardSleepDialog();
+              }
+            })
+          }
+        }
+
+        ListItem() {
+          SectionHeader({ headerText: '桌面歌词' })
+        }
+
+        ListItem() {
+          InsetCard() {
+            // 桌面歌词总开关：开启后接入系统「歌词组件」（AVSession Kit，
+            // API 23+），由系统在桌面悬浮渲染歌词（内容 = AVMetadata.lyric
+            // 标准 LRC，样式由系统统一管理，无需悬浮窗权限）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '桌面歌词' },
+                secondaryText: { text: '由系统在桌面悬浮显示当前播放歌词（需系统支持歌词组件；样式由系统管理）' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.floatLyricEnabled,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.toggleFloatLyric(v);
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 锁定歌词组件：锁定后固定位置、禁止拖拽与设置面板（系统能力）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '锁定歌词位置' },
+                secondaryText: { text: '锁定后歌词组件固定位置、禁止拖动；需解锁时回到本开关' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.floatLyricLocked,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.toggleFloatLyricLocked(v);
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
             })
           }
         }

@@ -66,4 +66,23 @@ export class ArrayDataSource<T> implements IDataSource {
       }
     }
   }
+
+  /**
+   * 条目移动（List/Grid 的 LazyForEach.onMove 拖拽排序专用）：
+   * 把 from 下标条目移到 to 下标，原地 splice 重排后 onDataReloaded 通知
+   * （官方 LazyForEach onMove 示例同款口径：回调内同步改数据源且仅顺序
+   * 变化，落位动画才正常）。边界守卫：越界 / from===to 直接 no-op。
+   * ⚠️ 本方法原地改写 items，与 reload 的整表替换不同——只供 onMove 回调
+   * 内「先行同步数据源」用，业务真值仍由调用方写穿唯一数据源。
+   */
+  move(from: number, to: number): void {
+    if (from < 0 || from >= this.items.length || to < 0 || to >= this.items.length || from === to) {
+      return;
+    }
+    const moved: T = this.items.splice(from, 1)[0];
+    this.items.splice(to, 0, moved);
+    if (this.listener !== undefined) {
+      this.listener.onDataReloaded();
+    }
+  }
 }

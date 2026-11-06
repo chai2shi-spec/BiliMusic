@@ -25,8 +25,6 @@ import {
   PREF_RECENT,
   PREF_FAVORITES,
   PREF_PLAYLISTS,
-  PREF_PLAYLIST_TOMBSTONES,
-  PREF_FAVORITE_TOMBSTONES,
   PREF_PLAYER_STATE,
   PREF_SEARCH_HISTORY,
   PREF_TOTAL_LISTEN_SECONDS,
@@ -202,11 +200,14 @@ function getSettings(): AppSettings {
     speedEnabled: stored?.speedEnabled ?? DEFAULT_APP_SETTINGS.speedEnabled,
     playbackSpeed: stored?.playbackSpeed ?? DEFAULT_APP_SETTINGS.playbackSpeed,
     audioMixEnabled: stored?.audioMixEnabled ?? DEFAULT_APP_SETTINGS.audioMixEnabled,
+    fadeDurationMs: stored?.fadeDurationMs ?? DEFAULT_APP_SETTINGS.fadeDurationMs,
     openInBilibiliEnabled: stored?.openInBilibiliEnabled ?? DEFAULT_APP_SETTINGS.openInBilibiliEnabled,
     sleepTimerEntryEnabled: stored?.sleepTimerEntryEnabled ?? DEFAULT_APP_SETTINGS.sleepTimerEntryEnabled,
     skipIntroEntryEnabled: stored?.skipIntroEntryEnabled ?? DEFAULT_APP_SETTINGS.skipIntroEntryEnabled,
     upSpaceEntryEnabled: stored?.upSpaceEntryEnabled ?? DEFAULT_APP_SETTINGS.upSpaceEntryEnabled,
     trackVolumeEntryEnabled: stored?.trackVolumeEntryEnabled ?? DEFAULT_APP_SETTINGS.trackVolumeEntryEnabled,
+    chaptersEntryEnabled: stored?.chaptersEntryEnabled ?? DEFAULT_APP_SETTINGS.chaptersEntryEnabled,
+    descEntryEnabled: stored?.descEntryEnabled ?? DEFAULT_APP_SETTINGS.descEntryEnabled,
     lyricCentered: stored?.lyricCentered ?? DEFAULT_APP_SETTINGS.lyricCentered,
     immersiveMaterialTier: normalizeImmersiveTier(stored?.immersiveMaterialTier),
     listenCacheEnabled: stored?.listenCacheEnabled ?? DEFAULT_APP_SETTINGS.listenCacheEnabled,
@@ -215,7 +216,11 @@ function getSettings(): AppSettings {
     publicDirMigrated: stored?.publicDirMigrated ?? DEFAULT_APP_SETTINGS.publicDirMigrated,
       playCdnLine: stored?.playCdnLine ?? DEFAULT_APP_SETTINGS.playCdnLine,
       autoPickedCdnLine: stored?.autoPickedCdnLine ?? DEFAULT_APP_SETTINGS.autoPickedCdnLine,
-      funcItemOrder: normalizeFuncItemOrder(stored?.funcItemOrder)
+      funcItemOrder: normalizeFuncItemOrder(stored?.funcItemOrder),
+      sleepTimerEnd: stored?.sleepTimerEnd ?? DEFAULT_APP_SETTINGS.sleepTimerEnd,
+      lockCardSleepMinutes: stored?.lockCardSleepMinutes ?? DEFAULT_APP_SETTINGS.lockCardSleepMinutes,
+      floatLyricEnabled: stored?.floatLyricEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEnabled,
+      floatLyricLocked: stored?.floatLyricLocked ?? DEFAULT_APP_SETTINGS.floatLyricLocked
     };
   }
   return copyAppSettings(settingsCache);
@@ -252,11 +257,14 @@ function copyAppSettings(s: AppSettings): AppSettings {
     speedEnabled: s.speedEnabled,
     playbackSpeed: s.playbackSpeed,
     audioMixEnabled: s.audioMixEnabled,
+    fadeDurationMs: s.fadeDurationMs,
     openInBilibiliEnabled: s.openInBilibiliEnabled,
     sleepTimerEntryEnabled: s.sleepTimerEntryEnabled,
     skipIntroEntryEnabled: s.skipIntroEntryEnabled,
     upSpaceEntryEnabled: s.upSpaceEntryEnabled,
     trackVolumeEntryEnabled: s.trackVolumeEntryEnabled,
+    chaptersEntryEnabled: s.chaptersEntryEnabled,
+    descEntryEnabled: s.descEntryEnabled,
     lyricCentered: s.lyricCentered,
     immersiveMaterialTier: s.immersiveMaterialTier,
     listenCacheEnabled: s.listenCacheEnabled,
@@ -271,7 +279,11 @@ function copyAppSettings(s: AppSettings): AppSettings {
     autoPickedCdnLine: s.autoPickedCdnLine,
     // 数组字段防御性拷贝：隔离 AppStorage 镜像 / 排序页本地序与内存缓存的引用，
     // 防任一侧原地改写污染另一侧（getSettings 返回值直连 settingsCache）。
-    funcItemOrder: s.funcItemOrder.slice()
+    funcItemOrder: s.funcItemOrder.slice(),
+    sleepTimerEnd: s.sleepTimerEnd,
+    lockCardSleepMinutes: s.lockCardSleepMinutes,
+    floatLyricEnabled: s.floatLyricEnabled,
+    floatLyricLocked: s.floatLyricLocked
   };
 }
 
@@ -361,22 +373,6 @@ async function savePlaylists<T>(list: T[]): Promise<void> {
   await setObject<T[]>(PREF_PLAYLISTS, list);
 }
 
-function getPlaylistTombstones<T>(): T[] {
-  return getObject<T[]>(PREF_PLAYLIST_TOMBSTONES) ?? [];
-}
-
-async function savePlaylistTombstones<T>(list: T[]): Promise<void> {
-  await setObject<T[]>(PREF_PLAYLIST_TOMBSTONES, list);
-}
-
-function getFavoriteTombstones<T>(): T[] {
-  return getObject<T[]>(PREF_FAVORITE_TOMBSTONES) ?? [];
-}
-
-async function saveFavoriteTombstones<T>(list: T[]): Promise<void> {
-  await setObject<T[]>(PREF_FAVORITE_TOMBSTONES, list);
-}
-
 function getSearchHistory(): string[] {
   return getObject<string[]>(PREF_SEARCH_HISTORY) ?? [];
 }
@@ -463,10 +459,6 @@ export const AppPreferences = {
   getFavoriteTracks,
   getPlaylists,
   savePlaylists,
-  getPlaylistTombstones,
-  savePlaylistTombstones,
-  getFavoriteTombstones,
-  saveFavoriteTombstones,
   getPlayerState,
   getSearchHistory,
   saveSearchHistory,

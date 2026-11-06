@@ -54,6 +54,7 @@ import {
 import { SearchBox } from '../components/SearchBox';
 import { HeaderIconButton } from '../components/HeaderIconButton';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
+import { openCollectionOrPlay } from '../utils/CollectionNavigator';
 import {
   CONTENT_END_OFFSET,
   STORE_CURRENT_TRACK,
@@ -853,6 +854,18 @@ export struct PlaylistDetail {
       .catch((): void => {
         // 读旧缓存失败：放弃同步（不阻塞拉新主流程，UP 页下次联网自会重建缓存）
       });
+  }
+
+  /**
+   * 曲目行点击：先查后分流（HomePage / SearchPage / UpSpacePage 同款）。
+   * 合集入口条目（bvid 有值、cid 为空，来自合集页「加入歌单」等路径）经一次
+   * view 查询（viewCache 命中零开销）后跳「合集详情页」；具体分 P（id 含 '#'
+   * 或 cid 非空）与非 BV 条目（音乐中心 / 直播 / 本地文件）走快速路径直接播放，
+   * 行为与原先完全一致。「播放全部 / 加入队列 / 下载」不经过本方法（内核自带
+   * 合集展开逻辑），维持既有行为。
+   */
+  private onRowPlay(tr: Track): void {
+    openCollectionOrPlay(tr, this.player);
   }
 
   /**
@@ -1896,7 +1909,7 @@ export struct PlaylistDetail {
                             track: pair.first,
                             downloaded: this.isDownloaded(pair.first),
                             onPlay: (tr: Track): void => {
-                              this.player.playOrToggle(tr);
+                              this.onRowPlay(tr);
                             },
                             moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
                             selecting: this.selecting,
@@ -1915,7 +1928,7 @@ export struct PlaylistDetail {
                               track: pair.second,
                               downloaded: this.isDownloaded(pair.second),
                               onPlay: (tr: Track): void => {
-                                this.player.playOrToggle(tr);
+                                this.onRowPlay(tr);
                               },
                               moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
                               selecting: this.selecting,
@@ -1950,13 +1963,13 @@ export struct PlaylistDetail {
                       Row() {
                          TrackItem({
                            track: pair.first,
-                           entranceIndex: pIndex * 2,
-                           // 已下载徽标：读 @State downloadedIds，下载完成的
-                           // 快照到达时可见行局部刷新出徽标
-                           downloaded: this.isDownloaded(pair.first),
-                           onPlay: (tr: Track): void => {
-                             this.player.playOrToggle(tr);
-                           },
+                            entranceIndex: pIndex * 2,
+                            // 已下载徽标：读 @State downloadedIds，下载完成的
+                            // 快照到达时可见行局部刷新出徽标
+                            downloaded: this.isDownloaded(pair.first),
+                            onPlay: (tr: Track): void => {
+                              this.onRowPlay(tr);
+                            },
                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
                            selecting: this.selecting,
                            selected: this.selectedIds.indexOf(pair.first.id) >= 0,
@@ -1967,11 +1980,11 @@ export struct PlaylistDetail {
                          if (pair.second !== null) {
                            TrackItem({
                              track: pair.second,
-                             entranceIndex: pIndex * 2 + 1,
-                             downloaded: this.isDownloaded(pair.second),
-                             onPlay: (tr: Track): void => {
-                               this.player.playOrToggle(tr);
-                             },
+                              entranceIndex: pIndex * 2 + 1,
+                              downloaded: this.isDownloaded(pair.second),
+                              onPlay: (tr: Track): void => {
+                                this.onRowPlay(tr);
+                              },
                              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
                              selecting: this.selecting,
                              selected: this.selectedIds.indexOf(pair.second.id) >= 0,
@@ -2001,10 +2014,10 @@ export struct PlaylistDetail {
                           // 已下载徽标：读 @State downloadedIds，
                           // 下载完成的快照到达时可见行局部刷新出徽标（保留节点读
                           // @State 是活的，与下载页「正在播放」同一机制）
-                         downloaded: this.isDownloaded(t),
-                         onPlay: (tr: Track): void => {
-                           this.player.playOrToggle(tr);
-                         },
+                          downloaded: this.isDownloaded(t),
+                          onPlay: (tr: Track): void => {
+                            this.onRowPlay(tr);
+                          },
                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
                          selecting: this.selecting,
                          selected: this.selectedIds.indexOf(t.id) >= 0,

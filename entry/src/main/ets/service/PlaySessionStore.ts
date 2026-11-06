@@ -139,8 +139,9 @@ export function appendSession(session: PlaySession): void {
   if (cached !== undefined) {
     cached.push(session);
   }
+  const line: string = `${JSON.stringify(session)}\n`;
   const run: Promise<void> = writeChain
-    .then((): Promise<void> => appendLine(monthKey, `${JSON.stringify(session)}\n`));
+    .then((): Promise<void> => appendLine(monthKey, line));
   writeChain = run.then((): void => {
   }, (e: Error): void => {
     recordPlaybackLog(PLAYBACK_LOG_WARN, `听歌会话落盘失败: ${e.message}`);
@@ -226,6 +227,109 @@ export async function querySessions(fromMs: number, toMs: number): Promise<PlayS
     cursor.setMonth(cursor.getMonth() + 1);
   }
   result.sort((a: PlaySession, b: PlaySession): number => a.startedAt - b.startedAt);
+  return result;
+}
+
+/** 恢复合并结果（本地备份恢复链路的回执） */
+export interface SessionMergeResult {
+  /** 实际合并落盘的会话条数 */
+  merged: number;
+  /** 被跳过的条数（非法条目 / 保留窗外 / 与现有记录重复） */
+  skipped: number;
+}
+
+/**
+ * 从备份文件合并收听会话（本地备份恢复链路，LocalBackup.restoreBackup 调用）。
+ *
+ * · 入参是备份 JSON 里解析出的 sessions 数组（未消毒），逐条按 loadMonth 同款
+ *   typeof 规则校验，非法 / ms < 1000 / startedAt 在保留窗外或超前于当前时刻
+ *   的一律跳过计数；
+ * · 先 await writeChain（querySessions 同口径），再按 startedAt 归属月分桶；
+ *   逐月 loadMonth 读现存会话，以 `trackId|startedAt|ms` 为去重键，仅追加
+ *   缺失条目 —— 重复恢复同一份备份不会把统计翻倍；
+ * · 新增行沿 writeChain 串行追加（与 appendSession 不交叉），monthCache
+ *   同步补入（缓存即真源，读侧立即可见）；
+ * · merged > 0 时把 STORE_SESSION_REV 递增一次 → 拾音页 @Watch 判快照
+ *   过期自动重查，恢复后免重启即可见；
+ * · 单条落盘失败只降级为 warn 日志（appendSession 同纪律），不抛出、
+ *   不打断恢复链路。
+ */
+export async function mergeBackupSessions(rawSessions: PlaySession[]): Promise<SessionMergeResult> {
+  const result: SessionMergeResult = { merged: 0, skipped: 0 };
+  if (!inited || !Array.isArray(rawSessions) || rawSessions.length === 0) {
+    return result;
+  }
+  await writeChain;
+  const retentionFloor: number = getRetentionFloorMs();
+  const nowMs: number = Date.now();
+  // 消毒 + 保留窗过滤（备份文件可能被手工改坏 / 跨设备带出保留窗外的旧数据）
+  const valid: PlaySession[] = [];
+  for (let i = 0; i < rawSessions.length; i++) {
+    const raw: PlaySession = rawSessions[i];
+    if (raw === null || raw === undefined || typeof raw !== 'object'
+      || typeof raw.trackId !== 'string' || raw.trackId.length === 0
+      || typeof raw.startedAt !== 'number' || !Number.isFinite(raw.startedAt)
+      || typeof raw.ms !== 'number' || !Number.isFinite(raw.ms)) {
+      result.skipped++;
+      continue;
+    }
+    if (raw.ms < MIN_SESSION_MS || raw.startedAt < retentionFloor || raw.startedAt > nowMs) {
+      result.skipped++;
+      continue;
+    }
+    valid.push({
+      trackId: raw.trackId,
+      title: typeof raw.title === 'string' ? raw.title : '',
+      artist: typeof raw.artist === 'string' ? raw.artist : '',
+      upMid: typeof raw.upMid === 'string' ? raw.upMid : '',
+      coverUrl: typeof raw.coverUrl === 'string' ? raw.coverUrl : '',
+      bvid: typeof raw.bvid === 'string' ? raw.bvid : '',
+      durationMs: typeof raw.durationMs === 'number' ? raw.durationMs : 0,
+      startedAt: raw.startedAt,
+      ms: raw.ms,
+      completed: raw.completed === true
+    });
+  }
+  valid.sort((a: PlaySession, b: PlaySession): number => a.startedAt - b.startedAt);
+  // 顺序保证同月相邻：一次线性扫描即可完成「逐月去重 + 追加」
+  let idx: number = 0;
+  while (idx < valid.length) {
+    const monthKey: string = monthKeyOf(valid[idx].startedAt);
+    const existingMonth: PlaySession[] = await loadMonth(monthKey);
+    const seen: Set<string> = new Set<string>();
+    for (let k = 0; k < existingMonth.length; k++) {
+      const s: PlaySession = existingMonth[k];
+      seen.add(`${s.trackId}|${s.startedAt}|${s.ms}`);
+    }
+    // 当月新增行先攒齐再一次追加（单次 fs 写，月级 I/O 而非条级）
+    const lines: string[] = [];
+    while (idx < valid.length && monthKeyOf(valid[idx].startedAt) === monthKey) {
+      const s: PlaySession = valid[idx];
+      idx++;
+      const dedupKey: string = `${s.trackId}|${s.startedAt}|${s.ms}`;
+      if (seen.has(dedupKey)) {
+        result.skipped++;
+        continue;
+      }
+      seen.add(dedupKey);
+      existingMonth.push(s);
+      lines.push(`${JSON.stringify(s)}\n`);
+      result.merged++;
+    }
+    if (lines.length > 0) {
+      const block: string = lines.join('');
+      writeChain = writeChain.then((): Promise<void> => appendLine(monthKey, block))
+        .then((): void => {
+        }, (e: Error): void => {
+          recordPlaybackLog(PLAYBACK_LOG_WARN, `备份会话合并落盘失败: ${e.message}`);
+        });
+    }
+  }
+  if (result.merged > 0) {
+    // 拾音页 @Watch 本信号判断快照过期（appendSession 同款手法）
+    const rev: number = AppStorage.get<number>(STORE_SESSION_REV) ?? 0;
+    AppStorage.setOrCreate(STORE_SESSION_REV, rev + 1);
+  }
   return result;
 }
 

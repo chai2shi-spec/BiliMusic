@@ -4,7 +4,8 @@
  * 分工：initPreferences 由 EntryAbility 在首帧前完成（loadContent 之前，
  * 供主题色 / 底栏布局首帧就位）；initRest 承载其余全部初始化
  * （RDB / 下载表 / 播放器 / Cookie），由 EntryAbility 与 loadContent
- * **并行**触发，不阻塞首页加载。
+ * **并行**触发，不阻塞首页加载。卡片 call 冷启动路径可能先于首帧链，
+ * initRest 链首自补一次幂等的 initPreferences 兜底。
  */
 
 import common from '@ohos.app.ability.common';
@@ -19,6 +20,7 @@ import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
 import { initIntroSkipStore } from './IntroSkipStore';
+import { initChapterCacheStore } from './ChapterCacheStore';
 import { initTrackVolumeStore } from './TrackVolumeStore';
 import { initHomeFeedFilterStore } from './HomeFeedFilterStore';
 import { initPlayerStateStore } from './PlayerStateStore';
@@ -46,7 +48,10 @@ export class AppContainer {
 
   /**
    * 非关键初始化链（与首页加载并行执行）。
-   * 前置条件：initPreferences 已由 EntryAbility 在首帧前完成。
+   * Preferences 由本链自行 await（链首）：桌面卡片 call 冷启动可能先于
+   * onWindowStageCreate 的 initPreferences 到达（callee handler 在 onCreate
+   * 注册，IPC 时序不可控），此前置条件若交给调用方保证必被击穿。
+   * initPreferences 幂等（重复调用返回同一 Preferences 实例），主路径双跑无害。
    * context 刻意收紧为 UIAbilityContext：
    * EntryAbility 传的本来就是它，公共目录授权（DocumentViewPicker）需要
    * UIAbilityContext；下游 initRdb / MusicPlayer.init 等收 common.Context，
@@ -66,6 +71,12 @@ export class AppContainer {
   }
 
   private static async doInitRest(context: common.UIAbilityContext): Promise<void> {
+    // Preferences 自给：卡片 call 冷启动（playByActionCall / collectActionCall）
+    // 可能先于 onWindowStageCreate 的 initPreferences 链到达，这里不 await 的话
+    // 链内 initBuvidCookie / purgeLegacyFavPushQueue 等读偏好会直接抛
+    // 「AppPreferences not initialized」，整链 reject、卡片播控静默失效。
+    // onWindowStageCreate 路径此前已完成 init —— 幂等双跑无副作用。
+    await AppPreferences.initPreferences(context);
     // 后台保活权限（normal 级 system_grant，不弹窗）：放在这里，
     // 减少首页加载瞬间的 IPC 竞争。
     AppContainer.requestKeepBackgroundPermission(context);
@@ -87,6 +98,10 @@ export class AppContainer {
     // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
     // 查询返回 0，无害降级为「该曲目不跳过」。
     initIntroSkipStore(context);
+    // 分段结果持久化缓存：filesDir/chapter_cache.json 装载进内存 Map。
+    // 同款小 JSON（400 条上限），毫秒级；未装载时读恒 null / 写静默跳过，
+    // 无害降级为「每次走网络重新拉分段」。
+    initChapterCacheStore(context);
     // 按曲「单曲音量」系数表：filesDir/track_volume.json 装载进内存 Map。
     // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
     // 查询返回 1.0，无害降级为「该曲目不调音量」。

@@ -4,7 +4,8 @@
  * 设置页按语义拆成四个二级子页（播放设置 / 下载与存储 / 外观设置 / 歌单备份），
  * 多个子页共用的格式化函数与音质档位常量在本文件统一维护：
  *   · formatBytes / formatSleepMinutes / formatRemain / formatListenDuration —— 纯展示文案；
- *   · QualityOption / QUALITY_OPTIONS —— 播放 / 下载音质弹窗共用的档位表。
+ *   · QualityOption / QUALITY_OPTIONS —— 播放 / 下载音质弹窗共用的档位表；
+ *   · FadeDurationOption / FADE_DURATION_OPTIONS / fadeDurationLabelOf —— 淡入淡出档位表与文案。
  */
 
 import { AudioQuality } from '../model/MusicModels';
@@ -28,6 +29,37 @@ export const QUALITY_OPTIONS: QualityOption[] = [
   { value: AudioQuality.HIGH, short: '约 192 kbps，默认' },
   { value: AudioQuality.LOSSLESS, short: '优先 Hi-Res / 杜比' }
 ];
+
+/**
+ * 淡入淡出档位（ms；0 = 关）。
+ *
+ * `ms` 即 AppSettings.fadeDurationMs 的存储值，播放内核（MusicPlayer）每次
+ * 过渡开始时经 AppPreferences.getSettings() 就近读取（内存缓存，零 IO）。
+ * `label` 同时用于设置行右侧文案与 SelectDialog 单选行标题。
+ * 生效面：切歌旧曲淡出/新曲淡入、暂停淡出/恢复淡入；来电等系统打断不淡出。
+ */
+export interface FadeDurationOption {
+  ms: number;
+  label: string;
+}
+
+export const FADE_DURATION_OPTIONS: FadeDurationOption[] = [
+  { ms: 0, label: '关' },
+  { ms: 500, label: '0.5 秒' },
+  { ms: 1000, label: '1 秒' },
+  { ms: 2000, label: '2 秒' },
+  { ms: 3000, label: '3 秒' }
+];
+
+/** 淡入淡出档位文案（未命中档位表回「关」——脏数据/旧版本残留值兜底） */
+export function fadeDurationLabelOf(ms: number): string {
+  for (let i = 0; i < FADE_DURATION_OPTIONS.length; i++) {
+    if (FADE_DURATION_OPTIONS[i].ms === ms) {
+      return FADE_DURATION_OPTIONS[i].label;
+    }
+  }
+  return '关';
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) {

@@ -35,8 +35,11 @@ import {
   DurlItem,
   FlacStream,
   PlayUrlData,
+  ReplyItem,
+  ReplyMainData,
   SeasonEpisode,
   SearchResultItem,
+  TopReplyResult,
   Track,
   TrackSource,
   UgcSeason,
@@ -1541,6 +1544,77 @@ export async function getVideoDetail(
   console.info(`[Collection] view bvid=${bvid} cache=net pages=${detail.pages ? detail.pages.length : 0} videos=${detail.videos}`);
   cachePut<VideoDetail>(viewCache, bvid, detail, VIEW_CACHE_MAX);
   return detail;
+}
+
+//
+// ────────── 置顶评论（「视频简介」弹层消费） ──────────
+//
+
+/**
+ * 置顶评论缓存条目包装：`TopReplyResult | null` 本身可空（视频没评论也要缓存，
+ * 防止每次打开弹层都重打一次注定空手而归的请求），直接拿 `TopReplyResult | null`
+ * 做 Map 值没法区分「没缓存」和「缓存了 null」—— 包一层对象做哨兵。
+ */
+interface TopReplyCacheValue {
+  reply: TopReplyResult | null;
+}
+
+const topReplyCache: Map<string, CacheEntry<TopReplyCacheValue>> =
+  new Map<string, CacheEntry<TopReplyCacheValue>>();
+
+/**
+ * 取视频「置顶评论」（`/x/v2/reply/wbi/main`，wbi 签名）：
+ * UP 主置顶楼（`data.top_replies[0]`）优先；无置顶回落 `data.replies[0]`
+ * （`mode=2` 热度序的首条，即热门评论）；全无（评论区为空 / 关闭）返回 null。
+ *
+ * 会话级缓存按 aid（上限 40 条，10 分钟 TTL，照 viewCache 模板）—— 置顶评论
+ * 基本不变，弹层反复开关不该反复请求；「null = 无评论」同样入缓存防重复请求。
+ * 风控依赖 HttpUtil 的 BiliRequestGate 全局闸（412/403/429 自动冷却上报）。
+ */
+export async function getTopReply(aid: number): Promise<TopReplyResult | null> {
+  const key: string = String(aid);
+  const hit: TopReplyCacheValue | null = cacheGet<TopReplyCacheValue>(topReplyCache, key, VIEW_CACHE_TTL_MS);
+  if (hit !== null) {
+    return hit.reply;
+  }
+  const query: string = await encodeWbi({
+    oid: aid,
+    type: 1,
+    mode: 2,
+    ps: 20,
+    next: 0
+  });
+  const data: BiliEnvelope<ReplyMainData> = await HttpUtil.requestJson<BiliEnvelope<ReplyMainData>>(
+    `${BILI_API}/x/v2/reply/wbi/main?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/v2/reply/wbi/main');
+  }
+  const main: ReplyMainData = data.data;
+  let picked: ReplyItem | null = null;
+  let isTop: boolean = false;
+  const topReplies: ReplyItem[] | null | undefined = main?.top_replies;
+  if (topReplies !== undefined && topReplies !== null && topReplies.length > 0) {
+    picked = topReplies[0];
+    isTop = true;
+  } else {
+    const replies: ReplyItem[] | null | undefined = main?.replies;
+    if (replies !== undefined && replies !== null && replies.length > 0) {
+      picked = replies[0];
+    }
+  }
+  let result: TopReplyResult | null = null;
+  if (picked !== null) {
+    result = {
+      isTop: isTop,
+      uname: picked.member?.uname ?? '',
+      message: picked.content?.message ?? '',
+      like: picked.like ?? 0,
+      ctime: picked.ctime ?? 0
+    };
+  }
+  cachePut<TopReplyCacheValue>(topReplyCache, key, { reply: result }, VIEW_CACHE_MAX);
+  return result;
 }
 
 /**

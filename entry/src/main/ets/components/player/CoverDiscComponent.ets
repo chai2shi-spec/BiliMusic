@@ -130,9 +130,11 @@ export struct CoverDiscComponent {
   @Builder
   DiscCover(): void {
     if (this.coverUrl().length > 0 && !this.coverFailed) {
-      // 720px 缩略图：播放页圆盘按 3x 屏密度最多 ~1000px，720 已足够锐利，
-      // 避免直接拉原图（B 站原图常见 2000px+，解码与流量都翻倍）
-      Image(toThumbUrl(this.coverUrl(), 720))
+      // 1024px 缩略图：播放页圆盘 3x 屏密度最多 ~1000px，按 1024 请求保证
+      // 1:1 物理像素；hdslb 源方形裁切上限通常 717~1080px，CDN 不足时按源
+      // 上限返回，仍显著优于 720（避免直接拉原图：B 站原图常见 2000px+，
+      // 解码与流量都翻倍）
+      Image(toThumbUrl(this.coverUrl(), 1024))
         .width('100%')
         .aspectRatio(1)
         .borderRadius('50%')
@@ -165,7 +167,7 @@ export struct CoverDiscComponent {
   @Builder
   SquareCover(): void {
     if (this.coverUrl().length > 0 && !this.coverFailed) {
-      Image(toThumbUrl(this.coverUrl(), 720))
+      Image(toThumbUrl(this.coverUrl(), 1024))
         .width('100%')
         .aspectRatio(1)
         .borderRadius(12)

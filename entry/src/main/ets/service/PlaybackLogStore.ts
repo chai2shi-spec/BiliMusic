@@ -134,15 +134,17 @@ async function loadPersistedLogs(): Promise<void> {
   }
 }
 
-/** 把内存缓冲整体落盘（open → write → close，TRUNC 全量重写） */
+/** 把内存缓冲整体落盘（临时文件 → 原子改名；TRUNC 只作用于 .tmp，划卡杀进程不会把正式文件截成 0 字节） */
 async function writeLogFile(payload: string): Promise<void> {
-  const file: fs.File = await fs.open(logFilePath,
+  const tmpPath: string = `${logFilePath}.tmp`;
+  const file: fs.File = await fs.open(tmpPath,
     fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
   try {
     await fs.write(file.fd, payload);
   } finally {
     await fs.close(file);
   }
+  await fs.rename(tmpPath, logFilePath);
 }
 
 /** 立即落盘：等历史读回完成后把内存缓冲全量重写进文件（写链串行，失败吞掉） */

@@ -20,6 +20,8 @@ export enum FormCardName {
   CONTROL_2X4 = 'PlayControlCard2x4',
   DYNAMIC_LYRICS = 'DynamicLyrics',
   CONTROL_FOLD = 'PlayControlCardFold',
+  /** 锁屏卡片（1×2 定时停止；renderingMode=autoColor，桌面同样可添加验证） */
+  LOCK_SCREEN = 'LockScreenCard',
 }
 
 export enum PlayActionType {
@@ -37,6 +39,8 @@ export enum RouterType {
 export enum CallMethod {
   PLAY_BY_ACTION = 'playByAction',
   COLLECT_ACTION = 'collectAction',
+  /** 锁屏卡片定时停止开关（活跃→取消，未开启→按设置页默认档开启） */
+  TOGGLE_SLEEP_TIMER = 'toggleSleepTimer',
 }
 
 export enum CollectAction {

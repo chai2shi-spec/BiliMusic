@@ -4,5 +4,7 @@
   "execution": {},
   "logging": {},
   "debugging": {},
-  "nodeOptions": {}
+  "nodeOptions": {
+    "maxOldSpaceSize": 4096
+  }
 }

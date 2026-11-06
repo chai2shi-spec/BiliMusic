@@ -13,7 +13,7 @@
  *  · 播放全部 / 随机播放（页内洗牌副本 + playAll，不动播放内核）；
  *  · 多选批量：加入歌单 / 串行下载（每首间隔节流）；
  *  · 页内搜索（标题 / 歌手本地过滤）；「⋯」菜单（加入队列 / 下载 / 进 UP 主页）；
- *  · 保存为歌单；头部 UP 主可跳转。
+ *  · 保存为歌单；合集可作为单曲（1 条 bvid-only 条目）加入已有歌单；头部 UP 主可跳转。
  *
  * 页面结构照抄 PlaylistDetail：HDS 沉浸标题栏（stackBuilder 空占位 +
  * bottomBuilder 头部区实测高度），列表视口铺满全屏 + 首个空白占位条目让位，
@@ -25,7 +25,7 @@
  *    下载页仍聚成本合集的组卡（点组卡即回到本页）。
  */
 
-import { Track, VideoDetail, DownloadTask, DownloadStatus, Playlist } from '../model/MusicModels';
+import { Track, VideoDetail, DownloadTask, DownloadStatus, Playlist, buildTrack } from '../model/MusicModels';
 import * as BilibiliApi from '../api/BilibiliApi';
 import { expandVideoParts } from '../api/BilibiliApi';
 import { formatDurationText, toHttpsUrl } from '../utils/TextUtil';
@@ -52,6 +52,7 @@ import { SearchBox } from '../components/SearchBox';
 import { HeaderIconButton } from '../components/HeaderIconButton';
 import { SheetActionRow } from '../components/SheetActionRow';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
+import { MaterialCompat } from '../utils/MaterialCompat';
 import {
   CONTENT_END_OFFSET,
   STORE_DOWNLOAD_TASKS,
@@ -726,6 +727,40 @@ export struct CollectionDetailPage {
     this.openPickerFor(tracks);
   }
 
+  /**
+   * 合集作为「单曲」的歌单条目：id = bvid、cid 留空 —— 即项目约定的
+   * 「合集入口条目」形态（与 HomePage / SearchPage「⋯ → 加入歌单」落库的
+   * bvid-only 条目同构）。歌单详情页点击时经 openCollectionOrPlay
+   * 先查后分流跳回本页；歌单按 id 去重，与具体分 P（id 为 `bvid#cid`）互不冲突。
+   * 时长取分 P 总和（秒），副行显示 UP 名，与页内 metaText 口径一致。
+   */
+  private buildCollectionEntry(): Track {
+    let totalSec: number = 0;
+    for (let i = 0; i < this.parts.length; i++) {
+      totalSec += this.parts[i].duration;
+    }
+    return buildTrack({
+      id: this.bvid,
+      title: this.headerTitle,
+      artist: this.ownerName,
+      coverUrl: this.coverUrl,
+      duration: totalSec,
+      bvid: this.bvid,
+      aid: this.parts.length > 0 ? this.parts[0].aid : '',
+      cid: '',
+      upMid: this.ownerMid
+    });
+  }
+
+  /** 更多面板「加入歌单」：整个合集作为 1 条条目，复用既有选择弹层 / 自动建单兜底 */
+  private addCollectionEntryToPlaylist(): void {
+    if (this.parts.length === 0) {
+      this.toast('该合集还没有分 P', 1500);
+      return;
+    }
+    this.openPickerFor([this.buildCollectionEntry()]);
+  }
+
   // ===== 多选批量下载（串行入队 + 节流；不标记 playlistId —— 任务按 bvid 归组成合集组卡） =====
 
   /** 多选动作区「下载」：先确认，再串行入队（间隔见 CD_ENQUEUE_GAP_MS） */
@@ -962,6 +997,18 @@ export struct CollectionDetailPage {
             this.openSaveDialog();
           }
         })
+        // 合集作为「单曲」加入已有歌单：与「保存为歌单」（展开全部分 P 建新歌单）
+        // 互补 —— 这里只落 1 条 bvid-only 合集入口条目（cid 留空），
+        // 歌单详情页点击时经 openCollectionOrPlay 先查后分流跳回本页。
+        SheetActionRow({
+          icon: $r('sys.symbol.list_bullet'),
+          title: '加入歌单',
+          subtitle: `整个合集作为 1 条条目（共 ${this.parts.length} 个分P）`,
+          onClickAction: (): void => {
+            this.moreSheetOpen = false;
+            this.addCollectionEntryToPlaylist();
+          }
+        })
       }
       if (this.tracks.length > 0) {
         SheetActionRow({
@@ -1090,7 +1137,10 @@ export struct CollectionDetailPage {
               title: { title: '合集操作' },
               height: SheetSize.FIT_CONTENT,
               dragBar: true,
-              showClose: true
+              showClose: true,
+              // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+              // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+              systemMaterial: MaterialCompat.sheetMaterial()
             })
           }
           .width('100%')

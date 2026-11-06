@@ -28,9 +28,19 @@
  */
 
 import { BILI_API } from '../common/Constants';
-import { LyricLine, LyricResult, Track } from '../model/MusicModels';
+import {
+  CHAPTER_SOURCE_DESC,
+  CHAPTER_SOURCE_OFFICIAL,
+  CHAPTER_SOURCE_TOP_COMMENT,
+  LyricLine,
+  LyricResult,
+  TopReplyResult,
+  Track,
+  VideoChapter,
+  VideoDetail
+} from '../model/MusicModels';
 import { encodeWbi } from './WbiSign';
-import { getVideoDetail, RETRYABLE_BIZ_CODES } from './BilibiliApi';
+import { getTopReply, getVideoDetail, RETRYABLE_BIZ_CODES } from './BilibiliApi';
 import { HttpUtil } from '../utils/HttpUtil';
 import { BiliRequestGate } from '../utils/BiliRequestGate';
 import { isLoggedIn } from '../service/LoginStore';
@@ -118,10 +128,34 @@ interface SubtitlePlayerEnvelope {
 
 interface SubtitlePlayerData {
   subtitle?: SubtitleList;
+  /**
+   * 视频章节分段（「分段」，web 端进度条章节标记）：
+   * 章节条目的 { from, to, content }（秒）。缺失 = 该视频无分段。
+   * 由 toChapters 解析、requestPlayerInfo 顺带写入 chapterCache。
+   */
+  view_points?: ViewPoint[];
   /** 响应回显的视频身份（身份校验用；缺失 = 无法校验，放行） */
   bvid?: string;
   aid?: number;
   cid?: number;
+}
+
+/**
+ * `x/player/wbi/v2` 响应 data.view_points 的单条目（只声明章节用到的字段）。
+ * 实测 type 有两种形态：AI 音乐章节为数字 2（BGM 识别生成的歌曲分段，
+ * 带 imgUrl / team_name 等字段），UP 主手动分段也可能以字符串 'chapter' 出现 ——
+ * 两种都按章节收（isChapterPoint 判定），其余类型忽略。
+ */
+interface ViewPoint {
+  type?: string | number;
+  from?: number;
+  to?: number;
+  content?: string;
+}
+
+/** view_points 条目是否章节分段：type=2（数字，实测）或 'chapter'（字符串，防御两态） */
+function isChapterPoint(vp: ViewPoint): boolean {
+  return vp.type === 2 || vp.type === 'chapter';
 }
 
 interface SubtitleList {
@@ -148,8 +182,8 @@ interface SubtitleBodyLine {
   content?: string;
 }
 
-/** 解析出的视频定位（wbi/v2 的请求参数） */
-interface SubtitleTarget {
+/** 解析出的视频定位（wbi/v2 的请求参数；字幕与章节两条链路共用） */
+export interface SubtitleTarget {
   bvid: string;
   aid: string;
   cid: string;
@@ -171,7 +205,7 @@ export interface SubtitleOutcome {
 }
 
 /** resolveSubtitleTarget 的输出：失败时带机器可读原因，供 outcome 分级 */
-interface SubtitleTargetResolve {
+export interface SubtitleTargetResolve {
   target: SubtitleTarget | null;
   reason: string;
 }
@@ -215,8 +249,7 @@ function isAiSubtitle(meta: SubtitleMeta): boolean {
  * getVideoDetail(bvid) 补（viewCache 命中近乎零开销）。全空 → target null。
  * 失败原因：补 cid 失败（网络/接口异常，瞬时）与 bvid/aid 全空（无法定位视频，结论性）。
  */
-async function resolveSubtitleTarget(track: Track): Promise<SubtitleTargetResolve> {
-  let bvid: string = track.bvid;
+export async function resolveSubtitleTarget(track: Track): Promise<SubtitleTargetResolve> {  let bvid: string = track.bvid;
   let aid: string = track.aid;
   // cid 优先级：id 的 `BV…#cid` 后缀 > track.cid > getVideoDetail(bvid)。
   // 分 P 曲目的 id 后缀是队列 / 下载链路共用的权威身份（见 BilibiliApi
@@ -396,11 +429,246 @@ async function fetchSubtitleMetasOnce(target: SubtitleTarget): Promise<SubtitleM
   }
 }
 
-/** 字幕列表单次请求（useWbi=true 走 wbi/v2 签名通道；false 走 v2 旧通道） */
-async function requestSubtitleMetas(
+/**
+ * 章节分段会话级缓存（键 = cid 字符串）：由 requestPlayerInfo 成功路径唯一写入
+ * （字幕请求顺带免费产出；view_points 为空也写入 —— 章节基本不变，会话内
+ * 防重复请求）。不落盘，进程重启自然清零。
+ */
+const chapterCache: Map<string, VideoChapter[]> = new Map<string, VideoChapter[]>();
+
+/**
+ * view_points → 章节分段：只认章节条目（isChapterPoint：type=2 / 'chapter'）
+ * 且标题非空、时间轴合法（from ≥ 0、to > from）的条目，按 from 升序。
+ * 脏条目跳过不影响其余。
+ */
+function toChapters(viewPoints: ViewPoint[] | undefined): VideoChapter[] {
+  const chapters: VideoChapter[] = [];
+  if (viewPoints === undefined || !Array.isArray(viewPoints)) {
+    return chapters;
+  }
+  for (let i = 0; i < viewPoints.length; i++) {
+    const vp: ViewPoint = viewPoints[i];
+    const title: string = (vp.content ?? '').trim();
+    const from: number = vp.from ?? Number.NaN;
+    const to: number = vp.to ?? Number.NaN;
+    if (!isChapterPoint(vp) || title.length === 0
+      || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to <= from) {
+      continue;
+    }
+    chapters.push({ from: from, to: to, title: title, source: CHAPTER_SOURCE_OFFICIAL });
+  }
+  chapters.sort((a: VideoChapter, b: VideoChapter): number => a.from - b.from);
+  return chapters;
+}
+
+/**
+ * 简介时间戳行匹配：行首（可选括号/书名号包裹）的 mm:ss 或 h:mm:ss，
+ * 后接可选分隔符与标题。匹配组 1 = 时间戳、组 2 = 标题。
+ * 「00:00」单独成行（无标题）不匹配（组 2 要求非空白）；
+ * 「3:14 我写了一首歌」这类正文闲聊单行由采纳闸门（≥2 条）拦下。
+ */
+const DESC_CHAPTER_LINE_RE: RegExp = new RegExp(
+  '^[\\s]*[（(\\[【]?\\s*((?:\\d{1,2}:)?\\d{1,2}:\\d{2})\\s*[）)\\]】]?\\s*[-–—.、:：|｜]?\\s*(\\S.*)$'
+);
+
+/** 简介分段标题截断长度：防超长标题（复制粘贴的正文段）刷爆分段弹层 */
+const DESC_CHAPTER_TITLE_MAX: number = 50;
+
+/** 简介时间戳行解析的中间产物 */
+interface DescTimestamp {
+  sec: number;
+  title: string;
+}
+
+/** mm:ss / h:mm:ss → 秒；格式非法返回 null（正则已保证形态，双保险） */
+function parseTimestampToSec(stamp: string): number | null {
+  const parts: string[] = stamp.split(':');
+  if (parts.length !== 2 && parts.length !== 3) {
+    return null;
+  }
+  const h: number = parts.length === 3 ? Number(parts[0]) : 0;
+  const m: number = parts.length === 3 ? Number(parts[1]) : Number(parts[0]);
+  const s: number = parts.length === 3 ? Number(parts[2]) : Number(parts[1]);
+  if (!Number.isInteger(h) || !Number.isInteger(m) || !Number.isInteger(s)
+    || h < 0 || m < 0 || s < 0 || s > 59) {
+    return null;
+  }
+  return h * 3600 + m * 60 + s;
+}
+
+/**
+ * 视频简介时间戳目录 → 章节分段（纯函数，可单测；不碰网络与任何缓存）。
+ * 这是官方 view_points 不可用（未登录 / 412 风控 / 接口空）时的兜底解析层：
+ * UP 主在简介手写的「00:00 歌名」行与官方分段数据同源（稿件分段信息），
+ * 公开接口可得，不依赖登录态。
+ *
+ * 采纳闸门（防把普通简介误判成分段目录）：
+ * 1. ≥2 条有效时间戳行 —— 单行时间戳大概率是正文闲聊；
+ * 2. 时长已知（durationSec > 0）时丢弃 ≥ 时长的越界条目（「23:59」占位 /
+ *    笔误），全部越界则自然少于 2 条不采纳；
+ * 3. 同秒去重（保留首条）；排序后前一段 to = 后一段 from，末段 to =
+ *    durationSec（时长未知兜底 from + 3600：分段消费方只用 from 起点做
+ *    高亮与跳转，to 仅存档展示，越界影响可控）。
+ *
+ * 返回条目全部带调用方传入的 source（缺省 'desc'，置顶评论链路传
+ * CHAPTER_SOURCE_TOP_COMMENT）；不满足闸门返回空数组，调用方回落空。
+ */
+export function parseDescriptionChapters(
+  desc: string,
+  durationSec: number,
+  source: string = CHAPTER_SOURCE_DESC
+): VideoChapter[] {
+  const chapters: VideoChapter[] = [];
+  if (typeof desc !== 'string' || desc.length === 0) {
+    return chapters;
+  }
+  const lines: string[] = desc.split('\n');
+  const stamps: DescTimestamp[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line: string = lines[i].trim();
+    if (line.length === 0) {
+      continue;
+    }
+    const m: RegExpMatchArray | null = line.match(DESC_CHAPTER_LINE_RE);
+    if (m === null || m.length < 3) {
+      continue;
+    }
+    const sec: number | null = parseTimestampToSec(m[1]);
+    const title: string = (m[2] ?? '').trim();
+    if (sec === null || title.length === 0) {
+      continue;
+    }
+    if (durationSec > 0 && sec >= durationSec) {
+      continue;
+    }
+    stamps.push({ sec: sec, title: title });
+  }
+  if (stamps.length < 2) {
+    return chapters;
+  }
+  stamps.sort((a: DescTimestamp, b: DescTimestamp): number => a.sec - b.sec);
+  const uniq: DescTimestamp[] = [];
+  for (let i = 0; i < stamps.length; i++) {
+    if (uniq.length === 0 || stamps[i].sec > uniq[uniq.length - 1].sec) {
+      uniq.push(stamps[i]);
+    }
+  }
+  if (uniq.length < 2) {
+    return chapters;
+  }
+  for (let i = 0; i < uniq.length; i++) {
+    const from: number = uniq[i].sec;
+    let to: number;
+    if (i + 1 < uniq.length) {
+      to = uniq[i + 1].sec;
+    } else if (durationSec > from) {
+      to = durationSec;
+    } else {
+      to = from + 3600;
+    }
+    let title: string = uniq[i].title;
+    if (title.length > DESC_CHAPTER_TITLE_MAX) {
+      title = title.substring(0, DESC_CHAPTER_TITLE_MAX);
+    }
+    chapters.push({ from: from, to: to, title: title, source: source });
+  }
+  return chapters;
+}
+
+/**
+ * 简介兜底链路：拉视频简介并解析出分段（ChapterStore 官方源空/失败后调用）。
+ * 数据源 getVideoDetail(bvid).desc —— 走 viewCache（10 分钟 TTL，字幕链路
+ * 「拉取字幕描述词」同款缓存命中近乎零开销），公开接口不依赖登录与 wbi。
+ * P1 限定：仅当目标 cid 为视频第 1 页时才解析 —— 简介时间戳目录描述的是
+ * 整个稿件（几乎总是 P1），分 P 歌切（P2+）套用会串台（与字幕链路 cid
+ * 防串台同口径）。
+ * 任何失败返回空数组，永不抛 —— 兜底层必须比主链路更稳。
+ */
+export async function fetchChaptersFromDescription(
+  bvid: string,
+  cid: string,
+  durationSec: number
+): Promise<VideoChapter[]> {
+  if (bvid.length === 0 || cid.length === 0) {
+    return [];
+  }
+  let detail: VideoDetail;
+  try {
+    detail = await getVideoDetail(bvid);
+  } catch (e) {
+    console.info(`[Chapter] desc fallback detail failed bvid=${bvid}`
+      + ` err=${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    return [];
+  }
+  if (String(detail.cid) !== cid) {
+    return [];
+  }
+  const duration: number = durationSec > 0 ? durationSec : detail.duration;
+  const chapters: VideoChapter[] = parseDescriptionChapters(detail.desc, duration);
+  if (chapters.length > 0) {
+    console.info(`[Chapter] desc fallback parsed bvid=${bvid} cid=${cid}`
+      + ` chapters=${chapters.length}`);
+  }
+  return chapters;
+}
+
+/**
+ * 置顶评论兜底链路：拉 UP 主置顶评论并解析出分段（ChapterStore 简介源
+ * 结论性空/失败后调用，第四层兜底）。
+ * 数据源 getTopReply(aid) —— 走 topReplyCache 会话缓存（10 分钟 TTL，
+ * 「视频简介」弹层已拉过则免费命中），wbi 签名 + BiliRequestGate 全局
+ * 风控闸，公开接口不依赖登录。
+ * 仅取 isTop === true 的真 UP 置顶楼 —— getTopReply 无置顶时回落的
+ * 热门首评是其他用户评论，时间戳目录可信度低，不解析。
+ * 任何失败返回空数组，永不抛 —— 兜底层必须比主链路更稳。
+ */
+export async function fetchChaptersFromTopComment(
+  aid: string,
+  durationSec: number
+): Promise<VideoChapter[]> {
+  const aidNum: number = parseInt(aid);
+  if (Number.isNaN(aidNum) || aidNum <= 0) {
+    return [];
+  }
+  let reply: TopReplyResult | null = null;
+  try {
+    reply = await getTopReply(aidNum);
+  } catch (e) {
+    console.info(`[Chapter] top comment fallback failed aid=${aid}`
+      + ` err=${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    return [];
+  }
+  // 仅 UP 主真置顶楼：无置顶回落的热门首评（isTop=false）不解析
+  if (reply === null || !reply.isTop) {
+    return [];
+  }
+  const chapters: VideoChapter[] =
+    parseDescriptionChapters(reply.message, durationSec, CHAPTER_SOURCE_TOP_COMMENT);
+  if (chapters.length > 0) {
+    console.info(`[Chapter] top comment fallback parsed aid=${aid}`
+      + ` chapters=${chapters.length}`);
+  }
+  return chapters;
+}
+
+/** requestPlayerInfo 的输出：data 为 null 时 reason/definitive 沿用字幕链路分级口径 */
+interface PlayerInfoOutcome {
+  data: SubtitlePlayerData | null;
+  reason: string;
+  definitive: boolean;
+}
+
+/**
+ * `x/player/wbi/v2`（useWbi=true，WBI 签名）或 `x/player/v2`（旧通道）单次请求
+ * + code 校验 + 串台身份校验 —— 字幕列表与章节分段两条链路共用的数据源。
+ * 成功路径顺带把 view_points 解析结果写入 chapterCache（字幕请求免费产出
+ * 章节缓存，章节链路命中即省一次请求）。失败分级与原 requestSubtitleMetas
+ * 完全一致：risk（风控码，瞬时）/ mismatch（串台，瞬时）/ denied（结论性）。
+ */
+async function requestPlayerInfo(
   target: SubtitleTarget,
   useWbi: boolean
-): Promise<SubtitleMetasOutcome> {
+): Promise<PlayerInfoOutcome> {
   const params: Record<string, string | number> = Object.assign(
     { cid: target.cid },
     gaiaWebParams()
@@ -428,9 +696,9 @@ async function requestSubtitleMetas(
     console.info(`[Lyric] subtitle denied code=${code} msg=${envelope.message ?? ''}`
       + ` cookie=${isLoggedIn() ? 1 : 0} risk=${isRisk ? 1 : 0}`);
     if (isRisk) {
-      return { metas: null, reason: 'risk', definitive: false };
+      return { data: null, reason: 'risk', definitive: false };
     }
-    return { metas: null, reason: 'denied', definitive: true };
+    return { data: null, reason: 'denied', definitive: true };
   }
   // 身份校验（F3 串台防护）：实测该接口偶发返回**其它视频**的响应（与同参数下
   // subtitles 空/非空抖动同源，服务端缓存不一致）—— 拿到别人的字幕列表就是
@@ -438,9 +706,10 @@ async function requestSubtitleMetas(
   // 请求的视频身份，逐项比对（回显缺失 = 无法校验 = 放行，防接口形态变化误杀）；
   // 不一致 → 串台，按瞬时失败返回（不 throw：throw 会触发 wbi 通道 10 分钟熔断，
   // 串台是服务端数据问题不是通道风控），由 fetchSubtitleMetas 换指纹重试。
-  const echoedCid: number | undefined = envelope.data?.cid;
-  const echoedBvid: string | undefined = envelope.data?.bvid;
-  const echoedAid: number | undefined = envelope.data?.aid;
+  const data: SubtitlePlayerData | undefined = envelope.data;
+  const echoedCid: number | undefined = data?.cid;
+  const echoedBvid: string | undefined = data?.bvid;
+  const echoedAid: number | undefined = data?.aid;
   const cidMismatch: boolean = echoedCid !== undefined && String(echoedCid) !== target.cid;
   const bvidMismatch: boolean = target.bvid.length > 0
     && (echoedBvid ?? '').length > 0 && echoedBvid !== target.bvid;
@@ -450,14 +719,84 @@ async function requestSubtitleMetas(
     console.info(`[Lyric] subtitle list identity mismatch req cid=${target.cid}`
       + ` bvid=${target.bvid} aid=${target.aid} resp cid=${echoedCid ?? ''}`
       + ` bvid=${echoedBvid ?? ''} aid=${echoedAid ?? ''}`);
-    return { metas: null, reason: 'mismatch', definitive: false };
+    return { data: null, reason: 'mismatch', definitive: false };
   }
-  const metas: SubtitleMeta[] | undefined = envelope.data?.subtitle?.subtitles;
+  if (data === undefined) {
+    return { data: null, reason: 'empty', definitive: true };
+  }
+  // 章节缓存唯一写入口：响应已过身份校验，view_points 无论有无都定格
+  //（会话内不再为该 cid 发章节请求）。
+  chapterCache.set(target.cid, toChapters(data.view_points));
+  return { data: data, reason: '', definitive: false };
+}
+
+/** 字幕列表单次请求（useWbi=true 走 wbi/v2 签名通道；false 走 v2 旧通道） */
+async function requestSubtitleMetas(
+  target: SubtitleTarget,
+  useWbi: boolean
+): Promise<SubtitleMetasOutcome> {
+  const info: PlayerInfoOutcome = await requestPlayerInfo(target, useWbi);
+  if (info.data === null) {
+    return { metas: null, reason: info.reason, definitive: info.definitive };
+  }
+  const metas: SubtitleMeta[] | undefined = info.data.subtitle?.subtitles;
   if (metas === undefined || !Array.isArray(metas) || metas.length === 0) {
     console.info(`[Lyric] subtitle list empty cookie=${isLoggedIn() ? 1 : 0} cid=${target.cid}`);
     return { metas: null, reason: 'empty', definitive: true };
   }
   return { metas: metas, reason: '', definitive: false };
+}
+
+/**
+ * 取视频章节分段（view_points 的 type='chapter' 条目）。
+ * 缓存命中（字幕链路顺带产出 / 本函数此前请求写入）直接返回；未命中走与
+ * fetchSubtitleMetasOnce 同款通道选择：wbi 熔断检查 → wbi/v2（WBI 签名）
+ * → 网络异常落 v2 旧通道。
+ * 返回分级：null = 瞬时失败（risk / 串台 / 网络，调用方下次可重试）；
+ * 空数组 = 结论性「该视频没有分段」（响应已过身份校验并定格进缓存）；
+ * 非空数组 = 章节数据。章节是增强功能，任何失败都不抛错。
+ */
+export async function fetchVideoChapters(target: SubtitleTarget): Promise<VideoChapter[] | null> {
+  const cached: VideoChapter[] | undefined = chapterCache.get(target.cid);
+  if (cached !== undefined) {
+    return cached.slice();
+  }
+  let outcome: PlayerInfoOutcome;
+  if (Date.now() >= wbiChannelBlockedUntil) {
+    try {
+      outcome = await requestPlayerInfo(target, true);
+    } catch (e) {
+      const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      wbiChannelBlockedUntil = Date.now() + WBI_CHANNEL_BLOCK_MS;
+      console.info(`[Chapter] wbi/v2 failed, fallback to v2`
+        + ` (wbi blocked ${Math.round(WBI_CHANNEL_BLOCK_MS / 60000)}min): ${detail}`);
+      try {
+        outcome = await requestPlayerInfo(target, false);
+      } catch (e2) {
+        const detail2: string = e2 instanceof Error ? e2.message : JSON.stringify(e2);
+        console.info(`[Chapter] v2 network failed: ${detail2}`);
+        return null;
+      }
+    }
+  } else {
+    try {
+      outcome = await requestPlayerInfo(target, false);
+    } catch (e) {
+      const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.info(`[Chapter] v2 network failed: ${detail}`);
+      return null;
+    }
+  }
+  if (outcome.data === null) {
+    console.info(`[Chapter] fetch failed reason=${outcome.reason} cid=${target.cid}`
+      + ` bvid=${target.bvid}`);
+    return null;
+  }
+  const chapters: VideoChapter[] | undefined = chapterCache.get(target.cid);
+  const result: VideoChapter[] = chapters !== undefined ? chapters.slice() : [];
+  console.info(`[Chapter] loaded cid=${target.cid} bvid=${target.bvid}`
+    + ` chapters=${result.length}`);
+  return result;
 }
 
 /** 字幕文件 body[] → LyricLine[]；空白行跳过，有效行不足 → null */

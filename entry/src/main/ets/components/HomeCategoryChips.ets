@@ -3,9 +3,9 @@
  *
  * · MusicHome CategoryChipsSection 的 V1 移植：横向滚动的分类 pill
  *   （36 高 / radius 18 / 图标 16 + 文字 12 / 选中 500 字重反白），
- *   与 SearchPage 二级页拆分配套 —— 首页页签为「推荐/排行榜/音乐中心/
- *   热门歌单」四 chip（热门歌单 = 网易云热门歌单网格，HomePage netease
- *   分支），搜索独立成二级页。
+ *   与 SearchPage 二级页拆分配套 —— 首页页签为「推荐/热歌榜/音乐中心/
+ *   热门歌单」四 chip（热歌榜 = 网易云热歌榜单曲列表，HomePage ranking
+ *   分支；热门歌单 = 网易云热门歌单网格，HomePage netease 分支），搜索独立成二级页。
  *
  * · 选中态经 AppStorage 双向状态 STORE_SEARCH_TAB：
  *   HomeCategoryChips 点击写 → HomePage @StorageLink 读并切换内容分支；
@@ -39,15 +39,15 @@ export interface CategoryChipUi {
 }
 
 /**
- * 四分类 chip 静态表（模块级导出，顺序即展示顺序：推荐 / 热门歌单 / 音乐中心 /
- * 排行榜）：chip 条本体与 Index 导航栏滚动联动的 tab 图标共用同一份图标 / key
+ * 四分类 chip 静态表（模块级导出，顺序即展示顺序：推荐 / 热门歌单 / 热歌榜 /
+ * 音乐中心）：chip 条本体与 Index 导航栏滚动联动的 tab 图标共用同一份图标 / key
  * （单一来源，两处不会漂移）。Index 侧图标 40×40 圆按钮复用同 icon。
  */
 export const HOME_CATEGORY_CHIPS: CategoryChipUi[] = [
   { key: 'recommend', title: '推荐', icon: $r('app.media.home_cat_recommend') },
   { key: 'netease', title: '热门歌单', icon: $r('app.media.home_cat_playlist') },
-  { key: 'center', title: '音乐中心', icon: $r('app.media.home_cat_center') },
-  { key: 'ranking', title: '排行榜', icon: $r('app.media.home_cat_ranking') }
+  { key: 'ranking', title: '热歌榜', icon: $r('app.media.home_cat_ranking') },
+  { key: 'center', title: '音乐中心', icon: $r('app.media.home_cat_center') }
 ];
 
 @Component

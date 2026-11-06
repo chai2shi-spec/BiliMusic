@@ -113,8 +113,6 @@ export const PREF_SETTINGS: string = 'bilimusic_settings';
 export const PREF_RECENT: string = 'bilimusic_recent';
 export const PREF_FAVORITES: string = 'bilimusic_favorites';
 export const PREF_PLAYLISTS: string = 'bilimusic_playlists';
-export const PREF_PLAYLIST_TOMBSTONES: string = 'bilimusic_playlists_deleted';
-export const PREF_FAVORITE_TOMBSTONES: string = 'bilimusic_favorites_deleted';
 export const PREF_PLAYER_STATE: string = 'bilimusic_player_state';
 export const PREF_TOTAL_LISTEN_SECONDS: string = 'bilimusic_total_listen_seconds';
 /** 搜索历史：JSON 字符串数组，最近搜索的在前，最多 20 条（见 service/SearchHistoryStore.ts） */
@@ -455,6 +453,21 @@ export const STORE_UP_SPACE_ENTRY_ENABLED: string = 'upSpaceEntryEnabled';
 export const STORE_TRACK_VOLUME_ENTRY_ENABLED: string = 'trackVolumeEntryEnabled';
 
 /**
+ * 分段列表入口开关镜像（AppSettings.chaptersEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行「分段列表」入口是否渲染（默认关）。
+ * 开关只管入口显隐；无分段视频点击后由弹层展示空态。
+ */
+export const STORE_CHAPTERS_ENTRY_ENABLED: string = 'chaptersEntryEnabled';
+
+/**
+ * 「视频简介」入口开关镜像（AppSettings.descEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
+ * @StorageProp 订阅 —— 控制功能行「视频简介」入口是否渲染（默认关）。
+ */
+export const STORE_DESC_ENTRY_ENABLED: string = 'descEntryEnabled';
+
+/**
  * 歌词居中显示开关镜像（AppSettings.lyricCentered 的运行时镜像）：
  * EntryAbility 启动首发、长按歌词面板切换时重发，LyricsComponent
  * @StorageProp 订阅并透传 LrcView —— 控制每行歌词水平居中 / 左对齐绘制（默认关）。
@@ -493,6 +506,31 @@ export const STORE_PLAYBACK_SPEED: string = 'playbackSpeed';
  * ⚠️ 数组引用：发布与写穿两侧都必须 slice() 新数组，禁止原地改写共享引用。
  */
 export const STORE_FUNC_ITEM_ORDER: string = 'playerFuncItemOrder';
+
+/**
+ * 桌面歌词总开关镜像（AppSettings.floatLyricEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、设置页 / 功能行切换时重发，供入口按钮订阅。
+ * 实际开关由 DesktopLyricController 经 AVSession 系统歌词组件落地
+ *（本镜像只表达「用户想要的开关状态」，系统侧可见性变化会回写）。
+ */
+export const STORE_FLOAT_LYRIC_ENABLED: string = 'floatLyricEnabled';
+
+/**
+ * 桌面歌词锁定镜像（AppSettings.floatLyricLocked 的运行时镜像）：
+ * EntryAbility 启动首发、设置页 / 功能行切换时重发，
+ * DesktopLyricController.setLocked 消费（系统组件锁定 = 固定位置禁拖拽）。
+ */
+export const STORE_FLOAT_LYRIC_LOCKED: string = 'floatLyricLocked';
+
+/**
+ * 当前曲「章节分段」镜像（VideoChapter[]，view_points 解析产物）：
+ * 由 ChapterStore.loadForTrack **唯一写入**（切歌 / 播放页首次挂载时加载，
+ * 失败 / 无分段 / 非站内曲目一律写空数组），消费端一律 @StorageProp 只读订阅
+ * —— 功能行「分段列表」按钮（ControlAreaComponent，≥2 段才渲染槽位）、
+ * 分段列表弹层（ChapterSheet）、进度条分段刻度（PlayerProgressArea 四样式）。
+ * ⚠️ 数组引用：写入侧必须 slice() 新数组，禁止与 ChapterStore 内部缓存共享引用。
+ */
+export const STORE_VIDEO_CHAPTERS: string = 'videoChapters';
 
 /**
  * 「与其他应用同时播放」开关镜像（AppSettings.audioMixEnabled 的运行时镜像）：

@@ -2,7 +2,7 @@
   "modelVersion": "26.0.0",
   "name": "bilimusic",
   "version": "1.0.1",
-  "description": "BiliMusic - 基于哔哩哔哩的鸿蒙手机音乐播放器（原生 ArkTS）",
+  "description": "BiliMusic - 基于哔哩哔哩的鸿蒙音乐播放器（原生 ArkTS）",
   "dependencies": {
     "pako": "2.1.0",
     "@types/pako": "2.0.0"

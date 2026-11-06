@@ -26,7 +26,7 @@ import { initVideoTagStore, flushVideoTagsNow } from '../service/VideoTagStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
 import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
-import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER } from '../common/Constants';
+import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_CHAPTERS_ENTRY_ENABLED, STORE_DESC_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER, STORE_FLOAT_LYRIC_ENABLED, STORE_FLOAT_LYRIC_LOCKED } from '../common/Constants';
 
 /**
  * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
@@ -108,6 +108,29 @@ export default class EntryAbility extends UIAbility {
   };
 
   /**
+   * 锁屏卡片定时停止开关指令（call 拉起）：定时活跃 → 取消；未开启 → 按
+   * 设置页「锁屏卡片定时停止默认档位」开启。toggleSleepTimer 内部读
+   * AppStorage 快照判态，冷启动时初始化链可能尚未跑完 —— await initRest
+   * （幂等 Promise）兜底，与 playByActionCall 同款。
+   */
+  private toggleSleepTimerCall = (data: rpc.MessageSequence): rpc.Parcelable => {
+    try {
+      const params: Record<string, string> = JSON.parse(data.readString()) as Record<string, string>;
+      console.info(`[EntryAbility] toggleSleepTimerCall formId=${params.formId ?? ''}`);
+      AppContainer.initRest(this.context)
+        .then((): void => {
+          MusicPlayer.getInstance().toggleSleepTimer();
+        })
+        .catch((e: Error): void => {
+          console.error(`[EntryAbility] toggleSleepTimerCall initRest failed: ${e.message}`);
+        });
+    } catch (e) {
+      console.error(`[EntryAbility] toggleSleepTimerCall failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+    return new EmptyParcelable();
+  };
+
+  /**
    * 卡片路由 want 解析（onCreate / onNewWant 共用）：
    * 卡片根节点 / FormLink 的 router 请求 → seq++ 发布，
    * Index 侧 @StorageProp + @Watch + aboutToAppear 补刀消费后展开播放页。
@@ -143,10 +166,11 @@ export default class EntryAbility extends UIAbility {
     initVideoTagStore(this.context);
     // 卡片路由：冷启动直达播放页（Index aboutToAppear 补刀消费 seq）
     this.handleCardRouter(want);
-    // 卡片播控 / 收藏 call 通道（postCardAction CALL → callee）
+    // 卡片播控 / 收藏 / 锁屏卡片定时开关 call 通道（postCardAction CALL → callee）
     try {
       this.callee.on(CallMethod.PLAY_BY_ACTION, this.playByActionCall);
       this.callee.on(CallMethod.COLLECT_ACTION, this.collectActionCall);
+      this.callee.on(CallMethod.TOGGLE_SLEEP_TIMER, this.toggleSleepTimerCall);
     } catch (e) {
       console.error(`[EntryAbility] callee register failed: ${JSON.stringify(e)}`);
     }
@@ -197,6 +221,7 @@ export default class EntryAbility extends UIAbility {
     try {
       this.callee.off(CallMethod.PLAY_BY_ACTION);
       this.callee.off(CallMethod.COLLECT_ACTION);
+      this.callee.off(CallMethod.TOGGLE_SLEEP_TIMER);
     } catch (e) {
       console.error(`[EntryAbility] callee unregister failed: ${JSON.stringify(e)}`);
     }
@@ -212,6 +237,9 @@ export default class EntryAbility extends UIAbility {
    */
   onForeground(): void {
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
+    // 桌面歌词（AVSession 系统歌词组件）无需在这里恢复：组件随 AVSession
+    // 存活，会话在 MusicPlayer.init 创建后由 restoreDesktopLyric 按落盘值
+    // enable + visible；本方法不再承担悬浮窗重建职责。
   }
 
   /**
@@ -328,6 +356,18 @@ export default class EntryAbility extends UIAbility {
         // 「单曲音量」入口开关（设置页可改）：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_TRACK_VOLUME_ENTRY_ENABLED, settings.trackVolumeEntryEnabled);
+        // 「分段列表」入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_CHAPTERS_ENTRY_ENABLED, settings.chaptersEntryEnabled);
+        // 「视频简介」入口开关（设置页可改）：播放页 ControlAreaComponent 的
+        // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
+        AppStorage.setOrCreate(STORE_DESC_ENTRY_ENABLED, settings.descEntryEnabled);
+        // 桌面歌词（AVSession 系统歌词组件）2 设置项同批首发（总开关 / 锁定）：
+        // 设置页分组与播放页功能行入口的 @StorageProp 初值只是占位，
+        // 真值必须首帧 build 前就位。系统组件的实际 enable/visible 由
+        // MusicPlayer.init 末尾 restoreDesktopLyric 按落盘值恢复。
+        AppStorage.setOrCreate(STORE_FLOAT_LYRIC_ENABLED, settings.floatLyricEnabled);
+        AppStorage.setOrCreate(STORE_FLOAT_LYRIC_LOCKED, settings.floatLyricLocked);
         // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
         // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);

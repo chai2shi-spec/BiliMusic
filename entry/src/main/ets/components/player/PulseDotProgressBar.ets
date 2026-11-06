@@ -25,7 +25,7 @@
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../../common/constants/InteractionConstants';
 import { STORE_IS_PLAYING, STORE_THEME_PRIMARY } from '../../common/Constants';
-import { ProgressMath } from './ProgressMath';
+import { ProgressMath, PROGRESS_MARK_WIDTH_VP, PROGRESS_MARK_HEIGHT_VP, PROGRESS_MARK_COLOR } from './ProgressMath';
 
 /** 命中区高度（vp） */
 const PULSE_HIT_VP: number = 32;
@@ -54,6 +54,8 @@ export struct PulseDotProgressBar {
   @Prop value: number = 0;
   /** 生效总时长（秒）：<=0 时进度按 0 处理、触摸不上报 */
   @Prop max: number = 0;
+  /** 章节分段起点集（秒，不含 0）：空数组 = 无分段，不渲染刻度 */
+  @Prop marks: number[] = [];
   /**
    * 拖拽起止/移动回调（秒）：父组件持有交互状态并决定是否 seek。
    * ⚠️ 不能叫 onDragStart/onDragMove/onDragEnd —— 与 CustomComponent 内置
@@ -237,6 +239,22 @@ export struct PulseDotProgressBar {
       }
       .width(StyleConstants.FULL_WIDTH)
       .height(PULSE_LINE_VP)
+
+      // 章节分段刻度：细白竖条叠在轨道上方（中线对齐各分段起点；
+      // 时长未知/无分段不渲染）
+      if (this.max > 0 && this.marks.length > 0) {
+        ForEach(this.marks, (m: number, _i: number) => {
+          Column() {}
+            .width(PROGRESS_MARK_WIDTH_VP)
+            .height(PROGRESS_MARK_HEIGHT_VP)
+            .borderRadius(PROGRESS_MARK_WIDTH_VP / 2)
+            .backgroundColor(PROGRESS_MARK_COLOR)
+            .position({
+              x: ProgressMath.markX(this.trackWidth, m, this.max),
+              y: (PULSE_HIT_VP - PROGRESS_MARK_HEIGHT_VP) / 2
+            })
+        }, (m: number, i: number) => `${i}_${m}`)
+      }
 
       // 落位涟漪（一次性，完成态 opacity 0 不可见）。
       // 环用 Column+border 画（不用 Circle.stroke/fill —— SDK 26 API，兼容 23 无效）

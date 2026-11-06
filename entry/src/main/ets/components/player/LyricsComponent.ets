@@ -32,6 +32,7 @@ import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { LrcView } from '../../lyric/LrcView';
 import { LrcEntry, Word } from '../../lyric/LrcEntry';
 import { LyricScrollEffect, LyricTopPosition } from '../../lyric/LyricConst';
+import { MaterialCompat } from '../../utils/MaterialCompat';
 import { ControlAreaComponent } from './ControlAreaComponent';
 import {
   STORE_CURRENT_TRACK,
@@ -1548,6 +1549,9 @@ export struct LyricsComponent {
       preferType: SheetType.BOTTOM,
       dragBar: true,
       showClose: false,
+      // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+      // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+      systemMaterial: MaterialCompat.sheetMaterial(),
       // 弹窗关闭即复位搜索区（含手选成功关弹窗的路径）：下次打开是干净入口态
       onDisappear: (): void => {
         this.resetLyricSearchSection();

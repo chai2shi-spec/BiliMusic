@@ -5,17 +5,19 @@
  *  · 启动即全量回填 —— CardFormStore 里的每张卡按类型推一次完整载荷
  *    （快照 + 歌词 + 封面 + 主色），覆盖「应用启动时桌面卡片还停在旧数据」；
  *  · 订阅 MusicPlayer.cardSyncListeners（setStore 对
- *    CURRENT_TRACK / IS_PLAYING / PROGRESS 三键通知）：
+ *    CURRENT_TRACK / IS_PLAYING / PROGRESS / SLEEP_TIMER_END 四键通知）：
  *      换歌 → 全量刷新（AppStorage 实时快照，歌词缓存重置）——
  *        快照落盘晚于切歌通知数百 ms，读盘会慢一首，必须喂内存值；
  *      播放态 → 轻量推 isPlay（不重取封面）；
  *      进度（500ms 一拍）→ 1s 节流 + 歌词行索引变化才推动态歌词窗口
- *    （只影响 DynamicLyrics 卡；心动卡歌词固定随机 4 行，换歌才变）。
+ *        （只影响 DynamicLyrics 卡；心动卡歌词固定随机 4 行，换歌才变）；
+ *      定时停止 → 锁屏卡片轻量推 sleepOn + sleepText（读盘自给）。
  * Form 扩展进程（MusicCardFormAbility）不经过本类 —— 它自行调
  * CardPayloadBuilder.pushCardToForm（双进程自给）。
  */
 
 import common from '@ohos.app.ability.common';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { Track, LyricResult, RepeatMode } from '../../model/MusicModels';
 import {
@@ -23,14 +25,17 @@ import {
   STORE_IS_PLAYING,
   STORE_PROGRESS,
   STORE_DURATION,
-  STORE_REPEAT_MODE
+  STORE_REPEAT_MODE,
+  STORE_SLEEP_TIMER_END
 } from '../../common/Constants';
 import { CardFormStore, CardFormRecord } from './CardFormStore';
 import { FormCardName } from '../../widget/model/CardFormConstant';
 import {
   buildLyricWindow,
   fetchCardLyric,
+  FORM_NOT_EXIST_CODE,
   pushCardToForm,
+  pushLockCardStateToForm,
   pushLyricWindowToForm,
   pushPlayStatusToForm,
   pushProgressToForm
@@ -100,6 +105,11 @@ export class CardPublisher {
       this.pushPlayStatusAll();
     } else if (key === STORE_PROGRESS) {
       this.onProgressTick();
+    } else if (key === STORE_SLEEP_TIMER_END) {
+      // 定时停止开/关（含到点自动暂停）：锁屏卡片轻量推 sleepOn + sleepText。
+      // 不依赖 MusicPlayer → CardPublisher 的直接调用，沿用 setStore 通知机制
+      // 扩展，避免 MusicPlayer 反向依赖卡片层（循环导入）。
+      this.pushLockCardState();
     }
   }
 
@@ -146,8 +156,12 @@ export class CardPublisher {
       .then(async (records: CardFormRecord[]): Promise<void> => {
         for (let i = 0; i < records.length; i++) {
           const record: CardFormRecord = records[i];
-          await pushCardToForm(context, record.formId, record.formName,
-            useLiveState ? this.liveState() : null);
+          try {
+            await pushCardToForm(context, record.formId, record.formName,
+              useLiveState ? this.liveState() : null);
+          } catch (e) {
+            await this.pruneDeadForm(record.formId, e);
+          }
         }
         console.info(`[${TAG}] refreshAll done, cards=${records.length}`);
       })
@@ -173,7 +187,11 @@ export class CardPublisher {
           if (records[i].formName === FormCardName.LYRICS) {
             continue; // 心动卡无播控元素
           }
-          await pushPlayStatusToForm(records[i].formId, isPlay);
+          try {
+            await pushPlayStatusToForm(records[i].formId, isPlay);
+          } catch (e) {
+            await this.pruneDeadForm(records[i].formId, e);
+          }
         }
       })
       .catch((e: Error): void => {
@@ -230,7 +248,37 @@ export class CardPublisher {
     const records: CardFormRecord[] =
       await CardFormStore.getInstance().queryByName(FormCardName.CONTROL_FOLD);
     for (let i = 0; i < records.length; i++) {
-      await pushProgressToForm(records[i].formId, progress, duration, isPlay);
+      try {
+        await pushProgressToForm(records[i].formId, progress, duration, isPlay);
+      } catch (e) {
+        await this.pruneDeadForm(records[i].formId, e);
+      }
+    }
+  }
+
+  /**
+   * 锁屏卡片（LockScreenCard）定时停止态轻量推送：定时开 / 关 / 到点自动
+   * 停时只推 sleepOn + sleepText（CardPayloadBuilder 读盘自给），不重取
+   * 封面 / 快照。无锁屏卡片时 queryByName 空数组自然空转。
+   */
+  private async pushLockCardState(): Promise<void> {
+    const context: common.Context | null = this.context;
+    if (context === null) {
+      return;
+    }
+    try {
+      await CardFormStore.getInstance().init(context);
+      const records: CardFormRecord[] =
+        await CardFormStore.getInstance().queryByName(FormCardName.LOCK_SCREEN);
+      for (let i = 0; i < records.length; i++) {
+        try {
+          await pushLockCardStateToForm(context, records[i].formId);
+        } catch (e) {
+          await this.pruneDeadForm(records[i].formId, e);
+        }
+      }
+    } catch (e) {
+      console.error(`[${TAG}] pushLockCardState failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
     }
   }
 
@@ -249,7 +297,30 @@ export class CardPublisher {
     const records: CardFormRecord[] =
       await CardFormStore.getInstance().queryByName(FormCardName.DYNAMIC_LYRICS);
     for (let i = 0; i < records.length; i++) {
-      await pushLyricWindowToForm(records[i].formId, win.lines, 0, isPlay);
+      try {
+        await pushLyricWindowToForm(records[i].formId, win.lines, 0, isPlay);
+      } catch (e) {
+        await this.pruneDeadForm(records[i].formId, e);
+      }
+    }
+  }
+
+  /**
+   * 推送报「卡片不存在」（16501）→ 该 formId 的卡片已被用户从桌面移除而
+   * 记录未及清理（onRemoveForm 竞态 / 未触达）：删除 CardFormStore 死记录，
+   * 止血后续每次换歌 / 播放态 / 进度 / 歌词推送对同一路径的无效更新。
+   * 其余错误已在推送出口记录日志，这里直接吞掉，不中断同批其余卡片。
+   */
+  private async pruneDeadForm(formId: string, e: Object): Promise<void> {
+    const be: BusinessError = e as BusinessError;
+    if (be.code !== FORM_NOT_EXIST_CODE) {
+      return;
+    }
+    try {
+      await CardFormStore.getInstance().remove(formId);
+      console.info(`[${TAG}] dead form pruned: ${formId}`);
+    } catch (rmErr) {
+      console.error(`[${TAG}] prune dead form failed: ${JSON.stringify(rmErr)}`);
     }
   }
 }

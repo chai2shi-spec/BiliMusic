@@ -15,9 +15,13 @@
  *   ⚠️ 官方《沉浸光感常见问题》生效范围（真机实证）：「其他组件」的
  *   systemMaterial 仅在 Navigation/NavDestination 标题栏或横向 Tabs 底部
  *   TabBar（barPosition=End）内生效，其他区域**静默不渲染**——自绘 Row 直接
- *   挂 .systemMaterial() 就是全透明。当前工程无 uiMaterial 消费方：二级页
- *   悬浮播放栏（SubPagePlayBar）走 HDS 内部材质通路（二号
- *   HdsTabs miniBar + systemMaterialEffect，与首页胶囊同源）。
+ *   挂 .systemMaterial() 就是全透明。二级页悬浮播放栏（SubPagePlayBar）走
+ *   HDS 内部材质通路（二号 HdsTabs miniBar + systemMaterialEffect，与首页
+ *   胶囊同源）。
+ *   ✅ **官方支持的 uiMaterial 消费点**：bindSheet 半模态的
+ *   `SheetOptions.systemMaterial`（API 26 新增，弹窗类 options 传材质走
+ *   官方通道，不受上述自绘限制）。6 个半模态弹层统一经
+ *   `MaterialCompat.sheetMaterial()` 取 ULTRA_THICK 材质。
  */
 
 // ⚠️ @ohos.arkui.uiMaterial 整个模块 26.0.0 才有：API 23/24 设备上静态 import 会在
@@ -173,6 +177,28 @@ export class MaterialCompat {
       console.error(`create immersiveMaterial failed: ${JSON.stringify(e)}`);
       return undefined;
     }
+  }
+
+  /** sheetMaterial() 结果缓存：bindSheet 半模态共用一个 ULTRA_THICK 材质实例 */
+  private static sheetMaterialCache: uiMaterial.ImmersiveMaterial | undefined;
+  /** 缓存已解析标记：探测结果可能合法为 undefined（能力缺失），不能用值判空代替 */
+  private static sheetMaterialResolved: boolean = false;
+
+  /**
+   * bindSheet 半模态专用沉浸材质（ULTRA_THICK，官方 bindSheet 示例同款）：
+   * 首次调用做能力探测并构造材质，之后直接复用缓存实例 —— bindSheet 的
+   * options 对象随宿主组件重渲染反复求值，不缓存会反复 new + 打日志。
+   * 低版本 / 运行时能力缺失返回 undefined：SheetOptions.systemMaterial 收
+   * undefined 即系统默认样式（字段可选，老设备忽略），与现状零差异。
+   */
+  static sheetMaterial(): uiMaterial.ImmersiveMaterial | undefined {
+    if (MaterialCompat.sheetMaterialResolved) {
+      return MaterialCompat.sheetMaterialCache;
+    }
+    MaterialCompat.sheetMaterialResolved = true;
+    MaterialCompat.sheetMaterialCache =
+      MaterialCompat.immersiveMaterial(MaterialCompatStyle.ULTRA_THICK);
+    return MaterialCompat.sheetMaterialCache;
   }
 
   /**

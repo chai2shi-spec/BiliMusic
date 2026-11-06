@@ -4,6 +4,13 @@
  * 由 PlayerPage 的 bindSheet 挂载（底栏 PlayBar 不带队列按钮，
  * 队列入口只剩播放页控制栏的「播放列表」键）。
  *
+ * 长按拖动排序：LazyForEach.onMove 官方拖拽路线（长按 ≥500ms 浮起，
+ * 拖到列表边缘自动滚动，松手落位动画）；落手双写 —— 本地 queueSource.move
+ * 先行（保落位动画：回调内必须同步改数据源且仅顺序变化），再经
+ * player.moveQueueItem 写穿唯一真值（syncQueue → STORE_QUEUE → @Watch
+ * reload，与先行 move 内容一致，幂等）。播放中的曲目可拖（不中断播放，
+ * currentIndex 由 moveQueueItem 按当前曲 id 重对准）。
+ *
  * 宿主约定：bindSheet 挂载本组件，并把弹层开关以 @Link showSheet 传入——
  * 点条目播放 / 清空列表后由内容侧置 false 关闭弹层。
  */
@@ -188,6 +195,16 @@ export struct QueueSheet {
     });
   }
 
+  /**
+   * 长按拖动落手（LazyForEach.onMove 回调，from = 拖起下标，to = 落点下标）。
+   * 双写（见文件头注释）：本地数据源先行 + 播放器队列写穿；后者内部
+   * syncQueue → STORE_QUEUE → @Watch reload 与本地先行内容一致（幂等）。
+   */
+  private onItemMove(from: number, to: number): void {
+    this.queueSource.move(from, to);
+    this.player.moveQueueItem(from, to);
+  }
+
   build() {
     Column() {
       Row() {
@@ -296,6 +313,11 @@ export struct QueueSheet {
               this.showSheet = false;
             })
           }, (track: Track): string => track.id)
+          // 长按拖动排序（见 onItemMove）：onMove 是长按手势（≥500ms），
+          // 与短按 onClick 点播 / xmark 移除共存不互踩。
+          .onMove((from: number, to: number): void => {
+            this.onItemMove(from, to);
+          })
         }
         .width('100%')
         .layoutWeight(1)

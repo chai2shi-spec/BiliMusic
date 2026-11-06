@@ -1,12 +1,12 @@
 /**
  * 自定义功能栏页（播放设置 → 播放页入口 → 自定义功能栏）。
  *
- * 播放页功能行共 10 个功能项（核心 4 + 开关入口 6），顺序持久化在
- * AppSettings.funcItemOrder：前 4 位 = 播放页默认页图标，其余经左右滑动
- * 分页切换查看（ControlAreaComponent 的 Swiper 分页）。本页负责整体排序：
+ * 播放页功能行共 12 个功能项（核心 4 + 开关入口 8），
+ * 顺序持久化在 AppSettings.funcItemOrder：前 4 位 = 播放页默认页图标，
+ * 其余经左右滑动分页切换查看（ControlAreaComponent 的 Swiper 分页）。本页负责整体排序：
  *   · 长按拖动（ForEach.onMove 官方拖拽路线，系统自带浮起/让位动画）；
  *   · 前 4 位行尾标「默认显示」主题色描边徽标；
- *   · 6 个开关入口项受各自入口开关控制：未开启时降透明 + 副文案提示，
+ *   · 8 个开关入口项受各自入口开关控制：未开启时降透明 + 副文案提示，
  *     仍可拖动（占位顺序保留，开启后按当前顺序出现在功能行）；
  *   · 拖动落手即写穿：AppPreferences.updateSettings（持久层）+
  *     AppStorage.setOrCreate(STORE_FUNC_ITEM_ORDER)（运行时镜像）。
@@ -34,6 +34,8 @@ import {
   STORE_SKIP_INTRO_ENTRY_ENABLED,
   STORE_UP_SPACE_ENTRY_ENABLED,
   STORE_TRACK_VOLUME_ENTRY_ENABLED,
+  STORE_CHAPTERS_ENTRY_ENABLED,
+  STORE_DESC_ENTRY_ENABLED,
   STORE_THEME_PRIMARY,
   STORE_FUNC_ITEM_ORDER
 } from '../common/Constants';
@@ -50,6 +52,9 @@ import {
   PLAYER_FUNC_BILI,
   PLAYER_FUNC_UP_SPACE,
   PLAYER_FUNC_VOLUME,
+  PLAYER_FUNC_CHAPTERS,
+  PLAYER_FUNC_DESC,
+  PLAYER_FUNC_FLOAT_LYRIC,
   DEFAULT_FUNC_ITEM_ORDER,
   speedLabelOf
 } from '../model/MusicModels';
@@ -83,13 +88,15 @@ export struct PlayerFuncOrderPage {
   @StorageProp(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
   /** 当前倍速（speed 项视觉 = 倍速片文案，实时跟随） */
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
-  /** 六个开关入口项的入口开关镜像（未开启 → 行降透明 + 副文案提示） */
+  /** 七个开关入口项的入口开关镜像（未开启 → 行降透明 + 副文案提示） */
   @StorageProp(STORE_PLAYBACK_SPEED_ENABLED) speedEnabled: boolean = false;
   @StorageProp(STORE_SKIP_INTRO_ENTRY_ENABLED) skipEntryEnabled: boolean = false;
   @StorageProp(STORE_SLEEP_TIMER_ENTRY_ENABLED) sleepEntryEnabled: boolean = false;
   @StorageProp(STORE_OPEN_IN_BILI_ENABLED) openInBiliEnabled: boolean = true;
   @StorageProp(STORE_UP_SPACE_ENTRY_ENABLED) upSpaceEntryEnabled: boolean = false;
   @StorageProp(STORE_TRACK_VOLUME_ENTRY_ENABLED) volumeEntryEnabled: boolean = false;
+  @StorageProp(STORE_CHAPTERS_ENTRY_ENABLED) chaptersEntryEnabled: boolean = false;
+  @StorageProp(STORE_DESC_ENTRY_ENABLED) descEntryEnabled: boolean = false;
   /**
    * 功能项顺序（本页唯一数据源）。aboutToAppear 从持久层读
    * （AppPreferences 内存缓存启动即热，getSettings 同步零磁盘读）；
@@ -172,7 +179,16 @@ export struct PlayerFuncOrderPage {
     if (id === PLAYER_FUNC_UP_SPACE) {
       return '进入 UP 主页';
     }
-    return '单曲音量';
+    if (id === PLAYER_FUNC_VOLUME) {
+      return '单曲音量';
+    }
+    if (id === PLAYER_FUNC_CHAPTERS) {
+      return '分段列表';
+    }
+    if (id === PLAYER_FUNC_DESC) {
+      return '视频简介';
+    }
+    return '桌面歌词';
   }
 
   /** 开关入口项的入口开关是否开启（核心 4 项恒开） */
@@ -194,6 +210,12 @@ export struct PlayerFuncOrderPage {
     }
     if (id === PLAYER_FUNC_VOLUME) {
       return this.volumeEntryEnabled;
+    }
+    if (id === PLAYER_FUNC_CHAPTERS) {
+      return this.chaptersEntryEnabled;
+    }
+    if (id === PLAYER_FUNC_DESC) {
+      return this.descEntryEnabled;
     }
     return true;
   }
@@ -288,8 +310,20 @@ export struct PlayerFuncOrderPage {
       SymbolGlyph($r('sys.symbol.person'))
         .fontSize(22)
         .fontColor([$r('app.color.text_primary')])
-    } else {
+    } else if (id === PLAYER_FUNC_VOLUME) {
       SymbolGlyph($r('sys.symbol.speaker_wave_2'))
+        .fontSize(22)
+        .fontColor([$r('app.color.text_primary')])
+    } else if (id === PLAYER_FUNC_CHAPTERS) {
+      SymbolGlyph($r('sys.symbol.text_alignleft'))
+        .fontSize(22)
+        .fontColor([$r('app.color.text_primary')])
+    } else if (id === PLAYER_FUNC_DESC) {
+      SymbolGlyph($r('sys.symbol.doc_text'))
+        .fontSize(22)
+        .fontColor([$r('app.color.text_primary')])
+    } else {
+      SymbolGlyph($r('sys.symbol.lyrics_square'))
         .fontSize(22)
         .fontColor([$r('app.color.text_primary')])
     }

@@ -2,7 +2,8 @@
  * 播放核心（原生 ArkTS 版）。
  * 使用 @ohos.multimedia.media (AVPlayer) + @ohos.multimedia.avsession (AVSession)。
  * - 通过 setMediaSource 在请求头注入 Referer（B 站音频流必需）
- * - AVSession 负责锁屏 / 通知栏 / 媒体中心（控制中心卡片，HiCar 车机卡片同源）的显示与遥控
+ * - AVSession 负责锁屏 / 通知栏 / 媒体中心（控制中心卡片，HiCar 车机卡片同源）的显示与遥控；
+ *   定时停止跨进程落盘（AppSettings.sleepTimerEnd），锁屏卡片 / 播放页 chip 共用
  * - 状态写入 AppStorage，UI 用 @StorageLink 订阅
  */
 
@@ -45,6 +46,7 @@ import { appendSession } from '../service/PlaySessionStore';
 import { notifyPlaybackHint } from '../common/ToastChannel';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { hasNetwork, isUnmeteredNetwork } from '../utils/NetworkUtil';
+import { toThumbUrl } from '../utils/TextUtil';
 import { CdnLineOption, CDN_LINE_AUTO, probeCdnLinesInOrder, setAutoPickedCdnLine } from '../utils/CdnLine';
 import { BILI_REFERER } from '../common/Constants';
 import {
@@ -74,6 +76,8 @@ import {
   STORE_AUDIO_MIX_ENABLED,
   STORE_BT_PERM_REQ_SEQ,
   STORE_SLEEP_TIMER_END,
+  STORE_FLOAT_LYRIC_ENABLED,
+  STORE_FLOAT_LYRIC_LOCKED,
   RESUME_MIN_SEC,
   RESUME_TAIL_SEC,
   PREF_PLAYER_STATE,
@@ -439,7 +443,30 @@ export class MusicPlayer {
   private firstPlayFadePending: boolean = true;
   /** 淡入斜坡定时器（-1 = 无）；随实例摘除一并清理（见 detachAndClearPlayer） */
   private firstPlayFadeTimer: number = -1;
+  /** 淡入已武装（音量已归零、等 'playing' 状态事件起斜坡）：首播 / 切歌新曲 / 恢复淡入共用 */
+  private fadeInArmed: boolean = false;
+  /** 本次淡入时长（ms）：武装时确定（档位值；档位关闭时为首播一次性 800ms） */
+  private fadeInDurationMs: number = FIRST_PLAY_FADE_MS;
+  /** 淡出斜坡定时器（-1 = 无）：切歌淡出 / 暂停淡出共用 */
+  private fadeOutTimer: number = -1;
+  /** 正在淡出的实例：切歌重建押后 release 时它已不是 this.avPlayer，斜坡靠它找到目标 */
+  private fadeOutPlayer: media.AVPlayer | null = null;
+  /** 淡出完成后需 release 实例（切歌重建把 release 押给了淡出收尾，见 rebuildPlayerLocked） */
+  private fadeOutReleaseOnDone: boolean = false;
+  /** 押后 release 实例的本地文件句柄（rebuildPlayerLocked 移交；淡出收尾时关闭） */
+  private fadeOutDeferredFd: fs.File | null = null;
+  /** 音量引擎最近一次写入 AVPlayer 的音量：淡入/淡出斜坡交接时从它起坡，避免跳变 */
+  private lastEngineVolume: number = 1;
   private session: avSession.AVSession | null = null;
+  /**
+   * 系统桌面歌词组件能力探测结果缓存（null = 未探测）：
+   * avSession.isDesktopLyricSupported 结果进程内不变，探测一次即可。
+   */
+  private desktopLyricSupported: boolean | null = null;
+  /** 系统桌面歌词组件当前是否可见（与 AppSettings.floatLyricEnabled 对账） */
+  private desktopLyricVisibleNow: boolean = false;
+  /** 已 enableDesktopLyric(true)（重复 enable 无副作用，仅减少 IPC） */
+  private desktopLyricEnabledOnce: boolean = false;
   /**
    * 播放本地下载文件时打开的文件句柄（非本地播放时为 null）。
    *
@@ -772,6 +799,8 @@ export class MusicPlayer {
         // 投播设备监听：AVCastPicker 选定设备后系统回调 outputDeviceChange，
         // 由此建立/拆除 AVCastController（见「投播」小节）
         this.registerCastDeviceListener(this.session);
+        // 桌面歌词组件：系统侧可见性/锁定变化回写应用开关（见「桌面歌词」小节）
+        this.registerDesktopLyricListeners(this.session);
       }
     }
 
@@ -783,6 +812,11 @@ export class MusicPlayer {
     this.startCallStateWatch();
 
     await this.restoreState();
+    // 桌面歌词组件随会话销毁而消失：落盘 enabled=true 时冷启动按锁定态重新开启
+    this.restoreDesktopLyric();
+    // 定时停止跨进程重启恢复：AppSettings.sleepTimerEnd 在未来 → 按剩余时长
+    // 重新武装 setTimeout（静默，不弹「已设置」toast）；已过期 → 清理落盘残留
+    this.restoreSleepTimer();
     this.initCompleted = true;
   }
 
@@ -985,6 +1019,32 @@ export class MusicPlayer {
     const state: PersistedPlayerState | null = await readPlayerStateFile();
     if (!state || !state.currentTrack) {
       await this.restoreLegacyState();
+      // 队列降级恢复：标量快照损坏/丢失（历史版本划卡杀进程把
+      // player_state.json 截成 0 字节——onBackground 强制落盘的
+      // open(TRUNC)→write 被 SIGKILL 掐在中间）而队列文件完好
+      //（队列仅在变更时写，案发时无在途写）时，不能整体放弃：
+      // 恢复队列本体、游标回队头、进度归零，损失仅「续播点」。
+      // 不做这层的话卡片冷启动点播放会因无 currentTrack 静默 no-op
+      //（表现「点了没反应」且零报错）。
+      if (this.queue.length === 0) {
+        const degradedQueue: PersistedPlayerQueue | null = await readPlayerQueueFile();
+        if (degradedQueue !== null && Array.isArray(degradedQueue.queue)
+          && degradedQueue.queue.length > 0) {
+          const degradedTrack: Track = degradedQueue.queue[0];
+          const degraded: PersistedPlayerState = {
+            currentTrack: degradedTrack,
+            currentIndex: 0,
+            progress: 0,
+            duration: 0,
+            repeatMode: RepeatMode.NONE,
+            isShuffled: false,
+            isPlaying: false,
+            savedAt: Date.now()
+          };
+          console.info('restoreState: scalar snapshot lost, degraded restore from queue');
+          this.applyRestoredState(degraded, degradedTrack, degradedQueue.queue);
+        }
+      }
       return;
     }
     const queueSnap: PersistedPlayerQueue | null = await readPlayerQueueFile();
@@ -1081,9 +1141,11 @@ export class MusicPlayer {
     } else {
       AppStorage.setOrCreate(key, value);
     }
-    // 桌面卡片实时推送挂钩：只对卡片关心的三键通知，其余键（队列 / 模式 /
+    // 桌面卡片实时推送挂钩：只对卡片关心的四键通知，其余键（队列 / 模式 /
     // loading 等）高频且卡片不消费，不进通知以免 CardPublisher 无谓醒来。
-    if (key === STORE_CURRENT_TRACK || key === STORE_IS_PLAYING || key === STORE_PROGRESS) {
+    // SLEEP_TIMER_END 低频（仅定时开关触发），LockScreenCard 的 chip 依赖它刷新。
+    if (key === STORE_CURRENT_TRACK || key === STORE_IS_PLAYING || key === STORE_PROGRESS
+      || key === STORE_SLEEP_TIMER_END) {
       this.notifyCardSync(key);
     }
   }
@@ -1286,6 +1348,11 @@ export class MusicPlayer {
       if (this.isPreparing) {
         return;
       }
+      // 暂停淡出在途（淡入淡出档位开启时按了暂停，停声尚未落定）：进度停在
+      // 按下瞬间即可（恢复首帧对齐，≤ 档位时长偏差）；继续推送会把暂停点写歪。
+      if (this.fadeOutTimer !== -1) {
+        return;
+      }
       // 按曲「限定播放进度」片尾限定点：到达 时长-片尾秒数 即视为自然播完，
       // 与 AVPlayer 'completed' 完全同口径收尾（听歌时长落盘 / 最近播放清零 /
       // 听后缓存）后按播放模式自动切歌。实时查表（Map.get 每 100ms 一次成本
@@ -1443,7 +1510,7 @@ export class MusicPlayer {
         this.play();
       });
       session.on('pause', (): void => {
-        this.pause();
+        this.pause(true);
       });
       session.on('seek', (time: number): void => {
         this.seek(time / 1000);
@@ -1578,6 +1645,17 @@ export class MusicPlayer {
   private pauseOldSourceOnSwitch(): void {
     const player: media.AVPlayer | null = this.avPlayer;
     if (!player || this.playerState !== 'playing') {
+      return;
+    }
+    // 淡入淡出档位开启：旧曲斜坡淡到 0 再 pause（新源解析并行推进，不等淡出；
+    // 解析完成重建时若淡出未走完，rebuildPlayerLocked 会把 release 押给淡出收尾，
+    // 旧曲得以完整淡完、不被重建拦腰斩断）。投播本地不出声，走原即时压声。
+    const fadeMs: number = this.crossFadeMs();
+    if (fadeMs > 0 && !this.casting) {
+      // 同实例淡出已在途（切歌连点）：目标一致（淡到 0 静音），不重启斜坡
+      if (!(this.fadeOutTimer !== -1 && this.fadeOutPlayer === player)) {
+        this.startFadeOutRamp(player, fadeMs);
+      }
       return;
     }
     try {
@@ -1997,6 +2075,130 @@ export class MusicPlayer {
     });
   }
 
+  // ===== 桌面歌词（AVSession 系统歌词组件） =====
+
+  /**
+   * 系统是否支持桌面歌词组件（API 23+，avSession.isDesktopLyricSupported）。
+   * 结果进程内缓存：能力与设备绑定，不会变化；IPC 失败按不支持降级。
+   */
+  public async isDesktopLyricSupported(): Promise<boolean> {
+    if (this.desktopLyricSupported !== null) {
+      return this.desktopLyricSupported;
+    }
+    let supported: boolean = false;
+    try {
+      supported = await avSession.isDesktopLyricSupported();
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      console.error(`[DesktopLyric] isDesktopLyricSupported failed: ${err.code} ${err.message}`);
+    }
+    this.desktopLyricSupported = supported;
+    return supported;
+  }
+
+  /**
+   * 开启/关闭系统桌面歌词组件。开启 = enableDesktopLyric(true)（首次）
+   * + setDesktopLyricState(锁定态) + setDesktopLyricVisible(true)；
+   * 关闭 = setDesktopLyricVisible(false)（保留 enable，再次开启免重复 enable）。
+   * 歌词内容来自已上报的 AVMetadata.lyric（标准 LRC，见 publishSessionLyric）。
+   * 会话未就绪 / 设备不支持 / 系统异常一律返回 false，由调用方提示并回弹开关。
+   */
+  public async setDesktopLyricEnabled(enabled: boolean, locked: boolean): Promise<boolean> {
+    const session: avSession.AVSession | null = this.session;
+    if (session === null) {
+      console.warn('[DesktopLyric] session not ready');
+      return false;
+    }
+    if (enabled && !(await this.isDesktopLyricSupported())) {
+      console.warn('[DesktopLyric] device does not support desktop lyric');
+      return false;
+    }
+    try {
+      if (enabled) {
+        if (!this.desktopLyricEnabledOnce) {
+          await session.enableDesktopLyric(true);
+          this.desktopLyricEnabledOnce = true;
+        }
+        await session.setDesktopLyricState({ isLocked: locked });
+        await session.setDesktopLyricVisible(true);
+      } else {
+        await session.setDesktopLyricVisible(false);
+      }
+      this.desktopLyricVisibleNow = enabled;
+      return true;
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      console.error(`[DesktopLyric] set enabled=${enabled} failed: ${err.code} ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 锁定/解锁系统桌面歌词组件（锁定 = 固定位置、禁止拖拽与设置面板）。
+   * 组件未开启时静默成功（设置先行，下次开启按落盘值生效）。
+   */
+  public async setDesktopLyricLocked(locked: boolean): Promise<void> {
+    const session: avSession.AVSession | null = this.session;
+    if (session === null || !this.desktopLyricVisibleNow) {
+      return;
+    }
+    try {
+      await session.setDesktopLyricState({ isLocked: locked });
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      console.error(`[DesktopLyric] set locked=${locked} failed: ${err.code} ${err.message}`);
+    }
+  }
+
+  /**
+   * 系统侧桌面歌词状态回调：用户在系统组件上关闭/锁定（或系统回收隐藏）时
+   * 回写应用开关（镜像 + 落盘），避免设置页开关与系统真实状态不一致。
+   * 应用主动 setDesktopLyricVisible 也会触发可见性回调 —— 幂等重写无害。
+   */
+  private registerDesktopLyricListeners(session: avSession.AVSession): void {
+    try {
+      session.onDesktopLyricVisibilityChanged((visible: boolean): void => {
+        this.desktopLyricVisibleNow = visible;
+        AppStorage.setOrCreate(STORE_FLOAT_LYRIC_ENABLED, visible);
+        AppPreferences.updateSettings((s: AppSettings): void => {
+          s.floatLyricEnabled = visible;
+        });
+        console.info(`[DesktopLyric] visibility changed: ${visible}`);
+      });
+      session.onDesktopLyricStateChanged((state: avSession.DesktopLyricState): void => {
+        AppStorage.setOrCreate(STORE_FLOAT_LYRIC_LOCKED, state.isLocked);
+        AppPreferences.updateSettings((s: AppSettings): void => {
+          s.floatLyricLocked = state.isLocked;
+        });
+        console.info(`[DesktopLyric] lock changed: ${state.isLocked}`);
+      });
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      console.error(`[DesktopLyric] register listeners failed: ${err.code} ${err.message}`);
+    }
+  }
+
+  /**
+   * 冷启动恢复桌面歌词：歌词组件随会话/进程销毁，落盘 enabled=true 时
+   * 按锁定态重新 enable + visible（会话未就绪/不支持时静默跳过）。
+   */
+  private restoreDesktopLyric(): void {
+    let settings: AppSettings;
+    try {
+      settings = AppPreferences.getSettings();
+    } catch (e) {
+      return;
+    }
+    if (!settings.floatLyricEnabled) {
+      return;
+    }
+    this.setDesktopLyricEnabled(true, settings.floatLyricLocked).then((ok: boolean): void => {
+      if (!ok) {
+        console.info('[DesktopLyric] restore skipped (unsupported or session error)');
+      }
+    }).catch((): void => {});
+  }
+
   /**
    * 能力声明（since 26，媒体中心 = 控制中心/锁屏/HiCar 车机卡片同源）：
    * setMediaCenterControlType 让媒体中心优先显示这排控制，要求所设命令必须已 on() 注册
@@ -2051,12 +2253,20 @@ export class MusicPlayer {
   /**
    * 把封面网络地址解码成 PixelMap，供系统媒体胶囊（AVSession mediaImage）显示专辑封面。
    * 网络 URL 不能直接当 ImageSource 的 URI，故走 http 取到字节再 createImageSource。
+   *
+   * 解码口径：先向 CDN 请求方形裁切缩略图（toThumbUrl(url, 512)，服务端把 16:9
+   * 原图居中方裁到 512×512），解码目标同为 512 方形 —— 源与目标同比例，
+   * desiredSize 不保宽高比的行为无从触发；512 档对齐媒体胶囊/锁屏卡片 3x 屏
+   * 显示位（≤ ~500px），较旧 256 档像素量 ×4（旧实现 16:9 原图直解 256×256，
+   * 锁屏/实况窗封面被压扁且模糊）。
    * 失败返回 null（封面非必需，绝不能让元数据上报中断）。
    */
   private async loadCoverPixelMap(url: string): Promise<image.PixelMap | null> {
     const httpReq = http.createHttp();
     try {
-      const resp: http.HttpResponse = await httpReq.request(url, {
+      // 方形 CDN 裁切：16:9 原图先由服务端居中方裁到 512×512 再下载，
+      // 与下方 512×512 解码目标同比例，锁屏/实况窗封面零变形。
+      const resp: http.HttpResponse = await httpReq.request(toThumbUrl(url, 512), {
         method: http.RequestMethod.GET,
         header: { Referer: BILI_REFERER },
         connectTimeout: 10000,
@@ -2068,8 +2278,9 @@ export class MusicPlayer {
       }
       const data: ArrayBuffer = resp.result as ArrayBuffer;
       const src: image.ImageSource = image.createImageSource(data);
-      // 降采样解码：媒体胶囊缩略图只要 256px，避免整张原图解码占内存
-      const opts: image.DecodingOptions = { desiredSize: { width: 256, height: 256 } };
+      // 降采样解码：512×512 对齐 CDN 方形裁切源（媒体胶囊/锁屏卡片 3x 屏
+      // 显示位 ≤ ~500px），方形源 + 方形目标，零变形。
+      const opts: image.DecodingOptions = { desiredSize: { width: 512, height: 512 } };
       return await src.createPixelMap(opts);
     } catch (e) {
       console.error(`loadCoverPixelMap failed: ${JSON.stringify(e)}`);
@@ -3168,14 +3379,26 @@ export class MusicPlayer {
   private async rebuildPlayerLocked(): Promise<media.AVPlayer | null> {
     const old: media.AVPlayer | null = this.detachAndClearPlayer();
     if (old) {
-      try {
-        await old.release();
-      } catch (e) {
-        console.error(`release old avPlayer failed: ${JSON.stringify(e)}`);
+      // 切歌淡出在途（淡入淡出档位开启，旧曲还在出声降坡）：此刻 release 会把
+      // 淡出拦腰斩断（半坡音量瞬停）。押后到淡出收尾再 release + 关 fd
+      // （见 startFadeOutRamp 斜坡完成分支 / finishDeferredRelease）；
+      // 旧实例的本地 fd 引用一并移交淡出引擎，防止新音源的 closeLocalFile 把它泄漏。
+      if (this.fadeOutTimer !== -1 && this.fadeOutPlayer === old) {
+        this.fadeOutReleaseOnDone = true;
+        this.fadeOutDeferredFd = this.localFile;
+        this.localFile = null;
+      } else {
+        try {
+          await old.release();
+        } catch (e) {
+          console.error(`release old avPlayer failed: ${JSON.stringify(e)}`);
+        }
+        // 旧播放器已释放，它读着的本地文件句柄这时才能安全关闭（顺序不能提前）
+        this.closeLocalFile();
       }
+    } else {
+      this.closeLocalFile();
     }
-    // 旧播放器已释放，它读着的本地文件句柄这时才能安全关闭（顺序不能提前）
-    this.closeLocalFile();
     try {
       // @SuppressWarnings syscap
       const player: media.AVPlayer = await media.createAVPlayer();
@@ -3208,20 +3431,42 @@ export class MusicPlayer {
   }
 
   /**
-   * 启动后首次出声的淡入（一）：prepared 出声前把音量归零。
+   * 淡入淡出时长档位（AppSettings.fadeDurationMs，0 = 关）：
+   * 切歌旧曲淡出 / 新曲淡入、暂停淡出 / 恢复淡入共用一份。
+   * 读偏好层内存缓存即可，无需 AppStorage 镜像（仅播放内核消费）。
+   */
+  private crossFadeMs(): number {
+    return AppPreferences.getSettings().fadeDurationMs;
+  }
+
+  /**
+   * 出声前的淡入准备（一）：prepared 时把音量归零并武装淡入。
    *
-   * pending 未消费前每个新实例 prepared 都会归零——未播即弃的实例释放后
-   * 无副作用，真正首次出声的实例必然已归零，任何 play() 路径
-   * （autoplay / 续播 seekDone / resume）都无声起步。
+   * 档位开启：每个新音源起播都淡入（时长 = 档位值），首播一次性 800ms
+   * 淡入被涵盖（首播标记一并消费，防双跑）。
+   * 档位关闭：保持会话级首播一次性淡入的现状行为（pending 未消费前每个
+   * 新实例 prepared 都会归零——未播即弃的实例释放后无副作用，真正首次
+   * 出声的实例必然已归零）。
    * 投播（casting）本地不出声，跳过。volume 设不进去（异常）就放弃淡入：
-   * 消费 pending 保底满音量，绝不静音。
+   * 归零失败满音量出声，绝不静音卡死。
    */
   private zeroVolumeForFirstFade(player: media.AVPlayer): void {
-    if (!this.firstPlayFadePending || this.casting) {
+    if (this.casting) {
+      return;
+    }
+    const fadeMs: number = this.crossFadeMs();
+    if (fadeMs > 0) {
+      this.armFadeIn(player, fadeMs);
+      return;
+    }
+    if (!this.firstPlayFadePending) {
       return;
     }
     try {
       player.setVolume(0);
+      this.lastEngineVolume = 0;
+      this.fadeInArmed = true;
+      this.fadeInDurationMs = FIRST_PLAY_FADE_MS;
     } catch (e) {
       this.firstPlayFadePending = false;
       console.error(`set volume for first-play fade failed: ${JSON.stringify(e)}`);
@@ -3229,23 +3474,51 @@ export class MusicPlayer {
   }
 
   /**
-   * 启动后首次出声的淡入（二）：playing（真正出声）时启动斜坡定时器，
-   * 把音量在 FIRST_PLAY_FADE_MS 内线性爬到有效音量（effectiveVolume：
-   * 正常通路恒 1，降级通路的单曲增益衰减），并一次性消费淡入标记。
+   * 归零音量并武装淡入（'playing' 状态事件起斜坡）。首播 / 切歌新曲 /
+   * 暂停恢复共用；归零失败只记日志（音量维持原值满音量出声，绝不静音卡死）。
+   */
+  private armFadeIn(player: media.AVPlayer, durationMs: number): void {
+    this.firstPlayFadePending = false;
+    this.fadeInArmed = false;
+    try {
+      player.setVolume(0);
+      this.lastEngineVolume = 0;
+      this.fadeInArmed = true;
+      this.fadeInDurationMs = durationMs;
+    } catch (e) {
+      console.error(`arm fade-in (set volume 0) failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
+   * 出声时的淡入（二）：playing（真正出声）时消费武装标记、启动斜坡定时器，
+   * 把音量线性爬到有效音量（effectiveVolume：正常通路恒 1，降级通路的
+   * 单曲增益衰减）。
    *
    * 斜坡期间的守卫（任一命中即收尾）：
-   *   · 实例被换 / 释放（avPlayer !== player）：清定时器即可——pending 已在
-   *     启动斜坡时消费，新实例满音量起步，不存在「归零后无人爬坡」的静音窗口；
+   *   · 实例被换 / 释放（avPlayer !== player）：清定时器即可——武装标记已消费，
+   *     新实例起步音量由它自己的 prepared 决定，不存在「归零后无人爬坡」的静音窗口；
    *   · 被暂停 / 打断（playerState !== 'playing'）：立即恢复到有效音量再清
    *     定时器，保证恢复播放时正常音量即时出声、不卡无声。
    */
   private startFirstFadeRamp(player: media.AVPlayer): void {
-    if (!this.firstPlayFadePending || this.casting || player !== this.avPlayer) {
+    if (!this.fadeInArmed || this.casting || player !== this.avPlayer) {
       return;
     }
-    // 一次性消费：本会话只淡一次，无论斜坡是否顺利走完
+    // 一次性消费：武装标记只允许触发一次斜坡（首播 pending 随之消费，本会话只淡一次）
+    this.fadeInArmed = false;
     this.firstPlayFadePending = false;
+    this.runFadeInRamp(player, this.fadeInDurationMs);
+  }
+
+  /**
+   * 淡入斜坡定时器体：lastEngineVolume → effectiveVolume 线性爬坡。
+   * 首播 / 切歌新曲 / 常规暂停恢复（武装路径，音量已归零、从 0 爬起）与
+   * 暂停淡出反悔（play() 直接调用，从半坡值回爬）共用。
+   */
+  private runFadeInRamp(player: media.AVPlayer, durationMs: number): void {
     const startedAt: number = Date.now();
+    const fromVol: number = this.lastEngineVolume;
     if (this.firstPlayFadeTimer !== -1) {
       clearInterval(this.firstPlayFadeTimer);
     }
@@ -3260,6 +3533,7 @@ export class MusicPlayer {
         // 暂停 / 打断：恢复到有效音量（降级通路的单曲增益衰减），之后恢复播放不再淡入
         try {
           cur.setVolume(this.effectiveVolume());
+          this.lastEngineVolume = this.effectiveVolume();
         } catch (e) {
           console.error(`restore volume after fade interrupt failed: ${JSON.stringify(e)}`);
         }
@@ -3267,12 +3541,14 @@ export class MusicPlayer {
         this.firstPlayFadeTimer = -1;
         return;
       }
-      const t: number = (Date.now() - startedAt) / FIRST_PLAY_FADE_MS;
+      const t: number = (Date.now() - startedAt) / durationMs;
       try {
         // 爬坡目标 = 有效音量（降级通路的单曲增益衰减），不是满音量 1.0——
-        // 否则首播淡入会把降级衰减悄悄冲掉
+        // 否则淡入会把降级衰减悄悄冲掉
         const target: number = this.effectiveVolume();
-        cur.setVolume(t >= 1 ? target : t * target);
+        const vol: number = fromVol + (target - fromVol) * (t >= 1 ? 1 : t);
+        cur.setVolume(vol);
+        this.lastEngineVolume = vol;
       } catch (e) {
         console.error(`fade ramp set volume failed: ${JSON.stringify(e)}`);
         clearInterval(this.firstPlayFadeTimer);
@@ -3284,6 +3560,105 @@ export class MusicPlayer {
         this.firstPlayFadeTimer = -1;
       }
     }, FIRST_PLAY_FADE_STEP_MS);
+  }
+
+  /**
+   * 淡出斜坡：durationMs 内把音量从当前值线性降到 0。
+   * 切歌淡出（pauseOldSourceOnSwitch，解析完成重建时由 rebuildPlayerLocked
+   * 把旧实例的 release 押给淡出收尾）与暂停淡出（pause）共用。
+   * 与淡入互斥：启动前先掐掉在途淡入斜坡（音量停在半坡值 lastEngineVolume，
+   * 从这里接着往下降，避免从满音量起坡造成跳变）。
+   */
+  private startFadeOutRamp(player: media.AVPlayer, durationMs: number): void {
+    // 在途淡出（另一实例的押后淡出）：立即收掉（含押后 release + fd），
+    // 截断处的瞬停被当前声源掩蔽
+    const startVol: number = this.firstPlayFadeTimer !== -1 ? this.lastEngineVolume : this.effectiveVolume();
+    this.clearFadeOut();
+    this.fadeOutPlayer = player;
+    const startedAt: number = Date.now();
+    this.fadeOutTimer = setInterval((): void => {
+      const target: media.AVPlayer | null = this.fadeOutPlayer;
+      if (target === null) {
+        clearInterval(this.fadeOutTimer);
+        this.fadeOutTimer = -1;
+        return;
+      }
+      // 附加态淡出途中被外部停声（系统打断等）：声音已停，无需继续降坡；
+      // 押后 release 的实例（已脱离 this.avPlayer）不受此守卫影响，继续淡完
+      if (!this.fadeOutReleaseOnDone && this.playerState !== 'playing') {
+        clearInterval(this.fadeOutTimer);
+        this.fadeOutTimer = -1;
+        this.fadeOutPlayer = null;
+        return;
+      }
+      const t: number = (Date.now() - startedAt) / durationMs;
+      const vol: number = t >= 1 ? 0 : startVol * (1 - t);
+      try {
+        target.setVolume(vol);
+        this.lastEngineVolume = vol;
+      } catch (e) {
+        // setVolume 失败（实例被系统释放等）：直接收尾，不留半坡音量
+        console.error(`fade-out set volume failed: ${JSON.stringify(e)}`);
+        clearInterval(this.fadeOutTimer);
+        this.fadeOutTimer = -1;
+        this.fadeOutPlayer = null;
+        this.finishDeferredRelease(target);
+        return;
+      }
+      if (t >= 1) {
+        clearInterval(this.fadeOutTimer);
+        this.fadeOutTimer = -1;
+        this.fadeOutPlayer = null;
+        // 淡到无声：真正落停；押后 release 的实例在此 release + 关 fd
+        try {
+          target.pause().catch((e: BusinessError): void => {
+            console.error(`pause after fade-out failed: ${e.code} ${e.message}`);
+          });
+        } catch (e) {
+          console.error(`pause after fade-out threw: ${JSON.stringify(e)}`);
+        }
+        this.finishDeferredRelease(target);
+      }
+    }, FIRST_PLAY_FADE_STEP_MS);
+  }
+
+  /** 立即终止在途淡出：押后 release 的实例（切歌重建后旧曲仍出声）在此补收，绝不漏 */
+  private clearFadeOut(): void {
+    const target: media.AVPlayer | null = this.fadeOutPlayer;
+    if (this.fadeOutTimer !== -1) {
+      clearInterval(this.fadeOutTimer);
+      this.fadeOutTimer = -1;
+    }
+    this.fadeOutPlayer = null;
+    if (target !== null) {
+      this.finishDeferredRelease(target);
+    }
+  }
+
+  /**
+   * 押后 release 收尾：rebuildPlayerLocked 把旧实例的 release 押给淡出引擎
+   * （fadeOutReleaseOnDone 置位）时，淡出走完 / 被掐都在这里统一收口——
+   * release + 关移交过来的本地 fd；非押后场景纯 no-op。
+   */
+  private finishDeferredRelease(player: media.AVPlayer): void {
+    if (!this.fadeOutReleaseOnDone) {
+      return;
+    }
+    this.fadeOutReleaseOnDone = false;
+    try {
+      player.release().catch((e: BusinessError): void => {
+        console.error(`release deferred player failed: ${e.code} ${e.message}`);
+      });
+    } catch (e) {
+      console.error(`release deferred player threw: ${JSON.stringify(e)}`);
+    }
+    const fd: fs.File | null = this.fadeOutDeferredFd;
+    this.fadeOutDeferredFd = null;
+    if (fd !== null) {
+      fs.close(fd.fd).catch((e: object): void => {
+        console.error(`close deferred local audio failed: ${JSON.stringify(e)}`);
+      });
+    }
   }
 
   /**
@@ -3455,6 +3830,9 @@ export class MusicPlayer {
 
   /** 彻底回收播放器实例；下一次播放会在 switchSource 里重新建一个干净的 */
   private dropPlayer(): void {
+    // 在途淡出一并收掉：切歌押后 release 的实例引用只存在于淡出引擎里，
+    // 不在此补收会变孤儿（进程结束前无人释放）；押后移交的 fd 一并关闭
+    this.clearFadeOut();
     const old: media.AVPlayer | null = this.detachAndClearPlayer();
     if (old) {
       try {
@@ -4102,6 +4480,20 @@ export class MusicPlayer {
         this.lastProgressBucket = Math.floor((replayStart * 1000) / PROGRESS_PUSH_INTERVAL_MS);
         this.setStore(STORE_PROGRESS, replayStart);
       } else {
+        // 淡入淡出开启：恢复播放从无声平滑爬起。两条路径：
+        // · 常规暂停恢复（paused → play）：归零武装，'playing' 状态事件起斜坡；
+        // · 暂停淡出途中反悔（state 仍 playing，'playing' 事件不会再派发）：
+        //   掐掉淡出，从当前音量（lastEngineVolume）直接回爬。
+        const resumePlayer: media.AVPlayer | null = this.avPlayer;
+        const resumeFadeMs: number = this.crossFadeMs();
+        if (resumePlayer !== null && resumeFadeMs > 0 && !this.casting) {
+          if (this.fadeOutTimer !== -1 && this.fadeOutPlayer === resumePlayer) {
+            this.clearFadeOut();
+            this.runFadeInRamp(resumePlayer, resumeFadeMs);
+          } else if (s === 'paused') {
+            this.armFadeIn(resumePlayer, resumeFadeMs);
+          }
+        }
         try {
           // play() 返回 Promise，拒绝必须接住，否则未处理的 rejection 会让
           // 「点了播放但没出声」这件事完全不可见
@@ -4119,7 +4511,7 @@ export class MusicPlayer {
     this.savePlayerStateNow();
   }
 
-  pause(): void {
+  pause(fade: boolean = false): void {
     // 用户主动暂停（锁屏媒体卡片 / 迷你条 / 播放页 / 耳机线控…全走这里）：
     // 作废「打断前在播放」的自动续播意图 —— 否则上一个打断周期残留的意图
     // 会在下一次焦点归还（如微信消息提示音结束）时把已暂停的音乐错误拉起。
@@ -4171,12 +4563,24 @@ export class MusicPlayer {
       // 「Pause operation only supports playing」刷脏报错记录。
       // 挂起 play 已在上面取消，这些态下不存在残留出声路径。
       if (s === 'playing') {
-        try {
-          this.avPlayer.pause().catch((e: BusinessError): void => {
-            console.error(`avPlayer.pause failed: ${e.code} ${e.message}`);
-          });
-        } catch (e) {
-          console.error(`avPlayer.pause threw: ${JSON.stringify(e)}`);
+        // 淡入淡出档位开启且为用户操作（fade=true）：先斜坡淡到 0 再真正落停。
+        // 状态簿记（IS_PLAYING / 会话 / 后台任务 / 落盘）保持即时，停声延后 ≤ 档位时长。
+        // 系统打断（fade=false，来电 / 蓝牙断开 / 清空队列）：掐掉在途淡出立即停。
+        const fadeMs: number = fade ? this.crossFadeMs() : 0;
+        if (fadeMs > 0) {
+          // 同实例淡出已在途（快速连按）：目标一致（淡到 0 落停），不重启斜坡
+          if (!(this.fadeOutTimer !== -1 && this.fadeOutPlayer === this.avPlayer)) {
+            this.startFadeOutRamp(this.avPlayer, fadeMs);
+          }
+        } else {
+          this.clearFadeOut();
+          try {
+            this.avPlayer.pause().catch((e: BusinessError): void => {
+              console.error(`avPlayer.pause failed: ${e.code} ${e.message}`);
+            });
+          } catch (e) {
+            console.error(`avPlayer.pause threw: ${JSON.stringify(e)}`);
+          }
         }
       }
     }
@@ -4189,7 +4593,7 @@ export class MusicPlayer {
   togglePlay(): void {
     const playing: boolean = (AppStorage.get(STORE_IS_PLAYING) as boolean) ?? false;
     if (playing) {
-      this.pause();
+      this.pause(true);
     } else {
       this.play();
     }
@@ -4654,6 +5058,39 @@ export class MusicPlayer {
     this.markQueueDirty();
   }
 
+  /**
+   * 播放列表拖拽排序（QueueSheet 的 LazyForEach.onMove 落手回调）：
+   * 把队列 from 下标条目移到 to 下标。播放中的曲目不受影响（不触碰播放器，
+   * 只动顺序）；currentIndex 按当前曲 id 重对准 —— 顺序模式下 queue 顺序
+   * 变化会挪动当前曲下标，不重对准会让 next/prev 走错歌。
+   * shuffledQueue 整体重洗（addToQueue / removeFromQueue 同口径：随机模式
+   * 下 upcoming 顺序随之变化，非新增行为）；立即落盘（setQueue 同款，
+   * 拖动是明确的用户操作，重启后必须保持新顺序）。
+   */
+  moveQueueItem(from: number, to: number): void {
+    if (from < 0 || from >= this.queue.length || to < 0 || to >= this.queue.length || from === to) {
+      return;
+    }
+    const next: Track[] = [...this.queue];
+    const moved: Track = next.splice(from, 1)[0];
+    next.splice(to, 0, moved);
+    this.queue = next;
+    this.shuffledQueue = this.shuffle(this.queue);
+    this.syncQueue();
+    this.markQueueDirty();
+    this.savePlayerStateNow();
+    // currentIndex 重对准当前曲（insertToQueue 同款模板）：
+    // 顺序模式 = queue 新下标；随机模式 = 重洗后 shuffledQueue 新下标。
+    const curId: string = this.currentTrackSnapshot()?.id ?? '';
+    if (curId.length > 0) {
+      const dq: Track[] = this.displayQueue();
+      const idx: number = dq.findIndex((t: Track): boolean => t.id === curId);
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      }
+    }
+  }
+
   clearQueue(): void {
     // 作废一切在途加载：否则清空后网络解析才回来，会把刚 drop 掉的播放器
     // 重建出来继续放歌（队列已空、STORE_CURRENT_TRACK 已 null，歌却还在响）
@@ -4818,22 +5255,77 @@ export class MusicPlayer {
     this.clearSleepTimer();
     if (minutes <= 0) {
       this.setStore(STORE_SLEEP_TIMER_END, 0);
+      this.persistSleepTimerEnd(0);
       this.notifyHint('已取消定时停止');
       return;
     }
     const delayMs: number = minutes * 60 * 1000;
     // 只发布**结束时刻**：剩余时间由设置页现算，内核不必每秒写一次 AppStorage
-    this.setStore(STORE_SLEEP_TIMER_END, Date.now() + delayMs);
+    const end: number = Date.now() + delayMs;
+    this.setStore(STORE_SLEEP_TIMER_END, end);
+    // 定时状态同步落盘（AppSettings.sleepTimerEnd）：AppStorage 不跨进程，
+    // LockScreenCard 的 chip 文案（Form 扩展进程读偏好）以此为准
+    this.persistSleepTimerEnd(end);
     this.sleepTimer = setTimeout((): void => {
       this.sleepTimer = -1;
       this.setStore(STORE_SLEEP_TIMER_END, 0);
-      this.pause();
+      this.persistSleepTimerEnd(0);
+      this.pause(true);
       this.notifyHint('定时结束，已停止播放');
     }, delayMs);
     const label: string = (minutes >= 60 && minutes % 60 === 0)
       ? `${minutes / 60} 小时`
       : `${minutes} 分钟`;
     this.notifyHint(`已设置 ${label} 后停止播放`);
+  }
+
+  /**
+   * 锁屏卡片定时停止 chip 的开关入口：定时活跃 → 取消；未开启 → 按设置页
+   * 「锁屏卡片定时停止默认档位」（AppSettings.lockCardSleepMinutes，默认 30 分钟）开启。
+   */
+  toggleSleepTimer(): void {
+    const end: number = (AppStorage.get(STORE_SLEEP_TIMER_END) as number) ?? 0;
+    if (end > Date.now()) {
+      this.setSleepTimer(0);
+      return;
+    }
+    this.setSleepTimer(AppPreferences.getSettings().lockCardSleepMinutes);
+  }
+
+  /** 定时结束时刻写穿到偏好层（跨进程可见；写失败只记日志不阻断播放链） */
+  private persistSleepTimerEnd(end: number): void {
+    try {
+      AppPreferences.updateSettings((s: AppSettings): void => {
+        s.sleepTimerEnd = end;
+      });
+    } catch (e) {
+      console.error(`persist sleepTimerEnd failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /**
+   * 启动时恢复定时停止：进程被杀（划卡）会让 setTimeout 随进程消失，而
+   * AppSettings.sleepTimerEnd 已落盘 —— 结束时刻在未来就按剩余时长静默重挂
+   * 定时器（同时发布 AppStorage 供 SleepTimerChip / 锁屏卡片恢复显示），
+   * 已过期则清掉落盘残留（卡片不会显示一个早已死掉的定时）。
+   */
+  private restoreSleepTimer(): void {
+    const end: number = AppPreferences.getSettings().sleepTimerEnd;
+    if (end <= Date.now()) {
+      if (end !== 0) {
+        this.persistSleepTimerEnd(0);
+      }
+      return;
+    }
+    const delayMs: number = end - Date.now();
+    this.setStore(STORE_SLEEP_TIMER_END, end);
+    this.sleepTimer = setTimeout((): void => {
+      this.sleepTimer = -1;
+      this.setStore(STORE_SLEEP_TIMER_END, 0);
+      this.persistSleepTimerEnd(0);
+      this.pause(true);
+      this.notifyHint('定时结束，已停止播放');
+    }, delayMs);
   }
 
   private clearSleepTimer(): void {

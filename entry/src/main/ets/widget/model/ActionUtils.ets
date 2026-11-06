@@ -55,6 +55,21 @@ class ActionUtils {
     });
   }
 
+  /**
+   * 锁屏卡片定时停止开关 → call 拉起 EntryAbility callee（toggleSleepTimer）：
+   * 定时活跃取消、未开启按设置页默认档开启。
+   */
+  public lockCardSleepToggle(component: Object, formId: string): void {
+    postCardAction(component, {
+      action: FormCarAction.CALL,
+      abilityName: ENTRY_ABILITY,
+      params: {
+        method: CallMethod.TOGGLE_SLEEP_TIMER,
+        formId: formId
+      }
+    });
+  }
+
   /** 2x2 卡「开始播放」时的溢出动效触发（Form 扩展 onFormEvent 收 message） */
   public requestOverflow(component: Object): void {
     postCardAction(component, {

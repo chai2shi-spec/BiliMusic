@@ -1,12 +1,13 @@
 /**
  * 播放控制区。
  *
- * 版式自上而下：功能行（Swiper 分页：全部 10 个功能项按用户排序
+ * 版式自上而下：功能行（Swiper 分页：全部 12 个功能项按用户排序
  * （STORE_FUNC_ITEM_ORDER，设置 → 播放设置 → 自定义功能栏拖动调整）过滤
  * 后每页 4 个等宽槽位分页展示，核心键「播放模式 / 下载 / 加入歌单 / 队列」
  * 恒在，开关入口「倍速 / 限定进度 / 定时停止 / 在 B 站打开 / 进入 UP 主页 /
- * 单曲音量」按各自开关决定是否渲染；多页时双侧箭头按页位显隐；图标统一
- * 尺寸、内容居中到同一条中线）→ 进度条 + 双侧时间 → 三键控制行。
+ * 单曲音量 / 视频简介」按各自开关决定是否渲染，「分段列表」按章节数据驱动
+ *（≥2 段）；多页时双侧箭头按页位显隐；图标统一尺寸、内容居中到同一条中线）→
+ * 进度条 + 双侧时间 → 三键控制行。
  * 紧凑模式（compactMode，阔折叠外屏）：功能行与进度区整体不挂载
  * （条件渲染而非 visibility 隐藏），只渲染三键行（聚拢左对齐）。
  * 控制调用全部走 MusicPlayer 单例；队列弹层复用共享组件 QueueSheet；
@@ -28,6 +29,7 @@ import {
   speedLabelOf,
   VideoDetail,
   VideoPageInfo,
+  VideoChapter,
   PLAYER_FUNC_REPEAT,
   PLAYER_FUNC_DOWNLOAD,
   PLAYER_FUNC_ADD_PLAYLIST,
@@ -38,12 +40,20 @@ import {
   PLAYER_FUNC_BILI,
   PLAYER_FUNC_UP_SPACE,
   PLAYER_FUNC_VOLUME,
+  PLAYER_FUNC_CHAPTERS,
+  PLAYER_FUNC_DESC,
+  PLAYER_FUNC_FLOAT_LYRIC,
+  AppSettings,
   DEFAULT_FUNC_ITEM_ORDER
 } from '../../model/MusicModels';
+import { AppPreferences } from '../../preferences/AppPreferences';
+import { DesktopLyricController } from '../../service/DesktopLyricController';
 import { getVideoDetail } from '../../api/BilibiliApi';
 import common from '@ohos.app.ability.common';
 import { MusicPlayer } from '../../player/MusicPlayer';
 import { QueueSheet, repeatLabelOf, modeIconOf, nextRepeatMode } from '../QueueSheet';
+import { ChapterSheet } from './ChapterSheet';
+import { DescSheet } from './DescSheet';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { showAppToast } from '../AppToast';
 import { showConfirm } from '../AppAlertDialog';
@@ -55,6 +65,7 @@ import { PlayerProgressArea } from './PlayerProgressArea';
 import { SleepTimerChip } from './SleepTimerChip';
 import { VolumeChip } from './VolumeChip';
 import { LibraryStore } from '../../service/LibraryStore';
+import { loadChaptersForTrack } from '../../service/ChapterStore';
 import { skipIntroSecOf, skipOutroSecOf, setTrackSkipRange } from '../../service/IntroSkipStore';
 import { NavStackHolder } from '../../service/NavStackHolder';
 import { UpSpaceRouteParam } from '../../service/NavRouteParams';
@@ -77,6 +88,10 @@ import {
   STORE_SKIP_INTRO_ENTRY_ENABLED,
   STORE_UP_SPACE_ENTRY_ENABLED,
   STORE_TRACK_VOLUME_ENTRY_ENABLED,
+  STORE_CHAPTERS_ENTRY_ENABLED,
+  STORE_DESC_ENTRY_ENABLED,
+  STORE_FLOAT_LYRIC_ENABLED,
+  STORE_VIDEO_CHAPTERS,
   STORE_FUNC_ITEM_ORDER,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_CONTENT_EXIT,
@@ -94,6 +109,7 @@ import {
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
+import { MaterialCompat } from '../../utils/MaterialCompat';
 
 /** 切歌键（上一曲 / 下一曲）图标与圆底尺寸 */
 const PREVNEXT_ICON_SIZE: BreakpointType<number> = new BreakpointType<number>({ sm: 26, md: 26, lg: 30 });
@@ -150,9 +166,14 @@ export struct ControlAreaComponent {
    */
   @Prop centerMode: boolean = false;
   @StorageLink(STORE_REPEAT_MODE) repeatMode: RepeatMode = RepeatMode.NONE;
-  @StorageLink(STORE_CURRENT_TRACK) currentTrack: Track | null = null;
+  // 切歌 → 章节分段按曲重载（ChapterStore 内部去重 + 令牌竞态处理）
+  @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   /** 队列弹层开关（本组件自持，bindSheet 挂在播放列表按钮上） */
   @State showQueueSheet: boolean = false;
+  /** 分段列表弹层开关（本组件自持，bindSheet 挂在功能行分段按钮上） */
+  @State showChapterSheet: boolean = false;
+  /** 「视频简介」弹层开关（本组件自持，bindSheet 挂在功能行视频简介按钮上） */
+  @State showDescSheet: boolean = false;
   /** 「下载」请求在途：连点会重复提交同一首（提交后立刻变「已在队列」，体验是「点了没反应」） */
   @State downloading: boolean = false;
   /**
@@ -174,6 +195,17 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_UP_SPACE_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') upSpaceEntryEnabled: boolean = false;
   /** 「单曲音量」入口开关（设置页镜像，默认关）：开 = 功能行渲染 VolumeChip（需有当前曲）；变化 = 组合变（回第 0 页） */
   @StorageProp(STORE_TRACK_VOLUME_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') volumeEntryEnabled: boolean = false;
+  /** 「分段列表」入口开关（设置页镜像，默认关）：开 = 功能行渲染「分段列表」按钮（无分段视频由弹层展示空态）；变化 = 组合变（回第 0 页） */
+  @StorageProp(STORE_CHAPTERS_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') chaptersEntryEnabled: boolean = false;
+  /** 「视频简介」入口开关（设置页镜像，默认关）：开 = 功能行渲染「视频简介」按钮（弹层展示简介 + 置顶评论）；变化 = 组合变（回第 0 页） */
+  @StorageProp(STORE_DESC_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') descEntryEnabled: boolean = false;
+  /** 桌面歌词总开关镜像（设置页 / 功能行双入口写）：功能行按钮点击翻转（关 = 销毁悬浮窗） */
+  @StorageProp(STORE_FLOAT_LYRIC_ENABLED) floatLyricEnabled: boolean = false;
+  /**
+   * 当前曲章节分段（ChapterStore 发布镜像）：分段列表弹层数据源
+   * （入口显隐已改由 chaptersEntryEnabled 开关控制，本镜像只供弹层内容）。
+   */
+  @StorageProp(STORE_VIDEO_CHAPTERS) chapters: VideoChapter[] = [];
   /** 当前倍速（MusicPlayer.setStore 写回 → 倍速片标签与菜单 ✓ 实时刷新） */
   @StorageProp(STORE_PLAYBACK_SPEED) playbackSpeed: number = 1.0;
   /** 倍速片按压反馈缩放（onTouch 驱动，不消费事件，与 bindMenu 共存） */
@@ -203,6 +235,8 @@ export struct ControlAreaComponent {
 
   aboutToAppear(): void {
     this.exitRequested = false;
+    // 首挂载兜底：切歌 @Watch 之外的首次加载（播放页打开时 track 已在）
+    loadChaptersForTrack(this.currentTrack);
     // 「限定播放进度」弹窗（官方 CustomContentDialog，HomePage「加入歌单」同款）：
     // 两条独立调整条（片头 / 片尾，0.1s 步进）+ 各自右侧秒数输入框（双向实时同步）；
     // 「不限」清两端设置、「保存」校验后落盘
@@ -298,6 +332,43 @@ export struct ControlAreaComponent {
   /** 短提示：模式这种「图标变化不明显」的切换给一次文字反馈 */
   private toast(message: string): void {
     showAppToast(message);
+  }
+
+  /**
+   * 桌面歌词开关（功能行入口，与播放设置页「桌面歌词」总开关同一状态）。
+   * 已开 → 关（隐藏系统歌词组件 + 落盘）；未开 → 先探测系统歌词组件能力，
+   * 支持则 enable + 显示（AVSession 系统组件，无权限申请），失败回弹。
+   */
+  private toggleFloatLyric(): void {
+    const controller: DesktopLyricController = DesktopLyricController.getInstance();
+    if (this.floatLyricEnabled) {
+      const locked: boolean = AppPreferences.getSettings().floatLyricLocked;
+      controller.setEnabled(false, locked).then((ok: boolean): void => {
+        if (!ok) {
+          this.toast('桌面歌词关闭失败');
+          return;
+        }
+        this.toast('已关闭桌面歌词');
+      }).catch((): void => {
+        this.toast('桌面歌词关闭异常，请稍后重试');
+      });
+      return;
+    }
+    controller.isSupported().then(async (supported: boolean): Promise<void> => {
+      if (!supported) {
+        this.toast('当前设备/系统不支持桌面歌词组件');
+        return;
+      }
+      const locked: boolean = AppPreferences.getSettings().floatLyricLocked;
+      const shown: boolean = await controller.setEnabled(true, locked);
+      if (!shown) {
+        this.toast('桌面歌词开启失败，请确认正在播放音乐后重试');
+        return;
+      }
+      this.toast('已开启桌面歌词');
+    }).catch((): void => {
+      this.toast('桌面歌词开启异常，请稍后重试');
+    });
   }
 
   private cycleRepeat(): void {
@@ -604,6 +675,18 @@ export struct ControlAreaComponent {
         result.push(id);
       } else if (id === PLAYER_FUNC_VOLUME && this.volumeEntryEnabled && this.currentTrack !== null) {
         result.push(id);
+      } else if (id === PLAYER_FUNC_CHAPTERS && this.chaptersEntryEnabled) {
+        // 分段列表（入口开关控制显隐）：章节数据只决定弹层内容与进度条刻度，
+        // 无分段视频点击后由弹层展示空态。
+        result.push(id);
+      } else if (id === PLAYER_FUNC_DESC && this.descEntryEnabled && this.currentTrack !== null) {
+        // 视频简介（入口开关控制显隐）：弹层展示视频简介 + 置顶评论；
+        // 播放页无曲不展开（防御性条件，与限定进度 / 单曲音量同口径）。
+        result.push(id);
+      } else if (id === PLAYER_FUNC_FLOAT_LYRIC) {
+        // 桌面歌词（恒显，无二级开关）：点击开 / 关悬浮窗歌词（权限未授权时
+        // 按钮点击引导，授权失败回弹不开窗）。显隐只由排序页控制。
+        result.push(id);
       }
     }
     return result;
@@ -659,6 +742,11 @@ export struct ControlAreaComponent {
    */
   private onFuncCompositionChanged(): void {
     this.funcPageIndex = 0;
+  }
+
+  /** 切歌 → 章节分段按曲重载（去重 / 竞态由 ChapterStore 内部令牌处理） */
+  private onTrackChanged(): void {
+    loadChaptersForTrack(this.currentTrack);
   }
 
   // ===== 按曲「限定播放进度」=====
@@ -1028,6 +1116,71 @@ export struct ControlAreaComponent {
       // 单曲音量快捷入口：100% 显喇叭图标、已调低显百分比文字片，
       // 点击弹就近气泡滑条（0-100% 拖动实时生效，按曲存 TrackVolumeStore）。
       VolumeChip()
+    } else if (itemId === PLAYER_FUNC_CHAPTERS) {
+      // 分段列表（数据驱动入口，章节 ≥2 才渲染，visibleFuncItems 过滤）：
+      // 图标 text_alignleft（与播放列表 list_bullet 区分）。
+      // bindSheet 挂本节点 —— 队列弹层挂 Swiper，两个弹层不同宿主互不覆盖。
+      BounceIconButton({
+        icon: $r('sys.symbol.text_alignleft'),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
+        onTap: (): void => {
+          this.showChapterSheet = true;
+        }
+      })
+        .bindSheet($$this.showChapterSheet, this.ChapterSheetHost(), {
+          // 大窗（≥840vp）POPUP 弹层收得回 + 手机底部样式，队列弹层同款配置
+          preferType: SheetType.POPUP,
+          enableOutsideInteractive: false,
+          // 内容自适应高度（同简介弹层）：章节数不定，固定半屏会在章节偏少时
+          // 下方大片留白；ChapterSheet 根节点按 FIT_CONTENT 约束不再用百分比高。
+          height: SheetSize.FIT_CONTENT,
+          dragBar: true,
+          showClose: false,
+          // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+          // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+          systemMaterial: MaterialCompat.sheetMaterial()
+        })
+        .accessibilityText('分段列表')
+    } else if (itemId === PLAYER_FUNC_DESC) {
+      // 视频简介（开关入口，visibleFuncItems 过滤）：点击弹半模态弹层 ——
+      // 上半视频简介、下半置顶评论（无置顶回落热门首评）。
+      // 图标 doc_text；bindSheet 挂本节点（队列 / 分段弹层不同宿主互不覆盖）。
+      BounceIconButton({
+        icon: $r('sys.symbol.doc_text'),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
+        onTap: (): void => {
+          this.showDescSheet = true;
+        }
+      })
+        .bindSheet($$this.showDescSheet, this.DescSheetHost(), {
+          // 大窗（≥840vp）POPUP 弹层收得回 + 手机底部样式，队列 / 分段弹层同款配置
+          preferType: SheetType.POPUP,
+          enableOutsideInteractive: false,
+          // 内容自适应高度（队列 / 分段固定 MEDIUM 是列表弹层）：简介 + 置顶评论
+          // 长短不一，固定半屏会在内容偏短时下方大片留白；API 23 起短内容按实际
+          // 高度生效。约束：DescSheet 根节点不能再设百分比高（FIT_CONTENT 文档要求）。
+          height: SheetSize.FIT_CONTENT,
+          dragBar: true,
+          showClose: false,
+          // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+          // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+          systemMaterial: MaterialCompat.sheetMaterial()
+        })
+        .accessibilityText('视频简介')
+    } else if (itemId === PLAYER_FUNC_FLOAT_LYRIC) {
+      // 桌面歌词开关入口（恒显）：点击开 / 关 TYPE_FLOAT 悬浮窗歌词。
+      // 图标 lyrics_square（歌词块，与简介 doc_text / 分段 text_alignleft 区分）。
+      BounceIconButton({
+        icon: $r('sys.symbol.lyrics_square'),
+        iconSize: this.funcIconSize(),
+        buttonSize: this.funcButtonSize(),
+        onTap: (): void => {
+          this.toggleFloatLyric();
+        }
+      })
+        .accessibilityText('桌面歌词')
     }
   }
 
@@ -1097,7 +1250,10 @@ export struct ControlAreaComponent {
         enableOutsideInteractive: false,
         height: SheetSize.MEDIUM,
         dragBar: true,
-        showClose: false
+        showClose: false,
+        // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+        // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+        systemMaterial: MaterialCompat.sheetMaterial()
       })
 
       // 右侧「下一页」箭头：仅多页时渲染；末页淡出、其余页淡入（同左侧）。
@@ -1174,5 +1330,17 @@ export struct ControlAreaComponent {
   @Builder
   QueueSheetHost(): void {
     QueueSheet({ showSheet: this.showQueueSheet })
+  }
+
+  /** 分段列表弹层宿主：bindSheet 只收 CustomBuilder，包一层共享 ChapterSheet */
+  @Builder
+  ChapterSheetHost(): void {
+    ChapterSheet({ showSheet: this.showChapterSheet })
+  }
+
+  /** 「视频简介」弹层宿主：bindSheet 只收 CustomBuilder，包一层共享 DescSheet */
+  @Builder
+  DescSheetHost(): void {
+    DescSheet({ showSheet: this.showDescSheet })
   }
 }

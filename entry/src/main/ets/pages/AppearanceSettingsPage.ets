@@ -916,7 +916,10 @@ export struct AppearanceSettingsPage {
       preferType: SheetType.BOTTOM,
       height: SheetSize.FIT_CONTENT,
       dragBar: true,
-      showClose: false
+      showClose: false,
+      // 沉浸光感（API 26 官方 bindSheet 材质通道）：ULTRA_THICK 弹窗档；
+      // 低版本 / 能力缺失时 MaterialCompat 返回 undefined → 系统默认样式
+      systemMaterial: MaterialCompat.sheetMaterial()
     })
   }
 }

@@ -21,6 +21,10 @@
       "value": "用于识别蓝牙耳机、音箱等音频设备，连接手表时避免误暂停播放"
     },
     {
+      "name": "permission_float_window_reason",
+      "value": "用于在其他应用上方悬浮显示桌面歌词"
+    },
+    {
       "name": "tab_search",
       "value": "搜索"
     },
@@ -75,6 +79,14 @@
     {
       "name": "widget_desc_dynamic_lyrics",
       "value": "歌词跟随播放进度滚动"
+    },
+    {
+      "name": "widget_display_name_lock",
+      "value": "定时停止卡片"
+    },
+    {
+      "name": "widget_desc_lock",
+      "value": "锁屏/桌面快捷开关定时停止播放"
     },
     {
       "name": "MusicCardFormAbility_label",

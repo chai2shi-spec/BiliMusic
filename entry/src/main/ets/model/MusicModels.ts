@@ -377,12 +377,6 @@ export interface Playlist {
   titleSorted?: boolean;
 }
 
-/** 删除墓碑：云同步时区分「此端删除」与「从未有过」 */
-export interface Tombstone {
-  id: string;
-  deletedAt: string;
-}
-
 /** 底部导航布局取值（AppSettings.barLayout）：水平融合 —— 播放栏与页签同一行（HdsBarLayoutMode.HORIZONTAL，6.1.1(24)+ 设备生效） */
 export const BAR_LAYOUT_HORIZONTAL: string = 'horizontal';
 /** 底部导航布局取值（AppSettings.barLayout）：垂直两层 —— 播放栏在上、页签在下（HdsBarLayoutMode.VERTICAL；API 23 设备的默认布局） */
@@ -433,7 +427,7 @@ export const IMMERSIVE_TIER_OPTIONS: string[] = [
 ];
 
 // ===== 播放页功能行功能项 id（AppSettings.funcItemOrder 的取值域）=====
-// 功能行共 10 个功能项：核心 4 项恒显示，6 个开关入口项受各自入口开关控制
+// 功能行共 11 个功能项：核心 4 项恒显示，7 个开关入口项受各自入口开关控制
 //（关 = 不渲染该槽位）。funcItemOrder 存整体顺序，前 4 位 = 播放页默认页。
 /** 播放模式（核心，恒显示） */
 export const PLAYER_FUNC_REPEAT: string = 'repeat';
@@ -456,8 +450,28 @@ export const PLAYER_FUNC_UP_SPACE: string = 'upSpace';
 /** 单曲音量（开关入口：AppSettings.trackVolumeEntryEnabled；需有当前曲） */
 export const PLAYER_FUNC_VOLUME: string = 'trackVolume';
 /**
+ * 分段列表（数据驱动入口，无开关）：当前曲章节分段 ≥ 2 时才渲染该槽位
+ * （单章节覆盖全片无意义）；数据经 ChapterStore 从 view_points 解析，
+ * 无分段视频不占槽位。图标 text_alignleft（与播放列表 list_bullet 区分）。
+ */
+export const PLAYER_FUNC_CHAPTERS: string = 'videoChapters';
+/**
+ * 视频简介（开关入口：AppSettings.descEntryEnabled；需有当前曲）：
+ * 点击弹半模态弹层 —— 上半视频简介（getVideoDetail 的 desc）、下半置顶评论
+ * （无置顶回落热门首评，/x/v2/reply/wbi/main）。图标 doc_text。
+ */
+export const PLAYER_FUNC_DESC: string = 'videoDesc';
+/**
+ * 桌面歌词（总开关入口，无二级显隐开关）：点击切换系统「歌词组件」开/关 ——
+ * 未开 → avSession.enableDesktopLyric(true) + setDesktopLyricVisible(true)；
+ * 已开 → setDesktopLyricVisible(false)。歌词内容来自已上报的
+ * AVMetadata.lyric（标准 LRC，MusicPlayer.publishSessionLyric），
+ * 开关编排见 service/DesktopLyricController.ts。图标 lyrics_square。
+ */
+export const PLAYER_FUNC_FLOAT_LYRIC: string = 'floatLyric';
+/**
  * 功能行默认顺序（AppSettings.funcItemOrder 缺省值）：
- * 前 4 位（核心键）= 默认页，6 个开关入口项顺延其后 —— 与历史版本布局逐位
+ * 前 4 位（核心键）= 默认页，开关入口项顺延其后 —— 与历史版本布局逐位
  * 一致，老版本升级（无该字段）归一化回落到本序，零迁移零感知。
  */
 export const DEFAULT_FUNC_ITEM_ORDER: string[] = [
@@ -470,7 +484,10 @@ export const DEFAULT_FUNC_ITEM_ORDER: string[] = [
   PLAYER_FUNC_SLEEP,
   PLAYER_FUNC_BILI,
   PLAYER_FUNC_UP_SPACE,
-  PLAYER_FUNC_VOLUME
+  PLAYER_FUNC_VOLUME,
+  PLAYER_FUNC_CHAPTERS,
+  PLAYER_FUNC_DESC,
+  PLAYER_FUNC_FLOAT_LYRIC
 ];
 
 export interface AppSettings {
@@ -514,6 +531,12 @@ export interface AppSettings {
   playbackSpeed: number;
   /** 与其他应用同时播放（设置 → 播放；默认关）：开启后激活 AudioSession（CONCURRENCY_MIX_WITH_OTHERS，与其他应用音频双向混音），关闭停用会话恢复默认焦点行为 */
   audioMixEnabled: boolean;
+  /**
+   * 淡入淡出时长（ms；0 = 关，档位见 FADE_DURATION_OPTIONS）：切歌旧曲淡出/新曲淡入、
+   * 暂停淡出/恢复淡入的音量过渡时长。来电/蓝牙断开等系统打断不淡出（立即停声）；
+   * 关闭时保留启动后首次播放的短淡入（FIRST_PLAY_FADE_MS）不变。
+   */
+  fadeDurationMs: number;
   /** 在 B 站打开原视频（设置 → 播放；默认开）：开启后播放页功能行出现跳转 B 站客户端入口 */
   openInBilibiliEnabled: boolean;
   /** 定时停止入口（设置 → 播放；默认关）：开启后播放页功能行出现定时停止快捷入口（图标 / 倒计时） */
@@ -531,6 +554,18 @@ export interface AppSettings {
    * 「单曲音量」调节入口（气泡滑条，0-100% 仅衰减，系数存 TrackVolumeStore）。
    */
   trackVolumeEntryEnabled: boolean;
+  /**
+   * 分段列表入口（设置 → 播放；默认关）：开启后播放页功能行出现「分段列表」
+   * 入口（章节列表弹层 seek 跳转 + 进度条分段刻度；无分段视频弹层展示空态）。
+   * 运行时镜像 STORE_CHAPTERS_ENTRY_ENABLED。
+   */
+  chaptersEntryEnabled: boolean;
+  /**
+   * 视频简介入口（设置 → 播放；默认关）：开启后播放页功能行出现「视频简介」
+   * 入口（弹层上半视频简介、下半置顶评论，无置顶回落热门首评）。
+   * 运行时镜像 STORE_DESC_ENTRY_ENABLED。
+   */
+  descEntryEnabled: boolean;
   /** 歌词居中显示（长按歌词面板可切，默认关）：开启后每行歌词水平居中绘制（Apple Music 风格） */
   lyricCentered: boolean;
   /**
@@ -580,6 +615,33 @@ export interface AppSettings {
    * 运行时镜像 STORE_FUNC_ITEM_ORDER（EntryAbility 启动首发、排序页拖动后重发）。
    */
   funcItemOrder: string[];
+  /**
+   * 定时停止结束时刻（ms 时间戳，0 = 未开启）。与运行时镜像
+   * STORE_SLEEP_TIMER_END 同值，持久化的目的是让卡片两个进程
+   * （Form 扩展 / UIAbility）都能读到定时状态 —— AppStorage 不跨进程，
+   * LockScreenCard 的 chip 文案（「HH:mm 停」）以此为准。
+   */
+  sleepTimerEnd: number;
+  /**
+   * 锁屏卡片（LockScreenCard）定时停止的默认档位（分钟，取值限
+   * SLEEP_OPTIONS）。卡片 chip 点按即按此档开启定时，再按取消。
+   */
+  lockCardSleepMinutes: number;
+  /**
+   * 桌面歌词总开关（设置 → 播放 + 播放页功能行入口；默认关）：开启后调用
+   * AVSession Kit 系统「歌词组件」（avSession.enableDesktopLyric +
+   * setDesktopLyricVisible），由系统以悬浮窗形式在桌面显示当前行歌词
+   * （歌词源 = 已上报的 AVMetadata.lyric 标准 LRC）。无需任何悬浮窗权限。
+   * 用户也可在系统组件侧关闭/锁定，监听回调会回写本标记。
+   * 运行时镜像 STORE_FLOAT_LYRIC_ENABLED。
+   */
+  floatLyricEnabled: boolean;
+  /**
+   * 桌面歌词锁定（默认关）：锁定后系统歌词组件固定位置、禁止拖拽与设置
+   *（avSession.setDesktopLyricState({ isLocked })，样式由系统统一渲染）。
+   * 运行时镜像 STORE_FLOAT_LYRIC_LOCKED。
+   */
+  floatLyricLocked: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -604,11 +666,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   speedEnabled: false,
   playbackSpeed: 1.0,
   audioMixEnabled: false,
+  fadeDurationMs: 0,
   openInBilibiliEnabled: true,
   sleepTimerEntryEnabled: false,
   skipIntroEntryEnabled: false,
   upSpaceEntryEnabled: false,
   trackVolumeEntryEnabled: false,
+  chaptersEntryEnabled: false,
+  descEntryEnabled: false,
   lyricCentered: false,
   immersiveMaterialTier: IMMERSIVE_TIER_EXQUISITE,
   listenCacheEnabled: true,
@@ -617,7 +682,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   publicDirMigrated: false,
   playCdnLine: 'auto',
   autoPickedCdnLine: '',
-  funcItemOrder: DEFAULT_FUNC_ITEM_ORDER
+  funcItemOrder: DEFAULT_FUNC_ITEM_ORDER,
+  sleepTimerEnd: 0,
+  lockCardSleepMinutes: 30,
+  floatLyricEnabled: false,
+  floatLyricLocked: false
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -831,6 +900,35 @@ export interface VideoPageInfo {
   duration: number;
 }
 
+/** 分段来源：官方 view_points（x/player/wbi/v2 服务端下发） */
+export const CHAPTER_SOURCE_OFFICIAL: string = 'official';
+/** 分段来源：视频简介时间戳行解析（公开 view 接口，不依赖登录与风控敏感端点） */
+export const CHAPTER_SOURCE_DESC: string = 'desc';
+/** 分段来源：UP 主置顶评论时间戳行解析（公开 reply 接口，仅取 isTop=true 真置顶楼） */
+export const CHAPTER_SOURCE_TOP_COMMENT: string = 'topReply';
+
+/**
+ * B 站视频「章节分段」（UP 主在稿件编辑器添加的分段，web 端进度条上的章节标记）。
+ * 来源：`x/player/wbi/v2` 响应的 `view_points` 字段（type === 'chapter' 条目），
+ * from/to 单位秒。由 SubtitleLyricApi 解析、ChapterStore 按 cid 缓存发布
+ * （STORE_VIDEO_CHAPTERS），播放页功能行「分段列表」与进度条刻度消费。
+ */
+export interface VideoChapter {
+  /** 章节起点（秒） */
+  from: number;
+  /** 章节终点（秒） */
+  to: number;
+  /** 章节标题 */
+  title: string;
+  /**
+   * 分段数据来源：'official'（view_points）/ 'desc'（简介时间戳解析）/
+   * 'topReply'（置顶评论时间戳解析）。可选字段 —— 缺省按 official 处理
+   * （兼容旧持久化数据与未打标的既有产物）；进度条刻度只读 from，不感知
+   * 本字段；分段列表弹层据它显示来源标识。
+   */
+  source?: string;
+}
+
 export interface VideoDetail {
   bvid: string;
   aid: number;
@@ -883,6 +981,51 @@ export interface UgcSeason {
   title: string;
   cover?: string;
   sections?: UgcSeasonSection[];
+}
+
+/** B 站评论楼层：评论人信息（member，只取弹层展示消费的字段） */
+export interface ReplyMember {
+  mid: string;
+  uname: string;
+  avatar: string;
+}
+
+/** B 站评论楼层：内容体（content，只取展示消费的 message；emote / jump_url 等富文本结构不消费） */
+export interface ReplyContent {
+  message: string;
+}
+
+/** B 站评论楼层（/x/v2/reply/wbi/main 的 replies / top_replies 条目，只取展示消费的字段） */
+export interface ReplyItem {
+  rpid: number;
+  mid: number;
+  member: ReplyMember;
+  content: ReplyContent;
+  like: number;
+  /** 发布时间（Unix 秒） */
+  ctime: number;
+}
+
+/** /x/v2/reply/wbi/main 响应的 data 体（只取消费字段） */
+export interface ReplyMainData {
+  /** 置顶评论（UP 主置顶楼；多数视频无置顶为 null / 缺省） */
+  top_replies?: ReplyItem[] | null;
+  /** 普通评论楼列表（mode=2 请求时按热度排序） */
+  replies?: ReplyItem[] | null;
+}
+
+/**
+ * 「视频简介」弹层消费的规范化评论结果（getTopReply 返回）：
+ * 置顶楼优先，无置顶回落热门首评（isTop=false），全无时返回 null。
+ */
+export interface TopReplyResult {
+  /** 是否为 UP 置顶楼（false = 热门首评回落） */
+  isTop: boolean;
+  uname: string;
+  message: string;
+  like: number;
+  /** 发布时间（Unix 秒） */
+  ctime: number;
 }
 
 export interface AudioStream {

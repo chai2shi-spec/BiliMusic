@@ -18,11 +18,12 @@ import common from '@ohos.app.ability.common';
 import { image } from '@kit.ImageKit';
 import { effectKit } from '@kit.ArkGraphics2D';
 import { formBindingData, formProvider } from '@kit.FormKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { Track, LyricResult } from '../../model/MusicModels';
 import { getLyricForTrack, getLyricOffset } from '../../api/LyricsApi';
 import { initLyricCache } from '../LyricCacheStore';
 import { initPlayerStateStore, readPlayerStateFile, PersistedPlayerState } from '../PlayerStateStore';
-import { initPreferences } from '../../preferences/AppPreferences';
+import { initPreferences, AppPreferences } from '../../preferences/AppPreferences';
 import { FormCardName } from '../../widget/model/CardFormConstant';
 
 const TAG: string = 'CardPayloadBuilder';
@@ -33,6 +34,21 @@ export const DEFAULT_COLOR_HEX: string = 'fb7299';
 const DEFAULT_COLOR_RGBA: string = 'rgba(251, 114, 153, 1)';
 /** 心动歌词卡展示行数（连续随机截取） */
 const HEART_LYRIC_LINE_COUNT: number = 4;
+/** formProvider「卡片不存在」错误码（16501）：卡片已被用户从桌面移除，推送方应清理死记录 */
+export const FORM_NOT_EXIST_CODE: number = 16501;
+
+/**
+ * 卡片已被移除（updateForm 报 16501）时上抛给调用方：
+ * 调用方据此从 CardFormStore 删除该 formId 死记录，止损后续每次
+ * 播放态 / 进度 / 歌词推送对同一路径的无效更新。
+ * 其余错误不上抛（维持「出口自吞」既有契约，调用方无需逐处兜底）。
+ */
+function rethrowIfFormGone(e: Object): void {
+  const be: BusinessError = e as BusinessError;
+  if (be.code === FORM_NOT_EXIST_CODE) {
+    throw be;
+  }
+}
 
 /** 封面取色结果 */
 class CoverColor {
@@ -63,6 +79,10 @@ class CardPayload {
   currentLyricIndex: number = 0;
   progress: number = 0;
   duration: number = 0;
+  /** 锁屏卡片：定时停止活跃（sleepTimerEnd > now） */
+  sleepOn: boolean = false;
+  /** 锁屏卡片：定时结束文案（「HH:mm 停」，推送前格式化好） */
+  sleepText: string = '定时';
 }
 
 /** 构建结果：payload + 待关闭的封面 fd（-1 = 无封面） */
@@ -88,6 +108,34 @@ class ProgressData {
   progress: number = 0;
   duration: number = 0;
   isPlay: boolean = false;
+}
+
+/** 锁屏卡片定时停止态（全量 / 轻量推送共用读取） */
+class SleepStateData {
+  sleepOn: boolean = false;
+  sleepText: string = '定时';
+}
+
+/** 两位数字符串（不足补零：9 → '09'） */
+function pad2(value: number): string {
+  const clamped: number = Math.max(0, Math.min(59, Math.round(value)));
+  const raw: string = clamped.toString();
+  return raw.length < 2 ? `0${raw}` : raw;
+}
+
+/**
+ * 读锁屏卡片定时停止态：AppSettings.sleepTimerEnd（跨进程落盘字段）> 当前
+ * 时刻 → 活跃，文案「HH:mm 停」此处格式化好（卡片内不做时间运算）。
+ */
+function readLockSleepState(): SleepStateData {
+  const data: SleepStateData = new SleepStateData();
+  const end: number = AppPreferences.getSettings().sleepTimerEnd;
+  if (end > Date.now()) {
+    data.sleepOn = true;
+    const d: Date = new Date(end);
+    data.sleepText = `${pad2(d.getHours())}:${pad2(d.getMinutes())} 停`;
+  }
+  return data;
 }
 
 /**
@@ -444,24 +492,39 @@ async function buildCardPayload(context: common.Context, formName: string,
   await ensureCardEnv(context);
   // 注入优先、盘读兜底：Form 进程无主进程 AppStorage，只能读盘
   const snapshot: PersistedPlayerState | null = state !== null ? state : await readCardSnapshot();
-  if (snapshot === null || snapshot.currentTrack === null) {
-    return null;
+  const track: Track | null = snapshot !== null ? snapshot.currentTrack : null;
+  if (track === null) {
+    // 锁屏卡片例外：无播放快照（首次安装 / 从未播放）也要可推 —— chip 独立
+    // 于曲目工作，回落占位文案；其余卡片无快照返回 null 由调用方跳过
+    if (formName !== FormCardName.LOCK_SCREEN) {
+      return null;
+    }
+    const empty: CardBuildResult = new CardBuildResult();
+    empty.payload.title = 'BiliMusic';
+    empty.payload.singer = '未在播放';
+    const emptySleep: SleepStateData = readLockSleepState();
+    empty.payload.sleepOn = emptySleep.sleepOn;
+    empty.payload.sleepText = emptySleep.sleepText;
+    return empty;
   }
-  const track: Track = snapshot.currentTrack;
   const result: CardBuildResult = await prepareCover(context, track);
   const payload: CardPayload = result.payload;
-  payload.isPlay = snapshot.isPlaying;
+  payload.isPlay = snapshot !== null ? snapshot.isPlaying : false;
   payload.title = track.title;
   payload.singer = track.artist;
   payload.songId = track.id;
   payload.isCollected = track.isLiked;
-  payload.progress = snapshot.progress;
-  payload.duration = snapshot.duration;
-  if (formName === FormCardName.LYRICS) {
+  payload.progress = snapshot !== null ? snapshot.progress : 0;
+  payload.duration = snapshot !== null ? snapshot.duration : 0;
+  if (formName === FormCardName.LOCK_SCREEN) {
+    const sleep: SleepStateData = readLockSleepState();
+    payload.sleepOn = sleep.sleepOn;
+    payload.sleepText = sleep.sleepText;
+  } else if (formName === FormCardName.LYRICS) {
     payload.lrcArray = await pickRandomLyricLines(track);
   } else if (formName === FormCardName.DYNAMIC_LYRICS) {
     const lyric: LyricResult | null = await getLyricForTrack(track);
-    const win: LyricWindow = buildLyricWindow(lyric, track, snapshot.progress);
+    const win: LyricWindow = buildLyricWindow(lyric, track, snapshot !== null ? snapshot.progress : 0);
     payload.lrcArray = win.lines;
     payload.currentLyricIndex = 0;
   }
@@ -485,6 +548,7 @@ export async function pushCardToForm(context: common.Context, formId: string, fo
     console.info(`[${TAG}] updateForm ok formId=${formId} formName=${formName}`);
   } catch (e) {
     console.error(`[${TAG}] pushCardToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    rethrowIfFormGone(e);
   } finally {
     if (coverFd >= 0) {
       try {
@@ -504,6 +568,7 @@ export async function pushPlayStatusToForm(formId: string, isPlay: boolean): Pro
     await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
   } catch (e) {
     console.error(`[${TAG}] pushPlayStatusToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    rethrowIfFormGone(e);
   }
 }
 
@@ -518,6 +583,7 @@ export async function pushLyricWindowToForm(formId: string, lines: string[],
     await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
   } catch (e) {
     console.error(`[${TAG}] pushLyricWindowToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    rethrowIfFormGone(e);
   }
 }
 
@@ -532,5 +598,22 @@ export async function pushProgressToForm(formId: string, progress: number,
     await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
   } catch (e) {
     console.error(`[${TAG}] pushProgressToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    rethrowIfFormGone(e);
+  }
+}
+
+/**
+ * 轻量推送：锁屏卡片定时停止态（定时开启 / 取消时只推 sleepOn + sleepText，
+ * 不重取封面 / 快照）。读盘自给（AppSettings.sleepTimerEnd），Form 扩展进程
+ * 与主进程均可调用。
+ */
+export async function pushLockCardStateToForm(context: common.Context, formId: string): Promise<void> {
+  try {
+    await ensureCardEnv(context);
+    const data: SleepStateData = readLockSleepState();
+    await formProvider.updateForm(formId, formBindingData.createFormBindingData(data));
+  } catch (e) {
+    console.error(`[${TAG}] pushLockCardStateToForm failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    rethrowIfFormGone(e);
   }
 }

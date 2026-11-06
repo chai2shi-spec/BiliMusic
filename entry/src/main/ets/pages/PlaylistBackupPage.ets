@@ -2,7 +2,8 @@
  * 歌单备份页：设置页「歌单备份」二级页，行序与逻辑原样保留。
  *
  * 内容：导出歌单到剪贴板 / 从剪贴板导入歌单（经 PasteButton 安全控件授权）/
- * 从网易云 · QQ 音乐导入（跳 'PlaylistImport' 路由）+ 脚注说明。
+ * 从网易云 · QQ 音乐导入（跳 'PlaylistImport' 路由）+ 本地备份分组
+ * （歌单 + 拾音收听数据 ⇄ bilimusic-日期.json，service/LocalBackup 编排）+ 脚注说明。
  *
  * 解决的真实痛点：歌单只存在 Preferences 里，**清数据 / 换机即丢**。
  * 导出剥掉 localFilePath、导入逐首 slimTrack（见 LibraryStore 的注释）。
@@ -41,6 +42,18 @@ import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { BarNarrowShell } from '../components/BarNarrowShell';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
+import picker from '@ohos.file.picker';
+import fileUri from '@ohos.file.fileuri';
+import fs from '@ohos.file.fs';
+import common from '@ohos.app.ability.common';
+import {
+  BackupFile,
+  BackupRestoreResult,
+  BackupSummary,
+  buildLocalBackup,
+  peekBackup,
+  restoreBackup
+} from '../service/LocalBackup';
 
 /**
  * 剪贴板导入授权弹窗：官方 CustomContentDialog 承载（正文 + 系统粘贴按钮）。
@@ -169,6 +182,29 @@ export struct PlaylistBackupPage {
       .accessibilityLevel('yes')
   }
 
+  /**
+   * 「标题 + 副标题 + 箭头」行（本地备份 / 恢复两行共用，「从网易云 / QQ 音乐
+   * 导入」行同款样式）：备份链路语义单靠标题说不清，副标题补一句口径。
+   */
+  @Builder
+  BackupEntryRow(title: string, subtitle: string, onTap: () => void): void {
+    HdsListItemCard({
+      textItem: {
+        primaryText: { text: title },
+        secondaryText: { text: subtitle }
+      },
+      suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+      cardBackgroundColor: Color.Transparent,
+      cardPrefixMargin: 0,
+      cardSuffixMargin: 0,
+      onClick: (): void => {
+        onTap();
+      }
+    })
+      .accessibilityText(title)
+      .accessibilityLevel('yes')
+  }
+
   /** 导出：把全部歌单序列化后写进剪贴板 */
   private async exportPlaylists(): Promise<void> {
     const playlists: Playlist[] = LibraryStore.getPlaylists();
@@ -239,6 +275,132 @@ export struct PlaylistBackupPage {
       const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
       console.error(`import playlists failed: ${detail}`);
       this.toast('导入失败：数据格式不正确', 2000);
+    }
+  }
+
+  /**
+   * 备份到本地文件：组装「歌单 + 拾音收听数据」完整 JSON，经系统保存对话框
+   * （DocumentViewPicker.save，PlaybackLogPage 导出链路同款）保存，
+   * 默认文件名 bilimusic-YYYYMMDD.json（如 bilimusic-20261106.json）。
+   *
+   * 先组装后拦截：两段都空才判「无可备份」，数据只读一次（组装结果直接落盘）。
+   * 对话框返回空数组 = 用户取消，静默返回。
+   */
+  private async exportBackup(): Promise<void> {
+    const backup: BackupFile = await buildLocalBackup();
+    if (backup.playlists.length === 0 && backup.sessions.length === 0) {
+      this.toast('还没有可备份的数据', 1800);
+      return;
+    }
+    const d: Date = new Date();
+    const two = (v: number): string => v < 10 ? `0${v}` : `${v}`;
+    const fileName: string =
+      `bilimusic-${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}.json`;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const saveOptions: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+      saveOptions.newFileNames = [fileName];
+      const uris: Array<string> = await new picker.DocumentViewPicker(ctx).save(saveOptions);
+      if (uris.length === 0) {
+        return;
+      }
+      await this.writeBackupFile(uris[0], backup);
+      this.toast(
+        `已备份「${fileName}」（${backup.playlists.length} 个歌单 / ${backup.sessions.length} 条收听记录）`, 2600);
+    } catch (e) {
+      console.error(`export backup failed: ${JSON.stringify(e)}`);
+      this.toast('备份失败，请重试', 1800);
+    }
+  }
+
+  /** 保存对话框返回后写文件：URI → 绝对路径（fileUri 转换）→ 截断写 → 关闭（写失败即整体失败，toast 走 catch） */
+  private async writeBackupFile(uri: string, backup: BackupFile): Promise<void> {
+    const path: string = new fileUri.FileUri(uri).path ?? '';
+    if (path.length === 0) {
+      throw new Error('backup uri path is empty');
+    }
+    const file: fs.File = await fs.open(path, fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      await fs.write(file.fd, JSON.stringify(backup));
+    } finally {
+      try {
+        await fs.close(file);
+      } catch (e) {
+        // 关闭失败不影响备份结果，仅记录；吞掉避免覆盖 write 的原始异常
+        console.error(`[PlaylistBackupPage] close backup file failed: ${e}`);
+      }
+    }
+  }
+
+  /**
+   * 从备份文件恢复：文件选择器（DocumentViewPicker.select，仅 .json）选文件 →
+   * peekBackup 探测计数（不是备份文件当场拦下）→ 确认弹窗 → doRestoreBackup。
+   * 老版「导出歌单到剪贴板」的纯歌单 JSON 同样可恢复（peekBackup 兼容口径）。
+   */
+  private async pickBackupFile(): Promise<void> {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const selectOptions: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+      selectOptions.fileSuffixFilters = ['json'];
+      const uris: Array<string> = await new picker.DocumentViewPicker(ctx).select(selectOptions);
+      if (uris.length === 0) {
+        return;
+      }
+      const path: string = new fileUri.FileUri(uris[0]).path ?? '';
+      if (path.length === 0) {
+        this.toast('读取备份文件失败，请重试', 1800);
+        return;
+      }
+      const text: string = await fs.readText(path);
+      const summary: BackupSummary | null = peekBackup(text);
+      if (summary === null) {
+        this.toast('不是 BiliMusic 备份文件', 2000);
+        return;
+      }
+      const parts: string[] = [];
+      if (summary.playlists > 0) {
+        parts.push(`${summary.playlists} 个歌单`);
+      }
+      if (summary.sessions > 0) {
+        parts.push(`${summary.sessions} 条收听记录`);
+      }
+      showConfirm(this.getUIContext(), {
+        title: '恢复备份',
+        message: `备份文件里包含${parts.join('、')}，将合并到本机（歌单重名自动加「导入」后缀，收听记录自动去重）。`,
+        confirmText: '恢复',
+        onConfirm: (): void => {
+          this.doRestoreBackup(text);
+        }
+      });
+    } catch (e) {
+      console.error(`pick backup file failed: ${JSON.stringify(e)}`);
+      this.toast('读取备份文件失败，请重试', 1800);
+    }
+  }
+
+  /** 确认后的真恢复：歌单段走 LibraryStore 容错导入、会话段走去重合并，toast 拼回执 */
+  private async doRestoreBackup(text: string): Promise<void> {
+    try {
+      const r: BackupRestoreResult = await restoreBackup(text);
+      if (r.importedPlaylists === 0 && r.skippedPlaylists === 0
+        && r.mergedSessions === 0 && r.skippedSessions === 0) {
+        this.toast('备份里没有可恢复的数据', 2000);
+        return;
+      }
+      const segs: string[] = [];
+      if (r.importedPlaylists > 0 || r.skippedPlaylists > 0) {
+        const tail: string = r.skippedPlaylists > 0 ? `（跳过 ${r.skippedPlaylists} 个）` : '';
+        segs.push(`歌单 ${r.importedPlaylists} 个${tail}`);
+      }
+      if (r.mergedSessions > 0 || r.skippedSessions > 0) {
+        const tail: string = r.skippedSessions > 0 ? `（跳过 ${r.skippedSessions} 条）` : '';
+        segs.push(`收听记录 ${r.mergedSessions} 条${tail}`);
+      }
+      this.toast(`已恢复${segs.join('，')}`, 2600);
+    } catch (e) {
+      const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.error(`restore backup failed: ${detail}`);
+      this.toast('恢复失败：备份文件格式不正确', 2000);
     }
   }
 
@@ -335,6 +497,24 @@ export struct PlaylistBackupPage {
         }
         ListItem() {
           SectionFooter({ noteText: '导出的文本里不含音频直链与本机路径，导入后首次播放需要重新联网解析' })
+        }
+        ListItem() {
+          InsetCard() {
+            // 本地备份（文件）：歌单 + 拾音收听数据一并导出 / 恢复
+            // （service/LocalBackup 编排，PlaybackLogPage 同款文件通路）。
+            // 与上面的剪贴板链路（纯歌单、本机即时转移）互补：文件可长期
+            // 留存、跨设备搬运，且把拾音收听记录也一并带走。
+            this.BackupEntryRow('备份歌单与拾音数据', '导出为 bilimusic-日期.json 备份文件', (): void => {
+              this.exportBackup();
+            })
+            CardDivider()
+            this.BackupEntryRow('从备份文件恢复', '合并歌单与收听记录，自动去重', (): void => {
+              this.pickBackupFile();
+            })
+          }
+        }
+        ListItem() {
+          SectionFooter({ noteText: '备份文件包含歌单与拾音收听记录，不含音频文件与本机路径' })
         }
       }
       .width('100%')

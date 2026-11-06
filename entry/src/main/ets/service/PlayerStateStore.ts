@@ -18,6 +18,13 @@
  * 两次写都以 TRUNC 打开同一文件，若先发起的写晚完成，会把新内容覆盖回
  * 旧内容。所有写经同一条 promise 链排队（模式同 MusicPlayer.playerRebuildChain）。
  *
+ * 落盘原子性：先写 `<name>.tmp` 再 fs.rename 原子替换。划卡杀进程会
+ * SIGKILL 掉 onBackground 里 persistPlaybackSnapshotNow 的在途写 ——
+ * TRUNC 直接打在正式文件上的话，open 与 write 之间被杀会把
+ * player_state.json 截成 0 字节（冷启动 restoreState 读到空 → 无快照 →
+ * 卡片点播静默 no-op 的根因）。临时文件中转后，任何时刻被杀正式文件
+ * 都保持上一份完整内容，残留的 .tmp 由下次写覆盖。
+ *
  * 损坏即弃：读失败 / JSON 解析失败 / 字段不合法一律当无快照返回 null，
  * 绝不把脏数据甩进播放内核；两文件只认「同时存在」的组合，半份快照
  * （标量在、队列缺失）按无快照处理。
@@ -86,18 +93,21 @@ async function readJsonFile<T>(name: string): Promise<T | null> {
   }
 }
 
-/** 写 JSON 文件：open → write → close（鸿蒙 fileIo 没有 writeText） */
+/** 写 JSON 文件：写临时文件后原子改名（open → write → close → rename） */
 async function writeJsonText(name: string, json: string): Promise<void> {
   if (stateDir.length === 0) {
     return;
   }
-  const file: fs.File = await fs.open(`${stateDir}/${name}`,
+  const finalPath: string = `${stateDir}/${name}`;
+  const tmpPath: string = `${finalPath}.tmp`;
+  const file: fs.File = await fs.open(tmpPath,
     fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
   try {
     await fs.write(file.fd, json);
   } finally {
     await fs.close(file);
   }
+  await fs.rename(tmpPath, finalPath);
 }
 
 /**

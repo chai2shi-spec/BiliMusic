@@ -1,5 +1,5 @@
 /**
- * 媒体库存储（收藏 / 歌单 / 最近播放 / 删除墓碑）。
+ * 媒体库存储（收藏 / 歌单 / 最近播放）。
  * 存储后端为 Preferences（JSON）。
  */
 
@@ -9,7 +9,6 @@ import {
   PREF_VALUE_BUDGET_BYTES,
   Playlist,
   slimTrack,
-  Tombstone,
   Track,
   utf8Length
 } from '../model/MusicModels';
@@ -413,10 +412,8 @@ function toggleFavoriteTrack(track: Track): Track[] {
   const idx: number = favs.findIndex((t: Track): boolean => t.id === track.id);
   if (idx >= 0) {
     favs.splice(idx, 1);
-    addFavoriteTombstone(track.id);
   } else {
     favs.unshift(Object.assign({}, track, { isLiked: true, likedAt: new Date().toISOString() }));
-    removeFavoriteTombstone(track.id);
   }
   persistFavoriteTracks(favs);
   return getFavoriteTracks();
@@ -1039,13 +1036,12 @@ export function clearTitleSorted(): void {
 
 
 /**
- * 清掉某个歌单的落盘数据：写删除墓碑 + 移除它的曲目分片 key。
+ * 清掉某个歌单的落盘数据：移除它的曲目分片 key。
  *
  * 只清磁盘数据，**不提交** `persistPlaylists` —— 由调用方把新列表一次性提交，
  * 这样「删除 / 合并删源」都只有一次落盘，也不会出现「列表已换、分片还在」的中间态。
  */
 function purgePlaylistData(id: string): void {
-  addPlaylistTombstone(id);
   // 连分片一起清掉：留着不会被误读（读只取 chunkCount 个 key），但会一直占磁盘。
   // 攒一批走 removeMany（一次 flush），避免逐片 remove 造成上千次串行 flush。
   const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
@@ -2087,42 +2083,21 @@ function applyFavMirror(
   return { playlist: updated, added: added, removed: removed, reused: true };
 }
 
-// ===== 删除墓碑（云同步用，避免被对端复活） =====
-
-function loadPlaylistTombstones(): Tombstone[] {
-  return AppPreferences.getPlaylistTombstones<Tombstone>();
-}
-
-function savePlaylistTombstones(list: Tombstone[]): void {
-  AppPreferences.savePlaylistTombstones<Tombstone>(list);
-}
-
-function addPlaylistTombstone(id: string): void {
-  const list: Tombstone[] = loadPlaylistTombstones().filter((t: Tombstone): boolean => t.id !== id);
-  list.push({ id: id, deletedAt: new Date().toISOString() });
-  savePlaylistTombstones(list);
-}
-
-function loadFavoriteTombstones(): Tombstone[] {
-  return AppPreferences.getFavoriteTombstones<Tombstone>();
-}
-
-function saveFavoriteTombstones(list: Tombstone[]): void {
-  AppPreferences.saveFavoriteTombstones<Tombstone>(list);
-}
-
-function addFavoriteTombstone(id: string): void {
-  const list: Tombstone[] = loadFavoriteTombstones().filter((t: Tombstone): boolean => t.id !== id);
-  list.push({ id: id, deletedAt: new Date().toISOString() });
-  saveFavoriteTombstones(list);
-}
-
-function removeFavoriteTombstone(id: string): void {
-  saveFavoriteTombstones(loadFavoriteTombstones().filter((t: Tombstone): boolean => t.id !== id));
+/**
+ * 歌单导出 JSON 的顶层结构（createPlaylistsExport 的返回类型）。
+ * 命名 interface 收口：本地备份链路（LocalBackup）要读它的 playlists 数组，
+ * 返回裸 object 只能靠 as 断言取值（ArkTS 红线）。
+ */
+export interface PlaylistsExport {
+  app: string;
+  type: string;
+  version: number;
+  exportedAt: string;
+  playlists: Playlist[];
 }
 
 /**
- * 导出歌单（JSON 对象，交给调用方序列化后写进剪贴板）。
+ * 导出歌单（JSON 对象，交给调用方序列化后写进剪贴板 / 备份文件）。
  *
  * ⚠️ **导出必须剥掉 `localFilePath`**：内存快照里的曲目带本机绝对路径
  * （`slimTrack` 故意保留它，否则「播着下载好的歌 → 关 App → 重开」就找不到文件），
@@ -2130,9 +2105,11 @@ function removeFavoriteTombstone(id: string): void {
  * `audioUrl` 则本来就被 `slimTrack` 置空（直链带签名、会过期），所以导出后首次播放
  * 需要重新解析音源 —— 这是预期行为。
  */
-function createPlaylistsExport(): object {
+function createPlaylistsExport(): PlaylistsExport {
   const playlists: Playlist[] = getPlaylists();
-  const out: object[] = [];
+  // 元素类型与 PlaylistsExport.playlists 对齐（Playlist 接口收口）：
+  // 声明成 object[] 会被判「object[] 不能赋给 Playlist[]」，且丢失字面量校验
+  const out: Playlist[] = [];
   for (let i = 0; i < playlists.length; i++) {
     const p: Playlist = playlists[i];
     const tracks: Track[] = [];
@@ -2177,7 +2154,20 @@ export interface PlaylistImportResult {
 }
 
 function importPlaylistsFromText(text: string): PlaylistImportResult {
-  const parsed = JSON.parse(text);
+  // 已解析版（importPlaylistsFromParsed）是真正实现：备份恢复链路对同一份
+  // 大 JSON 只 parse 一次后分段恢复，这里保留文本入口给剪贴板导入。
+  return importPlaylistsFromParsed(JSON.parse(text));
+}
+
+/**
+ * 已解析 JSON 的歌单导入（importPlaylistsFromText 的实现体 + 备份恢复复用口）。
+ *
+ * 入参为 JSON.parse 的产物（剪贴板文本 / 备份文件的根对象），形状宽松：
+ * 顶层数组、`{playlists:[...]}`（旧版导出）、`{playlists, sessions,...}`
+ * （本地备份）均可，只认 `playlists` 数组；备份文件里的其它段（sessions 等）
+ * 由调用方（LocalBackup.restoreBackup）另行处理。
+ */
+export function importPlaylistsFromParsed(parsed: ESObject): PlaylistImportResult {
   const incoming: Playlist[] = Array.isArray(parsed) ? parsed : parsed?.playlists;
   if (!Array.isArray(incoming)) {
     throw new Error('文件中没有找到歌单列表');
@@ -2320,5 +2310,6 @@ export const LibraryStore = {
   applyFavMirror,
   consumeFavMirrorSkippedCount,
   createPlaylistsExport,
-  importPlaylistsFromText
+  importPlaylistsFromText,
+  importPlaylistsFromParsed
 };

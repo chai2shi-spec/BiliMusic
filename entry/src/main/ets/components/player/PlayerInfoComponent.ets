@@ -16,14 +16,18 @@
  *   · MD/LG 断点（真平板 / 大窗口 / 阔折叠外屏横屏；!isFoldFull 且非
  *     阔折叠折起竖屏守卫）→ 栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
  *   · SM 断点 / 阔折叠展开竖屏（isWideFoldFull：isFoldFull && 竖屏 &&
- *     内屏宽高比 ≥ WIDE_FOLD_INNER_ASPECT_MIN）/ 阔折叠折起外屏（isCompactFold，
+ *     内屏宽高比 ≤ WIDE_FOLD_INNER_ASPECT_MAX，≈0.62 的 16:10 长屏）/
+ *     阔折叠折起外屏（isCompactFold，
  *     如 Pura X 折起；用户拍板：折起态不再走出血专属版式，与直板机完全同版式）→
  *     Swiper 双页（封面页 | 歌词页）+ 顶栏叠加，版式与直板机一致。
  *
  * ⚠️ 真机实测结论（Pura X）：折起外屏落 sm 断点（<600vp）、展开内屏落 md
  * 断点（600~840vp）—— 与早期注释里「外屏 632×924vp 落 md / 展开 ≥840vp 落 lg」
  * 的假设不符，故阔折叠判定不卡断点，改按窗口宽高比（阔折叠外屏 ≈0.62 /
- * 展开内屏 ≈1.04，常规折叠 ≈0.49 / ≈0.89，宽高比与密度换算无关）。
+ * 展开内屏 ≈0.62 —— 内外屏同为 16:10 长屏；常规折叠 ≈0.49 / ≈0.83~0.92，
+ * 宽高比与密度换算无关）。⚠️ 早期版本曾按「展开内屏 ≈1.04 近方」设下限
+ * 0.97，与真机 16:10 长屏不符（展开竖屏从未命中、一直落分栏），已修正为
+ * 上限 0.75。
  *
  * 小折叠（Pocket / Nova Flip 系列，用户拍板：展开态播放页与直板机完全一致）：
  * display.isFoldable() 对小折叠返回 false（官方《双折叠应用开发》），FormFactorHolder
@@ -149,8 +153,10 @@ export struct PlayerInfoComponent {
    * 折叠屏展开态：订阅全局唯一真源 service/FormFactorHolder 的
    * STORE_FOLD_EXPANDED（EntryAbility 常驻首发）—— 播放页是懒加载 overlay，
    * 本组件不私有注册 display 监听（不挂载就没有折叠态）。
+   * @Watch → logFoldState：折叠开合时打 [PlayerInfo] 诊断日志（真机阔折叠
+   * 判定排查证据），与 windowWidthVp 的 @Watch 共用同一回调。
    */
-  @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
+  @StorageProp(STORE_FOLD_EXPANDED) @Watch('logFoldState') isFoldFull: boolean = false;
   /** 背景明暗（本组件取色写入 STORE_PLAYER_BG_DARK 后回读）：标题块码率文案压深/提亮用 */
   @StorageProp(STORE_PLAYER_BG_DARK) isBgDark: boolean = true;
   /** 封面风格（两档，设置页可切）：SurfaceLayers 背景分层据此分流，取色/模糊管线全风格共用不变 */
@@ -292,19 +298,25 @@ export struct PlayerInfoComponent {
 
   /**
    * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开
-   * （isFoldFull）且竖屏且内屏宽高比 ≥ WIDE_FOLD_INNER_ASPECT_MIN（阔折叠
-   * Pura X 类展开 ≈1.04 近方；常规折叠 Mate X 类展开 ≈0.89 偏长方，不命中
-   * 仍走分栏）。不卡断点：真机 Pura X 展开落 md（差一点未到早期假设的
-   * lg≥840），md 断点下两类折叠屏均出现，只能按宽高比区分。
+   * （isFoldFull）且竖屏且内屏宽高比 ≤ WIDE_FOLD_INNER_ASPECT_MAX（阔折叠
+   * Pura X 类展开内屏为 16:10 长屏，竖屏宽高比 ≈0.62；常规折叠 Mate X 类展开
+   * 近方偏宽 ≈0.83~0.92，> 阈值不命中仍走分栏）。不卡断点：真机 Pura X
+   * 展开落 md（差一点未到早期假设的 lg≥840），md 断点下两类折叠屏均出现，
+   * 只能按宽高比区分。
    * 命中时 build() 的 isFoldFull 分栏分支放行，穿透到 SM Swiper 双页分支
    * （直板机版式）。横屏排除：直板机 Swiper 版式不处理横屏，展开横屏命中
    * isCompactLandscape（isFoldFull && isLandscape）。
+   * aspect > 0 守卫不可省：窗口高度未就位时 windowAspect() 返回 0，0 ≤ 上限
+   * 会误命中（首帧闪错版式再跳变）；旧「≥ 下限」方向 0 天然不命中，反转
+   * 比较方向后必须显式挡零。
    * PlayerPage.dragDismissEnabled 为同口径双份实现（morph_swipe 下拉手势
    * 扩展），改判定口径时两处同步。
    */
   private isWideFoldFull(): boolean {
+    const aspect: number = this.windowAspect();
     return this.isFoldFull && !this.isLandscape
-      && this.windowAspect() >= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MIN;
+      && aspect > 0
+      && aspect <= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MAX;
   }
 
   /**
@@ -314,7 +326,7 @@ export struct PlayerInfoComponent {
    */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   /** 窗口内容区宽 / 高（vp）：EntryAbility 首发 + Index HdsTabs.onAreaChange 持续回写（折展开/旋转后新鲜） */
-  @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
+  @StorageProp(STORE_WINDOW_WIDTH_VP) @Watch('logFoldState') windowWidthVp: number = 0;
   @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
 
   /**
@@ -324,6 +336,20 @@ export struct PlayerInfoComponent {
    */
   private windowAspect(): number {
     return this.windowHeightVp > 0 ? this.windowWidthVp / this.windowHeightVp : 0;
+  }
+
+  /**
+   * 折叠/窗口形态诊断日志（真机阔折叠判定排查证据）：
+   * 首帧（aboutToAppear）与折叠开合 / 窗口宽度回写（@Watch）时输出
+   * [PlayerInfo] fold-state 前缀一行 —— 展开态、横竖屏、窗口宽高、宽高比
+   * 与 isWideFoldFull 判定结果一目了然，配合 [FormFactorHolder] 日志
+   * 可还原完整形态切换链。只在状态变化时打，不进 build 热路径。
+   */
+  private logFoldState(): void {
+    const aspect: number = this.windowAspect();
+    console.info(`[PlayerInfo] fold-state expanded=${this.isFoldFull} landscape=${this.isLandscape}`
+      + ` w=${this.windowWidthVp} h=${this.windowHeightVp} aspect=${aspect.toFixed(2)}`
+      + ` wideFoldFull=${this.isWideFoldFull()}`);
   }
   /** 水平安全区（vp）：横屏下状态栏侧边条带避让；竖屏两值为 0，padding 不生效 */
   @StorageProp(STORE_SAFE_LEFT) safeLeft: number = 0;
@@ -548,6 +574,8 @@ export struct PlayerInfoComponent {
     // 背景面转场起点不再手动实测：geometryTransition 配对由系统换算
     // 迷你栏锚点的真实视觉包围盒（见 GEOMETRY_ID_PLAYER_SURFACE）。
     this.onTrackChanged();
+    // 首帧形态基线（后续变化由 @Watch 补打），真机阔折叠判定排查证据
+    this.logFoldState();
   }
 
   onTrackChanged(): void {
@@ -964,9 +992,9 @@ export struct PlayerInfoComponent {
         } else if (this.isFoldFull && !this.isWideFoldFull()) {
           // isWideFoldFull（阔折叠展开竖屏，Pura X 类，宽高比门控）
           // 命中时放行本分支、穿透到下方 SM Swiper 双页（直板机版式，用户拍板
-          // 全宽铺满）—— 本分栏只留常规折叠展开竖屏（Mate X 类，宽高比 < 阈值
-          // 不命中 isWideFoldFull）；折叠展开横屏（isFoldFull && isLandscape）
-          // 命中上方紧凑横屏分支。
+          // 全宽铺满）—— 本分栏只留常规折叠展开竖屏（Mate X 类，近方宽高比
+          // ≈0.83~0.92 > 阈值不命中 isWideFoldFull）；折叠展开横屏（isFoldFull
+          // && isLandscape）命中上方紧凑横屏分支。
           Column() {
             TopAreaComponent()
               .margin({

@@ -6,7 +6,7 @@
  *      （收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
  *   2. 设置入口卡（iOS 设置风格彩色圆角图标行，两张分组卡片）：
  *      卡 1：播放设置 / 下载与存储 / 外观设置 / 应用图标 / 歌单导入；
- *      卡 2：查看更新日志 / 打赏作者 / 关于本项目 / 报错记录 / 反馈Q群
+ *      卡 2：查看更新日志 / 打赏作者 / PiLink 邀测 / 关于本项目 / 报错记录 / 反馈Q群
  *      （点按复制群号），点击分别推入对应二级页、弹更新日志弹窗或执行复制。
  *
  * 二级页（各自独立文件，懒加载注册见 service/LazyPageRegistry.ets）：
@@ -28,7 +28,7 @@
  * 低版本实底兜底）「设置」小标题常显 —— 与 Playlists / Downloads 同套交互。
  */
 
-import { bundleManager } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { BusinessError } from '@ohos.base';
 import {
   CONTENT_END_OFFSET,
@@ -87,6 +87,13 @@ const VIP_BADGE_GOLD_TO: string = '#E29B2D';
 
 /** 反馈 Q 群号：入口行点按即复制到剪贴板 */
 const FEEDBACK_QQ_GROUP: string = '1129926978';
+
+/**
+ * PiLink 邀测链接（应用市场邀测页）：PiLink 是原生鸿蒙精简版 B 站，
+ * 入口行点击弹确认框后经 openLink 跳转（不推二级页）。
+ */
+const PILINK_INVITE_URL: string =
+  'https://appgallery.huawei.com/link/invite-test-wap?taskId=49182f9984fd89834ae52acdf7093c66&invitationCode=XMFbRSukNQ';
 
 @Component
 export struct SettingsPage {
@@ -374,6 +381,36 @@ export struct SettingsPage {
         showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
       });
     })
+  }
+
+  /**
+   * 「PiLink 邀测」点击：先弹确认框介绍（原生鸿蒙精简版 B 站），确认后再跳，
+   * 避免点一下就离开 app（与清空队列同款 showConfirm 两键问句）。
+   */
+  private confirmPiLinkJump(): void {
+    showConfirm(this.getUIContext(), {
+      title: '前往 PiLink 邀测',
+      message: 'PiLink 是原生鸿蒙精简版 B 站。是否跳转应用市场参与邀测？',
+      confirmText: '前往',
+      onConfirm: (): void => {
+        this.openPiLinkInvite();
+      }
+    });
+  }
+
+  /**
+   * 打开 PiLink 邀测链接（AboutPage.openExternal 同款模式）：openLink 对
+   * https 链接交给系统处理（应用市场 / 浏览器）；失败 toast 不阻断页面。
+   */
+  private async openPiLinkInvite(): Promise<void> {
+    try {
+      // openLink 挂在 UIAbilityContext 上（不是基类 Context），所以要转一下
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await ctx.openLink(PILINK_INVITE_URL);
+    } catch (e) {
+      console.error(`open PiLink invite failed: ${JSON.stringify(e)}`);
+      showAppToast('无法打开链接', 1800);
+    }
   }
 
   /**
@@ -675,6 +712,14 @@ export struct SettingsPage {
               // 「打赏作者」：进 RewardPage 查看打赏二维码（页面居中展示 zsm.jpg）。
               this.IconEntryRow('打赏作者', $r('sys.symbol.heart_fill'), ICON_BG_RED, (): void => {
                 NavStackHolder.stack.pushPath({ name: 'Reward' });
+              })
+
+              CardDivider()
+
+              // 「PiLink 邀测」：原生鸿蒙精简版 B 站的邀测入口，点击弹确认框
+              // 介绍后 openLink 跳应用市场邀测页（B 站品牌粉 + 小电视图标）。
+              this.IconEntryRow('PiLink 邀测', $r('sys.symbol.TV_tv'), ICON_BG_PINK, (): void => {
+                this.confirmPiLinkJump();
               })
 
               CardDivider()

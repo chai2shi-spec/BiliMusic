@@ -105,9 +105,11 @@ export struct PlayerPage {
   private dragDismissEnabled(): boolean {
     return this.closeAnimStyle === PLAYER_CLOSE_STYLE_MORPH_SWIPE
       && (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
-        || (this.isFoldFull && !this.isLandscape
-          && this.windowHeightVp > 0
-          && this.windowWidthVp / this.windowHeightVp >= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MIN))
+      || (this.isFoldFull && !this.isLandscape
+        && this.windowWidthVp > 0 && this.windowHeightVp > 0
+        // 同口径双份实现：PlayerInfoComponent.isWideFoldFull（内屏宽高比
+        // ≤ 上限判阔折叠；宽 > 0 守卫不可省，反转比较方向后 0 会误命中）
+        && this.windowWidthVp / this.windowHeightVp <= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MAX))
       && this.playerOpen
       && !this.transitioning;
   }

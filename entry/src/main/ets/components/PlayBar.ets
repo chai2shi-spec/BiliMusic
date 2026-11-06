@@ -475,14 +475,15 @@ export struct PlayBar {
    *   · geometryTransition 全程单节点（与播放页大圆盘同 id 配对，一镜到底）；
    *   · 位置恒为行首（外层 Row padding 8 后）—— 收起/展开动画期间零位移。
    * 尺寸 = discSizeVp（运行时值，相位 / 展开态 @Watch 驱动 animateTo 过渡）。
-   * 缩略图仍按 96px 请求（3x 屏下即使 40vp 也够清晰，且尺寸变化不换 url → 不重新下载）。
+   * 缩略图按 128px 请求（迷你唱片展开态最大 ~64vp，3x 屏 ≈ 192px，128 档
+   * 补齐旧 96px 的发虚缺口；且尺寸变化不换 url → 不重新下载）。
    * ⚠️ 这里**不能**挂 onAreaChange 之类的布局回调去改尺寸状态 —— 详见
    * MINI_DISC_COLLAPSED_VERTICAL 的注释（真机上会把 HDS 的槽位搞塌）。
    */
   @Builder
   Disc(): void {
     Stack() {
-      CoverImage({ url: toThumbUrl(this.coverUrl(), 96), imgWidth: this.discSizeVp, imgHeight: this.discSizeVp, imgRadius: this.discSizeVp / 2 })
+      CoverImage({ url: toThumbUrl(this.coverUrl(), 128), imgWidth: this.discSizeVp, imgHeight: this.discSizeVp, imgRadius: this.discSizeVp / 2 })
         // GT 门控：gtOff=true 时 id 换空串，下滑路径不配对
         .geometryTransition(this.gtOff ? '' : GEOMETRY_ID_PLAYER_DISC)
 

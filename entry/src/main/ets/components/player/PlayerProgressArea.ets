@@ -18,6 +18,7 @@
 
 import {
   Track,
+  VideoChapter,
   PROGRESS_STYLE_SHIMMER,
   PROGRESS_STYLE_PULSE,
   PROGRESS_STYLE_WAVE
@@ -30,11 +31,14 @@ import { PlayerConstants } from '../../common/constants/PlayerConstants';
 import { ShimmerProgressBar } from './ShimmerProgressBar';
 import { PulseDotProgressBar } from './PulseDotProgressBar';
 import { WaveBarsProgressBar } from './WaveBarsProgressBar';
+import { ProgressMath, PROGRESS_MARK_WIDTH_VP, PROGRESS_MARK_HEIGHT_VP, PROGRESS_MARK_COLOR } from './ProgressMath';
 import {
   STORE_CURRENT_TRACK,
   STORE_PROGRESS,
   STORE_DURATION,
-  STORE_PROGRESS_STYLE
+  STORE_PROGRESS_STYLE,
+  STORE_VIDEO_CHAPTERS,
+  STORE_CHAPTERS_ENTRY_ENABLED
 } from '../../common/Constants';
 
 function formatTime(totalSeconds: number): string {
@@ -61,6 +65,13 @@ export struct PlayerProgressArea {
    * 走自绘分支，其余取值（含未知值）回落经典 Slider —— 交互契约四档一致。
    */
   @StorageProp(STORE_PROGRESS_STYLE) progressStyle: string = '';
+  /**
+   * 当前曲目章节分段（ChapterStore 按曲写入）：驱动四款进度条的刻度层；
+   * 只在切歌/加载完成时变化，不影响本组件 500ms 进度重渲染节奏。
+   */
+  @StorageProp(STORE_VIDEO_CHAPTERS) chapters: VideoChapter[] = [];
+  /** 「分段列表」入口开关（设置页镜像，默认关）：关 = 进度条不画分段刻度 */
+  @StorageProp(STORE_CHAPTERS_ENTRY_ENABLED) chaptersEntryEnabled: boolean = false;
   /** 拖动隔离：拖动中滑块显示 dragValue，松手恢复跟随插值进度 */
   @State dragging: boolean = false;
   @State dragValue: number = 0;
@@ -68,11 +79,38 @@ export struct PlayerProgressArea {
   @State sliderValue: number = 0;
   /** 进度条拖拽反馈缩放（本动画独占） */
   @State trackScale: number = 1;
+  /** 经典 Slider 分支叠加层实测宽度（vp）：刻度定位数据源 */
+  @State classicMarkWidth: number = 0;
 
   private player: MusicPlayer = MusicPlayer.getInstance();
 
   aboutToAppear(): void {
     this.sliderValue = this.progress;
+  }
+
+  /** Area 尺寸（Length）→ vp 数值；资源型（理论上不会出现）按 0 兜底 */
+  private toVp(v: Length): number {
+    return ProgressMath.toVp(v);
+  }
+
+  /**
+   * 章节分段刻度集（秒）：各章节起点，跳过 0（与进度条左缘重合无意义），
+   * 超出时长的丢弃（分 P 缩放等边界下防右缘堆叠）；入口开关关闭时恒空
+   *（开关统一控制章节相关 UI：功能行入口 + 进度条刻度）。
+   */
+  private chapterMarks(): number[] {
+    if (!this.chaptersEntryEnabled) {
+      return [];
+    }
+    const marks: number[] = [];
+    const dur: number = this.effectiveDuration();
+    for (let i: number = 0; i < this.chapters.length; i++) {
+      const from: number = this.chapters[i].from;
+      if (from > 0 && from < dur) {
+        marks.push(from);
+      }
+    }
+    return marks;
   }
 
   /**
@@ -198,6 +236,7 @@ export struct PlayerProgressArea {
         ShimmerProgressBar({
           value: this.dragging ? this.dragValue : this.sliderValue,
           max: this.effectiveDuration(),
+          marks: this.chapterMarks(),
           onSeekStart: (): void => {
             this.onBarDragStart();
           },
@@ -224,6 +263,7 @@ export struct PlayerProgressArea {
         PulseDotProgressBar({
           value: this.dragging ? this.dragValue : this.sliderValue,
           max: this.effectiveDuration(),
+          marks: this.chapterMarks(),
           onSeekStart: (): void => {
             this.onBarDragStart();
           },
@@ -250,6 +290,7 @@ export struct PlayerProgressArea {
         WaveBarsProgressBar({
           value: this.dragging ? this.dragValue : this.sliderValue,
           max: this.effectiveDuration(),
+          marks: this.chapterMarks(),
           onSeekStart: (): void => {
             this.onBarDragStart();
           },
@@ -273,48 +314,81 @@ export struct PlayerProgressArea {
             }).getValue(this.currentBreakpoint)
           })
       } else {
-        Slider({
-          min: 0,
-          max: Math.max(1, this.effectiveDuration()),
-          step: 1,
-          style: SliderStyle.OutSet,
-          value: this.dragging ? this.dragValue : this.sliderValue
+        // 经典 Slider + 章节分段刻度叠加层：Slider 无自绘入口，用同尺寸 Stack
+        // 叠一层细白竖条（中线对齐各分段起点）；叠加层 hitTestBehavior
+        // Transparent 不吃触摸，拖拽/点按仍全部归 Slider。
+        Stack() {
+          Slider({
+            min: 0,
+            max: Math.max(1, this.effectiveDuration()),
+            step: 1,
+            style: SliderStyle.OutSet,
+            value: this.dragging ? this.dragValue : this.sliderValue
+          })
+            .selectedColor($r('app.color.slider_select'))
+            .trackColor($r('app.color.slider_track'))
+            .scale({ x: this.trackScale, y: this.trackScale })
+            .onChange((value: number, mode: SliderChangeMode): void => {
+              if (mode === SliderChangeMode.Begin) {
+                // 按下：只动本地滑块并轻微放大，不写播放进度
+                this.dragging = true;
+                this.dragValue = value;
+                this.scaleUpTrack();
+                return;
+              }
+              if (mode === SliderChangeMode.Moving) {
+                this.dragValue = value;
+                return;
+              }
+              // 松手 / 点击定位：交给播放内核，进度条回弹
+              this.dragging = false;
+              if (this.effectiveDuration() > 0) {
+                this.player.seek(value);
+              }
+              this.bounceBackTrack(value);
+            })
+            .height($r('app.float.slider_height'))
+
+          // 章节分段刻度叠加层（时长未知/无分段不渲染）
+          if (this.effectiveDuration() > 0 && this.chapterMarks().length > 0) {
+            Stack() {
+              ForEach(this.chapterMarks(), (m: number, _i: number) => {
+                Column() {}
+                  .width(PROGRESS_MARK_WIDTH_VP)
+                  .height(PROGRESS_MARK_HEIGHT_VP)
+                  .borderRadius(PROGRESS_MARK_WIDTH_VP / 2)
+                  .backgroundColor(PROGRESS_MARK_COLOR)
+                  .position({
+                    x: ProgressMath.markX(this.classicMarkWidth, m, this.effectiveDuration()),
+                    y: 0
+                  })
+              }, (m: number, i: number) => `${i}_${m}`)
+            }
+            .width(StyleConstants.FULL_WIDTH)
+            .height(PROGRESS_MARK_HEIGHT_VP)
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, n: Area): void => {
+              const w: number = this.toVp(n.width);
+              if (w > 0) {
+                this.classicMarkWidth = w;
+              }
+            })
+          }
+        }
+        .width(StyleConstants.FULL_WIDTH)
+        .height($r('app.float.slider_height'))
+        .margin({
+          left: new BreakpointType<Resource>({
+            sm: $r('app.float.slider_margin_sm'),
+            md: $r('app.float.slider_margin_md'),
+            lg: $r('app.float.slider_margin_lg')
+          }).getValue(this.currentBreakpoint),
+          right: new BreakpointType<Resource>({
+            sm: $r('app.float.slider_margin_sm'),
+            md: $r('app.float.slider_margin_md'),
+            lg: $r('app.float.slider_margin_lg')
+          }).getValue(this.currentBreakpoint)
         })
-          .selectedColor($r('app.color.slider_select'))
-          .trackColor($r('app.color.slider_track'))
-          .scale({ x: this.trackScale, y: this.trackScale })
-          .onChange((value: number, mode: SliderChangeMode): void => {
-            if (mode === SliderChangeMode.Begin) {
-              // 按下：只动本地滑块并轻微放大，不写播放进度
-              this.dragging = true;
-              this.dragValue = value;
-              this.scaleUpTrack();
-              return;
-            }
-            if (mode === SliderChangeMode.Moving) {
-              this.dragValue = value;
-              return;
-            }
-            // 松手 / 点击定位：交给播放内核，进度条回弹
-            this.dragging = false;
-            if (this.effectiveDuration() > 0) {
-              this.player.seek(value);
-            }
-            this.bounceBackTrack(value);
-          })
-          .height($r('app.float.slider_height'))
-          .margin({
-            left: new BreakpointType<Resource>({
-              sm: $r('app.float.slider_margin_sm'),
-              md: $r('app.float.slider_margin_md'),
-              lg: $r('app.float.slider_margin_lg')
-            }).getValue(this.currentBreakpoint),
-            right: new BreakpointType<Resource>({
-              sm: $r('app.float.slider_margin_sm'),
-              md: $r('app.float.slider_margin_md'),
-              lg: $r('app.float.slider_margin_lg')
-            }).getValue(this.currentBreakpoint)
-          })
       }
       Row() {
         Text(formatTime(this.dragging ? this.dragValue : this.sliderValue))

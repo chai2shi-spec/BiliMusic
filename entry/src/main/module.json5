@@ -53,6 +53,12 @@
           "when": "always"
         }
       }
+      // 桌面歌词改为接入 AVSession Kit 系统「歌词组件」（API 23+，
+      // avSession.enableDesktopLyric / setDesktopLyricVisible 系列），
+      // 由系统渲染悬浮歌词窗口 —— 应用侧不需要任何悬浮窗权限：
+      //   · TYPE_FLOAT 全局悬浮窗仅 PC/2in1 支持；
+      //   · SYSTEM_FLOAT_WINDOW / FLOAT_VIEW 均为 system_basic 受限权限，
+      //     普通应用需 AGC ACL 申请，调试签名直接 install failed(9568289)。
     ],
     "abilities": [
       {

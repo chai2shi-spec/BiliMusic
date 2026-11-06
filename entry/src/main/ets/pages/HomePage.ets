@@ -9,7 +9,7 @@
  *   · 搜索框下方：快捷卡行（HomeQuickCards）—— 最近播放卡（点播放 = 播放全部最近、点卡进最近播放页）+
  *     收藏歌单卡（歌单 ⋯ 菜单「加入首页」自选，点播放 = 整单起播、点卡进
  *     歌单），最多 5 卡横滑；数据经 STORE_LIBRARY_REV 驱动重灌。
- *   · 卡行下方：分类 chip 条（HomeCategoryChips：推荐 / 排行榜 / 音乐中心 /
+ *   · 卡行下方：分类 chip 条（HomeCategoryChips：推荐 / 热歌榜 / 音乐中心 /
  *     热门歌单）+ 随所选 tab 显示对应数据源的条目列表。
  *
  * 入口搜索框是**入口**不是输入框：真输入在 'Search' 二级页（push 后自动聚焦）。
@@ -18,43 +18,53 @@
  * STORE_HOME_SEARCH_ENTRY_ACTIVE（只在翻转时写），Index 标题栏读它
  * 淡入/淡出右上搜索按钮 —— 头部滚出视口后用户随时有搜索入口。
  *
- * B 站数据源里本页占三个，分页能力各不相同（对照实验结论，细节见
+ * B 站数据源里本页占两个，分页能力各不相同（对照实验结论，细节见
  * api/BilibiliApi.ts 的注释）：
  *   · 推荐     —— 首屏 index/top/rcmd（30 条，重复调用返回同一批）+ popular pn=1；
  *                 翻页必须走 feed/rcmd 的 fresh_idx（每页约 17 条新内容）
- *   · 排行榜   —— ranking/v2 全站榜（rid=0，每日更新）一次返回整榜 100 条、
- *                 pn/ps 无效 → 只能前端分页
  *   · 音乐中心 —— 新歌榜（最新发布，固定 18 条）置顶 + 综合榜（热歌，真分页 pn）随后
  * 把「不能分页的源」硬接成上拉加载，得到的就是「一直加载却永远同一批」，所以分开处理。
  * 「下拉刷新 + 上拉加载更多」机制见 build 内注释（骨架接管）。
  *
- * 第四个数据源「热门歌单」（netease tab）是网易云第三方源（api/NeteaseApi）：
- * 不进启动三源轮、不落 HomeFeedCacheStore（Track 模型缓存不适用），首次切到
- * tab 时懒加载（onTabChanged → maybeLoadNetease）；网格卡点击进
- * NeteasePlaylist 预览页（点歌实时搜 B 站匹配播放 / 导入本地歌单）。
+ * 第三、四个数据源「热歌榜」（ranking tab）与「热门歌单」（netease tab）是
+ * 网易云第三方源（api/NeteaseApi）：
+ *   · 热歌榜 —— 云音乐热歌榜（固定歌单 3778678，v6 trackIds + v3 分批详情），
+ *     一次拿全后前端切片展示（HOT_CHART_PAGE_SIZE）；单曲无 B 站 bvid，
+ *     点行实时 matchSongForPlayback 匹配 B 站音源播放（仅单曲点播）。
+ *   · 热门歌单 —— api/playlist/list 热门歌单网格，点卡进 NeteasePlaylist 预览页。
+ * 两个 tab 都不进启动轮、不落 HomeFeedCacheStore（ExternalSong 系模型不适配
+ * Track 缓存），首次切到 tab 时懒加载（onTabChanged → maybeLoadHotChart /
+ * maybeLoadNetease），骨架/空态在列表内原位渲染（防搜索框/快捷卡/chips 顶飞闪屏）。
  */
 
 import * as BilibiliApi from '../api/BilibiliApi';
 import {
   PopularVideo,
-  RankingVideoItem,
   MusicCenterItem,
   MusicCenterRelatedArchive
 } from '../api/BilibiliApi';
-import { Playlist, Track, VideoDetail, VideoOwner, VideoStat, buildTrack, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
+import { Playlist, Track, VideoDetail, buildTrack, ITEM_DISPLAY_LIST, ITEM_DISPLAY_GRID } from '../model/MusicModels';
 import { LibraryStore } from '../service/LibraryStore';
 import { TrackItem } from '../components/TrackItem';
 import { TrackCard } from '../components/TrackCard';
 import { CoverImage } from '../components/CoverImage';
 import { SkeletonTrackItem } from '../components/SkeletonTrackItem';
 import { MusicPlayer } from '../player/MusicPlayer';
-import { toHttpsUrl, stripHtmlTags, toThumbUrl } from '../utils/TextUtil';
+import { toHttpsUrl, stripHtmlTags, toThumbUrl, formatDurationText } from '../utils/TextUtil';
 import { openCollectionOrPlay } from '../utils/CollectionNavigator';
 import { ComponentContent, CustomContentDialog } from '@kit.ArkUI';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam } from '../service/NavRouteParams';
 import { NeteasePlaylistRow, NeteasePlaylistCard } from '../components/NeteasePlaylistItem';
-import { NeteasePlaylistSummary, NeteaseHotPlaylistsResult, fetchNeteaseHotPlaylists } from '../api/NeteaseApi';
+import {
+  NeteasePlaylistSummary,
+  NeteaseHotSong,
+  NeteaseHotChart,
+  NeteaseHotPlaylistsResult,
+  fetchNeteaseHotPlaylists,
+  fetchNeteaseHotChart
+} from '../api/NeteaseApi';
+import { ExternalSong, matchSongForPlayback } from '../service/PlaylistImporter';
 import { ensureLazyPageLoaded } from '../service/LazyPageRegistry';
 import {
   DownloadManager,
@@ -139,33 +149,6 @@ function mapPopular(v: PopularVideo): Track {
     category: v.tname ?? '',
     rcmdReason: v.rcmdReason ?? '',
     likeCount: v.stat ? v.stat.like : 0
-  });
-}
-
-/**
- * 排行榜（ranking/v2）映射。
- * 与旧的 ranking/region 不同：这条接口有 owner 对象、有 cid、duration 是**秒**。
- * owner / stat 仍按可空读取——字段缺失时映射函数抛异常会让整块列表被 catch 成空，
- * 这是本项目踩过的坑，宁可退化成空字符串也不要整块丢。
- */
-function mapRankingV2(v: RankingVideoItem): Track {
-  const owner: VideoOwner | null = v.owner;
-  const stat: VideoStat | null = v.stat;
-  return buildTrack({
-    id: v.bvid,
-    bvid: v.bvid,
-    aid: String(v.aid),
-    cid: v.cid ? String(v.cid) : '',
-    title: stripHtmlTags(v.title),
-    artist: owner ? owner.name : '',
-    upMid: owner && owner.mid ? String(owner.mid) : '',
-    coverUrl: toHttpsUrl(v.pic),
-    duration: v.duration,
-    playCount: stat ? stat.view : 0,
-    pubdate: v.pubdate ?? 0,
-    // 首页筛选元数据：排行榜通道 stat 完整（like 可用于赞率档位），分区名待实测透传
-    category: v.tname ?? '',
-    likeCount: stat ? stat.like : 0
   });
 }
 
@@ -300,8 +283,8 @@ const RECOMMEND_FEED_PS: number = 20;
 const RECOMMEND_TOPUP_TARGET: number = 15;
 /** 单次补页最多拉几轮（防极端筛选下请求风暴；每轮约 17 条有效内容） */
 const RECOMMEND_TOPUP_MAX_ROUNDS: number = 3;
-/** 排行榜一次拿全（实测 100 条）后前端分页，每次多放这么多条 */
-const RANKING_PAGE_SIZE: number = 20;
+/** 热歌榜一次拿全（v6+v3）后前端切片，每次多放这么多条 */
+const HOT_CHART_PAGE_SIZE: number = 20;
 /**
  * 列表首条独立让位定值（vp）：固定标题行 56 + 此值 = List 首个空白占位
  * 条目高度（不含 safeTop）。取 8：搜索框与栏底只留常规呼吸间距，
@@ -339,7 +322,8 @@ export struct HomePage {
   /** 主题色深色运行时值：歌单选择弹层的「新建歌单并加入」跟随切色刷新 */
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @State @Watch('onListSourceChanged') recommend: Track[] = [];
-  @State @Watch('onListSourceChanged') ranking: Track[] = [];
+  /** 网易云热歌榜歌曲（ranking tab）：@Watch → ArrayDataSource reload */
+  @State @Watch('onListSourceChanged') hotSongs: NeteaseHotSong[] = [];
   @State @Watch('onListSourceChanged') center: Track[] = [];
   /** 网易云热门歌单（netease tab 网格）：同款 @Watch → ArrayDataSource reload */
   @State @Watch('onListSourceChanged') neteasePlaylists: NeteasePlaylistSummary[] = [];
@@ -352,8 +336,8 @@ export struct HomePage {
   // 平板横屏 3~4 列铺满，手机/折叠屏落回 2 列现值）。
   private recommendSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
   private recommendRows: RowDataSource<Track> = new RowDataSource<Track>(this.recommendSource, 2);
-  private rankingSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
-  private rankingRows: RowDataSource<Track> = new RowDataSource<Track>(this.rankingSource, 2);
+  /** 热歌榜单曲数据源（ranking tab，单列行渲染） */
+  private hotSongSource: ArrayDataSource<NeteaseHotSong> = new ArrayDataSource<NeteaseHotSong>([]);
   private centerSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
   private centerRows: RowDataSource<Track> = new RowDataSource<Track>(this.centerSource, 2);
   /** 网易云热门歌单数据源（行/列口径与三个 track 源完全同构：onColumnsChanged 联动） */
@@ -363,7 +347,8 @@ export struct HomePage {
   private pageId: number = 0;
   /** 推荐位待完成的数据源数量（热门 + 推荐两个源并行，互不影响） */
   @State recommendPending: number = 0;
-  @State loadingRanking: boolean = false;
+  /** 热歌榜首屏加载中（首次切 tab / 下拉刷新 / 空态重试） */
+  @State loadingHotChart: boolean = false;
   /** 音乐中心待完成的数据源数量（综合榜 + 新歌榜并行，互不影响） */
   @State centerPending: number = 0;
   /**
@@ -470,8 +455,6 @@ export struct HomePage {
     this.activeCols = active;
     this.recommendRows.setColumns(active);
     this.recommendRows.sync();
-    this.rankingRows.setColumns(active);
-    this.rankingRows.sync();
     this.centerRows.setColumns(active);
     this.centerRows.sync();
     // 热门歌单行数据源同口径联动（长条=listCols、大封面=gridCols）：
@@ -525,8 +508,13 @@ export struct HomePage {
   /** 音乐中心首屏缓冲：新歌榜与热歌榜各自落定后再按固定顺序合成（见 settleCenter） */
   private centerNewTracks: Track[] = [];
   private centerHotTracks: Track[] = [];
-  /** 排行榜全量（接口一次给全，展示侧按 RANKING_PAGE_SIZE 切片） */
-  private rankingAll: Track[] = [];
+  // ===== 网易云热歌榜（ranking tab）：第三方源，独立于启动轮 =====
+  /** 热歌榜全量（v6+v3 一次拿全，展示侧按 HOT_CHART_PAGE_SIZE 前端切片） */
+  private hotChartAll: NeteaseHotSong[] = [];
+  /** 首次加载已成功过（幂等闸门：切走再切回不重拉，空态重试 / 下拉刷新除外） */
+  private hotChartLoadedOnce: boolean = false;
+  /** 正在匹配播放的行下标（-1 = 空闲；单飞互斥防 B 站搜索风控，行尾转圈反馈） */
+  @State matchingIndex: number = -1;
   /**
    * 推荐位首屏双源暂存（热门 / 推荐流）：与 centerNewTracks/centerHotTracks 同款
    * staging 模式 —— 各自落定后由 settleRecommend 按固定顺序合成整表替换，
@@ -556,13 +544,13 @@ export struct HomePage {
   // ===== 启动缓存兜底（网络不佳时先出缓存内容，见 initHomeFeed）=====
   /** 本次会话任一 tab 恢复过启动缓存（决定静默校验与恢复提示的分支） */
   private cacheAppliedAny: boolean = false;
-  /** 「网络不佳」类 toast 只弹一次（启动轮 5 个请求的失败提示共享去重） */
+  /** 「网络不佳」类 toast 只弹一次（启动轮 4 个请求的失败提示共享去重） */
   private netPoorToastShown: boolean = false;
   /** 启动即离线、跳过了联网加载（等 STORE_NET_RETRY_REV 恢复信号补拉） */
   private offlineStartupSkipped: boolean = false;
   /** initHomeFeed 已跑完（收尾前忽略 onNetRetry，防「注册瞬间的 available」抢跑双拉） */
   private homeFeedInitDone: boolean = false;
-  /** 启动轮统计窗口：只覆盖 initHomeFeed 发起的第一轮 5 个请求 */
+  /** 启动轮统计窗口：只覆盖 initHomeFeed 发起的第一轮 4 个请求 */
   private startupRoundActive: boolean = false;
   private startupDone: number = 0;
   private startupFail: number = 0;
@@ -614,9 +602,8 @@ export struct HomePage {
     if (propName === 'recommend') {
       this.recommendSource.reload(this.recommend);
       this.recommendRows.sync();
-    } else if (propName === 'ranking') {
-      this.rankingSource.reload(this.ranking);
-      this.rankingRows.sync();
+    } else if (propName === 'hotSongs') {
+      this.hotSongSource.reload(this.hotSongs);
     } else if (propName === 'center') {
       this.centerSource.reload(this.center);
       this.centerRows.sync();
@@ -630,8 +617,7 @@ export struct HomePage {
   private syncAllListSources(): void {
     this.recommendSource.reload(this.recommend);
     this.recommendRows.sync();
-    this.rankingSource.reload(this.ranking);
-    this.rankingRows.sync();
+    this.hotSongSource.reload(this.hotSongs);
     this.centerSource.reload(this.center);
     this.centerRows.sync();
     this.neteaseSource.reload(this.neteasePlaylists);
@@ -649,9 +635,22 @@ export struct HomePage {
     }
   }
 
-  /** tab 切换（chip 点击写 STORE_SEARCH_TAB → @Watch）：热门歌单懒加载触发点 */
+  /** tab 切换（chip 点击写 STORE_SEARCH_TAB → @Watch）：热歌榜 / 热门歌单懒加载触发点 */
   private onTabChanged(): void {
+    this.maybeLoadHotChart();
     this.maybeLoadNetease();
+  }
+
+  /**
+   * 热歌榜懒加载：首次切到 ranking tab 时拉全量榜单。
+   * 幂等闸门：已成功过 / 加载中 / 非本 tab 直接返回 —— 切走再切回不重拉
+   * （内容还在内存里）；失败后切走再切回会自动重试（hotChartLoadedOnce 未置位）。
+   */
+  private maybeLoadHotChart(): void {
+    if (this.tab !== 'ranking' || this.hotChartLoadedOnce || this.loadingHotChart) {
+      return;
+    }
+    this.loadHotChart();
   }
 
   /**
@@ -814,7 +813,9 @@ export struct HomePage {
     // 首帧即正确列数，不等首个变化事件。
     this.onColumnsChanged();
     this.normalizeTab();
-    // 挂载即在热门歌单 tab（如进程重建后 STORE_SEARCH_TAB 仍为 netease）：补拉
+    // 挂载即在网易云懒加载 tab（如进程重建后 STORE_SEARCH_TAB 仍为 netease /
+    // ranking）：补拉
+    this.maybeLoadHotChart();
     this.maybeLoadNetease();
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
@@ -1005,23 +1006,23 @@ export struct HomePage {
    */
   private loadHomeData(revalidate: boolean = false): void {
     this.loadHomeRecommend(revalidate);
-    this.loadRanking();
     this.loadCenter(revalidate);
   }
 
   /**
-   * 启动数据入口（aboutToAppear 调，fire-and-forget）：
-   *   1) 先读三 tab 启动缓存（本地 IO 毫秒级）——命中立即出内容、不闪骨架，
-   *      网络不佳时用户看到的不再是 15 秒骨架屏；
-   *   2) 完全离线：跳过 5 个注定各挂 15s 超时的请求，toast 提示后直接返回，
-   *      等网络恢复信号（STORE_NET_RETRY_REV → onNetRetry）补拉；
-   *   3) 在线：正常联网校验（缓存在场时静默校验、成功才替换并更新缓存）。
-   * 三个 tab 顺序 await 即可 —— 单文件毫秒级，先于任何网络回调完成，无竞态。
-   */
+    * 启动数据入口（aboutToAppear 调，fire-and-forget）：
+    *   1) 先读推荐 / 音乐中心启动缓存（本地 IO 毫秒级）——命中立即出内容、不闪骨架，
+    *      网络不佳时用户看到的不再是 15 秒骨架屏；
+    *   2) 完全离线：跳过 4 个注定各挂 15s 超时的请求，toast 提示后直接返回，
+    *      等网络恢复信号（STORE_NET_RETRY_REV → onNetRetry）补拉；
+    *   3) 在线：正常联网校验（缓存在场时静默校验、成功才替换并更新缓存）。
+    * 两个 tab 顺序 await 即可 —— 单文件毫秒级，先于任何网络回调完成，无竞态。
+    * 热歌榜 / 热门歌单是网易云第三方源，不进启动轮（懒加载见 maybeLoadHotChart /
+    * maybeLoadNetease）。
+    */
   private async initHomeFeed(): Promise<void> {
     const offline: boolean = !hasNetwork();
     const rec: HomeFeedCacheEntry | null = await getHomeFeedCache('recommend');
-    const rank: HomeFeedCacheEntry | null = await getHomeFeedCache('ranking');
     const ctr: HomeFeedCacheEntry | null = await getHomeFeedCache('center');
     // 恢复：整体赋值 @State → onListSourceChanged 自动 reload 数据源；
     // 不碰 pending 标志 → homeLoading() 保持 false → 直接出内容、不闪骨架
@@ -1030,12 +1031,6 @@ export struct HomePage {
       // 放宽时原被滤条目即时回来（旧缓存本就未过滤，直接当 raw 用）
       this.recommendRaw = rec.tracks;
       this.refilterRecommend();
-      this.cacheAppliedAny = true;
-    }
-    if (rank !== null) {
-      // 排行榜存的是全量 100 条：恢复后离线 revealMoreRanking 翻页仍可用
-      this.rankingAll = rank.tracks;
-      this.ranking = rank.tracks.slice(0, RANKING_PAGE_SIZE);
       this.cacheAppliedAny = true;
     }
     if (ctr !== null) {
@@ -1159,20 +1154,84 @@ export struct HomePage {
     return this.ensureFilterCompiled().active;
   }
 
-  private async loadRanking(): Promise<void> {
-    this.loadingRanking = true;
+  //
+  // ── 网易云热歌榜（ranking tab）：第三方源，独立于启动轮 ──
+  //
+
+  /**
+   * 拉取热歌榜全量并展示首页切片（首切 tab / 空态重试 / 下拉刷新共用）。
+   * 开始即清展示列表 —— 原位骨架接管（列表内 chips 下方渲染，不清顶飞布局）；
+   * 失败保留空列表 → 原位「暂无数据 + 点击重试」；hotChartLoadedOnce 只在
+   * 成功时置位（失败后切走再切回自动重试）。
+   */
+  private async loadHotChart(): Promise<void> {
+    if (this.loadingHotChart) {
+      return;
+    }
+    this.loadingHotChart = true;
+    this.hotSongs = [];
     try {
-      const list: RankingVideoItem[] = await BilibiliApi.getGlobalRankingV2();
-      this.rankingAll = list.map(mapRankingV2);
-      this.ranking = this.rankingAll.slice(0, RANKING_PAGE_SIZE);
-      // 全量落盘（100 条）：启动恢复后离线 revealMoreRanking 翻页仍可用
-      this.persistHomeFeedCache('ranking', this.rankingAll);
+      const chart: NeteaseHotChart = await fetchNeteaseHotChart();
+      this.hotChartAll = chart.songs;
+      this.hotSongs = this.hotChartAll.slice(0, HOT_CHART_PAGE_SIZE);
+      this.hotChartLoadedOnce = true;
     } catch (e) {
-      console.error(`loadRanking failed: ${JSON.stringify(e)}`);
-      this.noteStartupLoadFail();
+      console.error(`loadHotChart failed: ${JSON.stringify(e)}`);
     } finally {
-      this.loadingRanking = false;
-      this.noteStartupSettled();
+      this.loadingHotChart = false;
+    }
+  }
+
+  /** 下拉刷新：重拉全量榜单，从榜位 1 重新展示 */
+  private async refreshHotChart(): Promise<void> {
+    try {
+      await this.loadHotChart();
+    } finally {
+      this.refreshing = false;
+    }
+  }
+
+  /** 热歌榜上拉加载更多：全量已在内存，前端切片多放一屏，不发请求 */
+  private revealMoreHotSongs(): void {
+    const from: number = this.hotSongs.length;
+    const next: number = Math.min(from + HOT_CHART_PAGE_SIZE, this.hotChartAll.length);
+    for (let i = from; i < next; i++) {
+      this.hotSongs.push(this.hotChartAll[i]);
+    }
+  }
+
+  /**
+   * 点榜单曲即播（NeteasePlaylistPage.playSongAt 同款，无连播链）：
+   * 实时 B 站搜索匹配 → playNow（Track 带 bvid = BiliMusic 音源）。
+   * 单飞互斥：匹配中再点直接忽略（防 B 站搜索风控）；行尾转圈反馈。
+   */
+  private async playHotSongAt(index: number): Promise<void> {
+    if (this.matchingIndex >= 0 || this.loadingHotChart) {
+      return;
+    }
+    if (index < 0 || index >= this.hotSongs.length) {
+      return;
+    }
+    const song: NeteaseHotSong = this.hotSongs[index];
+    const target: ExternalSong = {
+      title: song.title,
+      artist: song.artist,
+      durationSec: song.durationSec
+    };
+    this.matchingIndex = index;
+    try {
+      const track = await matchSongForPlayback(target);
+      if (track === null) {
+        this.toast('没找到可播放的 B 站音源，可去搜索页手动找', 2600);
+      } else {
+        this.player.playNow(track);
+      }
+    } catch (e) {
+      const detail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.error(`hot chart play match failed: ${detail}`);
+      this.toast('匹配失败，请稍后再试', 2200);
+    } finally {
+      this.matchingIndex = -1;
     }
   }
 
@@ -1254,7 +1313,7 @@ export struct HomePage {
       return this.recommend.length;
     }
     if (this.tab === 'ranking') {
-      return this.ranking.length;
+      return this.hotSongs.length;
     }
     if (this.tab === 'netease') {
       return this.neteasePlaylists.length;
@@ -1267,7 +1326,7 @@ export struct HomePage {
       return this.recommendPending > 0;
     }
     if (this.tab === 'ranking') {
-      return this.loadingRanking;
+      return this.loadingHotChart;
     }
     if (this.tab === 'center') {
       return this.centerPending > 0;
@@ -1279,16 +1338,16 @@ export struct HomePage {
   }
 
   /**
-   * 当前 tab 还有没有下一页。
-   * 三个源的分页能力不同，所以判据也不同（详见文件头的说明）。
-   */
+    * 当前 tab 还有没有下一页。
+    * 各源分页能力不同，所以判据也不同（详见文件头的说明）。
+    */
   private hasMore(): boolean {
     if (this.tab === 'recommend') {
       return this.recommend.length > 0 && this.recommendHasMore;
     }
     if (this.tab === 'ranking') {
-      // 全量已经在内存里，没放完就还有
-      return this.ranking.length > 0 && this.ranking.length < this.rankingAll.length;
+      // 热歌榜全量已经在内存里，没放完就还有
+      return this.hotSongs.length > 0 && this.hotSongs.length < this.hotChartAll.length;
     }
     if (this.tab === 'center') {
       return this.center.length > 0 && this.centerHasMore;
@@ -1304,7 +1363,7 @@ export struct HomePage {
     if (this.tab === 'recommend') {
       this.loadHomeRecommend();
     } else if (this.tab === 'ranking') {
-      this.loadRanking();
+      this.loadHotChart();
     } else if (this.tab === 'netease') {
       this.loadNeteaseFirstPage();
     } else {
@@ -1351,10 +1410,10 @@ export struct HomePage {
   }
 
   /**
-   * 启动轮单个请求失败上报（5 个首屏请求的 catch 各调一次）：
-   * 已恢复缓存 + 首个失败 → 立即 toast「网络不佳」（比等 5 个请求全部落定
-   * 快得多，弱网下用户能尽早知道内容是缓存兜底的）；toast 只弹一次。
-   */
+    * 启动轮单个请求失败上报（4 个首屏请求的 catch 各调一次）：
+    * 已恢复缓存 + 首个失败 → 立即 toast「网络不佳」（比等 4 个请求全部落定
+    * 快得多，弱网下用户能尽早知道内容是缓存兜底的）；toast 只弹一次。
+    */
   private noteStartupLoadFail(): void {
     if (this.cacheAppliedAny && !this.netPoorToastShown) {
       this.netPoorToastShown = true;
@@ -1366,19 +1425,19 @@ export struct HomePage {
   }
 
   /**
-   * 启动轮单个请求落定（成功 / 失败都算，5 个首屏请求的 finally 各调一次）。
-   * 5 个全部落定后收口：无缓存且全部失败 → 补一条弱网提示
-   * （原先是静默空态，用户毫无感知，正是「像卡死一样」的来源之一）。
-   * 下拉刷新 / 重试复用同一批加载函数时 startupRoundActive 已为 false，自动跳过。
-   */
+    * 启动轮单个请求落定（成功 / 失败都算，4 个首屏请求的 finally 各调一次）。
+    * 4 个全部落定后收口：无缓存且全部失败 → 补一条弱网提示
+    * （原先是静默空态，用户毫无感知，正是「像卡死一样」的来源之一）。
+    * 下拉刷新 / 重试复用同一批加载函数时 startupRoundActive 已为 false，自动跳过。
+    */
   private noteStartupSettled(): void {
     if (!this.startupRoundActive) {
       return;
     }
     this.startupDone++;
-    if (this.startupDone >= 5) {
+    if (this.startupDone >= 4) {
       this.startupRoundActive = false;
-      if (this.startupFail >= 5 && !this.cacheAppliedAny && !this.netPoorToastShown) {
+      if (this.startupFail >= 4 && !this.cacheAppliedAny && !this.netPoorToastShown) {
         this.netPoorToastShown = true;
         this.toast('网络不佳，请检查网络后重试', 2000);
       }
@@ -1389,7 +1448,7 @@ export struct HomePage {
     if (this.tab === 'recommend') {
       this.refreshRecommend();
     } else if (this.tab === 'ranking') {
-      this.refreshRanking();
+      this.refreshHotChart();
     } else if (this.tab === 'netease') {
       this.refreshNetease();
     } else {
@@ -1402,14 +1461,6 @@ export struct HomePage {
     try {
       await this.loadPopular();
       await this.loadRecommended();
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
-  private async refreshRanking(): Promise<void> {
-    try {
-      await this.loadRanking();
     } finally {
       this.refreshing = false;
     }
@@ -1431,10 +1482,11 @@ export struct HomePage {
    *     首屏加载中（整屏骨架在场、列表为空）时不再叠一条。若上一次 Done 的淡出
    *     还没跑完（快速连拉），先掐掉定时器并用 0 时长动画顶掉在途淡出 ——
    *     否则旧动画继续接管 opacity/translate，跟手映射全部失效。
-   *   · Refresh —— recommend/center 的刷新会先清空列表（resetRecommend /
-   *     resetCenter），整屏骨架随即接管，刷新头骨架必须在这里先撤，否则
-   *     「顶部一条 + 下面一整屏」；ranking 不清列表，骨架是唯一指示，
-   *     停在原位保持纯静态即可（骨架纯静态，不另加旋转/脉冲/进度环）。
+    *   · Refresh —— recommend/center 的刷新会先清空列表（resetRecommend /
+    *     resetCenter），整屏骨架随即接管，刷新头骨架必须在这里先撤，否则
+    *     「顶部一条 + 下面一整屏」；netease/ranking 懒加载页签的刷新同样
+    *     清列表（骨架在列表内原位渲染），刷新头骨架也一并撤掉
+    *     （骨架纯静态，不另加旋转/脉冲/进度环）。
    *   · Done —— 250ms 淡出上移；淡出**结束后**再摘节点（直接摘节点淡出
    *     根本看不到），句柄由 aboutToDisappear 兜底回收。
    *   · Inactive —— 未触发刷新的回弹复位；Done 淡出在途时交给定时器收尾。
@@ -1451,7 +1503,7 @@ export struct HomePage {
       }
       this.showPullSkeleton = this.currentListLength() > 0;
     } else if (status === RefreshStatus.Refresh) {
-      if (this.tab === 'recommend' || this.tab === 'center' || this.tab === 'netease') {
+      if (this.tab === 'recommend' || this.tab === 'center' || this.tab === 'netease' || this.tab === 'ranking') {
         this.showPullSkeleton = false;
       }
     } else if (status === RefreshStatus.Done) {
@@ -1508,7 +1560,7 @@ export struct HomePage {
     if (this.tab === 'recommend') {
       this.loadMoreRecommend();
     } else if (this.tab === 'ranking') {
-      this.revealMoreRanking();
+      this.revealMoreHotSongs();
     } else if (this.tab === 'netease') {
       this.loadNeteaseMore();
     } else {
@@ -1596,15 +1648,6 @@ export struct HomePage {
       this.persistHomeFeedCache('recommend', this.recommendRaw);
     } finally {
       this.recommendTopUpActive = false;
-    }
-  }
-
-  /** 排行榜：接口已经一次给全，这里只是多放一屏，不发请求 */
-  private revealMoreRanking(): void {
-    const from: number = this.ranking.length;
-    const next: number = Math.min(from + RANKING_PAGE_SIZE, this.rankingAll.length);
-    for (let i = from; i < next; i++) {
-      this.ranking.push(this.rankingAll[i]);
     }
   }
 
@@ -1728,18 +1771,19 @@ export struct HomePage {
   }
 
   /**
-   * 加载中 / 空数据的统一展示区（B 站三个页签的冷启动专用）。
-   * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条，纯静态占位），
-   * 占位形状对齐内容布局，加载完成内容「落位」不跳。
-   * 网易云页签不走这里：本区位于 Refresh 之前（列表上方），会话中切入懒加载的
-   * netease 页签时若在此插入整屏骨架，会把搜索框/快捷卡/chips 整体顶出屏幕、
-   * 数据落地再弹回（用户感知「闪屏」）；其骨架/空态改为列表内 chips 下方原位渲染。
-   */
+    * 加载中 / 空数据的统一展示区（B 站两个页签的冷启动专用）。
+    * 加载中：骨架屏（形状贴合 TrackItem 的 40 圆头像 + 两条文字条，纯静态占位），
+    * 占位形状对齐内容布局，加载完成内容「落位」不跳。
+    * 网易云页签（netease / ranking）不走这里：本区位于 Refresh 之前（列表上方），
+    * 会话中切入懒加载页签时若在此插入整屏骨架，会把搜索框/快捷卡/chips 整体
+    * 顶出屏幕、数据落地再弹回（用户感知「闪屏」）；其骨架/空态改为列表内
+    * chips 下方原位渲染。
+    */
   @Builder
   HomeStateArea(): void {
-    if (this.tab !== 'netease' && this.homeLoading() && this.currentListLength() === 0) {
+    if (this.tab !== 'netease' && this.tab !== 'ranking' && this.homeLoading() && this.currentListLength() === 0) {
       this.SkeletonArea()
-    } else if (this.tab !== 'netease' && !this.homeLoading() && this.currentListLength() === 0) {
+    } else if (this.tab !== 'netease' && this.tab !== 'ranking' && !this.homeLoading() && this.currentListLength() === 0) {
       // 推荐位被筛选滤成空（raw 有内容、展示为 0）：提示 + 直达「首页筛选」设置页
       if (this.tab === 'recommend' && this.recommendRaw.length > 0 && this.feedFilterActive()) {
         Column() {
@@ -1774,9 +1818,9 @@ export struct HomePage {
   }
 
   /**
-   * 骨架屏区（首屏加载）：8 行贴内容形状的占位。
-   * 行数取首屏可见量即可——多出来的行用户看不见，纯浪费渲染（每行自带 shimmer 动画）。
-   */
+    * 骨架屏区（首屏加载）：8 行贴内容形状的占位。
+    * 行数取首屏可见量即可——多出来的行用户看不见，纯浪费渲染（每行自带 shimmer 动画）。
+    */
   @Builder
   SkeletonArea(): void {
     Column() {
@@ -1787,6 +1831,64 @@ export struct HomePage {
     .width('100%')
     // 内容列不再整体 padding top（列表穿透需要），骨架区自己补内容起始让位
     .padding({ top: this.listStartOffset() })
+  }
+
+  /**
+    * 热歌榜单曲行（ranking tab）：榜位序号 + 封面 + 歌名 /「歌手 · 时长」副行，
+    * 整行点按即播（playHotSongAt 实时匹配 B 站音源）；匹配中的行行尾转圈。
+    * 版式参照 NeteasePlaylistPage 曲目行，加封面与前三名高亮。
+    */
+  @Builder
+  HotSongRow(song: NeteaseHotSong, index: number): void {
+    Row({ space: 12 }) {
+      Text(`${index + 1}`)
+        .fontSize(13)
+        .fontColor(index < 3 ? this.themeDeep : $r('app.color.text_tertiary'))
+        .width(24)
+        .textAlign(TextAlign.Center)
+      CoverImage({
+        url: toThumbUrl(song.coverUrl, 96),
+        imgWidth: 48,
+        imgHeight: 48,
+        imgRadius: 8,
+        altText: song.title
+      })
+      Column() {
+        Text(song.title)
+          .fontSize(15)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(`${song.artist} · ${formatDurationText(song.durationSec)}`)
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .margin({ top: 3 })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      // 行尾不放常驻播放键（整行点按即播）：仅匹配中的行在行尾给转圈反馈
+      if (this.matchingIndex === index) {
+        LoadingProgress()
+          .width(18)
+          .height(18)
+          .color(this.themeDeep)
+      }
+    }
+    .width('100%')
+    .padding({ top: 10, bottom: 10 })
+    .alignItems(VerticalAlign.Center)
+    .stateStyles({
+      pressed: { .backgroundColor($r('app.color.press_overlay')) },
+      normal: { .backgroundColor(Color.Transparent) }
+    })
+    .onClick((): void => {
+      this.playHotSongAt(index);
+    })
   }
 
   /**
@@ -2688,34 +2790,46 @@ export struct HomePage {
                 )
               }
             } else if (this.tab === 'ranking') {
-              // 多列行：同推荐页签（TrackColumnsRow 内部分支）
-              if (this.rowColumns() > 1) {
-                LazyForEach(
-                  this.rankingRows,
-                  (row: RowOf<Track>, rowIndex: number): void => {
-                    ListItem() {
-                      this.TrackColumnsRow(row, rowIndex)
-                    }
-                  },
-                  (row: RowOf<Track>): string => this.rowKeyOf(row)
-                )
+              // 热歌榜页签：网易云热歌榜单曲行（HotSongRow），点击实时搜
+              // B 站匹配播放（playHotSongAt），无连播链。首次切入懒加载：
+              // 骨架/空态在列表内原位渲染（chips 下方），不走 HomeStateArea
+              // 顶部占位 —— 那会把搜索框/快捷卡/chips 顶飞再弹回（闪屏）。
+              // 骨架 index 传 -1：不播入场错峰，纯静态。单曲行单列渲染，
+              // 不做多列 / 大封面网格。
+              if (this.loadingHotChart && this.hotSongs.length === 0) {
+                ForEach(SKELETON_ROW_INDEXES, (_i: number): void => {
+                  ListItem() {
+                    SkeletonTrackItem({ index: -1 })
+                  }
+                }, (_i: number): string => `hs_${_i}`)
+              } else if (this.hotSongs.length === 0) {
+                // 首拉失败：原位空态 + 重试（不顶飞布局）
+                ListItem() {
+                  Column() {
+                    Text('暂无数据')
+                      .fontSize(16)
+                      .fontColor($r('app.color.text_secondary'))
+                    Button('点击重试', { type: ButtonType.Normal })
+                      .fontSize(13)
+                      .borderRadius(BUTTON_RADIUS_VP)
+                      .margin({ top: 12 })
+                      .onClick((): void => {
+                        this.reloadCurrentTab();
+                      })
+                  }
+                  .width('100%')
+                  .alignItems(HorizontalAlign.Center)
+                  .padding({ top: 48, bottom: 24 })
+                }
               } else {
                 LazyForEach(
-                  this.rankingSource,
-                  (t: Track, index: number): void => {
+                  this.hotSongSource,
+                  (s: NeteaseHotSong, index: number): void => {
                     ListItem() {
-                      TrackItem({
-                         track: t,
-                         entranceIndex: index,
-                         onPlay: (tr: Track): void => {
-                           // 先查后分流：多 P 合集跳合集详情页，单曲回落直接播放
-                           openCollectionOrPlay(tr, this.player);
-                         },
-                         moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                       })
+                      this.HotSongRow(s, index)
                     }
                   },
-                  (t: Track): string => t.id
+                  (s: NeteaseHotSong, index: number): string => `${index}_${s.title}`
                 )
               }
             } else if (this.tab === 'center') {
