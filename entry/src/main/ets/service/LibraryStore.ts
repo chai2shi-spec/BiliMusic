@@ -17,6 +17,8 @@ import { enqueueFavPushes, FavPushIntent, pendingFavPushes, purgeFavPushesForFol
 import { scheduleFavPushFlush } from './FavPushRunner';
 import { HomeCardStore } from './HomeCardStore';
 import { TrackDedupKeeper } from '../utils/TrackDedup';
+import { notifyCloudSyncDataChanged } from './CloudSyncHooks';
+import { markRecentCleared, markRecentDeleted } from './CloudSyncStore';
 
 function createId(): string {
   return `pl_${Date.now()}_${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -28,7 +30,11 @@ function createId(): string {
  * 不再约束总量，200 即真实封顶；读侧按 ceil(RECENT_MAX_ITEMS/8) 探测分片，
  * 存量数据零迁移、扩容后自然读满。
  */
-const RECENT_MAX_ITEMS: number = 200;
+/**
+ * 最近播放条目上限（云同步的合并上限必须与它一致，见 CloudSyncManager）。
+ * 导出而非私有：两端各写一份数字迟早漂移。
+ */
+export const RECENT_MAX_ITEMS: number = 200;
 
 /**
  * 最近播放**分片存储**：曲目按每片 8 条拆到 `recent_tracks_{n}` 独立 key。
@@ -50,8 +56,10 @@ const RECENT_CHUNK_PREFIX: string = 'recent_tracks_';
  * playedAt = 0 的旧记录（升级前落盘、无时间戳）视为窗口内保留：
  * 升级瞬间静默清空用户已有记录是不可接受的数据丢失，
  * 它们会在下次重播时被重新盖章、重新进入 7 天倒计时。
+ *
+ * 导出给云同步用（合并时同一份窗口口径；两处各写一份必然漂移）。
  */
-const RECENT_KEEP_MS: number = 7 * 24 * 60 * 60 * 1000;
+export const RECENT_KEEP_MS: number = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * 一条记录是否仍在「最近 7 天」窗口内。
@@ -202,6 +210,11 @@ function persistRecentTracks(list: Track[], notify: boolean = true): void {
   // 播放中约 10s 一次的位置写入若 bump 版本号，最近播放页会整表重载闪动。
   if (notify) {
     notifyLibraryChanged();
+    // 云同步数据变更钩子（20s 去抖后触发一轮云端写回）。
+    // notify=false 的位置静默更新**刻意不触发**：播放中约 10s 一次，
+    // 每 10s 覆盖写一遍云端最近播放文件纯属浪费流量 —— 位置会随下一轮
+    // （换歌 / 回前台 / 手动同步）自然带上。
+    notifyCloudSyncDataChanged();
   }
 }
 
@@ -223,13 +236,43 @@ function addRecentTrack(track: Track): void {
 }
 
 function removeRecentTrack(id: string): Track[] {
-  const next: Track[] = getRecentTracks().filter((t: Track): boolean => t.id !== id);
+  const base: Track[] = getRecentTracks();
+  const next: Track[] = base.filter((t: Track): boolean => t.id !== id);
+  if (next.length !== base.length) {
+    // 记删除痕迹（跨设备传播用）：不记的话下一轮同步另一台设备就把它带回来了。
+    // 「删除时刻 >= 播放时刻才算删」的判据在 PlaylistCloudMerge.mergeRecentTracks。
+    markRecentDeleted(id, Date.now());
+  }
   persistRecentTracks(next);
   return getRecentTracks();
 }
 
 function clearRecentTracks(): void {
+  // 「清空」只记一个时刻：playedAt 早于它的记录在合并时一律丢弃 ——
+  // 比给 200 条逐条写墓碑省一个数量级，而且天然幂等（重复清空只是把时刻推后）。
+  markRecentCleared(Date.now());
   persistRecentTracks([]);
+}
+
+/**
+ * 云端合并结果整表替换本机最近播放（CloudSyncManager 读取轮末尾调用）。
+ *
+ * 与 addRecentTrack 的三点差异：
+ *   · 不盖 playedAt —— 云端带来的播放时间才是「谁后听」的真事实；
+ *   · 不 unshift —— 顺序与上限已由 mergeRecentTracks 排好；
+ *   · 整表替换而非增量插入 —— 合并是幂等的全量视图。
+ *
+ * 内容完全相同时早退：避免每轮都重写 200 条分片 + bump 一次 libraryRev
+ * （最近播放页会整表重载闪动）。走 persistRecentTracks，落盘纪律与本地写一致。
+ */
+export function replaceRecentFromCloud(tracks: Track[]): void {
+  const current: Track[] = getRecentTracks();
+  const a: string = JSON.stringify(current.map((t: Track): Track => slimTrack(t)));
+  const b: string = JSON.stringify(tracks.map((t: Track): Track => slimTrack(t)));
+  if (a === b) {
+    return;
+  }
+  persistRecentTracks(tracks);
 }
 
 /**
@@ -574,6 +617,10 @@ function persistPlaylists(list: Playlist[]): void {
   playlistCache = list;
   // 立即广播：页面刷新依赖 libraryRev，不能等落盘
   notifyLibraryChanged();
+  // 云同步数据变更钩子（20s 去抖后触发一轮云端写回）。
+  // CloudSyncManager 应用远端数据（batchUpsertFromCloud / deletePlaylist）期间
+  // 自会忽略本通知 —— 不会自我循环；云同步未初始化时是零开销 no-op。
+  notifyCloudSyncDataChanged();
   schedulePersist();
 }
 
@@ -2149,8 +2196,10 @@ function createPlaylistsExport(): PlaylistsExport {
 export interface PlaylistImportResult {
   /** 成功导入的歌单数 */
   imported: number;
-  /** 因字段不全 / 重名等被跳过的条目数 */
+  /** 因字段不全 / 格式错误被跳过的条目数 */
   skipped: number;
+  /** 命中同名歌单、改为合并曲目（而不是新建）的条目数 */
+  merged?: number;
 }
 
 function importPlaylistsFromText(text: string): PlaylistImportResult {
@@ -2177,6 +2226,16 @@ export function importPlaylistsFromParsed(parsed: ESObject): PlaylistImportResul
   const existing: Playlist[] = getPlaylists();
   const existingIds: Set<string> = new Set<string>(existing.map((p: Playlist): string => p.id));
   const existingNames: Set<string> = new Set<string>(existing.map((p: Playlist): string => p.name.trim()));
+  // 同名合并目标：重新导入同名歌单时把曲目并进已有的那份，而不是加「 导入」
+  // 后缀新建 —— 旧行为会让用户每导一次就多一份重复（实测出现过「古风戏腔」+
+  // 「古风戏腔 导入」两个空壳）。收藏夹镜像由 B 站侧维护，不作为合并目标。
+  const byName: Map<string, Playlist> = new Map<string, Playlist>();
+  for (let i = 0; i < existing.length; i++) {
+    if (!isFavMirror(existing[i])) {
+      byName.set(existing[i].name.trim(), existing[i]);
+    }
+  }
+  let mergedPlaylists: number = 0;
   // 已被镜像的收藏夹 media_id：导入文件里若又带同一个收藏夹的镜像，必须降级为普通歌单 ——
   // 否则会出现「同一收藏夹两个镜像」，而 `getFavMirrorByMediaId` 只取首个，
   // 另一个永远不再被同步、也不会被清理（同步链路看不到它）。
@@ -2227,6 +2286,24 @@ export function importPlaylistsFromParsed(parsed: ESObject): PlaylistImportResul
       skipped++;
       continue;
     }
+    // 同名歌单 → 曲目按 id 并入已有那份，不新建（导入防重复）。
+    // target 与 getPlaylists() 里的是同一个对象引用，末尾一次 persistPlaylists
+    // 就能把改动落盘；曲目 id 已存在的直接跳过，避免同步 / 反复导入时越导越重。
+    const target: Playlist | undefined = byName.get(name);
+    if (target !== undefined) {
+      const seenIds: Set<string> = new Set<string>();
+      for (let s = 0; s < target.tracks.length; s++) {
+        seenIds.add(target.tracks[s].id);
+      }
+      for (let k = 0; k < tracks.length; k++) {
+        if (!seenIds.has(tracks[k].id)) {
+          seenIds.add(tracks[k].id);
+          target.tracks.push(tracks[k]);
+        }
+      }
+      mergedPlaylists++;
+      continue;
+    }
     // 来源字段：导入文件里可能带订阅来源（旧版本导出的歌单没有这两个字段 → 空串 = 普通歌单）。
     // 老导出文件没有 sourceKind → 按 upMid 非空兜底为 'up'（与 toPlaylist 同口径）。
     const rawUpMid: string = item.upMid || '';
@@ -2260,11 +2337,249 @@ export function importPlaylistsFromParsed(parsed: ESObject): PlaylistImportResul
     });
   }
 
-  if (imported.length > 0) {
+  if (imported.length > 0 || mergedPlaylists > 0) {
     // 必须走 persistPlaylists：直接写 Preferences 不会更新内存快照，导入后读到的还是旧列表
     persistPlaylists([...imported, ...getPlaylists()]);
   }
-  return { imported: imported.length, skipped: skipped };
+  return { imported: imported.length, skipped: skipped, merged: mergedPlaylists };
+}
+
+// ===== 华为云空间同步（CloudSyncManager 专用读写口） =====
+
+/**
+ * 取**同步范围**内的歌单（云同步写回用）：
+ * 收藏夹镜像（sourceKind === 'fav'）**不参与**云同步 —— 它由 FavSyncManager
+ * 从 B 站收藏夹单向镜像，云端再同步一份只会制造两套真相（方案 §5 同步范围）。
+ * 其余全量参与：普通歌单 / UP 订阅歌单（订阅有 upMid 标记，跨设备恢复后
+ * 「拉取新投稿」入口仍在）。
+ * 返回内存快照的浅拷贝列表；曲目**不**在此处瘦身 —— 瘦身（slimTrack +
+ * 清 localFilePath）是云端写入方（CloudSyncManager）的职责。
+ */
+export function getPlaylistsForSync(): Playlist[] {
+  return getPlaylists().filter((p: Playlist): boolean => !isFavMirror(p));
+}
+
+/**
+ * 云同步写轮专用：数一数同步范围内「磁盘元信息说有分片、内存里却没有曲目」的歌单。
+ *
+ * ⚠️ 这不是洁癖检查，是数据保全闸门。2026-11-09 真机事故：某个时序窗口里
+ * 内存缓存带着空 tracks，写轮照常把这份「空歌单」序列化上传（快照只有 300B），
+ * 读轮再把它合并回本地并触发一次全量 runPersist —— chunkCount 被写成 0、
+ * 旧分片进 removes 被删，用户 40 首曲目一次性消失，而云端只剩空壳，连恢复
+ * 的来源都没有。
+ *
+ * 判据只看「磁盘说有分片 vs 内存说没曲目」这一对矛盾，不猜成因。用户真的
+ * 清空一个歌单时，runPersist 会同步把 chunkCount 写成 0，两边一致 → 不误报。
+ */
+export function countPlaylistsWithUnloadedChunks(): number {
+  const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+  if (!Array.isArray(stored) || stored.length === 0) {
+    return 0;
+  }
+  const live: Playlist[] = getPlaylists();
+  let suspect: number = 0;
+  for (let i = 0; i < stored.length; i++) {
+    const item: StoredPlaylist = stored[i];
+    if (!(item && typeof item.id === 'string' && item.id.length > 0)) {
+      continue;
+    }
+    // 收藏夹镜像不参与云同步；没有分片声明的歌单本来就是空的，跳过
+    if (item.sourceKind === 'fav' || (item.chunkCount ?? 0) <= 0) {
+      continue;
+    }
+    let found: Playlist | null = null;
+    for (let j = 0; j < live.length; j++) {
+      if (live[j].id === item.id) {
+        found = live[j];
+        break;
+      }
+    }
+    if (found === null || found.tracks.length === 0) {
+      suspect++;
+    }
+  }
+  return suspect;
+}
+
+/** 「合并同名歌单」的执行报告（与曲目去重的 PlaylistDedupResult 是两个东西） */
+export interface PlaylistNameDedupResult {
+  /** false = 前置闸门没过 / 没有重复项，什么都没动 */
+  applied: boolean;
+  /** 未执行的原因（applied=true 时为空） */
+  reason: string;
+  /** 处理了几个同名组 */
+  groups: number;
+  /** 并入主歌单的曲目数 */
+  tracksMerged: number;
+  /** 歌单内去掉的重复曲目数 */
+  duplicatesRemoved: number;
+  /** 被删掉的同名副本 id */
+  removed: string[];
+}
+
+/**
+ * 本地去重：① 每个歌单内按曲目 id 去重；② 同名歌单合并成一份（曲目并集），
+ * 删掉多余的副本。
+ *
+ * ⚠️ 前置闸门不能省：分片没装载完时内存里的 tracks 是 0，此时「同名比对」
+ * 会把 41 首的主歌单也判成空壳，与之前那次丢数据的时序一模一样。
+ * 宁可这轮什么都不做，也不能在库没就绪时删歌单。
+ *
+ * 收藏夹镜像（sourceKind=fav）由 B 站侧维护，不参与合并。
+ * 主歌单取「去重后曲目最多」的那份，并列时取 id 字典序最小，保证多轮结果稳定。
+ * 副本的曲目先按 id 并入主歌单再删，任何一条曲目都不会凭空消失。
+ */
+export function dedupPlaylistsByName(): PlaylistNameDedupResult {
+  const empty: PlaylistNameDedupResult = {
+    applied: false, reason: '', groups: 0, tracksMerged: 0, duplicatesRemoved: 0, removed: []
+  };
+  if (countPlaylistsWithUnloadedChunks() > 0) {
+    empty.reason = '歌单分片尚未装载完成，已跳过本次去重';
+    return empty;
+  }
+  const all: Playlist[] = getPlaylists();
+  // ① 曲目级去重：按 id 保留第一次出现的，顺手挡掉畸形条目
+  const tracksById: Map<string, Track[]> = new Map<string, Track[]>();
+  let duplicatesRemoved: number = 0;
+  for (let i = 0; i < all.length; i++) {
+    const p: Playlist = all[i];
+    const seen: Set<string> = new Set<string>();
+    const kept: Track[] = [];
+    for (let k = 0; k < p.tracks.length; k++) {
+      const t: Track = p.tracks[k];
+      if (t === null || t === undefined || typeof t.id !== 'string' || t.id.length === 0
+        || seen.has(t.id)) {
+        duplicatesRemoved++;
+        continue;
+      }
+      seen.add(t.id);
+      kept.push(t);
+    }
+    tracksById.set(p.id, kept);
+  }
+  // ② 按名称分组（收藏夹镜像排除）
+  const groups: Map<string, Playlist[]> = new Map<string, Playlist[]>();
+  for (let i = 0; i < all.length; i++) {
+    const p: Playlist = all[i];
+    if (isFavMirror(p)) {
+      continue;
+    }
+    const key: string = p.name.trim();
+    if (key.length === 0) {
+      continue;
+    }
+    const bucket: Playlist[] | undefined = groups.get(key);
+    if (bucket !== undefined) {
+      bucket.push(p);
+    } else {
+      groups.set(key, [p]);
+    }
+  }
+  const removedIds: Set<string> = new Set<string>();
+  let groupCount: number = 0;
+  let tracksMerged: number = 0;
+  const names: string[] = Array.from(groups.keys());
+  for (let g = 0; g < names.length; g++) {
+    const bucket: Playlist[] = groups.get(names[g]) ?? [];
+    if (bucket.length < 2) {
+      continue;
+    }
+    let primary: Playlist = bucket[0];
+    for (let b = 1; b < bucket.length; b++) {
+      const cand: Playlist = bucket[b];
+      const cLen: number = (tracksById.get(cand.id) ?? []).length;
+      const pLen: number = (tracksById.get(primary.id) ?? []).length;
+      if (cLen > pLen || (cLen === pLen && cand.id < primary.id)) {
+        primary = cand;
+      }
+    }
+    const merged: Track[] = (tracksById.get(primary.id) ?? []).slice();
+    const mergedIds: Set<string> = new Set<string>();
+    for (let m = 0; m < merged.length; m++) {
+      mergedIds.add(merged[m].id);
+    }
+    for (let b = 0; b < bucket.length; b++) {
+      const dup: Playlist = bucket[b];
+      if (dup.id === primary.id) {
+        continue;
+      }
+      const src: Track[] = tracksById.get(dup.id) ?? [];
+      for (let k = 0; k < src.length; k++) {
+        if (!mergedIds.has(src[k].id)) {
+          mergedIds.add(src[k].id);
+          merged.push(src[k]);
+          tracksMerged++;
+        }
+      }
+      removedIds.add(dup.id);
+    }
+    tracksById.set(primary.id, merged);
+    groupCount++;
+  }
+  if (removedIds.size === 0 && duplicatesRemoved === 0) {
+    empty.reason = '没有发现重复歌单或重复曲目';
+    return empty;
+  }
+  // ③ 一次性提交：副本的分片由 purgePlaylistData 清掉，主歌单换成并集
+  const next: Playlist[] = [];
+  for (let i = 0; i < all.length; i++) {
+    const p: Playlist = all[i];
+    if (removedIds.has(p.id)) {
+      purgePlaylistData(p.id);
+      continue;
+    }
+    p.tracks = tracksById.get(p.id) ?? p.tracks;
+    next.push(p);
+  }
+  persistPlaylists(next);
+  console.info(`[LibraryStore] dedup: groups=${groupCount} merged=${tracksMerged} `
+    + `dupTracks=${duplicatesRemoved} removed=${removedIds.size}`);
+  return {
+    applied: true,
+    reason: '',
+    groups: groupCount,
+    tracksMerged: tracksMerged,
+    duplicatesRemoved: duplicatesRemoved,
+    removed: Array.from(removedIds)
+  };
+}
+
+/**
+ * 云端合并结果批量落库（CloudSyncManager 读取轮末尾调用）。
+ *
+ * 与 importPlaylistsFromParsed 的三点刻意差异（云恢复不能走导入的原因）：
+ *  · 不改重名 / 不换 id —— 云端同 id 歌单是**同一份**数据的另一视角，
+ *    重名加「导入」后缀会让每次同步多长一份；
+ *  · 不重盖 updatedAt / addedAt —— 云端带来的时间戳是 LWW 判定与
+ *    「按加入时间」排序的依据，重盖会让下一轮合并彻底失真；
+ *  · 已存在的歌单**原位替换**（列表顺序是纯本地展示态，不跨设备同步），
+ *    远端新增的歌单追加到列表末尾。
+ *
+ * 单次 persistPlaylists（一次广播 + 一次去抖落盘）：合并 N 个歌单不放大成
+ * N 次全量重写分片 —— 与 addTracksToPlaylist 同一条 I/O 纪律。
+ * 云同步未应用时不触发（空列表早退），apply 窗口内由 CloudSyncManager
+ * 的 suppress 标志吃掉由此引发的数据变更通知。
+ */
+export function batchUpsertFromCloud(merged: Playlist[]): void {
+  if (merged.length === 0) {
+    return;
+  }
+  const existing: Playlist[] = getPlaylists();
+  const byId: Map<string, number> = new Map<string, number>();
+  for (let i = 0; i < existing.length; i++) {
+    byId.set(existing[i].id, i);
+  }
+  const next: Playlist[] = existing.slice();
+  for (let i = 0; i < merged.length; i++) {
+    const p: Playlist = merged[i];
+    const idx: number | undefined = byId.get(p.id);
+    if (idx !== undefined) {
+      next[idx] = p;
+    } else {
+      next.push(p);
+    }
+  }
+  persistPlaylists(next);
 }
 
 /** 命名空间导出：供 `import { LibraryStore }` 以对象方式调用。 */
@@ -2275,6 +2590,7 @@ export const LibraryStore = {
   clearRecentTracks,
   updateRecentProgress,
   getRecentProgressSec,
+  replaceRecentFromCloud,
   getFavoriteTracks,
   toggleFavoriteTrack,
   getPlaylists,
@@ -2311,5 +2627,7 @@ export const LibraryStore = {
   consumeFavMirrorSkippedCount,
   createPlaylistsExport,
   importPlaylistsFromText,
-  importPlaylistsFromParsed
+  importPlaylistsFromParsed,
+  getPlaylistsForSync,
+  batchUpsertFromCloud
 };

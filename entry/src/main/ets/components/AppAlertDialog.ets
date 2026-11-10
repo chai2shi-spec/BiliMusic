@@ -64,6 +64,21 @@ interface AppAlertDialogOptions {
 
 const EMPTY_BUTTON: AppAlertButtonOptions = { value: '' };
 
+/** 信息弹窗参数：只有一句「知道了」，用于「操作完成 / 结果汇报」类反馈 */
+interface AppInfoDialogOptions {
+  title: string;
+  message: string;
+  /** 按钮文案，默认「知道了」 */
+  confirmText?: string;
+}
+
+/**
+ * 信息弹窗数据槽（与确认弹窗分开）：两者可能先后出现，共用一个槽会串内容。
+ */
+let infoOptions: AppInfoDialogOptions = { title: '', message: '' };
+/** 信息弹窗是否已打开（open 重入前先关旧） */
+let infoOpened: boolean = false;
+
 /**
  * 弹窗数据槽：模块级单槽，`showAppAlertDialog` 写入后由宿主按当次值重建
  * controller 再 open。同一时刻只可能存在一个弹窗（模态阻塞），单槽不会串内容。
@@ -107,6 +122,17 @@ export struct AppDialogHost {
       .fontSize(14)
       .fontColor($r('app.color.text_secondary'))
       .textAlign(TextAlign.Center)
+      .width('100%')
+  }
+
+  /** 信息弹窗正文：允许多行（结果汇报常用「歌单 3 个 · 拾音 12 天」这类摘要） */
+  @Builder
+  InfoBody() {
+    Text(infoOptions.message)
+      .fontSize(14)
+      .fontColor($r('app.color.text_secondary'))
+      .textAlign(TextAlign.Center)
+      .lineHeight(21)
       .width('100%')
   }
 
@@ -167,6 +193,66 @@ export struct AppDialogHost {
     } catch (e) {
       const err = e as BusinessError;
       console.error(`close alert dialog failed: ${err.code} ${err.message}`);
+    }
+  }
+
+  /**
+   * 信息弹窗 controller（单按钮）。与确认弹窗同样的「每次重建」理由：
+   * CustomContentDialog 的构造参数在创建时定格（faqs-arkui-555）。
+   */
+  private infoController: CustomDialogController | null = null;
+
+  /** 打开信息弹窗（模块级 showAppInfoDialog 调用） */
+  openInfo(): void {
+    const label: string = infoOptions.confirmText !== undefined && infoOptions.confirmText.length > 0
+      ? infoOptions.confirmText : '知道了';
+    this.infoController = new CustomDialogController({
+      builder: CustomContentDialog({
+        primaryTitle: infoOptions.title,
+        contentBuilder: (): void => {
+          this.InfoBody();
+        },
+        buttons: [
+          {
+            value: label,
+            buttonStyle: ButtonStyleMode.EMPHASIZED,
+            action: (): void => {
+              infoOpened = false;
+            }
+          }
+        ]
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      cancel: (): void => {
+        infoOpened = false;
+      }
+    });
+    infoOpened = true;
+    try {
+      this.infoController.open();
+    } catch (e) {
+      infoOpened = false;
+      const err = e as BusinessError;
+      console.error(`showAppInfoDialog failed: ${err.code} ${err.message}`);
+    }
+  }
+
+  /** 关闭信息弹窗（幂等） */
+  closeInfo(): void {
+    if (!infoOpened) {
+      return;
+    }
+    infoOpened = false;
+    const controller: CustomDialogController | null = this.infoController;
+    if (controller === null) {
+      return;
+    }
+    try {
+      controller.close();
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`close info dialog failed: ${err.code} ${err.message}`);
     }
   }
 
@@ -242,4 +328,24 @@ export function showConfirm(uiContext: UIContext, options: AppConfirmOptions): v
     primaryButton: { value: options.cancelText ?? '取消' },
     secondaryButton: { value: options.confirmText, action: options.onConfirm }
   });
+}
+
+/**
+ * 信息弹窗（单按钮「知道了」）：用于「操作完成 / 结果汇报」这类只需要被告知的场合。
+ *
+ * 为什么不复用 showAppAlertDialog：那个恒为两键（左轻右重），汇报类内容多出
+ * 一个没有动作的按钮，用户会以为要选一个。这里只给一个强调键。
+ *
+ * @param uiContext 调用方页面的 UIContext（签名与 showAppAlertDialog 对齐；
+ *                  实现经宿主 controller 定位弹窗，不需要它）
+ */
+export function showAppInfoDialog(uiContext: UIContext, options: AppInfoDialogOptions): void {
+  infoOptions = options;
+  const host: AppDialogHost | null = dialogHost;
+  if (host === null) {
+    console.error('showAppInfoDialog: 弹窗宿主未挂载，弹窗未显示');
+    return;
+  }
+  host.closeInfo();
+  host.openInfo();
 }

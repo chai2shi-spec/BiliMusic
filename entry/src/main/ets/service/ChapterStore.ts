@@ -18,7 +18,8 @@
  *   · 去重：同一曲目（键 = track.id，分P 曲目含 `BV…#cid` 后缀天然区分）
  *     已加载 / 在途不重复发请求；切歌竞态用令牌保证只采纳最后一次结果。
  *   · 发布：结果（含空）整表写 AppStorage STORE_VIDEO_CHAPTERS，消费端
- *     （功能行按钮 / 分段列表弹层 / 进度条刻度）@StorageProp 只读订阅。
+ *     （功能行按钮 / 分段列表弹层 / 进度条刻度）@StorageProp 只读订阅；
+ *     同时经 chapterPublishListener 回调 MusicPlayer（切章检测 / 按章取词）。
  *   · 失败分级：瞬时失败（网络 / 风控 / 串台）不记「已加载」，下次打开
  *     播放页自然重试；结论性「无分段」定格，会话内不再请求。
  *   · 非站内曲目（本地下载缓存 / 网易歌单导入 / 直播）一律空数组。
@@ -44,9 +45,36 @@ let loadedKey: string = '';
 /** 在途的曲目键（请求进行中，重复请求拦截） */
 let loadingKey: string = '';
 
+/**
+ * 章表发布监听器（trackId + 整表）：MusicPlayer 注册后驱动
+ * 「切章检测 / 按章取词 / 会话元数据随章」。
+ * 用回调注册而不是 import MusicPlayer —— 避免 ChapterStore ⇄ MusicPlayer
+ * 循环依赖（ArkTS 模块循环会带来初始化顺序风险）。
+ */
+export type ChapterPublishListener = (trackId: string, chapters: VideoChapter[]) => void;
+let chapterPublishListener: ChapterPublishListener | null = null;
+/** 最近一次发布的曲目键 + 整表：监听器晚注册时重放（避免「先发布、后注册」丢事件） */
+let lastPublishedTrackId: string = '';
+let lastPublishedChapters: VideoChapter[] = [];
+
+/** 注册章表发布监听（传 null 解除）。MusicPlayer 初始化时注册一次。 */
+export function setChapterPublishListener(listener: ChapterPublishListener | null): void {
+  chapterPublishListener = listener;
+  // 重放最近一次结果：注册晚于首次发布时（播放页已先行加载过章节）也能拿到章表
+  if (listener !== null && lastPublishedTrackId.length > 0) {
+    listener(lastPublishedTrackId, lastPublishedChapters);
+  }
+}
+
 /** 发布当前曲章节（整表 slice 新引用，见 STORE_VIDEO_CHAPTERS 注释） */
-function publishChapters(chapters: VideoChapter[]): void {
-  AppStorage.setOrCreate(STORE_VIDEO_CHAPTERS, chapters.slice());
+function publishChapters(trackId: string, chapters: VideoChapter[]): void {
+  const copy: VideoChapter[] = chapters.slice();
+  lastPublishedTrackId = trackId;
+  lastPublishedChapters = copy;
+  AppStorage.setOrCreate(STORE_VIDEO_CHAPTERS, copy);
+  if (chapterPublishListener !== null) {
+    chapterPublishListener(trackId, copy);
+  }
 }
 
 /**
@@ -68,7 +96,8 @@ function extractTrackCid(track: Track): string {
 }
 
 /**
- * 加载当前曲的章节分段（ControlAreaComponent 首挂载 + 切歌 @Watch 调用）。
+ * 加载当前曲的章节分段（ControlAreaComponent 首挂载 + 切歌 @Watch 调用，
+ * 以及 MusicPlayer 换歌自触发）。
  * fire-and-forget：结果只经 STORE_VIDEO_CHAPTERS 发布，无返回值、不抛错。
  */
 export function loadChaptersForTrack(track: Track | null): void {
@@ -85,13 +114,13 @@ async function runLoad(track: Track | null): Promise<void> {
   }
   if (track === null || track === undefined) {
     loadedKey = key;
-    publishChapters([]);
+    publishChapters(key, []);
     return;
   }
   // 非站内曲目（本地 / 网易 / 直播）没有 view_points，直接定格空
   if (!track.id.startsWith('BV') && !track.bvid.startsWith('BV')) {
     loadedKey = key;
-    publishChapters([]);
+    publishChapters(key, []);
     return;
   }
   const token: number = ++loadToken;
@@ -103,7 +132,7 @@ async function runLoad(track: Track | null): Promise<void> {
     if (cached !== null) {
       loadingKey = '';
       loadedKey = key;
-      publishChapters(cached);
+      publishChapters(key, cached);
       return;
     }
   }
@@ -118,7 +147,7 @@ async function runLoad(track: Track | null): Promise<void> {
     if (resolved.reason === 'no-target') {
       loadedKey = key;
     }
-    publishChapters([]);
+    publishChapters(key, []);
     return;
   }
   // ── ①' cid 之前缺失（resolve 网络补的 P1 cid）：用权威 cid 再查一次缓存 ──
@@ -127,7 +156,7 @@ async function runLoad(track: Track | null): Promise<void> {
   if (cachedLate !== null) {
     loadingKey = '';
     loadedKey = key;
-    publishChapters(cachedLate);
+    publishChapters(key, cachedLate);
     return;
   }
   // ── ② 官方源 view_points ──
@@ -139,14 +168,14 @@ async function runLoad(track: Track | null): Promise<void> {
     // 瞬时失败（网络 / 风控 / 串台）：不记 loadedKey，下次打开播放页重试；
     // 先发布空保持 UI 一致
     loadingKey = '';
-    publishChapters([]);
+    publishChapters(key, []);
     return;
   }
   if (chapters.length > 0) {
     loadingKey = '';
     loadedKey = key;
     saveCachedChapters(cid, chapters);
-    publishChapters(chapters);
+    publishChapters(key, chapters);
     return;
   }
   // ── ③ 简介时间戳兜底：官方源结论性空（view_points 无章节条目）──
@@ -162,7 +191,7 @@ async function runLoad(track: Track | null): Promise<void> {
     loadingKey = '';
     loadedKey = key;
     saveCachedChapters(cid, descChapters);
-    publishChapters(descChapters);
+    publishChapters(key, descChapters);
     return;
   }
   // ── ④ 置顶评论时间戳兜底：简介也结论性空（仅 UP 主真置顶楼，热门首评不解析）──
@@ -177,9 +206,9 @@ async function runLoad(track: Track | null): Promise<void> {
   loadedKey = key;
   if (replyChapters.length > 0) {
     saveCachedChapters(cid, replyChapters);
-    publishChapters(replyChapters);
+    publishChapters(key, replyChapters);
     return;
   }
   // ── ⑤ 空定格：官方 / 简介 / 置顶评论都结论性为空（空不落盘，新会话重查可覆盖）──
-  publishChapters([]);
+  publishChapters(key, []);
 }

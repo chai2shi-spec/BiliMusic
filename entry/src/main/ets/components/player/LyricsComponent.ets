@@ -12,7 +12,7 @@
  *     （LyricsApi 内部 cacheKey 比对；不清缓存，manual 手选结果跨重启固定）。
  */
 
-import { Track, LyricLine, LyricResult, LyricWord, LyricCandidate, AppSettings } from '../../model/MusicModels';
+import { Track, LyricLine, LyricResult, LyricWord, LyricCandidate, AppSettings, VideoChapter } from '../../model/MusicModels';
 import { LyricsApi, sourceLabel } from '../../api/LyricsApi';
 import { AppPreferences } from '../../preferences/AppPreferences';
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../api/SubtitleLyricApi';
 import { isLoggedIn, isLoginStale } from '../../service/LoginStore';
 import { cleanTitle, toThumbUrl } from '../../utils/TextUtil';
+import { MusicPlayer } from '../../player/MusicPlayer';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
@@ -32,6 +33,15 @@ import { BreakpointType } from '../../common/utils/BreakpointSystem';
 import { LrcView } from '../../lyric/LrcView';
 import { LrcEntry, Word } from '../../lyric/LrcEntry';
 import { LyricScrollEffect, LyricTopPosition } from '../../lyric/LyricConst';
+import { parseLrcLyric, serializeLrcEntries } from '../../lyric/LrcUtils';
+import {
+  cancelTranscribe,
+  hasLocalAudioSource,
+  isTranscribeSupported,
+  startTranscribe
+} from '../../service/LyricTranscribeService';
+import { showConfirm } from '../AppAlertDialog';
+import { postAppToast } from '../../common/ToastChannel';
 import { MaterialCompat } from '../../utils/MaterialCompat';
 import { ControlAreaComponent } from './ControlAreaComponent';
 import {
@@ -43,7 +53,15 @@ import {
   STORE_PLAYER_CONTENT_EXIT,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
-  STORE_LYRIC_CENTERED
+  STORE_LYRIC_CENTERED,
+  STORE_TRANSCRIBE_DONE_SEQ,
+  STORE_TRANSCRIBE_PHASE,
+  STORE_TRANSCRIBE_PROGRESS,
+  STORE_TRANSCRIBE_RUNNING,
+  STORE_TRANSCRIBE_TRACK_ID,
+  STORE_VIDEO_CHAPTERS,
+  STORE_CURRENT_CHAPTER_INDEX,
+  STORE_CHAPTERS_TRACK_ID
 } from '../../common/Constants';
 import {
   ENTRANCE_DURATION_MS,
@@ -118,6 +136,21 @@ export struct LyricsComponent {
   /** 歌词居中显示（AppSettings.lyricCentered 的运行时镜像，长按面板可切，默认关 = 左对齐） */
   @StorageProp(STORE_LYRIC_CENTERED) lyricCentered: boolean = false;
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
+  /**
+   * 当前章节表（MusicPlayer / ChapterStore 发布，只读订阅）。
+   * 用途：切章时解析当前章节标题，按章取词；不参与进度渲染。
+   */
+  @StorageProp(STORE_VIDEO_CHAPTERS) chapters: VideoChapter[] = [];
+  /**
+   * 当前播放章节下标（MusicPlayer 章态镜像，-1 = 无章节 / 不在章内）。
+   * 变化 = 切章事件源：按新章重载歌词并重读该章偏移。
+   */
+  @StorageProp(STORE_CURRENT_CHAPTER_INDEX) @Watch('onActiveChapterChanged') currentChapterIndex: number = -1;
+  /**
+   * 章态归属曲目 id：只有与当前曲一致时，章节表 + 下标才可信
+   * （换歌瞬间旧章表不得污染新曲的按章取词）。
+   */
+  @StorageProp(STORE_CHAPTERS_TRACK_ID) chaptersTrackId: string = '';
   /** 是否随歌词渲染底部控制区（SM 歌词页 true；LG/折叠分栏布局 false，控制区在封面侧） */
   isShowControl: boolean = true;
   /** 常规行字号（vp，默认 20 = LrcView 缺省档） */
@@ -185,6 +218,21 @@ export struct LyricsComponent {
   /** 后台补全定时器 id（-1 = 无）：AI 字幕命中但疑似生成中时，稍后静默重取 */
   private biliPartialRefreshTimer: number = -1;
 
+  /** 本机 AI 转写：任务进行中（横幅显隐 / 转写按钮禁用） */
+  @StorageProp(STORE_TRANSCRIBE_RUNNING) transcribeRunning: boolean = false;
+  /** 转写阶段：'decoding'（解码中，不定态）/ 'recognizing'（识别中，带百分比） */
+  @StorageProp(STORE_TRANSCRIBE_PHASE) transcribePhase: string = '';
+  /** 识别进度（0-100 整数；解码阶段恒 0，横幅走不定态） */
+  @StorageProp(STORE_TRANSCRIBE_PROGRESS) transcribeProgress: number = 0;
+  /** 转写绑定的曲目 id（完成信号与本曲比对手齐） */
+  @StorageProp(STORE_TRANSCRIBE_TRACK_ID) transcribeTrackId: string = '';
+  /** 转写完成信号（服务侧自增；本曲完成 → 重载歌词 + 同步桌面歌词） */
+  @StorageProp(STORE_TRANSCRIBE_DONE_SEQ) @Watch('onTranscribeDone') transcribeDoneSeq: number = 0;
+  /** 编辑歌词 sheet（长按面板「编辑歌词」打开） */
+  @State showLyricEditSheet: boolean = false;
+  /** 编辑歌词文本区内容（预填当前歌词 LRC 文本，保存走 parseLrcLyric 重解析） */
+  @State lyricEditText: string = '';
+
   /** 同曲守卫：封面等字段异步补全不应重置歌词 */
   private lastTrackKey: string = '';
   /** 上一次真正发起歌词请求时的「信息键」（id + 标题 + 歌手 + 时长是否已知） */
@@ -200,7 +248,7 @@ export struct LyricsComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：歌词层 200ms EaseIn 柔退淡出（与控制区同批 LAYER_EXIT_DELAY_CONTROL）。
+   * 仅柔退路径递增）：歌词层 120ms EaseIn 柔退淡出（与控制区同批 LAYER_EXIT_DELAY_CONTROL）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /**
@@ -219,7 +267,7 @@ export struct LyricsComponent {
     this.enterOpacity = 0;
   }
 
-  /** 柔退复位：歌词层 200ms EaseIn 淡出 + 拦截在途延迟入场 */
+  /** 柔退复位：歌词层 120ms EaseIn 淡出 + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
     this.getUIContext().animateTo(
@@ -256,6 +304,59 @@ export struct LyricsComponent {
   private lyricKeyOf(track: Track): string {
     // 字段级 ?? 兜底：旧快照恢复的曲目可能缺 title/artist（undefined），模板串不设防
     return `${track.id}|${track.title ?? ''}|${track.artist ?? ''}|${track.duration > 0 ? 'd' : 'n'}`;
+  }
+
+  /**
+   * 当前播放到的章节（无章节 / 章表不属于当前曲 / 下标越界 → null）。
+   * 章表、下标与归属曲目 id 由 MusicPlayer 章态镜像驱动，这里只做一致性防御。
+   */
+  private activeChapter(): VideoChapter | null {
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || this.chaptersTrackId !== track.id) {
+      return null;
+    }
+    const idx: number = this.currentChapterIndex;
+    if (idx < 0 || idx >= this.chapters.length) {
+      return null;
+    }
+    return this.chapters[idx];
+  }
+
+  /**
+   * 歌词操作对象：章节在播 = 章级伪曲目（缓存 / 偏移 / 手动选词 / 跳过按段独立），
+   * 无章节 = 整曲。时间轴已由 LyricsApi 平移到整曲绝对时间，展示侧无差异。
+   */
+  private effectiveLyricTrack(): Track | null {
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined) {
+      return null;
+    }
+    const chapter: VideoChapter | null = this.activeChapter();
+    return chapter !== null ? LyricsApi.buildChapterTrack(track, chapter) : track;
+  }
+
+  /**
+   * 切章：偏移按章级键重读，歌词按章级键重载（去重键含章级 id，天然触发重搜）。
+   * 不清封面态（封面归属整曲）；字幕候选 / 探测态属于整片，保留。
+   */
+  private onActiveChapterChanged(): void {
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return;
+    }
+    const eff: Track | null = this.effectiveLyricTrack();
+    if (eff === null) {
+      return;
+    }
+    this.lyricOffsetMs = LyricsApi.getLyricOffset(eff.id);
+    const key: string = this.lyricKeyOf(eff);
+    if (key === this.lastLyricKey) {
+      return;
+    }
+    // 换段立刻清空上一段歌词，避免新词到达前显示错词
+    this.mLrcEntryList = [];
+    this.lastLyricKey = key;
+    this.loadLyrics();
   }
 
   /** 面板副标题：源 / 行数 / 是否有翻译 是否有逐字 */
@@ -304,29 +405,183 @@ export struct LyricsComponent {
     return parts.join(' · ');
   }
 
-  /** 清缓存重搜（用户觉得匹配错了 / 之前没找到） */
+  /**
+   * 歌词调整（换候选 / 换字幕 / 偏移 / 跳过等）成功后，把新词重发给 AVSession ——
+   * 否则桌面歌词 / 车机停留在旧词直到切歌（publishSessionLyric 同曲去重会拦掉重发）。
+   * republishSessionLyric 内部走 LyricsApi 缓存取词，零额外网络；track 空 / 空id 不发。
+   */
+  private syncSessionLyric(track: Track | null): void {
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return;
+    }
+    MusicPlayer.getInstance().republishSessionLyric(track);
+  }
+
+  /** 清缓存重搜（用户觉得匹配错了 / 之前没找到）；章节在播只清本段缓存 */
   private async refetchLyric(): Promise<void> {
     const track: Track | null = this.currentTrack;
     if (track === null || track === undefined || (track.id ?? '').length === 0) {
       return;
     }
-    LyricsApi.clearLyricCache(track.id);
+    const eff: Track | null = this.effectiveLyricTrack();
+    if (eff === null) {
+      return;
+    }
+    LyricsApi.clearLyricCache(eff.id);
     this.showLyricSheet = false;
     await this.loadLyrics();
+    // 重搜结果同步桌面歌词：缓存已清，republish 按新结果重拼 LRC（新词或清空）
+    this.syncSessionLyric(track);
   }
 
-  /** 主动跳过这首歌的歌词（以后不再自动搜） */
+  /** 主动跳过歌词（以后不再自动搜）；章节在播时连整曲一起跳过，避免下一段又冒出歌词 */
   private async skipLyric(): Promise<void> {
     const track: Track | null = this.currentTrack;
     if (track === null || track === undefined || (track.id ?? '').length === 0) {
       return;
     }
     this.lyricToken++;
-    await LyricsApi.skipLyricForTrack(track);
+    const eff: Track | null = this.effectiveLyricTrack();
+    const target: Track = eff !== null ? eff : track;
+    await LyricsApi.skipLyricForTrack(target);
+    if (target.id !== track.id) {
+      await LyricsApi.skipLyricForTrack(track);
+    }
     this.mLrcEntryList = [];
     this.lyricScrollEffect = LyricScrollEffect.Line;
     this.lyricInfo = '已跳过本曲歌词（重新获取可恢复）';
     this.showLyricSheet = false;
+    // 跳过同步桌面歌词：miss 缓存命中 → 重发不带 lyric 字段 → 桌面歌词清空
+    this.syncSessionLyric(track);
+  }
+
+  /** 转写按钮文案：进行中带阶段/百分比，闲时固定入口名 */
+  private transcribeButtonLabel(): string {
+    if (this.transcribeRunning) {
+      return this.transcribePhase === 'decoding'
+        ? '解码中…'
+        : `转写中 ${this.transcribeProgress}%`;
+    }
+    return 'AI 转写歌词';
+  }
+
+  /**
+   * 转写可发起：非运行中 + 本机有离线识别能力 + 有曲目 + 有本地音频
+   * （track.localFilePath / 下载完成 / 听后缓存任一存在）。纯 stat 判定。
+   */
+  private canStartTranscribe(): boolean {
+    if (this.transcribeRunning) {
+      return false;
+    }
+    if (!isTranscribeSupported()) {
+      return false;
+    }
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return false;
+    }
+    return hasLocalAudioSource(track);
+  }
+
+  /** 转写不可用原因（按钮灰显时的提示行；可用 / 运行中返回空串不显示） */
+  private transcribeUnavailableHint(): string {
+    if (this.transcribeRunning) {
+      return '';
+    }
+    if (!isTranscribeSupported()) {
+      return '本机不支持离线语音识别，无法转写';
+    }
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return '';
+    }
+    if (!hasLocalAudioSource(track)) {
+      return '转写需要已下载或已缓存的音频';
+    }
+    return '';
+  }
+
+  /** 转写发起：确认弹窗 → startTranscribe（进度横幅由 AppStorage 五键驱动） */
+  private confirmTranscribe(): void {
+    if (!this.canStartTranscribe()) {
+      return;
+    }
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined) {
+      return;
+    }
+    showConfirm(this.getUIContext(), {
+      title: 'AI 转写歌词',
+      message: '将用本机离线语音识别生成歌词，耗时约等于歌曲时长，期间请保持应用在前台。完成后自动绑定本曲，可再点「编辑歌词」修正。',
+      confirmText: '开始转写',
+      onConfirm: (): void => {
+        void startTranscribe(track);
+      }
+    });
+  }
+
+  /** 打开编辑歌词 sheet：预填当前歌词的 LRC 文本（时间标签 + 行文本） */
+  private openLyricEditor(): void {
+    if (this.mLrcEntryList.length === 0) {
+      return;
+    }
+    this.lyricEditText = serializeLrcEntries(this.mLrcEntryList);
+    this.showLyricEditSheet = true;
+  }
+
+  /**
+   * 保存编辑歌词：parseLrcLyric 重解析（行时长 = 相邻行起点差）→
+   * manual 缓存落库（source 'manual-edit'，自动搜索不覆盖）→ 就地刷新 +
+   * 同步桌面歌词。0 行不关窗（toast 提示检查格式）。
+   */
+  private async saveLyricEdit(): Promise<void> {
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return;
+    }
+    const entries: Array<LrcEntry> = parseLrcLyric(this.lyricEditText);
+    if (entries.length === 0) {
+      postAppToast('未解析到歌词行，请检查格式', 1800);
+      return;
+    }
+    const lines: LyricLine[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      lines.push({
+        time: entries[i].lineStartTime / 1000,
+        text: entries[i].lineWords,
+        words: []
+      });
+    }
+    const result: LyricResult = {
+      lines: lines,
+      synced: true,
+      instrumental: false,
+      trackName: track.title,
+      artistName: track.artist,
+      sourceId: 'manual-edit',
+      source: 'manual-edit',
+      dynamic: false
+    };
+    await LyricsApi.saveBiliSubtitleChoice(track, result);
+    this.mLrcEntryList = entries;
+    this.lyricScrollEffect = LyricScrollEffect.Line;
+    this.lyricInfo = this.buildInfoText(result);
+    this.showLyricEditSheet = false;
+    this.syncSessionLyric(track);
+    postAppToast('歌词已保存', 1600);
+  }
+
+  /** 转写完成（DONE_SEQ 自增）：本曲 → 重载歌词（manual 缓存命中）+ 同步桌面歌词 */
+  private onTranscribeDone(): void {
+    const track: Track | null = this.currentTrack;
+    if (track === null || track === undefined || (track.id ?? '').length === 0) {
+      return;
+    }
+    if (this.transcribeTrackId !== track.id) {
+      return;
+    }
+    void this.loadLyrics();
+    this.syncSessionLyric(track);
   }
 
   /**
@@ -434,6 +689,8 @@ export struct LyricsComponent {
         this.lyricInfo = this.buildInfoText(outcome.result);
         this.biliSubtitleChoices = [];
         this.showLyricSheet = false;
+        // 字幕歌词同步桌面歌词：partial 半截内容也先发（聊胜于无），后台补全后会再同步
+        this.syncSessionLyric(track);
         if (outcome.partial === true) {
           // AI 生成中的半截内容：先展示（聊胜于无），稍后后台静默补全
           this.lyricInfo = `${this.lyricInfo} · AI 生成中，稍后自动补全`;
@@ -519,6 +776,8 @@ export struct LyricsComponent {
         : LyricScrollEffect.Line;
       this.lyricInfo = this.buildInfoText(outcome.result);
       void LyricsApi.saveBiliSubtitleChoice(track, outcome.result);
+      // 完整字幕替换半截内容后同步桌面歌词（时间戳重拼，行数增长部分可见）
+      this.syncSessionLyric(track);
       if (outcome.partial === true && round < BILI_PARTIAL_REFRESH_MAX_ROUNDS) {
         this.scheduleBiliPartialRefresh(choice, trackId, outcome.result.lines.length, round + 1);
       }
@@ -833,8 +1092,12 @@ export struct LyricsComponent {
     this.lyricPickingId = cand.id;
     this.lyricSearchMsg = '';
     const token: number = ++this.lyricToken;
+    const chapter: VideoChapter | null = this.activeChapter();
     try {
-      const result: LyricResult | null = await LyricsApi.chooseLyricCandidate(track, cand);
+      // 章节在播：候选按章级伪曲目落 manual 缓存（每段独立），时间轴平移到整曲
+      const result: LyricResult | null = chapter !== null
+        ? await LyricsApi.chooseLyricCandidateForChapter(track, chapter, cand)
+        : await LyricsApi.chooseLyricCandidate(track, cand);
       if (token !== this.lyricToken) {
         return;
       }
@@ -843,8 +1106,12 @@ export struct LyricsComponent {
         this.lyricScrollEffect = result.dynamic === true
           ? LyricScrollEffect.LetterGradient
           : LyricScrollEffect.Line;
-        this.lyricInfo = this.buildInfoText(result);
+        this.lyricInfo = chapter !== null
+          ? `本段 · ${this.buildInfoText(result)}`
+          : this.buildInfoText(result);
         this.showLyricSheet = false;
+        // 手选词落地后同步桌面歌词：manual 缓存已写入，republish 命中即重发新词
+        this.syncSessionLyric(track);
       } else {
         this.lyricSearchMsg = '获取歌词失败，换个候选试试';
       }
@@ -880,9 +1147,12 @@ export struct LyricsComponent {
       this.resetBiliProbe();
       return;
     }
-    // 偏移每首歌独立（按曲目 id 落盘），切歌必须重读
-    this.lyricOffsetMs = LyricsApi.getLyricOffset(track.id);
-    const key: string = this.lyricKeyOf(track);
+    // 偏移按生效键独立（章节在播 = 章级伪曲目 id；换段由 onActiveChapterChanged 重读）。
+    // 章节可信性由 activeChapter() 按「章态归属曲目 === 当前曲」交叉校验。
+    const chapter: VideoChapter | null = this.activeChapter();
+    const eff: Track = chapter !== null ? LyricsApi.buildChapterTrack(track, chapter) : track;
+    this.lyricOffsetMs = LyricsApi.getLyricOffset(eff.id);
+    const key: string = this.lyricKeyOf(eff);
     if (key === this.lastLyricKey) {
       // 同一首、关键信息没变（例如只是封面被异步补全）→ 不重复请求
       return;
@@ -914,12 +1184,23 @@ export struct LyricsComponent {
       this.mLrcEntryList = [];
       return;
     }
-    // 歌词要经多轮网络往返，期间可能已切歌；令牌保证只采纳最后一次请求
+    // 歌词要经多轮网络往返，期间可能已切歌 / 切段；令牌保证只采纳最后一次请求
     const token: number = ++this.lyricToken;
+    const chapter: VideoChapter | null = this.activeChapter();
     try {
-      const result = await LyricsApi.getLyricForTrack(track);
+      // 章节在播：先按章取词（时间轴已平移），取不到回落整曲歌词
+      let result: LyricResult | null = chapter !== null
+        ? await LyricsApi.getLyricForChapter(track, chapter)
+        : null;
       if (token !== this.lyricToken) {
         return;
+      }
+      const chapterHit: boolean = result !== null;
+      if (result === null) {
+        result = await LyricsApi.getLyricForTrack(track);
+        if (token !== this.lyricToken) {
+          return;
+        }
       }
       if (result !== null) {
         this.mLrcEntryList = this.toLrcEntries(result.lines);
@@ -927,7 +1208,9 @@ export struct LyricsComponent {
         this.lyricScrollEffect = result.dynamic === true
           ? LyricScrollEffect.LetterGradient
           : LyricScrollEffect.Line;
-        this.lyricInfo = this.buildInfoText(result);
+        // 章级命中时标注「本段」；整曲兜底不标注（与改动前文案一致）
+        const info: string = this.buildInfoText(result);
+        this.lyricInfo = chapterHit ? `本段 · ${info}` : info;
       } else {
         this.mLrcEntryList = [];
         this.lyricScrollEffect = LyricScrollEffect.Line;
@@ -1091,9 +1374,12 @@ export struct LyricsComponent {
             this.lyricOffsetMs = ms;
             // 松手（End）/ 点按轨道跳转（Click）才落盘；Begin/Moving 只预览
             if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-              const track: Track | null = this.currentTrack;
-              if (track !== null && track !== undefined && (track.id ?? '').length > 0) {
-                LyricsApi.setLyricOffset(track.id, ms);
+              // 偏移按生效键落盘（章节在播 = 章级伪曲目 id，每段独立）
+              const eff: Track | null = this.effectiveLyricTrack();
+              if (eff !== null && eff !== undefined && (eff.id ?? '').length > 0) {
+                LyricsApi.setLyricOffset(eff.id, ms);
+                // 偏移落盘后同步桌面歌词：republish 按新偏移重拼 LRC 时间戳
+                this.syncSessionLyric(this.currentTrack);
               }
             }
           })
@@ -1115,12 +1401,15 @@ export struct LyricsComponent {
             normal: { .backgroundColor(Color.Transparent) }
           })
           .onClick((): void => {
-            const track: Track | null = this.currentTrack;
-            if (track === null || track === undefined || (track.id ?? '').length === 0) {
+            // 偏移归零按生效键（章节在播 = 章级伪曲目 id）
+            const eff: Track | null = this.effectiveLyricTrack();
+            if (eff === null || eff === undefined || (eff.id ?? '').length === 0) {
               return;
             }
-            LyricsApi.setLyricOffset(track.id, 0);
+            LyricsApi.setLyricOffset(eff.id, 0);
             this.lyricOffsetMs = 0;
+            // 偏移归零后同步桌面歌词：republish 按零偏移重拼 LRC 时间戳
+            this.syncSessionLyric(this.currentTrack);
           })
         Text('重新获取')
           .fontSize(13)
@@ -1204,6 +1493,58 @@ export struct LyricsComponent {
           })
       }
       .width(StyleConstants.FULL_WIDTH)
+
+      // 本机 AI 转写 + 本地编辑双入口：转写要求本机离线识别能力 + 本地音频
+      // （下载 / 缓存任一），不可用时灰显并给提示行；编辑要求当前有歌词可改。
+      Row({ space: 12 }) {
+        Text(this.transcribeButtonLabel())
+          .fontSize(13)
+          .fontColor(this.canStartTranscribe()
+            ? $r('app.color.text_secondary') : $r('app.color.text_tertiary'))
+          .height(44)
+          .layoutWeight(1)
+          .borderRadius(12)
+          .borderWidth(1)
+          .borderColor($r('app.color.bg_divider'))
+          .textAlign(TextAlign.Center)
+          .opacity(this.canStartTranscribe() ? 1 : 0.4)
+          .enabled(this.canStartTranscribe())
+          .stateStyles({
+            pressed: { .backgroundColor($r('app.color.press_overlay')) },
+            normal: { .backgroundColor(Color.Transparent) }
+          })
+          .onClick((): void => {
+            this.confirmTranscribe();
+          })
+        Text('编辑歌词')
+          .fontSize(13)
+          .fontColor(this.mLrcEntryList.length > 0
+            ? $r('app.color.text_secondary') : $r('app.color.text_tertiary'))
+          .height(44)
+          .layoutWeight(1)
+          .borderRadius(12)
+          .borderWidth(1)
+          .borderColor($r('app.color.bg_divider'))
+          .textAlign(TextAlign.Center)
+          .opacity(this.mLrcEntryList.length > 0 ? 1 : 0.4)
+          .enabled(this.mLrcEntryList.length > 0)
+          .stateStyles({
+            pressed: { .backgroundColor($r('app.color.press_overlay')) },
+            normal: { .backgroundColor(Color.Transparent) }
+          })
+          .onClick((): void => {
+            this.openLyricEditor();
+          })
+      }
+      .width(StyleConstants.FULL_WIDTH)
+
+      // 转写不可用原因提示（可用 / 运行中不显示）
+      if (this.transcribeUnavailableHint().length > 0) {
+        Text(this.transcribeUnavailableHint())
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+          .width(StyleConstants.FULL_WIDTH)
+      }
 
       // 探测提示行：未登录 / 非 B 站 / 该视频无字幕 / AI 生成中 / 检测失败；
       // 瞬时失败时给「重新检测」入口（探测链已带抖动重试，正常路径无需人工干预）
@@ -1297,9 +1638,9 @@ export struct LyricsComponent {
             return;
           }
           this.lyricSearchExpanded = true;
-          // 展开预填：清洗后的歌名（用户可改成「歌名 歌手」组合词）
+          // 展开预填：清洗后的歌名（章节在播预填章节标题；用户可改成「歌名 歌手」组合词）
           if (this.lyricSearchKeyword.length === 0) {
-            const track: Track | null = this.currentTrack;
+            const track: Track | null = this.effectiveLyricTrack();
             if (track !== null && track !== undefined) {
               const title: string = track.title ?? '';
               const cleaned: string = cleanTitle(title);
@@ -1419,8 +1760,99 @@ export struct LyricsComponent {
     .padding({ left: 24, right: 24, top: 16, bottom: 16 })
   }
 
+  /**
+   * 编辑歌词半模态：TextArea 预填当前歌词的 LRC 文本（`[mm:ss.cc]行文本`），
+   * 可改文字 / 时间戳后保存 —— parseLrcLyric 重解析落 manual 缓存
+   * （source 'manual-edit'，自动搜索不覆盖）。0 行解析结果不关窗（toast 提示）。
+   */
+  @Builder
+  LyricEditSheetHost() {
+    Column({ space: 16 }) {
+      Column({ space: 4 }) {
+        Text('编辑歌词')
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+        Text('每行格式：[分:秒.厘秒] 歌词文本，如 [01:23.45] 歌词内容')
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .width(StyleConstants.FULL_WIDTH)
+
+      TextArea({ placeholder: '[00:00.00] 歌词文本', text: this.lyricEditText })
+        .width(StyleConstants.FULL_WIDTH)
+        .height(280)
+        .fontSize(14)
+        .fontColor($r('app.color.text_primary'))
+        .placeholderColor($r('app.color.text_tertiary'))
+        .placeholderFont({ size: 14 })
+        .backgroundColor($r('app.color.bg_card'))
+        .borderRadius(12)
+        .padding(12)
+        .onChange((v: string): void => {
+          this.lyricEditText = v;
+        })
+
+      Row({ space: 12 }) {
+        Text('取消')
+          .fontSize(14)
+          .fontColor($r('app.color.text_secondary'))
+          .height(44)
+          .layoutWeight(1)
+          .borderRadius(12)
+          .borderWidth(1)
+          .borderColor($r('app.color.bg_divider'))
+          .textAlign(TextAlign.Center)
+          .stateStyles({
+            pressed: { .backgroundColor($r('app.color.press_overlay')) },
+            normal: { .backgroundColor(Color.Transparent) }
+          })
+          .onClick((): void => {
+            this.showLyricEditSheet = false;
+          })
+        Text('保存')
+          .fontSize(14)
+          .fontColor(Color.White)
+          .height(44)
+          .layoutWeight(1)
+          .borderRadius(12)
+          .backgroundColor(this.themePrimary)
+          .textAlign(TextAlign.Center)
+          .stateStyles({
+            pressed: { .opacity(0.85) },
+            normal: { .opacity(1) }
+          })
+          .onClick((): void => {
+            void this.saveLyricEdit();
+          })
+      }
+      .width(StyleConstants.FULL_WIDTH)
+      .alignItems(VerticalAlign.Center)
+    }
+    .width(StyleConstants.FULL_WIDTH)
+    .padding({ left: 24, right: 24, top: 16, bottom: 24 })
+  }
+
   build() {
     Column() {
+      // 编辑歌词半模态的隐形宿主：半模态是「组件级模态转场」，同一节点不能
+      // 同时绑两个（官方 FAQ：同组件多模态绑定会互相冲突、转场错乱 —— 表现为
+      // 拉起即被打断的"闪一下"）。故独立挂 1×1 节点：position 不参与流式布局，
+      // hitTestBehavior(None) 不挡触摸（与 AppDialogHost 的宿主同口径）。
+      Column()
+        .width(1)
+        .height(1)
+        .position({ x: 0, y: 0 })
+        .hitTestBehavior(HitTestMode.None)
+        .bindSheet($$this.showLyricEditSheet, this.LyricEditSheetHost(), {
+          height: SheetSize.FIT_CONTENT,
+          preferType: SheetType.BOTTOM,
+          dragBar: true,
+          showClose: false,
+          systemMaterial: MaterialCompat.sheetMaterial()
+        })
+
       if (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM) {
         Row() {
           if (this.coverUrl().length > 0 && !this.coverFailed) {
@@ -1486,6 +1918,50 @@ export struct LyricsComponent {
         })
       }
 
+      // 本机 AI 转写进度横幅（全布局生效，服务侧 AppStorage 五键驱动）：
+      // 解码阶段无进度值 → LoadingProgress 不定态；识别阶段按字节推算百分比
+      // Linear 进度条。取消即时生效（seq 失效旧任务，原生解码结果静默丢弃）。
+      if (this.transcribeRunning) {
+        Row({ space: 12 }) {
+          if (this.transcribePhase === 'decoding') {
+            LoadingProgress()
+              .width(18)
+              .height(18)
+              .color($r('app.color.text_secondary'))
+          }
+          Column({ space: 6 }) {
+            Text(this.transcribePhase === 'decoding'
+              ? '正在解码音频…'
+              : `AI 转写中 ${this.transcribeProgress}%`)
+              .fontSize(13)
+              .fontColor($r('app.color.text_primary'))
+            if (this.transcribePhase !== 'decoding') {
+              Progress({ value: this.transcribeProgress, total: 100, type: ProgressType.Linear })
+                .color(this.themePrimary)
+                .backgroundColor($r('app.color.bg_divider'))
+                .style({ strokeWidth: 4 })
+                .width(StyleConstants.FULL_WIDTH)
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+
+          Text('取消')
+            .fontSize(13)
+            .fontColor(this.themePrimary)
+            .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+            .onClick((): void => {
+              cancelTranscribe();
+            })
+        }
+        .width(StyleConstants.FULL_WIDTH)
+        .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+        .borderRadius(12)
+        .backgroundColor($r('app.color.bg_card'))
+        .margin({ bottom: 8 })
+        .alignItems(VerticalAlign.Center)
+      }
+
       // 平板大屏歌词（7 列居中窄栅格）只服务真 LG；折叠屏展开即使宽度落 lg
       //（阔折叠大屏）也走普通歌词列表 —— 分栏
       // 由外层折叠分支的 8 列 4+4 栅格负责，再套窄栅格会双重收窄。
@@ -1539,7 +2015,7 @@ export struct LyricsComponent {
           })
       }
     }
-    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；收起为柔退淡出（onContentExit 的 200ms EaseIn 退场）
+    // 分层入场只挂 opacity（不动 layout 属性，避免整树重排）；收起为柔退淡出（onContentExit 的 120ms EaseIn 退场）
     .opacity(this.enterOpacity)
     .bindSheet($$this.showLyricSheet, this.LyricSheetHost(), {
       // FIT_CONTENT：内容只有 ~230vp，固定半屏高在大屏真机上会留大片空白；

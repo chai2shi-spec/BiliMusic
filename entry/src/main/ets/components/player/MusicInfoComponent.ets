@@ -88,7 +88,7 @@ export struct MusicInfoComponent {
   @StorageProp(STORE_PLAYER_OPEN) @Watch('onPlayerOpenChanged') playerOpen: boolean = false;
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：标题块 200ms EaseIn 柔退淡出 + 回沉（与
+   * 仅柔退路径递增）：标题块 120ms EaseIn 柔退淡出 + 回沉（与
    * PlayerInfoComponent 自持标题块同档 LAYER_EXIT_DELAY_INFO 错峰）。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
@@ -104,7 +104,7 @@ export struct MusicInfoComponent {
     this.titleOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 柔退复位：标题块 200ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场 */
+  /** 柔退复位：标题块 120ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场 */
   private onContentExit(): void {
     this.exitRequested = true;
     this.getUIContext().animateTo(
@@ -284,7 +284,7 @@ export struct MusicInfoComponent {
           })
           // 分层入场：只挂 transform 系属性，不动 width/height/padding。
           // 这一层是「封面之外的容器」，所以不会影响 CoverDisc 的 geometryTransition 目标框。
-          // 收起为柔退退场（onContentExit 的 200ms EaseIn 淡出 + 回沉）。
+          // 收起为柔退退场（onContentExit 的 120ms EaseIn 淡出 + 回沉）。
           .opacity(this.titleOpacity)
           .translate({ y: this.titleOffsetY })
           Blank()

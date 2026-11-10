@@ -149,6 +149,14 @@ export interface Track {
    */
   audioBackupUrls?: string[];
   /**
+   * 所选音轨的综合响度（LUFS，B 站 playurl 响应 dash 音轨的 loudness 字段）。
+   * 「音量均衡」按它计算归一增益（目标 LOUDNESS_TARGET_LUFS）；缺失 =
+   * 服务端未下发（老视频 durl 兜底 / 直播流 / 官方未公开该字段）→ 该曲不归一。
+   * 与 audioBackupUrls 同款存活范围：仅在线播放链路内存中使用，slimTrack / 落盘
+   * 不带 —— 队列 / 最近播放重播必经 playurl 重解析重建 Track，本值自然刷新。
+   */
+  audioLoudness?: number;
+  /**
    * 已下载到沙箱的本地文件路径（可选）。
    *
    * 非空即代表「这一首不用联网解析音源，直接播本地文件」—— 播放内核据此走
@@ -215,6 +223,8 @@ export function buildTrack(partial: Partial<Track>): Track {
     category: partial.category,
     rcmdReason: partial.rcmdReason,
     likeCount: partial.likeCount,
+    // 音量均衡元数据（可缺）：undefined 不参与 JSON.stringify；重播重解析时刷新
+    audioLoudness: partial.audioLoudness,
     // 直播条目标记与房间号（可缺）：undefined 不参与 JSON.stringify；
     // slimTrack / 播放内核据此走直播专用链路
     isLive: partial.isLive,
@@ -555,6 +565,14 @@ export interface AppSettings {
    */
   trackVolumeEntryEnabled: boolean;
   /**
+   * 音量均衡（设置 → 播放；默认开，参照 B 站官方播放器同名功能）：开启后按
+   * playurl 下发的音轨响度（LUFS）把每首歌拉平到统一目标响度（归一增益经
+   * AVPlayer.setLoudnessGain 与「单曲音量」增益叠加生效）；元数据缺失的曲目
+   * 静默跳过。无 AppStorage 镜像：MusicPlayer 在换源 prepared 与开关切换
+   * （applyVolumeNormalizeNow）时就近读 AppPreferences。
+   */
+  volumeNormalizeEnabled: boolean;
+  /**
    * 分段列表入口（设置 → 播放；默认关）：开启后播放页功能行出现「分段列表」
    * 入口（章节列表弹层 seek 跳转 + 进度条分段刻度；无分段视频弹层展示空态）。
    * 运行时镜像 STORE_CHAPTERS_ENTRY_ENABLED。
@@ -623,12 +641,7 @@ export interface AppSettings {
    */
   sleepTimerEnd: number;
   /**
-   * 锁屏卡片（LockScreenCard）定时停止的默认档位（分钟，取值限
-   * SLEEP_OPTIONS）。卡片 chip 点按即按此档开启定时，再按取消。
-   */
-  lockCardSleepMinutes: number;
-  /**
-   * 桌面歌词总开关（设置 → 播放 + 播放页功能行入口；默认关）：开启后调用
+   * 桌面歌词总开关（播放页功能行入口一键开 / 关；默认关）：开启后调用
    * AVSession Kit 系统「歌词组件」（avSession.enableDesktopLyric +
    * setDesktopLyricVisible），由系统以悬浮窗形式在桌面显示当前行歌词
    * （歌词源 = 已上报的 AVMetadata.lyric 标准 LRC）。无需任何悬浮窗权限。
@@ -642,6 +655,13 @@ export interface AppSettings {
    * 运行时镜像 STORE_FLOAT_LYRIC_LOCKED。
    */
   floatLyricLocked: boolean;
+  /**
+   * 「桌面歌词入口」显隐开关（播放设置「播放页入口」区块；默认开）：
+   * 开 = 播放页功能行渲染桌面歌词一键开 / 关按钮，关 = 隐藏该按钮
+   * （已开启的桌面歌词不受影响，仍由系统继续显示）。
+   * 运行时镜像 STORE_FLOAT_LYRIC_ENTRY_ENABLED。
+   */
+  floatLyricEntryEnabled: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -672,6 +692,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   skipIntroEntryEnabled: false,
   upSpaceEntryEnabled: false,
   trackVolumeEntryEnabled: false,
+  volumeNormalizeEnabled: true,
   chaptersEntryEnabled: false,
   descEntryEnabled: false,
   lyricCentered: false,
@@ -684,9 +705,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   autoPickedCdnLine: '',
   funcItemOrder: DEFAULT_FUNC_ITEM_ORDER,
   sleepTimerEnd: 0,
-  lockCardSleepMinutes: 30,
   floatLyricEnabled: false,
-  floatLyricLocked: false
+  floatLyricLocked: false,
+  floatLyricEntryEnabled: true
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -1036,6 +1057,11 @@ export interface AudioStream {
   codecid: number;
   baseUrl: string;
   backupUrl: string[];
+  /**
+   * 该音轨综合响度（LUFS，B 站 playurl 响应实测字段，官方未公开文档化）：
+   * 「音量均衡」归一增益的数据源。缺失 = 服务端未下发 → 音量均衡对该曲不生效。
+   */
+  loudness?: number;
 }
 
 /** 杜比音轨容器：B 站把杜比全景声放在 dash.dolby.audio，不混入 dash.audio */
@@ -1110,5 +1136,7 @@ export interface TrackSource {
   audioMimeType: string;
   /** 所选音轨的实测带宽（bps）。见 DownloadTask.audioBandwidth 的说明。 */
   audioBandwidth: number;
+  /** 所选音轨的综合响度（LUFS，见 AudioStream.loudness）：音量均衡归一增益数据源，缺失 = 不归一 */
+  audioLoudness?: number;
 }
 

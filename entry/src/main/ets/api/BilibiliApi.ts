@@ -11,7 +11,7 @@ import { HttpUtil, HttpTextResult } from '../utils/HttpUtil';
 import { toHttpsUrl, stripHtmlTags, decodeHtmlEntities } from '../utils/TextUtil';
 import { encodeWbi } from './WbiSign';
 import { gaiaWebParams } from '../utils/RiskShield';
-import { appSignQuery } from '../utils/AppSign';
+import { appSignQuery, appSignQueryWith } from '../utils/AppSign';
 import { sleep } from '../utils/AsyncUtil';
 import { CdnLineOption, effectiveCdnLine, replaceUposHost } from '../utils/CdnLine';
 import { recordPlaybackLog, PLAYBACK_LOG_WARN } from '../service/PlaybackLogStore';
@@ -1944,6 +1944,59 @@ async function fetchTvPlayUrl(aid: number, cid: number, anonymous: boolean): Pro
 }
 
 /**
+ * TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：
+ * 用 APP 签名域（安卓客户端 appkey）打 `/x/player/playurl`（platform=android），
+ * 验证 APP 通道的 dash 音轨是否下发 loudness 响度元数据（Web 通道已实测无）。
+ * 匿名请求（不带登录 Cookie，与账号零关联）；fire-and-forget：任何失败只记
+ * 日志，绝不影响取流主链路。
+ */
+function probeAppPlayUrlLoudness(avid: number, cid: number): void {
+  if (!(avid > 0) || !(cid > 0)) {
+    return;
+  }
+  // 公开的安卓客户端固定凭据（bilibili-API-collect 文档示例同款，第三方共用，非本项目密钥）
+  const androidKey: string = '1d8b6e7d45233436';
+  const androidSec: string = '560c52ccd288fed045859ed18bffd973';
+  const params: Record<string, string> = {
+    avid: String(avid),
+    cid: String(cid),
+    fnval: '4048',
+    fnver: '0',
+    fourk: '1',
+    mobi_app: 'android',
+    platform: 'android',
+    qn: '16',
+    type: ''
+  };
+  const query: string = appSignQueryWith(androidKey, androidSec, params);
+  HttpUtil.requestJson<BiliEnvelope<PlayUrlData>>(
+    `${BILI_API}/x/player/playurl?${query}`,
+    {
+      // BiliDroid 标记 UA（与 TV 通道同款）：APP 域端点按 UA 判客户端身份
+      headers: { 'User-Agent': BILI_TV_UA },
+      skipLoginCookie: true
+    }
+  ).then((data: BiliEnvelope<PlayUrlData>): void => {
+    if (data.code !== 0) {
+      console.info(`probe: app playurl code=${data.code} msg=${data.message}`);
+      return;
+    }
+    const raw: string = JSON.stringify(data);
+    console.info(`probe: app playurl 'loudness' idx=${raw.indexOf('loudness')}`);
+    const play: PlayUrlData | undefined = data.data;
+    const dash: DashData | undefined = play?.dash;
+    if (dash !== undefined && dash.audio && dash.audio.length > 0) {
+      console.info(`probe: app playurl audio[0] = ` +
+        `${JSON.stringify(dash.audio[0]).replace(/https?:[^"]+/g, '[url]')}`);
+    } else {
+      console.info(`probe: app playurl no dash audio (durl=${play?.durl ? 'yes' : 'no'})`);
+    }
+  }).catch((e: Error): void => {
+    console.info(`probe: app playurl failed: ${e.message}`);
+  });
+}
+
+/**
  * 取流统一入口：**双 Web 通道交叉 + TV 域末级兜底**。
  *
  * 通道顺序（`wantHiRes` = 无损偏好 + 已登录 + 非匿名）：
@@ -2113,7 +2166,9 @@ function normalizeAudioStream(raw: AudioStream): AudioStream {
     mimeType: raw.mimeType,
     codecid: raw.codecid,
     baseUrl: raw.baseUrl,
-    backupUrl: raw.backupUrl ?? []
+    backupUrl: raw.backupUrl ?? [],
+    // 音量均衡元数据透传（LUFS，可缺）：缺失 = 服务端未下发 → 归一不生效
+    loudness: raw.loudness
   };
 }
 
@@ -2221,6 +2276,8 @@ interface AudioSelection {
   bandwidth: number;
   /** 'dash' | 'durl'，仅用于日志与排查 */
   container: string;
+  /** 所选音轨综合响度（LUFS，可缺）：音量均衡归一增益数据源；durl 兜底形态无此字段 */
+  loudness?: number;
 }
 
 /**
@@ -2253,7 +2310,8 @@ function applyCdnLineToSelection(sel: AudioSelection): AudioSelection {
     quality: sel.quality,
     mimeType: sel.mimeType,
     bandwidth: sel.bandwidth,
-    container: sel.container
+    container: sel.container,
+    loudness: sel.loudness
   };
 }
 
@@ -2309,6 +2367,15 @@ function durlToAudioSelection(playData: PlayUrlData): AudioSelection | null {
 }
 
 function resolveAudioSelection(playData: PlayUrlData, preferredQuality: number): AudioSelection {
+  // TEMP PROBE（音量均衡响度字段排查，确认后删除）：
+  // ① 全响应 substring 检查 'loudness'；② dash 音轨[0]原始字段 dump（URL 脱敏）
+  const probeRaw: string = JSON.stringify(playData);
+  console.info(`probe: playurl 'loudness' idx=${probeRaw.indexOf('loudness')}`);
+  const probeDash: DashData | undefined = playData.dash;
+  if (probeDash !== undefined && probeDash.audio && probeDash.audio.length > 0) {
+    console.info(`probe: playurl audio[0] = ` +
+      `${JSON.stringify(probeDash.audio[0]).replace(/https?:[^"]+/g, '[url]')}`);
+  }
   const streams: AudioStream[] = collectAudioStreams(playData);
   if (streams.length > 0) {
     const best: AudioStream = pickAudioStream(streams, preferredQuality);
@@ -2324,7 +2391,8 @@ function resolveAudioSelection(playData: PlayUrlData, preferredQuality: number):
       quality: best.quality,
       mimeType: best.mimeType,
       bandwidth: best.bandwidth,
-      container: 'dash'
+      container: 'dash',
+      loudness: best.loudness
     });
   }
   const byDurl: AudioSelection | null = durlToAudioSelection(playData);
@@ -2366,6 +2434,8 @@ function buildTrackSource(
       break;
     }
   }
+  // TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：fire-and-forget
+  probeAppPlayUrlLoudness(detail.aid, cid);
   return {
     bvid: detail.bvid,
     aid: detail.aid,
@@ -2378,7 +2448,8 @@ function buildTrackSource(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth
+    audioBandwidth: best.bandwidth,
+    audioLoudness: best.loudness
   };
 }
 
@@ -3865,6 +3936,8 @@ async function extractAudioByAvidCid(
     await fetchPlayUrlData({ avid: aid, cid: cid }, preferredQuality, anonymous);
   // 与 buildTrackSource 共用同一条选择链：dash 优先 → durl 兜底 → 都没有才抛错
   const best: AudioSelection = resolveAudioSelection(playData, preferredQuality);
+  // TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：fire-and-forget
+  probeAppPlayUrlLoudness(Number(aid) || 0, Number(cid) || 0);
   return {
     bvid: bvid,
     aid: Number(aid) || 0,
@@ -3877,7 +3950,8 @@ async function extractAudioByAvidCid(
     audioBackupUrls: best.backupUrls,
     audioQuality: best.quality,
     audioMimeType: best.mimeType,
-    audioBandwidth: best.bandwidth
+    audioBandwidth: best.bandwidth,
+    audioLoudness: best.loudness
   };
 }
 

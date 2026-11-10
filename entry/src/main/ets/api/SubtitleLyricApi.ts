@@ -690,6 +690,9 @@ async function requestPlayerInfo(
       { params: params }
     );
   }
+  // TEMP PROBE（音量均衡响度字段排查，确认后删除）：全响应 substring 检查
+  const probeRaw: string = JSON.stringify(envelope);
+  console.info(`probe: player v2 'loudness' idx=${probeRaw.indexOf('loudness')}`);
   if (envelope.code !== 0) {
     const code: number = envelope.code ?? -1;
     const isRisk: boolean = RETRYABLE_BIZ_CODES.indexOf(code) >= 0;

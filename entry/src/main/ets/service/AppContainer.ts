@@ -19,6 +19,7 @@ import { initLoginState } from './LoginStore';
 import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
+import { initLyricTranscribeStore } from './LyricTranscribeService';
 import { initIntroSkipStore } from './IntroSkipStore';
 import { initChapterCacheStore } from './ChapterCacheStore';
 import { initTrackVolumeStore } from './TrackVolumeStore';
@@ -28,6 +29,7 @@ import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
 import { PREF_FAV_PUSH_QUEUE, STORE_STARTUP_HINT_MSG, STORE_STARTUP_HINT_SEQ } from '../common/Constants';
 import { CardPublisher } from './card/CardPublisher';
+import { initCloudSync } from './CloudSyncManager';
 
 /**
  * buvid 升级失败的延迟重试间隔（ms）：
@@ -94,6 +96,9 @@ export class AppContainer {
     // 听后缓存目录：filesDir/listen_cache，512MB LRU。
     // 同步建目录 + 扫描索引（文件数百级有上界），毫秒级不拖慢启动。
     initListenCache(context);
+    // 本机转写临时 PCM 目录：cacheDir/transcribe（临时产物，系统可清理）。
+    // 只登记路径，目录由任务发起时懒建，不拖慢启动。
+    initLyricTranscribeStore(context);
     // 按曲「跳过开头」秒数表：filesDir/intro_skip.json 装载进内存 Map。
     // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
     // 查询返回 0，无害降级为「该曲目不跳过」。
@@ -165,6 +170,14 @@ export class AppContainer {
       CardPublisher.getInstance().attach(context);
     } catch (e) {
       console.error(`[AppContainer] card publisher attach failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+    // 华为云空间同步：初始化（幂等）+ 注册数据变更监听，8s 后自动跑首轮。
+    // 云端目录探针在内部完成 —— 系统同步开关未开时安全降级为 no-op，
+    // 用户中途打开开关无需重启（下一轮探针自然通过）。
+    try {
+      initCloudSync(context);
+    } catch (e) {
+      console.error(`[AppContainer] cloud sync init failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
     }
   }
 

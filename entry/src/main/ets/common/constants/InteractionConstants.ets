@@ -53,19 +53,25 @@ export const LAYER_DELAY_CONTROL: number = 400;
  * ══════════ 收起分层柔退 ══════════
  *
  * morph 风格收起时内容层不再单帧瞬隐，改为**反向错峰柔和退场**（镜像入场节奏）：
- * 背景收缩自顶部揭起 → 顶栏先退、标题块次之、控制区/歌词最后；各层 200ms
- * EaseIn 加速淡出 + 复位位移（与 700ms 几何转场重叠，总退场 ~340ms）。
+ * 背景收缩自顶部揭起 → 顶栏先退、标题块次之、控制区/歌词最后；各层 120ms
+ * EaseIn 加速淡出 + 复位位移（与 700ms 几何转场重叠，总退场 ~200ms）。
  * seq（STORE_PLAYER_CONTENT_EXIT）仍在主动画闭包外递增，各层 @Watch 内
  * **自建** animateTo 驱动退场；下滑收起路径不触发本组常量。
  */
-/** 柔退单层时长（ms，EaseIn 加速离场） */
-export const LAYER_EXIT_DURATION_MS: number = 200;
+/** 柔退单层时长（ms，EaseIn 加速离场）：120 保证错峰层次又不拖泥带水 */
+export const LAYER_EXIT_DURATION_MS: number = 120;
 /** 顶栏柔退延迟（ms）：背景收缩自顶揭起，顶栏最先退 */
 export const LAYER_EXIT_DELAY_TOP: number = 0;
 /** 标题块柔退延迟（ms） */
-export const LAYER_EXIT_DELAY_INFO: number = 70;
-/** 控制区 / 歌词柔退延迟（ms）：与入场 LAYER_DELAY_CONTROL 同批语义 */
-export const LAYER_EXIT_DELAY_CONTROL: number = 140;
+export const LAYER_EXIT_DELAY_INFO: number = 40;
+/** 控制区 / 歌词柔退延迟（ms）：与入场 LAYER_DELAY_CONTROL 同批语义；末批 80+120=200ms 退净 */
+export const LAYER_EXIT_DELAY_CONTROL: number = 80;
+/**
+ * 进度区柔退时长（ms，EaseIn，0 延迟起步）：进度条（PlayerProgressArea，含双侧时间）
+ * 是收起时最抢镜的动效元素（滑块 + 插值动画），单独比控制区整体更快消失 ——
+ * 控制区其余内容（功能行 / 三键行）仍走 80+120ms 节奏，进度区 0+80ms 先行退净。
+ */
+export const LAYER_EXIT_PROGRESS_MS: number = 80;
 /**
  * 背景面收起末端渐隐曲线：透明度 1→0 但曲线前 ~65% 恒持 ≈1、末端加速衰减 ——
  * 背景面收缩接近迷你栏时融入下层页面，替代落位瞬间硬切。调早调晚改 x1。

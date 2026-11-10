@@ -130,6 +130,7 @@ import {
   STORE_NAV_INDICATOR_BOTTOM,
   STORE_NET_RETRY_REV,
   STORE_ACTIVE_TAB,
+  STORE_SETTINGS_SUBTITLE,
   STORE_TAB_SWITCH_REQUEST,
   STORE_TAB_SWITCH_TARGET,
   STORE_BAR_LAYOUT,
@@ -371,7 +372,7 @@ struct Index {
    *
    * 迷你栏 → 全屏播放页不走 NavDestination 路由：PlayBar.openPlayer 写
    * STORE_PLAYER_OVERLAY_MOUNTED → 本页根 Stack 条件挂载 LazyDest('Player')
-   * （复用懒加载注册 + 1.5s 预热）→ PlayerInfoComponent 单个 animateTo(700ms,
+    * （复用懒加载注册 + 1.5s 预热）→ PlayerInfoComponent 单个 animateTo(700ms,
    * fastOutSlowIn) 驱动：容器从迷你栏向四周扩大 + 封面 geometryTransition 页内配对飞行 +
    * 页签图标淡出（playerOpen）+ 内容分层入场（LAYER_DELAY_*）。
    * 收起逆向镜像：TopArea 收起按钮（STORE_PLAYER_CLOSE_REQUEST seq）或
@@ -389,11 +390,13 @@ struct Index {
   @StorageProp(STORE_PLAYER_OVERLAY_MOUNTED) @Watch('onPlayerOverlayMountedChanged') playerOverlayMounted: boolean = false;
 
   /**
-   * 播放页横竖屏自动旋转：overlay 在场期间窗口跟随传感器自动旋转，卸载复原
+    * 播放页横竖屏自动旋转：overlay 在场期间窗口跟随传感器自动旋转，卸载复原
    * 系统默认。卸载选收起动画落定后的时机：收起瞬间恢复会与收起 morph 动画并行
    * 旋转，geometryTransition 配对按中途框计算必跳变。失败仅记日志不阻断播放。
    */
   private onPlayerOverlayMountedChanged(): void {
+    // 收起闩锁的会话边界：overlay 挂载（新一轮打开）与卸载（收起落定）都清闩
+    this.closeLatched = false;
     const ctx: common.Context | undefined = this.getUIContext().getHostContext();
     if (ctx === undefined) {
       return;
@@ -466,6 +469,13 @@ struct Index {
   @StorageProp(STORE_SUB_PAGE_ACTIVE) subPageActive: boolean = false;
 
   /**
+   * 收起在途同步闩锁：一次系统返回可能同 tick 双触发 closePlayer
+   * （二级页 CLOSE_REQUEST + 本页 onBackPress 直调），必须同步判重
+   * （playerOpen 镜像存在刷新时序差）。复位见 onPlayerOverlayMountedChanged。
+   */
+  private closeLatched: boolean = false;
+
+  /**
    * 收起播放页：按 STORE_PLAYER_CLOSE_ANIM 分流。
    *
    * ── 下滑分支（slide 风格全部入口 / 页面已被手势拖离原位）→ slideOutClose ──
@@ -476,8 +486,8 @@ struct Index {
    * ① STORE_PLAYER_CONTENT_EXIT 递增在主动画闭包【外】执行 —— 四个内容层组件
    *   与本页自持内容 @Watch 消费时 seq 不在任何主动画作用域内，各层自建
    *   animateTo 做**反向错峰柔退**（LAYER_EXIT_*，顶栏先、控制区/歌词后，
-   *   各 200ms EaseIn）。
-   * ② 唯一的主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE）闭包内只写
+    *   各 120ms EaseIn）。
+    * ② 唯一的主动画（PLAYER_TRANSITION_MS=700ms / PLAYER_MAIN_CURVE）闭包内只写
    *   STORE_PLAYER_OPEN=false —— 同帧驱动：
    *   · 背景面 geometryTransition 收回迷你栏透明锚点矩形，离场透明度由
    *     PlayerInfoComponent 背景面的非对称 transition 接管：PLAYER_BG_EXIT_CURVE
@@ -498,6 +508,17 @@ struct Index {
       && (AppStorage.get<boolean>(STORE_PLAYER_SLIDE_IN) ?? false)) {
       return;
     }
+    // 同步闩锁（收起会话内只允许一次）：一次系统返回会同时走到两条路径 ——
+    // 二级页 handleSubPageBackPress 递增 CLOSE_REQUEST（@Watch → 本函数）与
+    // Index.onBackPress 直调本函数；且同一 tick 内 playerOpen 的状态镜像可能
+    // 尚未刷新，仅靠 playerOpen 判重会漏掉第二次调用 → 连发两次 animateTo，
+    // CONTENT_EXIT 二次递增让各内容层柔退重播、morph 配对回弹（"返回两次"体感）。
+    // 复位点挂在 overlay 挂载态变化（onPlayerOverlayMountedChanged），与动画
+    // 时长解耦：收起落定卸载 / 下次打开挂载都会清闩。
+    if (this.closeLatched) {
+      return;
+    }
+    this.closeLatched = true;
     if (this.closeAnimStyle === PLAYER_CLOSE_STYLE_SLIDE || this.slideOffset > 1 || this.dragActive) {
       this.slideOutClose();
       return;
@@ -749,6 +770,13 @@ struct Index {
    * 照跑在启动路径上，拖冷启动）。onChange 的回写语句无需任何改动。
    */
   @StorageLink(STORE_ACTIVE_TAB) activeTab: number = 0;
+
+  /**
+   * 设置页顶栏副行（「v1.3.8 · 未登录」）：由 SettingsPage 汇总版本号与登录三态
+   * 后写入 AppStorage，本页只订阅显示 —— 顶栏是四页签共用的 stackBuilder，
+   * 让 Index 直接依赖 LoginStore / bundleManager 会把登录态耦合进根容器。
+   */
+  @StorageProp(STORE_SETTINGS_SUBTITLE) settingsSubtitle: string = '';
 
   /**
    * 一次性启动提示消费：MSG + SEQ 双键。
@@ -1477,13 +1505,27 @@ struct Index {
         .layoutWeight(1)
         .alignItems(VerticalAlign.Center)
       } else {
-        Text(this.tabTitleText())
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
+        // 设置页：标题右侧补 13fp 副行（版本号 · 登录态），版式对齐歌单页 plSubtitle。
+        // ⚠️ 歌单页那行 14fp 不动 —— 本轮字阶 / 颜色修订只覆盖设置页内。
+        Row({ space: 6 }) {
+          Text(this.tabTitleText())
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.text_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .flexShrink(1)
+          if (this.settingsSubtitle.length > 0) {
+            Text(this.settingsSubtitle)
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+              .maxLines(1)
+              .flexShrink(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .layoutWeight(1)
+        .alignItems(VerticalAlign.Center)
       }
       if (this.activeTab === TAB_PLAYLISTS) {
         PlTitleActions()

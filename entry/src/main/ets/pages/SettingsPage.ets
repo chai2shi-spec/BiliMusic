@@ -1,31 +1,29 @@
 /**
- * 设置页（主页面）：本页只保留两块内容：
- *   1. 账户卡（无分组标题）：扫码登录行（未登录点击进登录页 'Login' 路由；
- *      已登录显示头像 / 昵称 / 会籍徽标（B 站风格渐变胶囊），行最右「退出
- *      登录」显式按钮（弹确认后退出），登录后下方连着三行登录后能力入口
- *      （收藏夹同步 / 观看历史与稍后再看 / 我的关注）；
- *   2. 设置入口卡（iOS 设置风格彩色圆角图标行，两张分组卡片）：
- *      卡 1：播放设置 / 下载与存储 / 外观设置 / 应用图标 / 歌单导入；
- *      卡 2：查看更新日志 / 打赏作者 / PiLink 邀测 / 关于本项目 / 报错记录 / 反馈Q群
- *      （点按复制群号），点击分别推入对应二级页、弹更新日志弹窗或执行复制。
+ * 设置页（一级入口页）—— 2026-11-09 重设计实施版。
  *
- * 二级页（各自独立文件，懒加载注册见 service/LazyPageRegistry.ets）：
- *   · PlaybackSettingsPage（'PlaybackSettings'）—— 播放设置；
- *   · HomeFeedFilterPage（'HomeFeedFilter'）—— 首页筛选；
- *   · DownloadSettingsPage（'DownloadSettings'）—— 下载与存储；
- *   · AppearanceSettingsPage（'AppearanceSettings'）—— 外观设置；
- *   · PlaylistBackupPage（'PlaylistBackup'）—— 歌单备份；
- *   · PlaybackLogPage（'PlaybackLog'）—— 播放失败日志页；
- *   · RewardPage（'Reward'）—— 打赏作者页；
- *   · AboutPage（'About'）—— 关于页。
- * 本页不持有 AppSettings 状态：所有开关 / 值展示都在二级页里，
- * 主题色运行时值经 AppStorage（STORE_THEME_*）订阅刷新，跨页无同步负担。
+ * 四张卡：
+ *   A「账户与同步」：账户三态行（未登录 / 已登录 / 登录已失效）+ **云空间同步
+ *     直达**（无条件渲染，未登录也可见，→ 'HuaweiCloudSync'）+ 登录后才有的
+ *     「更多账号功能」折叠（B 站收藏夹同步 / 观看历史 / 我的关注 / 听直播）；
+ *   C「常用设置」：播放 / 下载 / 外观 / 首页筛选，行尾回显当前值；
+ *   D「数据与工具」：歌单与备份 / 应用图标 / 报错记录，行尾回显当前值；
+ *   E「关于与帮助」：5 行常驻卡片（用户 2026-11-09 23:35 定稿：不做折叠）。
  *
- * 账户卡区：本页是 Tabs 常驻页，登录态变化靠 STORE_LOGIN_REV 版本号 +
- * @Watch 驱动刷新（aboutToAppear 只触发一次）。
+ * ⚠️ 两个「同步」是不同功能、不同路由，别合并（design/设置页-重新设计-方案.md §0.1）：
+ *   · 云空间同步 → 'HuaweiCloudSync' → CloudSyncPage（华为云空间，与登录无关）
+ *   · B 站收藏夹同步 → 'CloudSync' → FavSyncPage（收藏夹镜像，登录后才渲染）
  *
- * 简约 iOS 风格：组件见 components/InsetCardGroup.ets；固定栏（THIN 毛玻璃，
- * 低版本实底兜底）「设置」小标题常显 —— 与 Playlists / Downloads 同套交互。
+ * 动作用尾部符号区分：进页 › / 弹窗 ⓘ / 外链 ↗ / 复制 ⧉ / 折叠 ⌄。
+ * 图标色不再用 9 个硬编码 iOS 色；全部 18 个入口行**统一**使用
+ * STORE_THEME_SURFACE 底 + STORE_THEME_DEEP 字这一对主题色（用户 2026-11-09 23:40
+ * 要求颜色一致），随 8 套主题色与深浅模式联动。
+ *
+ * 值回显：本页不持有 AppSettings 常驻订阅，只在 aboutToAppear / 切页签 / 二级页
+ * 返回时一次性读 getter 填 @State 字符串（方案 A）。**动态值不进带参 @Builder 的
+ * 参数** —— Builder 只收静态字面量，值在 Builder 体内经 this.entryValueOf(key) 现算。
+ *
+ * 登录态靠 STORE_LOGIN_REV 的 @Watch 刷新（本页是 Tabs 常驻页，aboutToAppear
+ * 只触发一次）；顶栏副行文本经 AppStorage 交给 Index.tabTitleRow 订阅。
  */
 
 import { bundleManager, common } from '@kit.AbilityKit';
@@ -35,9 +33,22 @@ import {
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
   STORE_LOGIN_REV,
+  STORE_ACTIVE_TAB,
+  STORE_SUB_PAGE_ACTIVE,
+  STORE_SETTINGS_SUBTITLE,
   STORE_THEME_PRIMARY,
+  STORE_THEME_DEEP,
+  STORE_THEME_SURFACE,
   STORE_THEME_ON
 } from '../common/Constants';
+import { AppSettings, ThemeMode } from '../model/MusicModels';
+import { AppPreferences } from '../preferences/AppPreferences';
+import { themeColorLabel } from '../common/ThemeColors';
+import { FeedFilterConfig } from '../model/FeedFilterModels';
+import { getFeedFilterConfig } from '../service/HomeFeedFilterStore';
+import { getPlaybackLogsNewestFirst } from '../service/PlaybackLogStore';
+import { getLastReadAt } from '../service/CloudSyncStore';
+import { isCloudDirAvailable } from '../service/CloudDirClient';
 import { getLoginUser, isLoggedIn, isLoginStale, refreshLoginUser, logout, LoginUser } from '../service/LoginStore';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { LoginRouteParam } from '../service/NavRouteParams';
@@ -46,39 +57,27 @@ import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
 import { copyText } from '../utils/ClipboardUtil';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
-// 设置页签内容列上限与根顶栏（immersiveTitleBarNarrow）
-// 及其他页签统一走 840 口径（TwoColumnLayout.contentMaxWidth）。
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { InsetCard, CardDivider } from '../components/InsetCardGroup';
+import { InsetCard, CardDivider, SectionHeader } from '../components/InsetCardGroup';
 import { showFullChangelog } from '../components/WhatsNewDialog';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
-/**
- * 设置入口行的图标底色（iOS 设置风格：每行固定异色，深浅色模式通用；
- * 图标字形为白色 SymbolGlyph，对比度充分）。
- */
-const ICON_BG_PINK: string = '#FB7299';
-const ICON_BG_BLUE: string = '#3478F6';
-const ICON_BG_PURPLE: string = '#AF52DE';
-const ICON_BG_GREEN: string = '#34C759';
-const ICON_BG_GRAY: string = '#8E8E93';
-/** 登录后能力三行专用异色（iOS 系统色板：橙 / 青 / 靛） */
-const ICON_BG_ORANGE: string = '#FF9500';
-const ICON_BG_TEAL: string = '#30B0C7';
-const ICON_BG_INDIGO: string = '#5E5CE6';
-/** 「打赏作者」入口图标底色（iOS 系统红）：打赏/爱心的辨识色，与其它异色行并列 */
-const ICON_BG_RED: string = '#FF3B30';
-
-/** 入口行图标容器边长与圆角（vp）：约 iOS 设置图标的视觉比例 */
+/** 入口行图标容器边长与圆角（vp）：圆角 8 = 规范 sm 档 */
 const ENTRY_ICON_SIZE: number = 28;
-const ENTRY_ICON_RADIUS: number = 7;
+const ENTRY_ICON_RADIUS: number = 8;
+
+/** 动作类型：决定尾部符号与无障碍播报，点击前即可预判结果 */
+const ENTRY_ACTION_PAGE: number = 0;
+const ENTRY_ACTION_DIALOG: number = 1;
+const ENTRY_ACTION_LINK: number = 2;
+const ENTRY_ACTION_COPY: number = 3;
+const ENTRY_ACTION_FOLD_ACCOUNT: number = 4;
 
 /**
- * 会籍徽标渐变色对（B 站风格硬编码、不随主题）：
- * 月度大会员粉渐变 / 年度大会员金渐变，白色小字胶囊。
- * 会籍是身份标识而非 UI 主题色，用 B 站官方会员色系最易辨识。
+ * 会籍徽标渐变色对（B 站风格、不随主题）：会籍是身份标识而非 UI 主题色，
+ * 用 B 站官方会员色系最易辨识。
  */
 const VIP_BADGE_PINK_FROM: string = '#FB7299';
 const VIP_BADGE_PINK_TO: string = '#FF9EB8';
@@ -88,62 +87,104 @@ const VIP_BADGE_GOLD_TO: string = '#E29B2D';
 /** 反馈 Q 群号：入口行点按即复制到剪贴板 */
 const FEEDBACK_QQ_GROUP: string = '1129926978';
 
-/**
- * PiLink 邀测链接（应用市场邀测页）：PiLink 是原生鸿蒙精简版 B 站，
- * 入口行点击弹确认框后经 openLink 跳转（不推二级页）。
- */
+/** PiLink 邀测链接（应用市场邀测页）：确认后经 openLink 跳转，不推二级页 */
 const PILINK_INVITE_URL: string =
-  'https://appgallery.huawei.com/link/invite-test-wap?taskId=49182f9984fd89834ae52acdf7093c66&invitationCode=XMFbRSukNQ';
+  'https://appgallery.huawei.com/link/invite-test-wap?taskId=3a0510d4a77f2a1fa42c033991b1b118&invitationCode=XMFbRSukNQ';
+
+function themeModeLabel(mode: ThemeMode): string {
+  if (mode === ThemeMode.DARK) {
+    return '深色';
+  }
+  if (mode === ThemeMode.LIGHT) {
+    return '浅色';
+  }
+  return '跟随系统';
+}
+
+/** 首页筛选「规则数」口径：名单条数 + 生效的数值阈值 + 激活方案 */
+function countFeedRules(cfg: FeedFilterConfig): number {
+  let n: number = 0;
+  n += cfg.blockUps.length;
+  n += cfg.allowUps.length;
+  n += cfg.blockTitleKeywords.length;
+  n += cfg.allowTitleKeywords.length;
+  n += cfg.blockCategories.length;
+  n += cfg.allowCategories.length;
+  if (cfg.viewMin > 0) {
+    n++;
+  }
+  if (cfg.likeRateMin > 0) {
+    n++;
+  }
+  if (cfg.durationMinSec > 0 || cfg.durationMaxSec > 0) {
+    n++;
+  }
+  if (cfg.pubdateWithinDays > 0) {
+    n++;
+  }
+  if (cfg.activeSchemeId.length > 0) {
+    n++;
+  }
+  return n;
+}
+
+/** 相对时间：云同步「上次读取」用，避免显示绝对时间戳 */
+function relativeTime(ts: number): string {
+  const delta: number = Date.now() - ts;
+  if (delta < 60 * 1000) {
+    return '刚刚';
+  }
+  if (delta < 60 * 60 * 1000) {
+    return `${Math.floor(delta / (60 * 1000))} 分钟前`;
+  }
+  if (delta < 24 * 60 * 60 * 1000) {
+    return `${Math.floor(delta / (60 * 60 * 1000))} 小时前`;
+  }
+  return `${Math.floor(delta / (24 * 60 * 60 * 1000))} 天前`;
+}
 
 @Component
 export struct SettingsPage {
-  /** 底部安全区高度（vp）：根容器不再统一避让，列表末尾让位要自己叠上这一份 */
+  /** 底部安全区高度（vp）：列表末尾让位要自己叠上这一份 */
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
-  /**
-   * 状态栏高度（vp）：固定栏材质 Row 内部 padding 用它让材质从 y=0 铺起覆盖状态栏；
-   * 本页内容避让是常量（无 onAreaChange 实测），内容层 padding 需显式 +safeTop。
-   */
+  /** 状态栏高度（vp）：自绘顶栏材质从 y=0 铺起 */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
-  /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
+  /** 当前断点 / 横竖屏：大屏上内容列收窄居中 */
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  /** 当前横竖屏（Index 常驻注册写入）：内容列 840 口径取值用 */
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
-  /**
-   * 主题色运行时值（EntryAbility 启动发布、外观设置页选色 / 切深浅模式重发布）。
-   * 本页消费点（账户占位头像底色 / 会籍徽标）跟随刷新。
-   */
+  /** 主题色运行时值：图标成对 token 随 8 套主题色 + 深浅模式刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
-  /**
-   * 登录态版本号（LoginStore 写入）：本页 Tabs 常驻、aboutToAppear 只触发一次，
-   * 扫码登录返回后的「账户」分组刷新全靠这个信号。
-   */
+  /** 登录态版本号：扫码登录 / 退出 / 失效广播后刷新账户区 */
   @StorageProp(STORE_LOGIN_REV) @Watch('onLoginRevChanged') loginRev: number = 0;
-  /** 当前登录用户（null = 未登录）；由 LoginStore 的缓存提供 */
+  /** 页签切换：切回设置页时补刷一次值回显（二级页改动可能发生在别的页签） */
+  @StorageProp(STORE_ACTIVE_TAB) @Watch('onActiveTabChanged') activeTab: number = 0;
+  /**
+   * 二级页出栈信号（NavStackHolder.setInterception 发布，Index 同款订阅）。
+   * ⚠️ 值回显「实时刷新」的主通道：pushPathByName 的 onPop 只覆盖自己 push 的页，
+   * 系统返回键 / NavStackHolder.pop() / replace 路径都靠这个信号兜住。
+   */
+  @StorageProp(STORE_SUB_PAGE_ACTIVE) @Watch('onSubPageActiveChanged') subPageActive: boolean = false;
+
   @State loginUser: LoginUser | null = null;
-  /**
-   * 登录已失效：本地有 Cookie 但被服务端拒绝过一次（nav -101）。
-   *
-   * 与 `loginUser === null`（从未登录）**必须分开**：前者凭据还在、点一下重新登录即可，
-   * 后者是根本没登录过。见 LoginStore.refreshLoginUser / isLoginStale。
-   */
+  /** 本地有 Cookie 但被服务端拒过一次：与「从未登录」必须分开 */
   @State loginStale: boolean = false;
-
-  /** 应用版本号（如「v1.0.2」）：从 bundleManager 读，跟着 app.json5 走，不在页面里写死 */
   @State appVersion: string = '';
+  @State accountExpanded: boolean = false;
 
-  /**
-   * 列表滚动控制器：交给**根 HdsNavigation 的统一标题栏**联动。
-   * List 直接挂 TabScrollerHolder.settings（唯一真源，身份恒定）——
-   * 替换实例会让根栏绑定在注册前求值拿到未挂载的占位实例。
-   */
+  /** 值回显快照（只在 refreshValues 里写，Builder 体内直读） */
+  @State valueCloudSync: string = '';
+  @State valuePlayback: string = '';
+  @State valueDownload: string = '';
+  @State valueAppearance: string = '';
+  @State valueFilter: string = '';
+  @State valuePlaylists: string = '';
+  @State valueLogs: string = '';
+  /** 值版本号：每轮 refreshValues 递增，供带参 @Builder 体内的方法建立状态依赖 */
+  @State valuesRev: number = 0;
 
-  /**
-   * 自绘顶栏渐变模糊层进度更新器 + 校准（下载页同款）：
-   * onDidScroll / onScrollStop 命令式驱动 opacity（不标 @State，滚动高频
-   * 回调零重建）；yOffset 0 → TITLE_BLUR_END_VP 线性映射 0 → 1（updater
-   * 内截断，边缘回弹负偏移归零 = 死区）。
-   */
   private topBlurUpdater: TopBlurProgressUpdater = new TopBlurProgressUpdater();
 
   private syncTopBlurProgress(): void {
@@ -152,11 +193,8 @@ export struct SettingsPage {
   }
 
   aboutToAppear(): void {
-    // 登录态：同步读缓存渲染首帧；已登录则顺带做一次懒校验（nav 拉最新昵称/头像，
-    // Cookie 被服务端拒绝时**不再清凭据**，只标 loginStale）。fire-and-forget。
     this.refreshLoginUi();
-    // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时
-    // initializeModifier 补上），防「已滚过再进页签」首帧缺模糊。
+    this.refreshValues();
     this.syncTopBlurProgress();
     setTimeout((): void => {
       if (isLoggedIn()) {
@@ -166,30 +204,153 @@ export struct SettingsPage {
     this.loadAppVersion();
   }
 
-  /** 登录/退出/用户信息更新（LoginStore 广播版本号）：重读缓存刷新「账户」分组 */
   onLoginRevChanged(): void {
     this.refreshLoginUi();
   }
 
-  /** 一次性刷新「账户」分组的两个状态字段（用户信息 + 是否已失效） */
+  /** 切页签一律补刷：全是内存态 getter，无 IO，多刷几次无副作用 */
+  onActiveTabChanged(): void {
+    this.refreshValues();
+  }
+
+  /** 二级页关闭（true → false）时重读全部 getter —— 值回显实时刷新的主通道 */
+  onSubPageActiveChanged(): void {
+    if (!this.subPageActive) {
+      this.refreshValues();
+    }
+  }
+
   private refreshLoginUi(): void {
     this.loginUser = getLoginUser();
     this.loginStale = isLoginStale();
+    this.updateSettingsSubtitle();
   }
 
-  /** 读自身包信息取 versionName（即 app.json5 的 versionName，升级后自动同步） */
+  /** 顶栏副行：版本号 + 登录三态，交给 Index.tabTitleRow 订阅显示 */
+  private updateSettingsSubtitle(): void {
+    const version: string = this.appVersion.length > 0 ? this.appVersion : 'BiliMusic';
+    let state: string = '未登录';
+    if (this.loginUser !== null) {
+      state = this.loginStale ? '登录已失效' : '已登录';
+    }
+    AppStorage.setOrCreate<string>(STORE_SETTINGS_SUBTITLE, `${version} · ${state}`);
+  }
+
   private loadAppVersion(): void {
     bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT)
       .then((info: bundleManager.BundleInfo): void => {
         this.appVersion = info.versionName.length > 0 ? `v${info.versionName}` : '';
+        this.updateSettingsSubtitle();
       })
       .catch((e: BusinessError): void => {
-        // 拿不到就空着，不影响其它设置项
         console.error(`getBundleInfoForSelf failed: ${e.code} ${e.message}`);
       });
   }
 
-  /** 已登录时点击账户行：确认退出（本地凭据 + B 站服务端会话一并撤销） */
+  /** 一次性刷新全部值回显（方案 A：不常驻订阅 AppSettings，跨页零同步负担） */
+  private refreshValues(): void {
+    const s: AppSettings = AppPreferences.getSettings();
+    this.valuePlayback = `${s.playQuality} · ${s.autoPlay ? '自动连播' : '手动切歌'}`;
+    this.valueDownload = `${s.downloadQuality} · ${s.wifiOnlyDownload ? '仅 WiFi' : '任意网络'}`;
+    this.valueAppearance = `${themeModeLabel(s.themeMode)} · ${themeColorLabel(s.themeColor)}`;
+    const cfg: FeedFilterConfig = getFeedFilterConfig();
+    this.valueFilter = cfg.enabled ? `${countFeedRules(cfg)} 条规则` : '未开启';
+    const playlists: object[] = AppPreferences.getPlaylists<object>();
+    this.valuePlaylists = `${playlists.length} 个歌单`;
+    this.valueLogs = `${getPlaybackLogsNewestFirst().length} 条`;
+    const lastRead: number = getLastReadAt();
+    if (!isCloudDirAvailable()) {
+      this.valueCloudSync = '未开启 · 三步开启';
+    } else if (lastRead > 0) {
+      this.valueCloudSync = `上次同步 ${relativeTime(lastRead)}`;
+    } else {
+      this.valueCloudSync = '等待首次同步';
+    }
+    // 递增版本号：带参 @Builder 体内只调用 entryValueOf()，靠它读 @State
+    // 建立依赖，避免「值写进去了但行 UI 不重渲染」。
+    this.valuesRev++;
+  }
+
+  /** Builder 体内现算当前值：key 是静态字面量，状态依赖落在 this 上 */
+  private entryValueOf(key: string): string {
+    // 读一次 valuesRev，确保本方法在 Builder 渲染链上订阅状态变化
+    const rev: number = this.valuesRev;
+    if (rev < 0) {
+      return '';
+    }
+    if (key === 'cloud') {
+      return this.valueCloudSync;
+    }
+    if (key === 'playback') {
+      return this.valuePlayback;
+    }
+    if (key === 'download') {
+      return this.valueDownload;
+    }
+    if (key === 'appearance') {
+      return this.valueAppearance;
+    }
+    if (key === 'filter') {
+      return this.valueFilter;
+    }
+    if (key === 'playlists') {
+      return this.valuePlaylists;
+    }
+    if (key === 'logs') {
+      return this.valueLogs;
+    }
+    if (key === 'version') {
+      return this.appVersion;
+    }
+    if (key === 'qq') {
+      return FEEDBACK_QQ_GROUP;
+    }
+    return '';
+  }
+
+  /** 消歧副标题：两个「同步」靠它区分，其余行为空 */
+  private subtitleOf(title: string): string {
+    if (title === '云空间同步') {
+      return '华为云空间 · 自动备份';
+    }
+    if (title === 'B 站收藏夹同步') {
+      return '收藏夹 → 本地歌单';
+    }
+    return '';
+  }
+
+  private actionText(action: number): string {
+    if (action === ENTRY_ACTION_PAGE) {
+      return '进入下一页';
+    }
+    if (action === ENTRY_ACTION_DIALOG) {
+      return '弹窗';
+    }
+    if (action === ENTRY_ACTION_LINK) {
+      return '将在浏览器打开';
+    }
+    if (action === ENTRY_ACTION_COPY) {
+      return '复制到剪贴板';
+    }
+    return '展开或收起';
+  }
+
+  /** 全部入口图标统一：主题 surface 底 + 主题 deep 字（成对 token，深浅两套值已在 ThemeColors.ts 配好） */
+  private iconBackground(): ResourceColor {
+    return this.themeSurface;
+  }
+
+  private iconForeground(): ResourceColor {
+    return this.themeDeep;
+  }
+
+  /** 统一推二级页，并在返回时补刷一次值回显 */
+  private pushPage(name: string): void {
+    NavStackHolder.stack.pushPathByName(name, undefined, (info: PopInfo): void => {
+      this.refreshValues();
+    });
+  }
+
   private confirmLogout(): void {
     showConfirm(this.getUIContext(), {
       title: '退出登录',
@@ -202,19 +363,11 @@ export struct SettingsPage {
   }
 
   private doLogout(): void {
-    this.toast('已退出登录', 1500);
-    // fire-and-forget：logout 内含撤销会话的网络请求（最长 15s），
-    // 本地清理在响应后完成并广播版本号，UI 由 @Watch 自动回落到未登录态
+    showAppToast('已退出登录', 1500);
     logout();
   }
 
-  /**
-   * 推登录页并挂 onPop 返回回调：
-   * 登录页无论登录成功与否返回，都幂等重读一次登录态刷新「账户」分组
-   * （refreshLoginUi 只重读缓存，无副作用，重复调用安全）。正常路径
-   * STORE_LOGIN_REV 的 @Watch 已刷新，这里是双保险；用户没登录直接
-   * 返回时 @Watch 不触发，靠这里兜住。
-   */
+  /** 推登录页并挂 onPop 兜底刷新（正常路径由 STORE_LOGIN_REV 的 @Watch 刷新） */
   private pushLoginWithRefresh(): void {
     NavStackHolder.stack.pushPathByName('Login', new LoginRouteParam(),
       (info: PopInfo): void => {
@@ -222,171 +375,6 @@ export struct SettingsPage {
       });
   }
 
-  private toast(message: string, duration: number): void {
-    showAppToast(message, duration);
-  }
-
-  /**
-   * 设置入口行（iOS 设置风格）：左侧固定异色圆角小图标（白色 SymbolGlyph 字形）+
-   * 标题 + 右侧灰色箭头。手写行而非 HdsListItemCard —— 该组件 B 区只支持
-   * 「文本 + Symbol」，放不下彩色图标前缀（账户行同款教训，观感参数对齐
-   * HDS 行：16/13 内边距 + press_overlay 按压反馈）。
-   *
-   * @param title 入口标题
-   * @param glyph 图标字形（sys.symbol 资源）
-   * @param iconColor 图标底色（固定异色常量）
-   * @param onTap 点击回调（推入对应二级页）
-   */
-  @Builder
-  IconEntryRow(title: string, glyph: Resource, iconColor: string, onTap: () => void) {
-    Row() {
-      Row() {
-        SymbolGlyph(glyph)
-          .fontSize(17)
-          .fontColor([Color.White])
-      }
-      .width(ENTRY_ICON_SIZE)
-      .height(ENTRY_ICON_SIZE)
-      .borderRadius(ENTRY_ICON_RADIUS)
-      .backgroundColor(iconColor)
-      .justifyContent(FlexAlign.Center)
-
-      Text(title)
-        .fontSize(16)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .margin({ left: 12 })
-        .layoutWeight(1)
-
-      // 箭头 fontSize 16：chevron 字形宽约为字号一半，14 时实际渲染 7×14vp
-      // 触发「图标宽或高小于 8vp」合规检查；16 渲染 8×16vp 达标。
-      SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(16)
-        .fontColor([$r('app.color.text_tertiary')])
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 11, bottom: 11 })
-    .alignItems(VerticalAlign.Center)
-    .stateStyles({
-      pressed: { .backgroundColor($r('app.color.press_overlay')) },
-      normal: { .backgroundColor(Color.Transparent) }
-    })
-    .accessibilityText(title)
-    .accessibilityLevel('yes')
-    .onClick((): void => {
-      onTap();
-    })
-  }
-
-  /**
-   * 「关于本项目」入口行：IconEntryRow 的带值变体 —— 箭头前显示版本号
-   * （@State appVersion 动态值，成员直读保证 loadAppVersion 完成后刷新；
-   * 不走 @Builder 按值传参，值参数不会触发刷新）。
-   */
-  @Builder
-  AboutEntryRow() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.info_circle_fill'))
-          .fontSize(17)
-          .fontColor([Color.White])
-      }
-      .width(ENTRY_ICON_SIZE)
-      .height(ENTRY_ICON_SIZE)
-      .borderRadius(ENTRY_ICON_RADIUS)
-      .backgroundColor(ICON_BG_GRAY)
-      .justifyContent(FlexAlign.Center)
-
-      Text('关于本项目')
-        .fontSize(16)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .margin({ left: 12 })
-        .layoutWeight(1)
-
-      if (this.appVersion.length > 0) {
-        Text(this.appVersion)
-          .fontSize(13)
-          .fontColor($r('app.color.text_secondary'))
-          .margin({ right: 4 })
-      }
-
-      // 箭头 fontSize 16：合规检查要求图标实际渲染宽高 ≥8vp，14 渲染 7×14vp 不达标。
-      SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(16)
-        .fontColor([$r('app.color.text_tertiary')])
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 11, bottom: 11 })
-    .alignItems(VerticalAlign.Center)
-    .stateStyles({
-      pressed: { .backgroundColor($r('app.color.press_overlay')) },
-      normal: { .backgroundColor(Color.Transparent) }
-    })
-    .accessibilityText(`关于本项目 ${this.appVersion}`)
-    .accessibilityLevel('yes')
-    .onClick((): void => {
-      NavStackHolder.stack.pushPath({ name: 'About' });
-    })
-  }
-
-  /**
-   * 「反馈Q群」入口行：非跳转行 —— 右侧直接显示群号，整行点按复制群号
-   * + toast 回执（非跳转行不带 chevron）。
-   */
-  @Builder
-  FeedbackEntryRow() {
-    Row() {
-      Row() {
-        SymbolGlyph($r('sys.symbol.person_2_fill'))
-          .fontSize(17)
-          .fontColor([Color.White])
-      }
-      .width(ENTRY_ICON_SIZE)
-      .height(ENTRY_ICON_SIZE)
-      .borderRadius(ENTRY_ICON_RADIUS)
-      .backgroundColor(ICON_BG_TEAL)
-      .justifyContent(FlexAlign.Center)
-
-      Text('反馈Q群')
-        .fontSize(16)
-        .fontColor($r('app.color.text_primary'))
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .margin({ left: 12 })
-        .layoutWeight(1)
-
-      Text(FEEDBACK_QQ_GROUP)
-        .fontSize(13)
-        .fontColor($r('app.color.text_secondary'))
-        .margin({ right: 8 })
-
-      SymbolGlyph($r('sys.symbol.doc_filled_on_doc'))
-        .fontSize(16)
-        .fontColor([$r('app.color.text_tertiary')])
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 11, bottom: 11 })
-    .alignItems(VerticalAlign.Center)
-    .stateStyles({
-      pressed: { .backgroundColor($r('app.color.press_overlay')) },
-      normal: { .backgroundColor(Color.Transparent) }
-    })
-    .accessibilityText(`复制反馈Q群 ${FEEDBACK_QQ_GROUP}`)
-    .accessibilityLevel('yes')
-    .onClick((): void => {
-      copyText(FEEDBACK_QQ_GROUP).then((ok: boolean): void => {
-        showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
-      });
-    })
-  }
-
-  /**
-   * 「PiLink 邀测」点击：先弹确认框介绍（原生鸿蒙精简版 B 站），确认后再跳，
-   * 避免点一下就离开 app（与清空队列同款 showConfirm 两键问句）。
-   */
   private confirmPiLinkJump(): void {
     showConfirm(this.getUIContext(), {
       title: '前往 PiLink 邀测',
@@ -398,13 +386,8 @@ export struct SettingsPage {
     });
   }
 
-  /**
-   * 打开 PiLink 邀测链接（AboutPage.openExternal 同款模式）：openLink 对
-   * https 链接交给系统处理（应用市场 / 浏览器）；失败 toast 不阻断页面。
-   */
   private async openPiLinkInvite(): Promise<void> {
     try {
-      // openLink 挂在 UIAbilityContext 上（不是基类 Context），所以要转一下
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       await ctx.openLink(PILINK_INVITE_URL);
     } catch (e) {
@@ -413,10 +396,37 @@ export struct SettingsPage {
     }
   }
 
-  /**
-   * 账户行头像（手写行的左侧）：已登录 → 真实头像；
-   * 未登录 → 品牌粉圆形 + 音符占位（与关于页 App 图标同款）。
-   */
+  private copyFeedbackGroup(): void {
+    copyText(FEEDBACK_QQ_GROUP).then((ok: boolean): void => {
+      showAppToast(ok ? `群号已复制：${FEEDBACK_QQ_GROUP}` : '复制失败，请重试', 1800);
+    });
+  }
+
+  private memberLabel(): string {
+    const u: LoginUser | null = this.loginUser;
+    if (u === null || u.vipStatus !== 1) {
+      return '';
+    }
+    return u.vipType >= 2 ? '年度大会员' : '大会员';
+  }
+
+  private isAnnualVip(): boolean {
+    const u: LoginUser | null = this.loginUser;
+    return u !== null && u.vipType >= 2;
+  }
+
+  private vipBadgeColors(): Array<[ResourceColor, number]> {
+    const from: string = this.isAnnualVip() ? VIP_BADGE_GOLD_FROM : VIP_BADGE_PINK_FROM;
+    const to: string = this.isAnnualVip() ? VIP_BADGE_GOLD_TO : VIP_BADGE_PINK_TO;
+    const stops: Array<[ResourceColor, number]> = [[from, 0], [to, 1]];
+    return stops;
+  }
+
+  private accountHint(): string {
+    return this.loginUser === null ? '扫码登录，可解锁更高音质档位' : '';
+  }
+
+  /** 账户行头像：已登录用真实头像，未登录用品牌色圆形 + 音符占位 */
   @Builder
   accountAvatar(): void {
     if (this.loginUser !== null) {
@@ -442,80 +452,110 @@ export struct SettingsPage {
   }
 
   /**
-   * 会籍徽标文案：'' = 不显示徽标。
-   * nav 的 vipType 区分月度（1）/ 年度（2）；老版本落盘数据没有该字段时按「大会员」显示，
-   * 下一次 refreshLoginUser 补上真实值（见 LoginUser.vipType 注释）。
+   * 统一入口行。⚠️ 参数全部是静态字面量（title / glyph / valueKey /
+   * action / 点击回调），动态值一律在 Builder 体内经 this.entryValueOf / this.xxx 现算 ——
+   * 带参 @Builder 按值传递，把状态当参数传进来不会刷新。
    */
-  private memberLabel(): string {
-    const u: LoginUser | null = this.loginUser;
-    if (u === null || u.vipStatus !== 1) {
-      return '';
+  @Builder
+  SettingEntryRow(title: string, glyph: Resource, valueKey: string,
+    action: number, onTap: () => void) {
+    Row() {
+      Row() {
+        SymbolGlyph(glyph)
+          .fontSize(17)
+          .fontColor([this.iconForeground()])
+      }
+        .width(ENTRY_ICON_SIZE)
+        .height(ENTRY_ICON_SIZE)
+        .borderRadius(ENTRY_ICON_RADIUS)
+        .backgroundColor(this.iconBackground())
+        .justifyContent(FlexAlign.Center)
+
+      Column() {
+        Text(title)
+          .fontSize(16)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.subtitleOf(title).length > 0) {
+          Text(this.subtitleOf(title))
+            .fontSize(13)
+            .fontColor($r('app.color.text_secondary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 3 })
+        }
+      }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .margin({ left: 12 })
+
+      if (this.entryValueOf(valueKey).length > 0) {
+        Text(this.entryValueOf(valueKey))
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: 160 })
+          .margin({ right: 4 })
+      }
+
+      if (action === ENTRY_ACTION_PAGE) {
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      } else if (action === ENTRY_ACTION_DIALOG) {
+        SymbolGlyph($r('sys.symbol.info_circle'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      } else if (action === ENTRY_ACTION_LINK) {
+        SymbolGlyph($r('sys.symbol.arrow_up_right'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      } else if (action === ENTRY_ACTION_COPY) {
+        SymbolGlyph($r('sys.symbol.doc_filled_on_doc'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      } else if (action === ENTRY_ACTION_FOLD_ACCOUNT) {
+        // 折叠态是状态变量 → 必须在 Builder 体内现算，不能当参数传
+        SymbolGlyph(this.accountExpanded ? $r('sys.symbol.chevron_up') : $r('sys.symbol.chevron_down'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      }
     }
-    return u.vipType >= 2 ? '年度大会员' : '大会员';
-  }
-
-  /**
-   * 是否年度大会员（金渐变徽标）：nav 的 vipType >= 2；月度/未知走粉渐变。
-   */
-  private isAnnualVip(): boolean {
-    const u: LoginUser | null = this.loginUser;
-    return u !== null && u.vipType >= 2;
-  }
-
-  /**
-   * 会籍徽标的 linearGradient 渐变色对：年度金渐变 / 其余粉渐变。
-   * 元组数组类型显式标注（ArkTS 禁匿名数组字面量类型）。
-   */
-  private vipBadgeColors(): Array<[ResourceColor, number]> {
-    const from: string = this.isAnnualVip() ? VIP_BADGE_GOLD_FROM : VIP_BADGE_PINK_FROM;
-    const to: string = this.isAnnualVip() ? VIP_BADGE_GOLD_TO : VIP_BADGE_PINK_TO;
-    const stops: Array<[ResourceColor, number]> = [[from, 0], [to, 1]];
-    return stops;
-  }
-
-  /**
-   * 账户行第二行引导文案：仅未登录态有第二行；已登录态的动作入口
-   * （退出登录 / 重新登录）由行最右侧的显式按钮承担。
-   */
-  private accountHint(): string {
-    if (this.loginUser === null) {
-      return '扫码登录，可解锁更高音质档位';
-    }
-    return '';
+      .width('100%')
+      // 52vp：真机首屏实测 56vp 会把「关于与帮助」折叠卡压到悬浮胶囊下方，
+      // 收到 52vp（图标 28 + 上下 12）仍 ≥44vp 命中区，静止态第 4 张卡完整可见。
+      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      .alignItems(VerticalAlign.Center)
+      .stateStyles({
+        pressed: { .backgroundColor($r('app.color.press_overlay')) },
+        normal: { .backgroundColor(Color.Transparent) }
+      })
+      .accessibilityText(`${title} ${this.entryValueOf(valueKey)} ${this.actionText(action)}`)
+      .accessibilityLevel('yes')
+      .onClick((): void => {
+        onTap();
+      })
   }
 
   build() {
     Stack() {
-      // 内容层：账户卡 + 设置入口卡（标题常驻固定栏，内容滚动即可）
       Column() {
         List({ scroller: TabScrollerHolder.settings }) {
-          // 顶部空白占位条目（下载页同款）：列表视口铺满全屏，条目起始位置在屏幕
-          // 顶端（y=0）。占位高度 = 根标题栏（safeTop + 56），首个真实条目恰从栏底
-          // 起排，滚动时占位与条目一起从模糊板下方穿过。
+          // 顶部空白占位：列表视口铺满全屏，首个真实条目恰从根标题栏底起排
           ListItem() {
-            // Blank 只能嵌在 Row/Column/Flex 内（编译器 10905201），ListItem 直下用定高 Row。
             Row()
               .width('100%')
               .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
           }
-          // 卡片间距占位：账户卡不加标题（根固定栏已常显「设置」，账户行自身
-          // 文案已表意），只保留卡片与标题栏的间距。
+
+          // ── A 账户与同步 ──
           ListItem() {
-            Row()
-              .width('100%')
-              .height(20)
+            SectionHeader({ headerText: '账户与同步' })
           }
           ListItem() {
             InsetCard() {
-              // 账户行（手写行）：不用 HdsListItemCard —— 该组件 B 区只支持
-              // 「文本 + Symbol」，放不下「昵称 + 会籍徽标」；用
-              // TextItemOptions.customBuilder 时 HDS 会把自定义内容渲染到标准
-              // 文本区之外（昵称/徽标落到头像下面一行，且 C 区的 SuffixButton
-              // 也不渲染）。手写沿用 HDS 行的观感参数（16/13 内边距 +
-              // press_overlay 按压反馈），与上下其它行视觉一致。
-              // 版式：头像 | 第一行「昵称 + 会籍徽标」、第二行仅未登录时渲染
-              // （登录引导）；已登录时行最右是「退出登录」显式按钮（避免同一行
-              // 出现两处「退出登录」语义重复；待重验时按钮变「重新登录」）。
               Row() {
                 this.accountAvatar()
 
@@ -527,59 +567,69 @@ export struct SettingsPage {
                       .fontColor($r('app.color.text_primary'))
                       .maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    // 会籍徽标（B 站风格渐变胶囊）：月度「大会员」粉渐变 /
-                    // 年度「年度大会员」金渐变，白字小胶囊。不用主题色 Chip：
-                    // 与头像/占位图标同一色系时辨识度差；渐变 + 固定会员色
-                    // 一眼可辨。不随主题色 —— 会籍是身份标识不是 UI 主题。
                     if (this.memberLabel().length > 0) {
                       Text(this.memberLabel())
-                        .fontSize(10)
+                        .fontSize(11)
                         .fontWeight(FontWeight.Medium)
                         .fontColor(Color.White)
                         .padding({ left: 7, right: 7, top: 2, bottom: 2 })
                         .borderRadius(9)
-                        .linearGradient({
-                          angle: 90,
-                          colors: this.vipBadgeColors()
-                        })
+                        .linearGradient({ angle: 90, colors: this.vipBadgeColors() })
+                        .margin({ left: 6 })
+                        .maxLines(1)
+                        .hitTestBehavior(HitTestMode.None)
+                    }
+                    // 登录已失效：凭据还在，只标 stale，不清空（SETTINGS.md）
+                    if (this.loginStale) {
+                      Text('登录已失效')
+                        .fontSize(11)
+                        .fontColor($r('app.color.text_secondary'))
+                        .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                        .borderRadius(8)
+                        .backgroundColor($r('app.color.bg_page'))
                         .margin({ left: 6 })
                         .maxLines(1)
                         .hitTestBehavior(HitTestMode.None)
                     }
                   }
-                  .alignItems(VerticalAlign.Center)
+                    .alignItems(VerticalAlign.Center)
 
-                  // 第二行仅未登录态渲染（已登录的动作改行右按钮）
                   if (this.accountHint().length > 0) {
                     Text(this.accountHint())
                       .fontSize(11)
-                      .fontColor($r('app.color.text_tertiary'))
+                      .fontColor($r('app.color.text_secondary'))
                       .margin({ top: 3 })
                   }
                 }
-                .alignItems(HorizontalAlign.Start)
-                .layoutWeight(1)
-                .margin({ left: 12 })
+                  .alignItems(HorizontalAlign.Start)
+                  .layoutWeight(1)
+                  .margin({ left: 12 })
 
-                // 行最右：已登录「退出登录」/ 待重验「重新登录」显式按钮。
-                // ArkUI 点击不冒泡：按钮 onClick 优先命中自身，整行 onClick
-                // 兜底不受影响；bg_page 底与 bg_card 卡面形成轻对比胶囊。
+                // 已登录 / 待重验的显式动作：视觉胶囊不变，外层 Row 撑 44vp 高命中区。
+                // ⚠️ 宽度**不能固定 44vp**：4 个汉字 13fp + 左右 padding 各 10 ≈ 72vp，
+                // 塞进 44vp 会被挤成竖排（用户 2026-11-09 23:51 反馈）。改成 80vp 定宽，
+                // 既容得下「退出登录 / 重新登录」横向一行，又 ≥44vp 命中区。
+                // 整行右侧 padding 收到 8 让两个热区之间留出缓冲。
                 if (this.loginUser !== null) {
-                  Text(this.loginStale ? '重新登录' : '退出登录')
-                    .fontSize(13)
-                    .fontColor($r('app.color.text_secondary'))
-                    .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-                    .borderRadius(14)
-                    .backgroundColor($r('app.color.bg_page'))
-                    .stateStyles({
-                      pressed: { .opacity(0.5) },
-                      normal: { .opacity(1) }
-                    })
-                    .accessibilityText(this.loginStale ? '重新登录' : '退出登录')
-                    .accessibilityLevel('yes')
+                  Row() {
+                    Text(this.loginStale ? '重新登录' : '退出登录')
+                      .fontSize(13)
+                      .fontColor($r('app.color.text_secondary'))
+                      .maxLines(1)
+                      .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                      .borderRadius(14)
+                      .backgroundColor($r('app.color.bg_page'))
+                      .stateStyles({
+                        pressed: { .opacity(0.5) },
+                        normal: { .opacity(1) }
+                      })
+                      .accessibilityText(this.loginStale ? '重新登录' : '退出登录')
+                      .accessibilityLevel('yes')
+                  }
+                    .width(80)
+                    .height(44)
+                    .justifyContent(FlexAlign.Center)
                     .onClick((): void => {
-                      // 待重验态优先去重新登录（与整行点击同策略）：此时退出
-                      // 只会把凭据清掉，用户目标是「让登录重新能用」。
                       if (this.loginStale) {
                         this.pushLoginWithRefresh();
                         return;
@@ -588,198 +638,183 @@ export struct SettingsPage {
                     })
                 }
               }
-              .width('100%')
-              .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-              .stateStyles({
-                pressed: { .backgroundColor($r('app.color.press_overlay')) },
-                normal: { .backgroundColor(Color.Transparent) }
-              })
-              .accessibilityText(this.loginUser === null
-                ? '登录 B 站账号'
-                : (this.loginStale
-                  ? `登录已失效，点击重新登录 ${this.loginUser.uname}`
-                  : `已登录 ${this.loginUser.uname}`))
-              .accessibilityLevel('yes')
-              .onClick((): void => {
-                if (this.loginUser === null) {
-                  this.pushLoginWithRefresh();
-                  return;
-                }
-                // 待重验态优先去**重新登录**：此时退出登录只会把凭据清掉，
-                // 而用户的目标是「让登录重新能用」，不是「我要退出」。
-                if (this.loginStale) {
-                  this.pushLoginWithRefresh();
-                  return;
-                }
-                this.confirmLogout();
-              })
+                .width('100%')
+                .padding({ left: 16, right: 8, top: 13, bottom: 13 })
+                .stateStyles({
+                  pressed: { .backgroundColor($r('app.color.press_overlay')) },
+                  normal: { .backgroundColor(Color.Transparent) }
+                })
+                .accessibilityText(this.loginUser === null
+                  ? '登录 B 站账号'
+                  : (this.loginStale
+                    ? `登录已失效，点击重新登录 ${this.loginUser.uname}`
+                    : `已登录 ${this.loginUser.uname}`))
+                .accessibilityLevel('yes')
+                .onClick((): void => {
+                  if (this.loginUser === null || this.loginStale) {
+                    this.pushLoginWithRefresh();
+                    return;
+                  }
+                  this.confirmLogout();
+                })
 
-              // 登录后能力三行：未登录不渲染，登录后在账户行下连着出现，
-              // 与下方设置入口同款 IconEntryRow（样式统一）。
+              CardDivider()
+
+              // 决策 1：无条件渲染，未登录也可见可进。与折叠内的 B 站收藏夹同步
+              // 是两个独立功能/路由（§0.1 勘误），副标题负责消歧。
+              this.SettingEntryRow('云空间同步', $r('sys.symbol.icloud'),
+                'cloud', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('HuaweiCloudSync');
+                })
+
+              // 登录后能力收进折叠，避免首屏随登录态跳变（原 4 行等权重铺开）
               if (this.loginUser !== null) {
                 CardDivider()
-                this.IconEntryRow('收藏夹同步', $r('sys.symbol.arrow_clockwise'), ICON_BG_ORANGE, (): void => {
-                  NavStackHolder.stack.pushPath({ name: 'CloudSync' });
-                })
-                CardDivider()
-                this.IconEntryRow('观看历史与稍后再看', $r('sys.symbol.clock_fill'), ICON_BG_TEAL, (): void => {
-                  NavStackHolder.stack.pushPath({ name: 'WatchHistory' });
-                })
-                CardDivider()
-                this.IconEntryRow('我的关注', $r('sys.symbol.person_2_fill'), ICON_BG_INDIGO, (): void => {
-                  NavStackHolder.stack.pushPath({ name: 'Follows' });
-                })
-                CardDivider()
-                // 「听直播」：关注主播开播列表 + 房间号/链接手动进入（LivePage），
-                // 直播流按 isLive Track 纯音频播放（地址实时解析不缓存）。
-                this.IconEntryRow('听直播', $r('sys.symbol.dot_radiowaves_left_and_right'), ICON_BG_RED, (): void => {
-                  NavStackHolder.stack.pushPath({ name: 'Live' });
-                })
+                this.SettingEntryRow('更多账号功能', $r('sys.symbol.ellipsis_circle'),
+                  '', ENTRY_ACTION_FOLD_ACCOUNT, (): void => {
+                    this.accountExpanded = !this.accountExpanded;
+                  })
+                if (this.accountExpanded) {
+                  CardDivider()
+                  this.SettingEntryRow('B 站收藏夹同步', $r('sys.symbol.arrow_clockwise'),
+                    '', ENTRY_ACTION_PAGE, (): void => {
+                      this.pushPage('CloudSync');
+                    })
+                  CardDivider()
+                  this.SettingEntryRow('观看历史与稍后再看', $r('sys.symbol.clock_fill'),
+                    '', ENTRY_ACTION_PAGE, (): void => {
+                      this.pushPage('WatchHistory');
+                    })
+                  CardDivider()
+                  this.SettingEntryRow('我的关注', $r('sys.symbol.person_2_fill'),
+                    '', ENTRY_ACTION_PAGE, (): void => {
+                      this.pushPage('Follows');
+                    })
+                  CardDivider()
+                  this.SettingEntryRow('听直播', $r('sys.symbol.dot_radiowaves_left_and_right'),
+                    '', ENTRY_ACTION_PAGE, (): void => {
+                      this.pushPage('Live');
+                    })
+                }
               }
             }
           }
 
-          // 卡片间距占位：入口卡不加分组标题（根固定栏已常显「设置」，
-          // 再标一次冗余），只保留卡片间距。
+          // ── C 常用设置（4 行值回显）──
           ListItem() {
-            Row()
-              .width('100%')
-              .height(20)
+            SectionHeader({ headerText: '常用设置' })
           }
-
-          // ── 设置入口卡 1（iOS 风格彩色图标行，点击进二级页）──
           ListItem() {
             InsetCard() {
-              this.IconEntryRow('播放设置', $r('sys.symbol.play_fill'), ICON_BG_PINK, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'PlaybackSettings' });
-              })
-
+              this.SettingEntryRow('播放设置', $r('sys.symbol.play_fill'),
+                'playback', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('PlaybackSettings');
+                })
               CardDivider()
-
-              // 「首页筛选」：首页推荐 tab 的内容过滤（屏蔽/仅看 UP、标题词、
-              // 分区、数值阈值、筛选方案；HomeFeedFilterPage，规则存
-              // HomeFeedFilterStore，只作用于推荐 tab，不发网络请求）。
-              this.IconEntryRow('首页筛选', $r('sys.symbol.funnel'), ICON_BG_PURPLE, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'HomeFeedFilter' });
-              })
-
+              this.SettingEntryRow('下载与存储', $r('sys.symbol.arrow_down_to_line'),
+                'download', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('DownloadSettings');
+                })
               CardDivider()
-
-              this.IconEntryRow('下载与存储', $r('sys.symbol.arrow_down_to_line'), ICON_BG_BLUE, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'DownloadSettings' });
-              })
-
+              this.SettingEntryRow('外观设置', $r('sys.symbol.paintpalette_fill'),
+                'appearance', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('AppearanceSettings');
+                })
               CardDivider()
-
-              this.IconEntryRow('外观设置', $r('sys.symbol.paintpalette_fill'), ICON_BG_PURPLE, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'AppearanceSettings' });
-              })
-
-              CardDivider()
-
-              // 「应用图标」（2026-10-25）：API 26 alternateIcons 备用图标 ——
-              // 默认 + 4 套预设设计运行时切换桌面图标，低版本设备页内自动降级。
-              this.IconEntryRow('应用图标', $r('sys.symbol.waveform'), ICON_BG_PINK, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'AppIconSettings' });
-              })
-
-              CardDivider()
-
-              this.IconEntryRow('歌单导入', $r('sys.symbol.doc_filled_on_doc'), ICON_BG_GREEN, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'PlaylistBackup' });
-              })
+              this.SettingEntryRow('首页筛选', $r('sys.symbol.funnel'),
+                'filter', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('HomeFeedFilter');
+                })
             }
           }
 
-          // 卡片间距占位：卡 1 与卡 2 之间（与上方账户卡—入口卡间距同款 20vp）。
+          // ── D 数据与工具 ──
+          ListItem() {
+            SectionHeader({ headerText: '数据与工具' })
+          }
+          ListItem() {
+            InsetCard() {
+              this.SettingEntryRow('歌单与备份', $r('sys.symbol.doc_filled_on_doc'),
+                'playlists', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('PlaylistBackup');
+                })
+              CardDivider()
+              this.SettingEntryRow('应用图标', $r('sys.symbol.waveform'),
+                '', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('AppIconSettings');
+                })
+              CardDivider()
+              this.SettingEntryRow('报错记录', $r('sys.symbol.doc_text_fill'),
+                'logs', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('PlaybackLog');
+                })
+            }
+          }
+
+          // ── E 关于与帮助（用户 2026-11-09 23:35 定稿：不做折叠，5 行常驻）──
+          // 分组标题 + 常驻卡片，与其它三区同构；没有展开/收起状态。
+          // 代价：首屏放不下 5 行，靠列表滚动（contentEndOffset 已为胶囊让位）。
+          ListItem() {
+            SectionHeader({ headerText: '关于与帮助' })
+          }
+          ListItem() {
+            InsetCard() {
+              this.SettingEntryRow('查看更新日志', $r('sys.symbol.list_bullet'),
+                '', ENTRY_ACTION_DIALOG, (): void => {
+                  showFullChangelog();
+                })
+              CardDivider()
+              this.SettingEntryRow('打赏作者', $r('sys.symbol.heart_fill'),
+                '', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('Reward');
+                })
+              CardDivider()
+              this.SettingEntryRow('PiLink 邀测', $r('sys.symbol.TV_tv'),
+                '', ENTRY_ACTION_LINK, (): void => {
+                  this.confirmPiLinkJump();
+                })
+              CardDivider()
+              this.SettingEntryRow('关于本项目', $r('sys.symbol.info_circle_fill'),
+                'version', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('About');
+                })
+              CardDivider()
+              this.SettingEntryRow('反馈Q群', $r('sys.symbol.person_2_fill'),
+                'qq', ENTRY_ACTION_COPY, (): void => {
+                  this.copyFeedbackGroup();
+                })
+            }
+          }
+          // 末尾留白：滚到底时最后一行完整露在悬浮胶囊上方
           ListItem() {
             Row()
               .width('100%')
-              .height(20)
-          }
-
-          // ── 设置入口卡 2：查看更新日志 / 打赏作者 / 关于本项目 / 报错记录 / 反馈Q群 ──
-          ListItem() {
-            InsetCard() {
-              // 「查看更新日志」：原地弹全量 CHANGELOG 弹窗（WhatsNewDialog
-              // 复用，2026-10-29 自「关于」页迁入；不推二级页，即看即关）。
-              this.IconEntryRow('查看更新日志', $r('sys.symbol.list_bullet'), ICON_BG_INDIGO, (): void => {
-                showFullChangelog();
-              })
-
-              CardDivider()
-
-              // 「打赏作者」：进 RewardPage 查看打赏二维码（页面居中展示 zsm.jpg）。
-              this.IconEntryRow('打赏作者', $r('sys.symbol.heart_fill'), ICON_BG_RED, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'Reward' });
-              })
-
-              CardDivider()
-
-              // 「PiLink 邀测」：原生鸿蒙精简版 B 站的邀测入口，点击弹确认框
-              // 介绍后 openLink 跳应用市场邀测页（B 站品牌粉 + 小电视图标）。
-              this.IconEntryRow('PiLink 邀测', $r('sys.symbol.TV_tv'), ICON_BG_PINK, (): void => {
-                this.confirmPiLinkJump();
-              })
-
-              CardDivider()
-
-              this.AboutEntryRow()
-
-              CardDivider()
-
-              // 「报错记录」：进 PlaybackLogPage 查看播放失败日志（app 内
-              // 环形缓冲留档，三方读不到 hilog 的替代方案，详见 PlaybackLogStore）。
-              this.IconEntryRow('报错记录', $r('sys.symbol.doc_text_fill'), ICON_BG_ORANGE, (): void => {
-                NavStackHolder.stack.pushPath({ name: 'PlaybackLog' });
-              })
-
-              CardDivider()
-
-              this.FeedbackEntryRow()
-            }
+              .height(12)
           }
         }
-        .width('100%')
-        .layoutWeight(1)
-        // 边界回弹：到顶/到底的反馈动效
-        .edgeEffect(EdgeEffect.Spring)
-        .cachedCount(10)
-        // 顶部根标题栏让位（Sumy 式穿透）：由 List 首个空白占位 ListItem 负责
-        //（见上方占位注释，下载页同款）。
-        // 底部悬浮页签让位：列表末尾可滚动至悬浮条上方，不被遮挡
-        // 页签栏自己抬高了 safeBottom（见 Index.ets），列表末尾要跟着多让这么多
-        .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
-        // 逐帧驱动自绘渐变模糊层（onDidScroll 在偏移已应用后回调，
-        // onWillScroll 是应用前，快滑时差一帧会让模糊层滞后一跳）。
-        .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
-          this.syncTopBlurProgress();
-        })
-        .onScrollStop((): void => {
-          // Idle 校准终态：兜住 Fling 期丢帧 / 死区过滤累计的偏差。
-          this.syncTopBlurProgress();
-        })
+          .width('100%')
+          .layoutWeight(1)
+          .edgeEffect(EdgeEffect.Spring)
+          .cachedCount(10)
+          .contentEndOffset(CONTENT_END_OFFSET + this.safeBottom)
+          .onDidScroll((scrollOffset: number, scrollState: ScrollState): void => {
+            this.syncTopBlurProgress();
+          })
+          .onScrollStop((): void => {
+            this.syncTopBlurProgress();
+          })
       }
-      .width('100%')
-      .height('100%')
-      // ⚠️ 不再整体 padding top：列表视口要铺满全屏（List 首个空白占位 ListItem
-      // 负责让出标题栏 safeTop + 56），否则条目在栏底被裁掉、滑不进模糊板下方。
-      // 大屏适配：内容列收窄居中（折叠屏展开 600vp / 平板 720vp）；
-      // 上限统一走 TwoColumnLayout.contentMaxWidth（两列激活 840 / 否则
-      // 600/720），平板横屏下与根顶栏及其他页签条目列同宽对齐。
-      .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
-      // 顶栏由根 HdsNavigation 的统一 titleBar 承担（见 Index.tabTitleRow），
-      // 本页只负责把 listScroller 注册给根容器驱动滚动模糊。
+        .width('100%')
+        .height('100%')
+        .constraintSize({ maxWidth: TwoColumnLayout.contentMaxWidth(this.currentBreakpoint, this.isLandscape) })
 
-      // 顶栏渐变模糊层：盖内容列之上（z 序低于根栏 HDS titleBar），进度由列表
-      // onDidScroll/onScrollStop 经 topBlurUpdater 命令式驱动（下载页同款）。
       TopGradientBlurOverlay({
         barHeightVp: this.safeTop + NAV_TITLE_BAR_HEIGHT,
         updater: this.topBlurUpdater
       })
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.bg_page'))
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.bg_page'))
   }
 }

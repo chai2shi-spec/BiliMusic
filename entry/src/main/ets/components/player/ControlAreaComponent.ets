@@ -91,6 +91,8 @@ import {
   STORE_CHAPTERS_ENTRY_ENABLED,
   STORE_DESC_ENTRY_ENABLED,
   STORE_FLOAT_LYRIC_ENABLED,
+  STORE_FLOAT_LYRIC_ENTRY_ENABLED,
+  STORE_FLOAT_LYRIC_LOCKED,
   STORE_VIDEO_CHAPTERS,
   STORE_FUNC_ITEM_ORDER,
   STORE_PLAYER_OPEN,
@@ -106,6 +108,7 @@ import {
   LAYER_DELAY_CONTROL,
   LAYER_EXIT_DURATION_MS,
   LAYER_EXIT_DELAY_CONTROL,
+  LAYER_EXIT_PROGRESS_MS,
   PRESS_ANIM_MS,
   PRESS_SCALE
 } from '../../common/constants/InteractionConstants';
@@ -201,6 +204,14 @@ export struct ControlAreaComponent {
   @StorageProp(STORE_DESC_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') descEntryEnabled: boolean = false;
   /** 桌面歌词总开关镜像（设置页 / 功能行双入口写）：功能行按钮点击翻转（关 = 销毁悬浮窗） */
   @StorageProp(STORE_FLOAT_LYRIC_ENABLED) floatLyricEnabled: boolean = false;
+  /** 「桌面歌词入口」显隐开关（设置页镜像，默认开）：开 = 功能行渲染桌面歌词一键开 / 关按钮；变化 = 组合变（回第 0 页） */
+  @StorageProp(STORE_FLOAT_LYRIC_ENTRY_ENABLED) @Watch('onFuncCompositionChanged') floatLyricEntryEnabled: boolean = true;
+  /** 桌面歌词锁定镜像（设置页开关 / 功能行长按菜单 / 系统回调三处写）：驱动锁角标与菜单文案 */
+  @StorageProp(STORE_FLOAT_LYRIC_LOCKED) floatLyricLocked: boolean = false;
+  /** 桌面歌词按钮长按菜单受控开关（显式 LongPressGesture 置位，onDisappear 复位） */
+  @State floatLyricMenuShown: boolean = false;
+  /** 长按松手误触守卫：LongPressGesture 弹菜单后松手，BounceIconButton 内置 click 仍会 fire，首击吞掉 */
+  @State suppressFloatLyricTap: boolean = false;
   /**
    * 当前曲章节分段（ChapterStore 发布镜像）：分段列表弹层数据源
    * （入口显隐已改由 chaptersEntryEnabled 开关控制，本镜像只供弹层内容）。
@@ -290,6 +301,15 @@ export struct ControlAreaComponent {
   @State enterOffsetY: number = ENTRANCE_OFFSET_VP;
 
   /**
+   * 进度区（进度条 + 双侧时间）单独快退透明度：收起时 0 延迟 + LAYER_EXIT_PROGRESS_MS(80ms)
+   * EaseIn 淡出 —— 比控制区整体（80+120ms）更快消失，进度条不拖到收起飞行中段。
+   * 进场恒 1（随控制区整体淡入）。⚠️ 收起复位（onPlayerOpenChanged）不得把它重置回 1：
+   * playerOpen 翻 false 发生在收起点，重置会让进度条闪回；重开时 overlay 卸载后全新挂载，
+   * 本值自然回 1，无需复位。
+   */
+  @State progressFade: number = 1;
+
+  /**
    * 播放页展开态：收起（→ false，落在 Index.closePlayer 的主动画闭包内）时
    * 把控制区入场状态复位为隐藏 —— 与 onContentExit 复位幂等兜底（那时已是隐藏值，
    * 同值复位不产生属性变化，不会触发动画）。
@@ -298,7 +318,8 @@ export struct ControlAreaComponent {
 
   /**
    * 收起时内容层柔退信号（seq 递增，写在 Index.closePlayer 的主动画闭包**外**，
-   * 仅柔退路径递增）：控制区 200ms EaseIn 柔退淡出 + 回沉（末批退场 LAYER_EXIT_DELAY_CONTROL）。
+   * 仅柔退路径递增）：控制区 120ms EaseIn 柔退淡出 + 回沉（末批退场 LAYER_EXIT_DELAY_CONTROL）；
+   * 进度区（进度条 + 双侧时间）另走 0 延迟 + LAYER_EXIT_PROGRESS_MS(80ms) 单独快退。
    */
   @StorageProp(STORE_PLAYER_CONTENT_EXIT) @Watch('onContentExit') contentExitSeq: number = 0;
   /** 柔退闸门：onContentExit 置 true 后，在途的延迟入场闭包不得再把控制区点亮 */
@@ -313,7 +334,7 @@ export struct ControlAreaComponent {
     this.enterOffsetY = ENTRANCE_OFFSET_VP;
   }
 
-  /** 柔退复位：控制区 200ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场 */
+  /** 柔退复位：控制区 120ms EaseIn 淡出 + 回沉 ENTRANCE_OFFSET_VP + 拦截在途延迟入场；进度区另走 80ms 快退 */
   private onContentExit(): void {
     this.exitRequested = true;
     this.getUIContext().animateTo(
@@ -325,6 +346,16 @@ export struct ControlAreaComponent {
       (): void => {
         this.enterOpacity = 0;
         this.enterOffsetY = ENTRANCE_OFFSET_VP;
+      }
+    );
+    // 进度区单独快退：0 延迟起步，进度条 ~80ms 先于控制区整体退净（最抢镜元素不拖尾）
+    this.getUIContext().animateTo(
+      {
+        duration: LAYER_EXIT_PROGRESS_MS,
+        curve: Curve.EaseIn
+      },
+      (): void => {
+        this.progressFade = 0;
       }
     );
   }
@@ -340,6 +371,12 @@ export struct ControlAreaComponent {
    * 支持则 enable + 显示（AVSession 系统组件，无权限申请），失败回弹。
    */
   private toggleFloatLyric(): void {
+    // 长按松手误触守卫：LongPressGesture 弹菜单后松手，本按钮内置 click 仍会
+    // fire（HomeQuickCards 已验证的坑），首击吞掉 —— 否则菜单刚弹出就误开关歌词。
+    if (this.suppressFloatLyricTap) {
+      this.suppressFloatLyricTap = false;
+      return;
+    }
     const controller: DesktopLyricController = DesktopLyricController.getInstance();
     if (this.floatLyricEnabled) {
       const locked: boolean = AppPreferences.getSettings().floatLyricLocked;
@@ -368,6 +405,32 @@ export struct ControlAreaComponent {
       this.toast('已开启桌面歌词');
     }).catch((): void => {
       this.toast('桌面歌词开启异常，请稍后重试');
+    });
+  }
+
+  /**
+   * 桌面歌词按钮长按菜单项：单项「锁定/解锁歌词位置」（文案随当前锁定态
+   * 翻转），与播放设置页「锁定歌词位置」开关走同一 DesktopLyricController
+   * 通道（镜像 + 落盘 + 下发系统），免进设置页。
+   */
+  private floatLyricMenuItems(): MenuElement[] {
+    return [
+      {
+        value: this.floatLyricLocked ? '解锁歌词位置' : '锁定歌词位置',
+        action: (): void => {
+          this.toggleFloatLyricLockQuick();
+        }
+      }
+    ];
+  }
+
+  /** 长按菜单快捷锁定/解锁：controller 先落盘 + 镜像再下发，@StorageProp 自动刷新角标与文案 */
+  private toggleFloatLyricLockQuick(): void {
+    const next: boolean = !this.floatLyricLocked;
+    DesktopLyricController.getInstance().setLocked(next).then((): void => {
+      this.toast(next ? '已锁定：歌词组件位置固定、禁止拖动' : '已解锁：歌词组件可拖动');
+    }).catch((): void => {
+      this.toast('锁定状态下发失败，请稍后重试');
     });
   }
 
@@ -607,7 +670,7 @@ export struct ControlAreaComponent {
    *   手机壳走 HdsTabsController.changeIndex，平板壳直写 activeTab）；
    * · 点选加入：递增 STORE_PICK_PLAYLIST_ADD，PlaylistsPage @Watch 快照当前曲目
    *   进入点选模式 —— 整行点击即把曲目加入该歌单（提示条见 PlaylistsPage）。
-   * 切页发生在收起动画（700ms）之下，overlay 收回时露出的就是带着提示条的歌单页。
+    * 切页发生在收起动画（700ms）之下，overlay 收回时露出的就是带着提示条的歌单页。
    */
   private goToPlaylistsTab(): void {
     const closeSeq: number | undefined = AppStorage.get<number>(STORE_PLAYER_CLOSE_REQUEST);
@@ -683,9 +746,10 @@ export struct ControlAreaComponent {
         // 视频简介（入口开关控制显隐）：弹层展示视频简介 + 置顶评论；
         // 播放页无曲不展开（防御性条件，与限定进度 / 单曲音量同口径）。
         result.push(id);
-      } else if (id === PLAYER_FUNC_FLOAT_LYRIC) {
-        // 桌面歌词（恒显，无二级开关）：点击开 / 关悬浮窗歌词（权限未授权时
-        // 按钮点击引导，授权失败回弹不开窗）。显隐只由排序页控制。
+      } else if (id === PLAYER_FUNC_FLOAT_LYRIC && this.floatLyricEntryEnabled) {
+        // 桌面歌词（入口开关控制显隐，播放设置「播放页入口」默认开）：
+        // 点击一键开 / 关系统歌词组件（AVSession Kit，无悬浮窗权限），
+        // 探测失败 toast 提示。关闭入口只隐藏按钮，已开歌词不受影响。
         result.push(id);
       }
     }
@@ -1170,17 +1234,46 @@ export struct ControlAreaComponent {
         })
         .accessibilityText('视频简介')
     } else if (itemId === PLAYER_FUNC_FLOAT_LYRIC) {
-      // 桌面歌词开关入口（恒显）：点击开 / 关 TYPE_FLOAT 悬浮窗歌词。
-      // 图标 lyrics_square（歌词块，与简介 doc_text / 分段 text_alignleft 区分）。
-      BounceIconButton({
-        icon: $r('sys.symbol.lyrics_square'),
-        iconSize: this.funcIconSize(),
-        buttonSize: this.funcButtonSize(),
-        onTap: (): void => {
-          this.toggleFloatLyric();
+      // 桌面歌词开关入口（显隐由「桌面歌词入口」开关控制）：点击一键开 / 关
+      // AVSession 系统歌词组件；长按弹快捷菜单（锁定 / 解锁歌词位置，免进
+      // 设置页），已锁定时右上角显示锁形角标。图标 lyrics_square（歌词块，
+      // 与简介 doc_text / 分段 text_alignleft 区分）。
+      // 长按走显式 LongPressGesture 驱动受控 bindMenu（HomeQuickCards 验证过
+      // 的模式：bindContextMenu 的 LongPress 响应在触屏上不触发）；长按松手
+      // 后 BounceIconButton 内置 click 仍会 fire，suppressFloatLyricTap 守卫
+      // 首击吞掉（toggleFloatLyric 顶部），onDisappear 一并复位防残留吞击。
+      Stack({ alignContent: Alignment.TopEnd }) {
+        BounceIconButton({
+          icon: $r('sys.symbol.lyrics_square'),
+          iconSize: this.funcIconSize(),
+          buttonSize: this.funcButtonSize(),
+          onTap: (): void => {
+            this.toggleFloatLyric();
+          }
+        })
+          .gesture(
+            LongPressGesture({ repeat: false, duration: 500 })
+              .onAction((): void => {
+                this.floatLyricMenuShown = true;
+                this.suppressFloatLyricTap = true;
+              })
+          )
+          .bindMenu(this.floatLyricMenuShown, this.floatLyricMenuItems(), {
+            onDisappear: (): void => {
+              this.floatLyricMenuShown = false;
+              this.suppressFloatLyricTap = false;
+            }
+          })
+          .accessibilityText(this.floatLyricLocked ? '桌面歌词（已锁定）' : '桌面歌词')
+        if (this.floatLyricLocked) {
+          // 锁形角标：锁定镜像驱动显隐；不拦截触摸（点击全归按钮本体）
+          SymbolGlyph($r('sys.symbol.lock'))
+            .fontSize(12)
+            .fontColor([Color.White])
+            .opacity(0.9)
+            .hitTestBehavior(HitTestMode.None)
         }
-      })
-        .accessibilityText('桌面歌词')
+      }
     }
   }
 
@@ -1284,6 +1377,9 @@ export struct ControlAreaComponent {
       // 紧凑模式（阔折叠外屏）整体不挂载：订阅与插值随组件卸载注销。
       if (!this.compactMode) {
         PlayerProgressArea()
+          // 收起时进度区单独快退（0+80ms，见 progressFade）：与整区 enterOpacity 相乘，
+          // 退场由更快的一条主导；进场恒 1 随整区淡入
+          .opacity(this.progressFade)
       }
 
       // 三键行（紧凑模式可变布局）：常规 = 全宽两端分布 + control_padding；
@@ -1321,7 +1417,7 @@ export struct ControlAreaComponent {
       })
     }
     // 分层入场只挂 transform 系属性，不动 width/height/padding（改布局属性会触发整树重排）
-    // 收起为柔退退场（onContentExit 的 200ms EaseIn 淡出 + 回沉）
+    // 收起为柔退退场（onContentExit 的 120ms EaseIn 淡出 + 回沉）
     .opacity(this.enterOpacity)
     .translate({ y: this.enterOffsetY })
   }

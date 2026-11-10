@@ -59,3 +59,34 @@ export function parseLrcLyric(text: string): Array<LrcEntry> {
 export function angleToRadian(angle: number): number {
   return angle * Math.PI / 180;
 }
+
+/**
+ * 毫秒 → LRC 时间标签字符串（[mm:ss.cc]，厘秒两位）。
+ * 负值钳 0；超 99 分进位为三位分钟（解析器 \d{2,} 兼容）。
+ */
+export function formatLrcTimeMs(ms: number): string {
+  const clamped = ms > 0 ? Math.floor(ms) : 0;
+  const totalCentis = Math.floor(clamped / 10);
+  const minutes = Math.floor(totalCentis / 6000);
+  const seconds = Math.floor((totalCentis % 6000) / 100);
+  const centis = totalCentis % 100;
+  const secText = seconds < 10 ? `0${seconds}` : `${seconds}`;
+  const centiText = centis < 10 ? `0${centis}` : `${centis}`;
+  return `[${minutes}:${secText}.${centiText}]`;
+}
+
+/**
+ * LrcEntry 列表 → LRC 文本（每行 `${时间标签}${行文本}`）。
+ * 供「编辑歌词」sheet 预填与转写结果人工修正。
+ */
+export function serializeLrcEntries(entries: Array<LrcEntry>): string {
+  const lines: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const text = entries[i].lineWords;
+    if (!text) {
+      continue;
+    }
+    lines.push(`${formatLrcTimeMs(entries[i].lineStartTime)}${text}`);
+  }
+  return lines.join('\n');
+}

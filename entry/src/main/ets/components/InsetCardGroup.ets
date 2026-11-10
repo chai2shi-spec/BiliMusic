@@ -5,10 +5,15 @@
  *   · 卡片：bg_card 白底、圆角 12、左右各让 16vp 出屏缘（inset grouped）；
  *   · 行分隔线：bg_divider，左缩进 16 与行文字对齐，末行不画；
  *   · 区块标题：13fp text_secondary，位于卡片上方，左缘 20；
- *   · 区块脚注：12fp text_tertiary，位于卡片下方，左右 20。
+ *   · 区块脚注：13fp text_secondary，位于卡片下方，左右 20。
  *
  * ⚠️ SectionHeader / SectionFooter 的文本必须用 @Prop：普通成员只在组件创建时
  * 赋值一次，父组件重渲染不会刷新（存储脚注含动态文案，普通成员会冻结）。
+ *
+ * 2026-11-09 设置页重设计：脚注 12fp → 13fp（字阶六档的 caption 档）、
+ * text_tertiary → text_secondary（实算 3.43:1 浅 / 4.43:1 深，均不到 AA 4.5；
+ * 换 secondary 后 5.30 / 7.28 达标）。**不改全局 color.json**，只在本组件就地换
+ * token —— 该组件被设置体系各页共用，脚注一并受益。
  */
 
 /**
@@ -59,7 +64,7 @@ export struct CardDivider {
   }
 }
 
-/** 区块标题：卡片上方的小字号灰字（如「播放」「下载」「我的歌单」） */
+/** 区块标题：卡片上方的小字号灰字（如「账户与同步」「常用设置」） */
 @Component
 export struct SectionHeader {
   @Prop headerText: string = '';
@@ -80,8 +85,8 @@ export struct SectionFooter {
 
   build() {
     Text(this.noteText)
-      .fontSize(12)
-      .fontColor($r('app.color.text_tertiary'))
+      .fontSize(13)
+      .fontColor($r('app.color.text_secondary'))
       .width('100%')
       .padding({ left: 20, right: 20, top: 8, bottom: 4 })
   }

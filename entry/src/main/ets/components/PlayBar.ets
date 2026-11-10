@@ -379,10 +379,10 @@ export struct PlayBar {
    * 打开全屏播放页（**组件状态切换动画，不走 pushPath 路由**）。
    *
    * 按收起风格分流：
-   *   · morph / morph_swipe → 现状 morph 打开：只做连点防护 + 挂载 overlay，
-   *     主动画（背景面从迷你栏**真实视觉包围盒**向四周扩大 + 封面
-   *     geometryTransition 飞行 + 页签图标淡出）由 PlayerInfoComponent 的
-   *     playEnterTransition（单个 animateTo）驱动，零改动；
+    *   · morph / morph_swipe → 现状 morph 打开：只做连点防护 + 挂载 overlay，
+    *     主动画（背景面从迷你栏**真实视觉包围盒**向四周扩大 + 封面
+    *     geometryTransition 飞行 + 页签图标淡出）由 PlayerInfoComponent 的
+    *     playEnterTransition（单个 animateTo）驱动，零改动；
    *   · slide → 上滑展开：挂载**前**预置屏下隐形起始态（SLIDE_OFFSET=窗高 /
    *     SLIDE_ALPHA=0 / GT_OFF=true / SLIDE_IN=true），首帧渲染即在屏外，
    *     PlayerInfoComponent.onAppear 检测到 slideIn 走 slideInTransition

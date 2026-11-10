@@ -196,6 +196,12 @@ export const STORE_APP_FOREGROUND: string = 'appForeground';
 export const STORE_SLEEP_TIMER_END: string = 'sleepTimerEnd';
 
 /**
+ * 锁屏/桌面「定时停止卡片」chip 未开启定时时的默认档位（分钟，固定值）：
+ * chip 点按开启定时即按此档，再按取消。
+ */
+export const LOCK_CARD_SLEEP_MINUTES: number = 30;
+
+/**
  * 桌面卡片拉起播放页：EntryAbility 解析卡片路由 want 后自增发布的序号。
  * 卡片（Form 渲染进程）经 postCardAction router 拉起 UIAbility，onCreate /
  * onNewWant 里 seq++；Index 侧 @StorageProp + @Watch（首次启动 @Watch 不
@@ -475,6 +481,36 @@ export const STORE_DESC_ENTRY_ENABLED: string = 'descEntryEnabled';
 export const STORE_LYRIC_CENTERED: string = 'lyricCenteredShown';
 
 /**
+ * 本机 AI 转写歌词运行状态（LyricTranscribeService 发布，歌词面板订阅）：
+ * true = 转写任务进行中（解码或识别阶段），按钮转禁用 + 进度横幅显示。
+ */
+export const STORE_TRANSCRIBE_RUNNING: string = 'lyricTranscribeRunning';
+
+/**
+ * 转写阶段标识（'decoding' 解码中 / 'recognizing' 识别中），
+ * RUNNING 为 true 时有意义，驱动横幅文案切换。
+ */
+export const STORE_TRANSCRIBE_PHASE: string = 'lyricTranscribePhase';
+
+/**
+ * 转写总进度（0-100 整数）：解码阶段按解码器回调推算，
+ * 识别阶段 = (已完成段起点 + 当前段已喂时长) / 总时长 × 100。
+ */
+export const STORE_TRANSCRIBE_PROGRESS: string = 'lyricTranscribeProgress';
+
+/**
+ * 正在转写的曲目 ID 快照：绑定发起时曲目，切歌不串曲；
+ * 完成时歌词页据此判断是否刷新当前歌词。
+ */
+export const STORE_TRANSCRIBE_TRACK_ID: string = 'lyricTranscribeTrackId';
+
+/**
+ * 转写完成信号（自增序号）：LyricsTranscribeService 落库后递增，
+ * 歌词页 @Watch 检测递增且曲目匹配时重载歌词（manual 缓存自动命中）。
+ */
+export const STORE_TRANSCRIBE_DONE_SEQ: string = 'lyricTranscribeDoneSeq';
+
+/**
  * 沉浸光感材质档位镜像（AppSettings.immersiveMaterialTier 的运行时镜像）：
  * EntryAbility 启动首发、外观页菜单切换时重发，MaterialTokens 档位感知
  * 解析统一消费 —— exquisite 精美（EXQUISITE，设备能力门控）/ gentle 轻柔
@@ -523,6 +559,13 @@ export const STORE_FLOAT_LYRIC_ENABLED: string = 'floatLyricEnabled';
 export const STORE_FLOAT_LYRIC_LOCKED: string = 'floatLyricLocked';
 
 /**
+ * 「桌面歌词入口」显隐开关镜像（AppSettings.floatLyricEntryEnabled 的运行时镜像）：
+ * EntryAbility 启动首发、播放设置「播放页入口」切换时重发，
+ * ControlAreaComponent.visibleFuncItems 消费（开 = 功能行渲染桌面歌词按钮）。
+ */
+export const STORE_FLOAT_LYRIC_ENTRY_ENABLED: string = 'floatLyricEntryEnabled';
+
+/**
  * 当前曲「章节分段」镜像（VideoChapter[]，view_points 解析产物）：
  * 由 ChapterStore.loadForTrack **唯一写入**（切歌 / 播放页首次挂载时加载，
  * 失败 / 无分段 / 非站内曲目一律写空数组），消费端一律 @StorageProp 只读订阅
@@ -531,6 +574,22 @@ export const STORE_FLOAT_LYRIC_LOCKED: string = 'floatLyricLocked';
  * ⚠️ 数组引用：写入侧必须 slice() 新数组，禁止与 ChapterStore 内部缓存共享引用。
  */
 export const STORE_VIDEO_CHAPTERS: string = 'videoChapters';
+
+/**
+ * 当前播放章节下标镜像（-1 = 无章节 / 不在任何章内）：
+ * 由 MusicPlayer 章态检测唯一写入（timeUpdate 事件跨越章边界 / seek 跳转 /
+ * 章表晚到时补判），LyricsComponent 订阅后按章取词与展示；
+ * 与 STORE_PROGRESS 的 500ms 分桶无关，只在「换章」这一低频时刻重发。
+ */
+export const STORE_CURRENT_CHAPTER_INDEX: string = 'currentChapterIndex';
+
+/**
+ * 章态归属的曲目 id 镜像（'' = 无）：与 STORE_CURRENT_CHAPTER_INDEX /
+ * STORE_VIDEO_CHAPTERS 配对消费 —— 只有归属曲目与当前曲一致时，
+ * 「章节 + 下标」才可信（换歌瞬间旧章表 / 旧下标不得污染新曲的按章取词）。
+ * 由 MusicPlayer 章态初始化 / 清空时发布。
+ */
+export const STORE_CHAPTERS_TRACK_ID: string = 'chaptersTrackId';
 
 /**
  * 「与其他应用同时播放」开关镜像（AppSettings.audioMixEnabled 的运行时镜像）：
@@ -663,6 +722,9 @@ export const STORE_HOME_CHIPS_ACTIVE: string = 'homeChipsActive';
  * 非本 Tab 跳过重算只置脏标记，切回时补算一次（见 DownloadsPage.onTabChanged）。
  */
 export const STORE_ACTIVE_TAB: string = 'activeTab';
+
+/** 设置页顶栏副行文案：由 SettingsPage 汇总「版本号 · 登录态」写入，Index.tabTitleRow 订阅 */
+export const STORE_SETTINGS_SUBTITLE: string = 'settingsSubtitle';
 
 /**
  * 跨层切页签请求（seq 递增）：播放页 overlay 深层组件（如「去歌单页选」菜单项）
@@ -806,11 +868,26 @@ export const STORE_FEED_FILTER_REV: string = 'feedFilterRev';
 export const STORE_SESSION_REV: string = 'sessionRev';
 
 /**
+ * 华为云空间同步版本号：每轮同步结束（成功/失败）、状态文件更新时递增
+ * （写入方：service/CloudSyncManager.ts）。
+ * 云同步页 @Watch 本信号刷新「上次同步时间 / 待上传 / 云端设备」等状态，
+ * 与 STORE_FAV_SYNC_REV 同一套版本号驱动 @Watch 的模式。
+ */
+export const STORE_CLOUD_SYNC_REV: string = 'cloudSyncRev';
+
+/**
  * 歌单导入任务状态（`ImportState`，见 service/PlaylistImporter.ts）。
  * 写入：ImportTaskManager 单例（每处理一首广播一次新快照对象）；
  * 消费：导入向导页 @StorageLink + @Watch 刷新进度与阶段流转。
  */
 export const STORE_IMPORT_STATE: string = 'playlistImportState';
+
+/**
+ * 下载记录扫描恢复状态（`RestoreState`，见 service/DownloadRestoreManager.ts）。
+ * 写入：DownloadRestoreManager 单例（每次进度变化广播一份新快照）；
+ * 消费：扫描恢复页 @StorageLink + @Watch 刷新进度与预览清单。
+ */
+export const STORE_RESTORE_STATE: string = 'downloadRestoreState';
 
 /**
  * 收藏夹同步状态（`FavFolderSyncState[]`，见 service/FavSyncStore.ts）。

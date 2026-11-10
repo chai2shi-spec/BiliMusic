@@ -27,7 +27,7 @@ import {
   scoreCandidate,
   ScoreContext
 } from '../utils/TextUtil';
-import { LyricCandidate, LyricResult, Track } from '../model/MusicModels';
+import { LyricCandidate, LyricLine, LyricResult, slimTrack, Track, VideoChapter } from '../model/MusicModels';
 import { parseLxLyric, ParsedLyricTrack } from '../lyric/LxLyricParser';
 import { fetchLxLyric, searchLxSource } from './lyricSdk/LyricSdk';
 import {
@@ -625,6 +625,193 @@ export function getLyricForTrack(track: Track): Promise<LyricResult | null> {
   return task;
 }
 
+// ───────────────────────────── 章节（分段）取词 ─────────────────────────────
+
+/**
+ * 章节级「伪曲目」id：`{trackId}#ch{章节起点秒}`。
+ * 缓存文件、缓存信息键、歌词偏移、手动选词 / 跳过全部以它为键 ——
+ * 章节歌词因此天然与整曲歌词物理隔离，且完全复用既有机制，无需新增存储。
+ */
+export function chapterTrackId(track: Track, chapter: VideoChapter): string {
+  return `${track.id}#ch${Math.floor(chapter.from)}`;
+}
+
+/** 章节标题清洗：去掉「01. / 1、/ 02) / 三：」等目录序号前缀，再走通用 cleanTitle */
+function cleanChapterTitle(raw: string): string {
+  const prefix: RegExp = /^\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.、)）\]】:：\-–—]\s*/;
+  const stripped: string = raw.replace(prefix, '');
+  const cleaned: string = cleanTitle(stripped.trim());
+  return cleaned;
+}
+
+/**
+ * 章节标题里带歌手时（「歌名 - 歌手」）取出歌手；解析失败沿用整曲 artist。
+ * 分隔符取第一次出现位置，右段须是 1~20 字且非纯数字（排除时间戳）。
+ */
+function chapterArtistOf(raw: string, fallback: string): string {
+  const seps: string[] = [' - ', ' – ', ' — ', '｜', '|'];
+  for (let i = 0; i < seps.length; i++) {
+    const idx: number = raw.indexOf(seps[i]);
+    if (idx <= 0) {
+      continue;
+    }
+    const left: string = raw.substring(0, idx).trim();
+    const right: string = raw.substring(idx + seps[i].length).trim();
+    const numeric: RegExp = /^\d+$/;
+    if (left.length > 0 && right.length > 0 && right.length <= 20 && !numeric.test(right)) {
+      return right;
+    }
+  }
+  return fallback;
+}
+
+/**
+ * 合成章节级「伪曲目」：字段级克隆整曲（ArkTS 禁对象展开，复用 slimTrack），
+ * 只改写 id / title / artist / duration。
+ *   · id       = 章级缓存键（缓存 / 偏移 / 手动选词天然按段隔离）
+ *   · title    = 清洗后的章节标题（自动搜索关键词 + 会话元数据标题）
+ *   · artist   = 「歌名 - 歌手」解析出的歌手，解析失败沿用整曲
+ *   · duration = 本段长度（候选打分时长口径，避免整片时长把正确候选压分）
+ */
+export function buildChapterTrack(track: Track, chapter: VideoChapter): Track {
+  const ct: Track = slimTrack(track);
+  const cleaned: string = cleanChapterTitle(chapter.title);
+  ct.id = chapterTrackId(track, chapter);
+  ct.title = cleaned.length > 0 ? cleaned : chapter.title;
+  ct.artist = chapterArtistOf(chapter.title, track.artist);
+  ct.duration = Math.max(0, chapter.to - chapter.from);
+  return ct;
+}
+
+/** 章级歌词时间轴平移：行时间 += 章节起点（秒），让下游统一按整曲绝对时间消费 */
+function shiftLinesToTimeline(lines: LyricLine[], fromSec: number): LyricLine[] {
+  const out: LyricLine[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const src: LyricLine = lines[i];
+    const line: LyricLine = {
+      time: src.time + fromSec,
+      text: src.text
+    };
+    if (src.translation !== undefined) {
+      line.translation = src.translation;
+    }
+    if (src.romaji !== undefined) {
+      line.romaji = src.romaji;
+    }
+    // words 的 offset 是相对本行起始的偏移，行整体平移后无需再改
+    if (src.words !== undefined) {
+      line.words = src.words;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** 整份歌词结果平移到整曲绝对时间轴（保持源 / 翻译 / 逐字标记不变） */
+function shiftResultToTimeline(result: LyricResult, fromSec: number): LyricResult {
+  return {
+    lines: shiftLinesToTimeline(result.lines, fromSec),
+    synced: result.synced,
+    instrumental: result.instrumental,
+    trackName: result.trackName,
+    artistName: result.artistName,
+    sourceId: result.sourceId,
+    source: result.source,
+    hasTranslation: result.hasTranslation,
+    dynamic: result.dynamic
+  };
+}
+
+/** 章级取词在途去重（键 = 章级伪曲目 id，与整曲链互不干扰） */
+const inflightChapterFetches: Map<string, Promise<LyricResult | null>> = new Map();
+
+/** 过短章节不联网自动搜词（片头 / 过场 / 彩蛋段）；手动选词命中缓存不受此限 */
+const MIN_CHAPTER_LYRIC_SEC: number = 30;
+
+/**
+ * 按章节取歌词：以「章节标题」为搜索口径走既有五源链（与整曲链同款
+ * 缓存 → 手动选词 → 自动搜索 → miss 落盘），结果时间轴一次性平移到整曲
+ * 绝对时间（App 内 LrcView 与桌面歌词 LRC 组装零改动）。
+ *
+ * 取不到返回 null（调用方回落整曲歌词）；短段直接 null 不联网。
+ * 不做 B 站字幕兜底：字幕是整片绝对时间轴，与章内取词口径冲突。
+ */
+export function getLyricForChapter(track: Track, chapter: VideoChapter): Promise<LyricResult | null> {
+  const ct: Track = buildChapterTrack(track, chapter);
+  const existing: Promise<LyricResult | null> | undefined = inflightChapterFetches.get(ct.id);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const task: Promise<LyricResult | null> = getLyricForChapterInner(ct, chapter).finally((): void => {
+    inflightChapterFetches.delete(ct.id);
+  });
+  inflightChapterFetches.set(ct.id, task);
+  return task;
+}
+
+async function getLyricForChapterInner(ct: Track, chapter: VideoChapter): Promise<LyricResult | null> {
+  if (ct.id.length === 0) {
+    return null;
+  }
+  const key: string = cacheKeyOf(ct);
+  const cached: LyricCacheEntry | null = await readLyricCache(ct.id);
+
+  if (cached !== null) {
+    if (cached.skipped) {
+      return null;
+    }
+    if (cached.status === LYRIC_CACHE_OK && cached.result !== null) {
+      // 手动指定过的缓存永远优先（用户的选择 > 算法），口径与整曲一致
+      if (cached.manual || cached.cacheKey === key) {
+        return shiftResultToTimeline(cached.result, chapter.from);
+      }
+    }
+    if (cached.manual && cached.candidateSource.length > 0 && cached.candidateRemoteId.length > 0) {
+      const manualCand: LyricCandidate = {
+        id: `${cached.candidateSource}:${cached.candidateRemoteId}`,
+        songId: cached.candidateRemoteId,
+        mid: '',
+        trackName: ct.title,
+        artistName: ct.artist,
+        albumName: '',
+        duration: ct.duration,
+        image: '',
+        source: cached.candidateSource,
+        remoteId: cached.candidateRemoteId
+      };
+      const manualResult: LyricResult | null = await fetchCandidateResult(manualCand);
+      if (manualResult !== null) {
+        void writeLyricCache(toEntry(ct, key, manualResult, true, manualCand));
+        return shiftResultToTimeline(manualResult, chapter.from);
+      }
+    }
+    if (cached.cacheKey === key && isMissFresh(cached)) {
+      return null;
+    }
+  }
+
+  // 短段不联网自动搜（手动选词已在上面命中缓存时提前返回）
+  const chapterLenSec: number = Math.max(0, chapter.to - chapter.from);
+  if (chapterLenSec > 0 && chapterLenSec < MIN_CHAPTER_LYRIC_SEC) {
+    return null;
+  }
+
+  const result: LyricResult | null = await autoSearch(ct);
+  if (result !== null) {
+    return shiftResultToTimeline(result, chapter.from);
+  }
+
+  // 旧结果兜底：这次没搜到，但之前搜到过且信息没变太多 → 继续用旧的
+  if (cached !== null && cached.status === LYRIC_CACHE_OK && cached.result !== null) {
+    return shiftResultToTimeline(cached.result, chapter.from);
+  }
+
+  // 结论性 miss：写章级 miss 缓存（24h 内跨回本段不再联网）
+  void writeLyricCache(toEntry(ct, key, null, false, null));
+  console.info(`[Lyric] chapter miss title=${ct.title} from=${chapter.from}`);
+  return null;
+}
+
 /** 手动搜索候选（五源合并，最多 20 条） */
 async function searchLyricCandidates(query: string): Promise<LyricCandidate[]> {
   const q: string = cleanTitle(query.trim());
@@ -654,6 +841,23 @@ async function chooseLyricCandidate(
   }
   await writeLyricCache(toEntry(track, cacheKeyOf(track), result, true, record));
   return result;
+}
+
+/**
+ * 章节级手动选词：候选按章级伪曲目写 manual 缓存（每段独立、跨重启保留），
+ * 返回结果时间轴平移到整曲绝对时间（与自动章级取词同口径）。
+ */
+async function chooseLyricCandidateForChapter(
+  base: Track,
+  chapter: VideoChapter,
+  record: LyricCandidate
+): Promise<LyricResult | null> {
+  const ct: Track = buildChapterTrack(base, chapter);
+  const result: LyricResult | null = await chooseLyricCandidate(ct, record);
+  if (result === null) {
+    return null;
+  }
+  return shiftResultToTimeline(result, chapter.from);
 }
 
 /**
@@ -740,8 +944,12 @@ function clearLyricCache(trackId: string): void {
 /** 命名空间导出：供 `import { LyricsApi }` 以对象方式调用。 */
 export const LyricsApi = {
   getLyricForTrack,
+  getLyricForChapter,
+  buildChapterTrack,
+  chapterTrackId,
   searchLyricCandidates,
   chooseLyricCandidate,
+  chooseLyricCandidateForChapter,
   chooseBiliSubtitle,
   chooseBiliSubtitleOutcome,
   listBiliSubtitleChoices,
@@ -792,6 +1000,13 @@ export function sourceLabel(source: string | undefined): string {
   }
   if (source === SOURCE_BILI_AI) {
     return 'B站AI字幕';
+  }
+  // 本机生成
+  if (source === 'device-asr') {
+    return '本机转写';
+  }
+  if (source === 'manual-edit') {
+    return '本地编辑';
   }
   return '';
 }

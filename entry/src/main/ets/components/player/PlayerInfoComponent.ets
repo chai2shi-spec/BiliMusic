@@ -186,7 +186,7 @@ export struct PlayerInfoComponent {
    * 重开时组件重挂载复位。
    */
   @State contentHidden: boolean = false;
-  /** 自持内容柔退透明度（LG/MD 标题块）：onContentExit 内 200ms EaseIn 淡出 */
+  /** 自持内容柔退透明度（LG/MD 标题块）：onContentExit 内 120ms EaseIn 淡出 */
   @State contentFade: number = 1;
   /**
    * geometryTransition 全窗摘除开关（Index.slideOutClose 置位）：
@@ -229,7 +229,7 @@ export struct PlayerInfoComponent {
     this.smAnimDuration = 0;
     this.smIndex = 0;
     // 自持内容柔退：LG/MD 标题块
-    // 200ms EaseIn 淡出，延迟与 MusicInfoComponent 同档（LAYER_EXIT_DELAY_INFO）
+    // 120ms EaseIn 淡出，延迟与 MusicInfoComponent 同档（LAYER_EXIT_DELAY_INFO）
     // —— 跨组件错峰口径一致。SM Swiper 回跳**不**包进本动画（瞬跳保持不动画）。
     this.getUIContext().animateTo(
       {
@@ -498,7 +498,7 @@ export struct PlayerInfoComponent {
    *     （PlayerPage 根节点 translate/opacity 绑定）滑入落位。
    * onFinish 复位三项标志：TRANSITIONING（解锁连点防护）、SLIDE_IN（迷你唱片
    * 摘除 —— 此刻整页已全屏盖住迷你栏）、GT_OFF（常驻节点 GT id 恢复，同帧
-   * 无挂载/卸载不触发配对）。内容层入场不变（LAYER_DELAY_* 400~530ms），
+    * 无挂载/卸载不触发配对）。内容层入场不变（LAYER_DELAY_* 400~530ms），
    * 上滑 350ms 落位后紧接错峰淡入，天然衔接。
    */
   private slideInTransition(): void {
@@ -1119,7 +1119,7 @@ export struct PlayerInfoComponent {
                   .width(StyleConstants.FULL_WIDTH)
                   .margin({ top: $r('app.float.music_info_margin_top') })
                   .alignItems(HorizontalAlign.Start)
-                  // 收起柔退：标题块 200ms EaseIn 淡出（contentFade，
+                  // 收起柔退：标题块 120ms EaseIn 淡出（contentFade，
                   // onContentExit 驱动，延迟与 MusicInfoComponent 同档），封面/背景不在此列
                   .opacity(this.contentFade)
                   .onAreaChange((_old: Area, n: Area): void => {

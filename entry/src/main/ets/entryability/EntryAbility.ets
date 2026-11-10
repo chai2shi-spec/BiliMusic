@@ -22,11 +22,12 @@ import { MusicPlayer } from '../player/MusicPlayer';
 import { flushPendingLibraryPersist } from '../service/LibraryStore';
 import { initLogStore, flushLogStoreNow } from '../service/PlaybackLogStore';
 import { initPlaySessionStore, flushPlaySessionsNow } from '../service/PlaySessionStore';
+import { onCloudSyncForeground, onCloudSyncBackground } from '../service/CloudSyncManager';
 import { initVideoTagStore, flushVideoTagsNow } from '../service/VideoTagStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
 import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
-import { STORE_CURRENT_TRACK, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_CHAPTERS_ENTRY_ENABLED, STORE_DESC_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER, STORE_FLOAT_LYRIC_ENABLED, STORE_FLOAT_LYRIC_LOCKED } from '../common/Constants';
+import { STORE_CURRENT_TRACK, STORE_IS_PLAYING, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_CHAPTERS_ENTRY_ENABLED, STORE_DESC_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER, STORE_FLOAT_LYRIC_ENABLED, STORE_FLOAT_LYRIC_LOCKED, STORE_FLOAT_LYRIC_ENTRY_ENABLED } from '../common/Constants';
 
 /**
  * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
@@ -108,8 +109,8 @@ export default class EntryAbility extends UIAbility {
   };
 
   /**
-   * 锁屏卡片定时停止开关指令（call 拉起）：定时活跃 → 取消；未开启 → 按
-   * 设置页「锁屏卡片定时停止默认档位」开启。toggleSleepTimer 内部读
+   * 锁屏卡片定时停止开关指令（call 拉起）：定时活跃 → 取消；未开启 → 按固定
+   * 默认档位（30 分钟）开启。toggleSleepTimer 内部读
    * AppStorage 快照判态，冷启动时初始化链可能尚未跑完 —— await initRest
    * （幂等 Promise）兜底，与 playByActionCall 同款。
    */
@@ -237,6 +238,16 @@ export default class EntryAbility extends UIAbility {
    */
   onForeground(): void {
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, true);
+    // 云空间同步：距上轮 >5min 补一轮（内部自判间隔，未初始化时 no-op）
+    onCloudSyncForeground();
+    // 「与其他应用同时播放」前台重对账（对账点 B）：后台期间系统可能已把音频
+    // 会话停用（暂停时长时任务已停，超时必停）。正在播且开关开时 fire-and-forget
+    // 补一次 —— setAudioMixEnabled 内部有 catch，不会抛，也不阻塞回前台。
+    const playing: boolean = (AppStorage.get(STORE_IS_PLAYING) as boolean) ?? false;
+    const mix: boolean = AppStorage.get<boolean>(STORE_AUDIO_MIX_ENABLED) ?? false;
+    if (playing && mix) {
+      MusicPlayer.getInstance().setAudioMixEnabled(true);
+    }
     // 桌面歌词（AVSession 系统歌词组件）无需在这里恢复：组件随 AVSession
     // 存活，会话在 MusicPlayer.init 创建后由 restoreDesktopLyric 按落盘值
     // enable + visible；本方法不再承担悬浮窗重建职责。
@@ -255,6 +266,8 @@ export default class EntryAbility extends UIAbility {
   onBackground(): void {
     // 退后台：动画门控关闭（animator/呼吸链冻结，回前台续转）
     AppStorage.setOrCreate(STORE_APP_FOREGROUND, false);
+    // 云空间同步：有未写回的本地变更时补一轮写回（划卡杀进程前最后一个可靠时机）
+    onCloudSyncBackground();
     try {
       // 歌单落盘走去抖异步（见 LibraryStore 的 PERSIST_DEBOUNCE_MS），
       // 去抖窗口内划卡杀进程会丢最后一次写，退后台立刻冲掉待写队列
@@ -362,12 +375,13 @@ export default class EntryAbility extends UIAbility {
         // 「视频简介」入口开关（设置页可改）：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位。
         AppStorage.setOrCreate(STORE_DESC_ENTRY_ENABLED, settings.descEntryEnabled);
-        // 桌面歌词（AVSession 系统歌词组件）2 设置项同批首发（总开关 / 锁定）：
-        // 设置页分组与播放页功能行入口的 @StorageProp 初值只是占位，
-        // 真值必须首帧 build 前就位。系统组件的实际 enable/visible 由
+        // 桌面歌词（AVSession 系统歌词组件）3 设置项同批首发（总开关 / 锁定 /
+        // 播放页入口显隐）：设置页分组与播放页功能行入口的 @StorageProp 初值
+        // 只是占位，真值必须首帧 build 前就位。系统组件的实际 enable/visible 由
         // MusicPlayer.init 末尾 restoreDesktopLyric 按落盘值恢复。
         AppStorage.setOrCreate(STORE_FLOAT_LYRIC_ENABLED, settings.floatLyricEnabled);
         AppStorage.setOrCreate(STORE_FLOAT_LYRIC_LOCKED, settings.floatLyricLocked);
+        AppStorage.setOrCreate(STORE_FLOAT_LYRIC_ENTRY_ENABLED, settings.floatLyricEntryEnabled);
         // 「与其他应用同时播放」开关同批首发：MusicPlayer 每次 loadAndPlay 前
         // 读它对账 AudioSession（MIX_WITH_OTHERS 激活/停用），首播前必须就位。
         AppStorage.setOrCreate(STORE_AUDIO_MIX_ENABLED, settings.audioMixEnabled);

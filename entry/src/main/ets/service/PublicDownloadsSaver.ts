@@ -28,6 +28,7 @@ import { AppSettings, DownloadTask, DownloadStatus } from '../model/MusicModels'
 import { AppPreferences } from '../preferences/AppPreferences';
 import { updateDownloadStatus } from '../database/MusicDao';
 import { exportBaseNameOf, exportExtOf } from './AudioExporter';
+import { writeIndex } from './DownloadIndex';
 
 /** 批量同步结果计数（设置页 toast 文案用） */
 export interface PublicSyncResult {
@@ -122,6 +123,10 @@ export async function moveTaskFile(task: DownloadTask, destFileName?: string): P
     await fs.unlink(task.localFilePath);
     task.localFilePath = destPath;
     await updateDownloadStatus(task.id, DownloadStatus.COMPLETED, destPath, task.completedAt);
+    // 随行索引：把 bvid/cid 等身份信息随音频一起放进公共目录，卸载重装后
+    // 才能靠扫描目录精确重建 download_task（公共文件名本身只有「歌名 - 歌手」）。
+    // 写在主链路成功之后、返回之前；失败只记日志，绝不阻断下载完成。
+    await writeIndex(destPath, task);
     return true;
   } catch (e) {
     console.error(`moveTaskFile failed (${task.id} -> ${destPath}): ${JSON.stringify(e)}`);

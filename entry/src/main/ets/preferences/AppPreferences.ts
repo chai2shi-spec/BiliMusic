@@ -206,6 +206,7 @@ function getSettings(): AppSettings {
     skipIntroEntryEnabled: stored?.skipIntroEntryEnabled ?? DEFAULT_APP_SETTINGS.skipIntroEntryEnabled,
     upSpaceEntryEnabled: stored?.upSpaceEntryEnabled ?? DEFAULT_APP_SETTINGS.upSpaceEntryEnabled,
     trackVolumeEntryEnabled: stored?.trackVolumeEntryEnabled ?? DEFAULT_APP_SETTINGS.trackVolumeEntryEnabled,
+    volumeNormalizeEnabled: stored?.volumeNormalizeEnabled ?? DEFAULT_APP_SETTINGS.volumeNormalizeEnabled,
     chaptersEntryEnabled: stored?.chaptersEntryEnabled ?? DEFAULT_APP_SETTINGS.chaptersEntryEnabled,
     descEntryEnabled: stored?.descEntryEnabled ?? DEFAULT_APP_SETTINGS.descEntryEnabled,
     lyricCentered: stored?.lyricCentered ?? DEFAULT_APP_SETTINGS.lyricCentered,
@@ -218,9 +219,9 @@ function getSettings(): AppSettings {
       autoPickedCdnLine: stored?.autoPickedCdnLine ?? DEFAULT_APP_SETTINGS.autoPickedCdnLine,
       funcItemOrder: normalizeFuncItemOrder(stored?.funcItemOrder),
       sleepTimerEnd: stored?.sleepTimerEnd ?? DEFAULT_APP_SETTINGS.sleepTimerEnd,
-      lockCardSleepMinutes: stored?.lockCardSleepMinutes ?? DEFAULT_APP_SETTINGS.lockCardSleepMinutes,
       floatLyricEnabled: stored?.floatLyricEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEnabled,
-      floatLyricLocked: stored?.floatLyricLocked ?? DEFAULT_APP_SETTINGS.floatLyricLocked
+      floatLyricLocked: stored?.floatLyricLocked ?? DEFAULT_APP_SETTINGS.floatLyricLocked,
+      floatLyricEntryEnabled: stored?.floatLyricEntryEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEntryEnabled
     };
   }
   return copyAppSettings(settingsCache);
@@ -263,6 +264,7 @@ function copyAppSettings(s: AppSettings): AppSettings {
     skipIntroEntryEnabled: s.skipIntroEntryEnabled,
     upSpaceEntryEnabled: s.upSpaceEntryEnabled,
     trackVolumeEntryEnabled: s.trackVolumeEntryEnabled,
+    volumeNormalizeEnabled: s.volumeNormalizeEnabled,
     chaptersEntryEnabled: s.chaptersEntryEnabled,
     descEntryEnabled: s.descEntryEnabled,
     lyricCentered: s.lyricCentered,
@@ -281,9 +283,9 @@ function copyAppSettings(s: AppSettings): AppSettings {
     // 防任一侧原地改写污染另一侧（getSettings 返回值直连 settingsCache）。
     funcItemOrder: s.funcItemOrder.slice(),
     sleepTimerEnd: s.sleepTimerEnd,
-    lockCardSleepMinutes: s.lockCardSleepMinutes,
     floatLyricEnabled: s.floatLyricEnabled,
-    floatLyricLocked: s.floatLyricLocked
+    floatLyricLocked: s.floatLyricLocked,
+    floatLyricEntryEnabled: s.floatLyricEntryEnabled
   };
 }
 

@@ -210,7 +210,7 @@ function describeError(e: Object): string {
  *   · `ID3`（offset 0~2）—— 64K 档（audio/mpeg）带 ID3v2 头的 MP3；
  *   · `0xFF 0xEx`（帧同步）—— 无 ID3 头的裸 MP3。
  */
-async function isValidAudioFile(path: string): Promise<boolean> {
+export async function isValidAudioFile(path: string): Promise<boolean> {
   // 探测用异步 fs，避免主线程 statSync/openSync/readSync 阻塞。
   let probe: fs.File | null = null;
   try {
@@ -331,6 +331,58 @@ export class DownloadManager {
     }
     this.loadingPromise = this.loadFromDb();
     await this.loadingPromise;
+  }
+
+  /**
+   * 扫描恢复专用：把一批「本地音频文件已存在」的任务直接写回下载记录表。
+   *
+   * 由 DownloadRestoreManager 在用户预览确认后调用；notify() 是 private，
+   * 页面无法直接推 AppStorage，所以必须走这个公开入口统一「内存表 + RDB + 快照」。
+   *
+   * ⚠️ status 必须是 COMPLETED：loadFromDb 对 PENDING/DOWNLOADING 的残留任务会
+   * fs.unlink(t.localFilePath)，而恢复记录指向的是**公共目录里真实的音频**——
+   * 状态写错，下次冷启动就会把用户的文件删掉。这里再断言一次，双保险。
+   *
+   * @returns 真正写入的条数（去重 / 非 COMPLETED 的被跳过）
+   */
+  async applyRestoredDownloads(tasks: DownloadTask[]): Promise<number> {
+    await this.ensureLoaded();
+    const knownPaths: Set<string> = new Set<string>();
+    const knownMusicIds: Set<string> = new Set<string>();
+    this.tasks.forEach((x: DownloadTask): void => {
+      if (x.localFilePath.length > 0) {
+        knownPaths.add(x.localFilePath);
+      }
+      if (x.musicId.length > 0) {
+        knownMusicIds.add(x.musicId);
+      }
+    });
+    const fresh: DownloadTask[] = [];
+    for (let i = 0; i < tasks.length; i++) {
+      const t: DownloadTask = tasks[i];
+      if (t.status !== DownloadStatus.COMPLETED || t.localFilePath.length === 0) {
+        continue;
+      }
+      if (this.tasks.has(t.id) || knownPaths.has(t.localFilePath)
+        || (t.musicId.length > 0 && knownMusicIds.has(t.musicId))) {
+        continue;
+      }
+      fresh.push(t);
+      knownPaths.add(t.localFilePath);
+      if (t.musicId.length > 0) {
+        knownMusicIds.add(t.musicId);
+      }
+    }
+    if (fresh.length === 0) {
+      return 0;
+    }
+    // 单事务：抛错整体回滚，内存表此刻还没动，不会留下脏数据
+    await insertDownloads(fresh);
+    for (let i = 0; i < fresh.length; i++) {
+      this.tasks.set(fresh[i].id, fresh[i]);
+    }
+    this.notify();
+    return fresh.length;
   }
 
   /**

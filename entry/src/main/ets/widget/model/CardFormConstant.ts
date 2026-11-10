@@ -39,7 +39,7 @@ export enum RouterType {
 export enum CallMethod {
   PLAY_BY_ACTION = 'playByAction',
   COLLECT_ACTION = 'collectAction',
-  /** 锁屏卡片定时停止开关（活跃→取消，未开启→按设置页默认档开启） */
+  /** 锁屏卡片定时停止开关（活跃→取消，未开启→按固定默认档开启） */
   TOGGLE_SLEEP_TIMER = 'toggleSleepTimer',
 }
 

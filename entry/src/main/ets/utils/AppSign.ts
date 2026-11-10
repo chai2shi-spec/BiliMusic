@@ -20,18 +20,19 @@ import { md5 } from './CryptoUtil';
 import { BILI_APP_KEY, BILI_APP_SEC } from '../common/Constants';
 
 /**
- * 给参数表补齐 appkey / ts / sign，返回可直接拼到 URL 后面的 query 串。
+ * 给参数表补齐指定 appkey / ts / sign，返回可直接拼到 URL 后面的 query 串。
  *
  * 不改入参（调用方拿到的 Record 保持原样）：内部先复制一份再加工 —— 否则
  * 复用同一份参数表重试时会带上上一次的 ts（服务端会判「签名过期」）。
+ * appKey/appSec 参数化：同一算法服务多个 APP 域客户端凭据（TV / Android）。
  */
-export function appSignQuery(params: Record<string, string>): string {
+export function appSignQueryWith(appKey: string, appSec: string, params: Record<string, string>): string {
   const signed: Record<string, string> = {};
   const keys: string[] = Object.keys(params);
   for (let i = 0; i < keys.length; i++) {
     signed[keys[i]] = params[keys[i]];
   }
-  signed['appkey'] = BILI_APP_KEY;
+  signed['appkey'] = appKey;
   signed['ts'] = String(Math.floor(Date.now() / 1000));
   const sorted: string[] = Object.keys(signed).sort();
   const parts: string[] = [];
@@ -39,5 +40,10 @@ export function appSignQuery(params: Record<string, string>): string {
     parts.push(`${encodeURIComponent(sorted[i])}=${encodeURIComponent(signed[sorted[i]])}`);
   }
   const query: string = parts.join('&');
-  return `${query}&sign=${md5(query + BILI_APP_SEC)}`;
+  return `${query}&sign=${md5(query + appSec)}`;
+}
+
+/** 默认凭据（BILI_APP_KEY/SEC）签名：见 appSignQueryWith */
+export function appSignQuery(params: Record<string, string>): string {
+  return appSignQueryWith(BILI_APP_KEY, BILI_APP_SEC, params);
 }

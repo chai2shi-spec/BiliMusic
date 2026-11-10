@@ -579,6 +579,25 @@ export struct DownloadSettingsPage {
                 this.syncCompletedToPublic();
               }
             })
+
+            CardDivider()
+
+            // 扫描并恢复已下载歌曲：卸载重装后公共目录里的音频还在，App 内的
+            // download_task 表没了。入口放在本分组，与「同步已完成歌曲」共用
+            // 同一个目录授权上下文（ensureDirUri）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '扫描并恢复已下载歌曲' },
+                secondaryText: { text: '重装后从「下载/BiliMusic」重建下载记录，先预览再确认' }
+              },
+              suffixItem: new SuffixText({ text: '扫描' }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                NavStackHolder.push('DownloadRestore', undefined);
+              }
+            })
           }
         }
 

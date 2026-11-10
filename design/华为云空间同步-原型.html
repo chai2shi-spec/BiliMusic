@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>华为云空间同步 · 四态原型</title>
+<style>
+*{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0}
+body{
+  font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;
+  background:#0A0A0D;color:#EDEDF2;padding:36px 36px 52px;
+}
+:root{--brand:#FB7299;--brand-dim:rgba(251,114,153,.16)}
+.phone{
+  width:372px;height:796px;position:relative;border-radius:36px;background:#000;
+  border:8px solid #26262D;overflow:hidden;flex:none;
+  box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.05) inset;
+  --n-bgpage:#121216; --n-bgcard:#1E1E24; --n-divider:#303038;
+  --n-tp:#F5F5F7; --n-ts:#ABABB5; --n-tt:#83838F; --n-td:#55555F;
+}
+.head{max-width:1720px;margin:0 auto 28px}
+.head h1{font-size:25px;font-weight:700;margin:0 0 10px;letter-spacing:.2px}
+.head p{margin:0;font-size:14px;line-height:23px;color:#9A9AA6;max-width:1040px}
+.head p code{background:#1E1E24;padding:1px 6px;border-radius:5px;font-size:12.5px;color:#D9A5B8}
+.row{display:flex;gap:32px;justify-content:center;align-items:flex-start;
+  max-width:1720px;margin:0 auto;flex-wrap:wrap}
+.cell{width:372px}
+.cap{margin-top:14px;font-size:12.5px;line-height:20px;color:#8E8E9C}
+.cap b{color:#E8E8F0;font-weight:600}
+.cap .tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;
+  margin-right:6px;font-weight:600;vertical-align:1px}
+.tag.a{background:rgba(251,114,153,.16);color:#FB7299}
+.tag.b{background:rgba(90,150,240,.16);color:#7FA8F0}
+.tag.c{background:rgba(72,187,120,.16);color:#5EC98A}
+
+/* ── 手机内基础 ── */
+.sb{position:absolute;top:0;left:0;right:0;height:44px;z-index:12;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px 0 26px;font-size:12px;font-weight:600;color:var(--n-tp);
+  background:var(--n-bgpage)}
+.sb .ic{display:flex;gap:5px;align-items:center}
+.body{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--n-bgpage);
+  padding-top:44px;overflow:hidden}
+.nav{height:56px;display:flex;align-items:center;gap:6px;padding:0 12px 0 8px}
+.nav .back{width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+  color:var(--n-tp);font-size:20px}
+.nav .t{font-size:20px;font-weight:700;color:var(--n-tp);letter-spacing:.2px}
+.wrap{padding:0 16px}
+
+.grp{font-size:13px;color:var(--n-tt);margin:16px 0 8px;padding-left:4px;letter-spacing:.3px}
+.grp.first{margin-top:4px}
+
+.card{background:var(--n-bgcard);border-radius:14px;overflow:hidden}
+.crow{display:flex;align-items:center;min-height:56px;padding:8px 14px;position:relative}
+.crow+.crow::before{content:'';position:absolute;top:0;left:14px;right:0;height:1px;
+  background:var(--n-divider);transform:scaleY(.6)}
+.crow .meta{flex:1;min-width:0;padding-right:10px}
+.crow .rt{font-size:16px;color:var(--n-tp);line-height:22px}
+.crow .rs{font-size:12.5px;color:var(--n-tt);line-height:18px;margin-top:2px}
+.crow .rt.strong{font-weight:500}
+.arw{color:var(--n-td);font-size:15px;flex:none}
+.dot{width:7px;height:7px;border-radius:50%;flex:none;margin-right:7px;display:inline-block;vertical-align:1px}
+.dot.ok{background:#4FBF7B}
+.dot.warn{background:#E5A34F}
+.dot.err{background:#E57575}
+.foot{font-size:11.5px;line-height:18px;color:var(--n-td);padding:10px 6px 0}
+
+.sw{width:44px;height:26px;border-radius:13px;background:#3A3A44;position:relative;flex:none}
+.sw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#8E8E9C}
+.sw.on{background:var(--brand)}
+.sw.on i{transform:translateX(18px);background:#fff}
+
+/* 状态卡 */
+.status{margin-top:4px;border-radius:16px;padding:16px 16px 12px;position:relative;overflow:hidden;
+  background:linear-gradient(160deg,#241A20 0%,#1C1C22 62%)}
+.status::after{content:'';position:absolute;left:-40px;top:-70px;width:220px;height:180px;
+  background:radial-gradient(closest-side,rgba(251,114,153,.20),transparent 72%);pointer-events:none}
+.status .st-top{display:flex;align-items:center;gap:7px;position:relative}
+.status .big{font-size:22px;font-weight:700;color:var(--n-tp);letter-spacing:.2px}
+.status .when{font-size:12.5px;color:var(--n-ts);margin-top:5px;position:relative}
+.status .pend{font-size:12px;color:#D6A65E;margin-top:5px;position:relative;display:flex;align-items:center}
+.meter{display:flex;margin-top:13px;position:relative}
+.meter .c{flex:1;display:flex;flex-direction:column}
+.meter .n{font-size:17px;font-weight:600;color:var(--n-tp);font-variant-numeric:tabular-nums;line-height:24px}
+.meter .u{font-size:11px;color:var(--n-tt);margin-top:2px}
+
+.btn{height:46px;border-radius:23px;display:flex;align-items:center;justify-content:center;
+  font-size:16px;font-weight:500;margin-top:14px;background:var(--brand);color:#3D0018}
+.btn.ghost{background:rgba(255,255,255,.07);color:var(--n-tp);font-weight:400;font-size:15px;margin-top:10px}
+
+.steps{padding:4px 14px 8px}
+.step{display:flex;gap:10px;padding:7px 0}
+.step .no{width:20px;height:20px;border-radius:50%;flex:none;background:var(--brand-dim);
+  color:var(--brand);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;
+  margin-top:1px}
+.step .tx{font-size:13px;color:var(--n-ts);line-height:20px}
+.step .tx b{color:var(--n-tp);font-weight:500}
+
+.note{display:flex;gap:8px;background:rgba(251,114,153,.08);border-radius:10px;
+  padding:10px 12px;margin-top:12px}
+.note .i{color:var(--brand);font-size:13px;flex:none;margin-top:1px;font-weight:700}
+.note .tx{font-size:12px;color:#D6B7C2;line-height:18px}
+
+/* 检测行 */
+.chk{display:flex;align-items:center;padding:11px 14px;position:relative}
+.chk+.chk::before{content:'';position:absolute;top:0;left:14px;right:0;height:1px;
+  background:var(--n-divider);transform:scaleY(.6)}
+.chk .meta{flex:1;min-width:0}
+.chk .n{font-size:14.5px;color:var(--n-tp);line-height:20px}
+.chk .s{font-size:11.5px;color:var(--n-tt);margin-top:2px}
+.chk .st{font-size:12px;flex:none;margin-left:8px}
+.chk .st.ok{color:#5EC98A}
+.chk .st.warn{color:#E5A34F}
+
+/* 设备行 */
+.dev{display:flex;align-items:center;padding:11px 14px;position:relative}
+.dev+.dev::before{content:'';position:absolute;top:0;left:14px;right:0;height:1px;
+  background:var(--n-divider);transform:scaleY(.6)}
+.dev .ico{width:34px;height:34px;border-radius:9px;background:#2A2A32;flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:15px;color:#9A9AA6}
+.dev .meta{flex:1;min-width:0;margin-left:11px}
+.dev .n{font-size:14.5px;color:var(--n-tp);line-height:20px}
+.dev .s{font-size:11.5px;color:var(--n-tt);margin-top:2px}
+.pill{font-size:10.5px;padding:2px 7px;border-radius:9px;background:rgba(255,255,255,.07);
+  color:var(--n-ts);flex:none}
+.pill.me{background:var(--brand-dim);color:var(--brand)}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>华为云空间同步 · 四态原型</h1>
+  <p>走<b>华为云空间</b>（`cloudFileSyncEnabled` + `context.cloudFileDir`），数据由系统在用户自己的云空间里同步 —— <b>零凭证、零建桶、零费用</b>，但上传时机归系统调度。因此按钮叫「立即读取云端」而不是「立即同步」，页面必须显示「N 个文件等待系统上传」。四屏：<code>入口</code> / <code>已连接</code> / <code>未开启系统开关</code> / <code>云端设备</code>。</p>
+</div>
+
+<div class="row">
+
+  <!-- ══════════ A. 入口 ══════════ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="nav"><div class="back">‹</div><div class="t">歌单备份</div></div>
+        <div class="wrap">
+
+          <div class="grp first">歌单</div>
+          <div class="card">
+            <div class="crow"><div class="meta"><div class="rt">导出歌单到剪贴板</div></div><div class="arw">›</div></div>
+            <div class="crow"><div class="meta"><div class="rt">从剪贴板导入歌单</div></div><div class="arw">›</div></div>
+            <div class="crow"><div class="meta"><div class="rt">从网易云 / QQ 音乐导入</div></div><div class="arw">›</div></div>
+          </div>
+
+          <div class="grp">云同步</div>
+          <div class="card">
+            <div class="crow">
+              <div class="meta">
+                <div class="rt strong">华为云空间同步</div>
+                <div class="rs"><span class="dot ok"></span>已连接 · 3 分钟前读取云端 · 12 个歌单</div>
+              </div>
+              <div class="arw">›</div>
+            </div>
+          </div>
+
+          <div class="grp">本地备份</div>
+          <div class="card">
+            <div class="crow">
+              <div class="meta">
+                <div class="rt">备份到文件</div>
+                <div class="rs">歌单 + 拾音收听数据 → .json</div>
+              </div>
+              <div class="arw">›</div>
+            </div>
+            <div class="crow">
+              <div class="meta">
+                <div class="rt">从文件恢复</div>
+                <div class="rs">同名歌单会加「导入」后缀，不清空现有数据</div>
+              </div>
+              <div class="arw">›</div>
+            </div>
+          </div>
+
+          <div class="foot">云空间同步与本地备份互相独立：本地备份是一次性文件，云空间同步由系统在后台完成。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag a">入口</span><b>只加一行，不新建一级入口。</b>副标题承担全部状态告知，措辞是「读取云端」而不是「同步」—— 因为本机改动何时上传不由 App 决定，用「同步」会让用户误判。放在「本地备份」之上，它常态运行。</div>
+  </div>
+
+  <!-- ══════════ B. 已连接 ══════════ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="nav"><div class="back">‹</div><div class="t">云空间同步</div></div>
+        <div class="wrap">
+
+          <div class="status">
+            <div class="st-top"><span class="dot ok"></span><span class="big">已同步</span></div>
+            <div class="when">3 分钟前读取云端 · 本机无更新</div>
+            <div class="pend"><span class="dot warn"></span>2 个文件等待系统上传</div>
+            <div class="meter">
+              <div class="c"><div class="n">12</div><div class="u">歌单</div></div>
+              <div class="c"><div class="n">986</div><div class="u">曲目</div></div>
+              <div class="c"><div class="n">1.2 万</div><div class="u">拾音条数</div></div>
+              <div class="c"><div class="n">5.1 M</div><div class="u">云空间</div></div>
+            </div>
+          </div>
+
+          <div class="grp">同步</div>
+          <div class="card">
+            <div class="crow">
+              <div class="meta"><div class="rt">自动读取</div><div class="rs">打开 App 时拉取云端最新数据</div></div>
+              <div class="sw on"><i></i></div>
+            </div>
+            <div class="crow">
+              <div class="meta"><div class="rt">仅 WiFi 读取</div><div class="rs">移动网络下不下载云端文件</div></div>
+              <div class="sw on"><i></i></div>
+            </div>
+          </div>
+
+          <div class="grp">数据</div>
+          <div class="card">
+            <div class="crow">
+              <div class="meta"><div class="rt">云端设备</div><div class="rs">2 台设备在同步</div></div>
+              <div class="arw">›</div>
+            </div>
+            <div class="crow">
+              <div class="meta"><div class="rt">同步内容</div><div class="rs">歌单 12（含 3 个订阅）· 拾音 13 个月</div></div>
+              <div class="arw">›</div>
+            </div>
+          </div>
+
+          <div class="btn">立即读取云端</div>
+          <div class="foot">上传由系统在充电和 WiFi 下完成，通常几分钟到几小时。已自动排除 B 站收藏夹 —— 它跟随你的 B 站账号，不需要上云。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag c">已连接</span><b>状态卡必须有两个时间维度</b>：读（App 可控，精确到分钟）+ 写（系统调度，只报"还有几个没传"）。少了第二行，用户会在改了歌单却看不到上传时以为坏了。开关只剩两个 —— 加密、重试、端点这些都不再由 App 管。</div>
+  </div>
+
+  <!-- ══════════ C. 未开启系统开关 ══════════ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="nav"><div class="back">‹</div><div class="t">开启云空间同步</div></div>
+        <div class="wrap">
+
+          <div class="note" style="margin-top:4px">
+            <div class="i">!</div>
+            <div class="tx">这是系统开关，App 不能代你打开。只需设置一次，之后自动生效。</div>
+          </div>
+
+          <div class="grp">三步开启</div>
+          <div class="card">
+            <div class="steps">
+              <div class="step"><div class="no">1</div><div class="tx">确认已登录<b>华为账号</b>（设置 → 顶部账号）</div></div>
+              <div class="step"><div class="no">2</div><div class="tx">进入 <b>设置 → 云空间 → 本应用</b>，打开同步开关</div></div>
+              <div class="step"><div class="no">3</div><div class="tx">回到这里点「重新检测」</div></div>
+            </div>
+          </div>
+
+          <div class="grp">检测结果</div>
+          <div class="card">
+            <div class="chk">
+              <div class="meta"><div class="n">华为账号</div><div class="s">已登录 · 138****6721</div></div>
+              <div class="st ok">正常</div>
+            </div>
+            <div class="chk">
+              <div class="meta"><div class="n">云空间同步开关</div><div class="s">未开启 · 数据暂不会上云</div></div>
+              <div class="st warn">待开启</div>
+            </div>
+            <div class="chk">
+              <div class="meta"><div class="n">云空间剩余容量</div><div class="s">4.2 GB 可用 · 本应用约需 5 MB</div></div>
+              <div class="st ok">充足</div>
+            </div>
+          </div>
+
+          <div class="btn">打开系统设置</div>
+          <div class="btn ghost">我已开启，重新检测</div>
+
+          <div class="foot">开启后数据写入系统云端目录，由系统负责上传与多设备同步，不经过任何第三方服务器。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag b">未开启</span><b>这一屏的本质是「无法代劳」</b>，所以不画输入框、不做假按钮 —— 只有步骤 + 检测结果 + 跳转。检测行把三种失败分开报（没登录账号 / 开关没开 / 容量不足），因为系统设置里它们是三个不同位置，混成一句「同步不可用」用户就卡死了。</div>
+  </div>
+
+  <!-- ══════════ D. 云端设备 ══════════ -->
+  <div class="cell">
+    <div class="phone">
+      <div class="sb"><span>9:41</span><span class="ic">▮▮▮ ⌁ ▰</span></div>
+      <div class="body">
+        <div class="nav"><div class="back">‹</div><div class="t">云端设备</div></div>
+        <div class="wrap">
+
+          <div class="note" style="margin-top:4px">
+            <div class="i">i</div>
+            <div class="tx">每台设备各写各的目录，读取时合并。系统同步即使按「后写覆盖」处理，也覆盖不到别人的数据。</div>
+          </div>
+
+          <div class="grp">正在同步</div>
+          <div class="card">
+            <div class="dev">
+              <div class="ico">▯</div>
+              <div class="meta"><div class="n">Mate 70 Pro</div><div class="s">最后读取 · 3 分钟前</div></div>
+              <div class="pill me">本机</div>
+            </div>
+            <div class="dev">
+              <div class="ico">▭</div>
+              <div class="meta"><div class="n">MatePad Pro</div><div class="s">最后写入 · 昨天 22:14</div></div>
+              <div class="pill">歌单 12</div>
+            </div>
+          </div>
+
+          <div class="grp">很久没动过</div>
+          <div class="card">
+            <div class="dev">
+              <div class="ico">▯</div>
+              <div class="meta"><div class="n">旧手机 · 07 月重装前</div><div class="s">最后写入 · 101 天前</div></div>
+              <div class="pill">清理</div>
+            </div>
+          </div>
+
+          <div class="grp">存储</div>
+          <div class="card">
+            <div class="crow">
+              <div class="meta"><div class="rt">云端占用</div><div class="rs">5.1 MB · 2 个文件待上传</div></div>
+              <div class="arw">›</div>
+            </div>
+            <div class="crow">
+              <div class="meta"><div class="rt">本地缓存</div><div class="rs">38 MB · 点击释放（不影响云端）</div></div>
+              <div class="arw">›</div>
+            </div>
+          </div>
+
+          <div class="foot">重装 App 会生成新的设备标识，旧目录不会自动清理 —— 确认不再需要后手动清理，只影响这一份视图。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><span class="tag b">云端设备</span><b>「每设备一份视图」是支点，也是唯一的解释成本</b>，用一句 note 正面讲清为什么不怕系统覆盖。多了一行「本地缓存 · 可释放」—— `CloudFileCache` 会在本机堆积缓存副本，不给释放入口用户会莫名其妙少几百兆。</div>
+  </div>
+
+</div>
+
+</body>
+</html>

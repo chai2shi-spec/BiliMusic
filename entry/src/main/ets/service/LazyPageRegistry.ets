@@ -131,6 +131,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.DownloadSettingsPageWrapped);
       break;
     }
+    case 'DownloadRestore': {
+      const m = await import('../pages/DownloadRestorePage');
+      builders.set(name, m.DownloadRestorePageWrapped);
+      break;
+    }
     case 'AppearanceSettings': {
       const m = await import('../pages/AppearanceSettingsPage');
       builders.set(name, m.AppearanceSettingsPageWrapped);
@@ -149,6 +154,11 @@ async function loadByName(name: string): Promise<void> {
     case 'PlaybackLog': {
       const m = await import('../pages/PlaybackLogPage');
       builders.set(name, m.PlaybackLogPageWrapped);
+      break;
+    }
+    case 'HuaweiCloudSync': {
+      const m = await import('../pages/CloudSyncPage');
+      builders.set(name, m.CloudSyncPageWrapped);
       break;
     }
     case 'Downloads': {
@@ -189,7 +199,7 @@ async function loadByName(name: string): Promise<void> {
 /** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
 const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'NeteasePlaylist', 'Recent', 'Follows', 'Live',
   'UpSpace', 'SeasonSeriesDetail', 'CollectionDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
-  'HomeFeedFilter', 'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'Downloads', 'ListenCacheList', 'PlaylistBackup', 'PlaybackLog', 'DiaryNewFaces', 'DiaryTimeline', 'Reward', 'About', 'Login'];
+  'HomeFeedFilter', 'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'Downloads', 'ListenCacheList', 'PlaylistBackup', 'PlaybackLog', 'HuaweiCloudSync', 'DiaryNewFaces', 'DiaryTimeline', 'Reward', 'About', 'Login', 'DownloadRestore'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

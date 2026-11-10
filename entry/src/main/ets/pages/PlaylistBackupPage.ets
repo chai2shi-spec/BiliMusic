@@ -19,12 +19,16 @@
 
 import {
   CONTENT_END_OFFSET,
+  STORE_CLOUD_SYNC_REV,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP
 } from '../common/Constants';
 import { Playlist } from '../model/MusicModels';
 import { NavStackHolder } from '../service/NavStackHolder';
-import { LibraryStore, PlaylistImportResult } from '../service/LibraryStore';
+import { LibraryStore, PlaylistImportResult, getPlaylistsForSync } from '../service/LibraryStore';
+import { isCloudDirAvailable } from '../service/CloudDirClient';
+import { getLastReadAt } from '../service/CloudSyncStore';
+import { formatRelativeTime } from '../utils/TextUtil';
 import { copyText, readText } from '../utils/ClipboardUtil';
 import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
@@ -92,6 +96,11 @@ export struct PlaylistBackupPage {
   /** 子页转场的横移量（相对页面自身宽度）：转场代理里按 push/pop 方向临时改写 */
   @State navTransX: string = '0%';
 
+  /** 云同步入口行副标题（探针 + 读取时间 + 歌单数；未开启时给开启指引） */
+  @State cloudEntrySubtitle: string = '';
+  /** 云同步页刷新信号：同步轮结束 bump 时刷新入口行副标题 */
+  @StorageLink(STORE_CLOUD_SYNC_REV) @Watch('onCloudSyncRevChanged') cloudSyncRev: number = 0;
+
   /**
    * 「从剪贴板导入歌单」授权弹窗 controller：官方 CustomContentDialog 承载。
    * ⚠️ 必须在 @Component 内部定义时赋值才有效，且一经创建不能重新赋值；
@@ -103,6 +112,7 @@ export struct PlaylistBackupPage {
   aboutToAppear(): void {
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，挂载时 initializeModifier 补上）
     this.syncTopBlurProgress();
+    this.refreshCloudEntrySubtitle();
     this.pasteImportController = new CustomDialogController({
       builder: CustomContentDialog({
         primaryTitle: '从剪贴板导入歌单',
@@ -124,6 +134,28 @@ export struct PlaylistBackupPage {
 
   private toast(message: string, duration: number): void {
     showAppToast(message, duration);
+  }
+
+  /** 云同步入口行副标题刷新（rev 变化 / 进页时）：探针未过给开启指引，
+   *  通过给「读取时间 + 歌单数」 —— 副标题承担全部状态告知（原型 A 屏口径）。 */
+  private refreshCloudEntrySubtitle(): void {
+    if (!isCloudDirAvailable()) {
+      this.cloudEntrySubtitle = '未开启 · 点击查看三步开启方法';
+      return;
+    }
+    const scope: Playlist[] = getPlaylistsForSync();
+    const readMs: number = getLastReadAt();
+    if (!(readMs > 0)) {
+      this.cloudEntrySubtitle = `已连接 · 尚未读取过云端 · ${scope.length} 个歌单`;
+      return;
+    }
+    const rel: string = formatRelativeTime(new Date(readMs).toISOString());
+    const when: string = rel.length > 0 ? `${rel}读取云端` : '已读取过云端';
+    this.cloudEntrySubtitle = `已连接 · ${when} · ${scope.length} 个歌单`;
+  }
+
+  private onCloudSyncRevChanged(): void {
+    this.refreshCloudEntrySubtitle();
   }
 
   /**
@@ -497,6 +529,31 @@ export struct PlaylistBackupPage {
         }
         ListItem() {
           SectionFooter({ noteText: '导出的文本里不含音频直链与本机路径，导入后首次播放需要重新联网解析' })
+        }
+        // 华为云空间同步入口（原型 A 屏「云同步」分组）：副标题承担全部状态
+        // 措辞用「读取云端」而不是「同步」—— 本机改动何时上传由系统调度，
+        // 用「同步」会让用户误判（方案 §2）。
+        ListItem() {
+          InsetCard() {
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '华为云空间同步' },
+                secondaryText: { text: this.cloudEntrySubtitle }
+              },
+              suffixItem: new SuffixArrowIconText({ endArrow: {} }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                NavStackHolder.stack.pushPath({ name: 'HuaweiCloudSync' });
+              }
+            })
+              .accessibilityText('华为云空间同步')
+              .accessibilityLevel('yes')
+          }
+        }
+        ListItem() {
+          SectionFooter({ noteText: '云空间同步与本地备份互相独立：本地备份是一次性文件，云空间同步由系统在后台完成' })
         }
         ListItem() {
           InsetCard() {

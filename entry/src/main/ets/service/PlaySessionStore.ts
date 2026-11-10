@@ -29,6 +29,7 @@ import common from '@ohos.app.ability.common';
 import fs from '@ohos.file.fs';
 import { PLAYBACK_LOG_WARN, recordPlaybackLog } from './PlaybackLogStore';
 import { STORE_SESSION_REV } from '../common/Constants';
+import { notifyCloudSyncDataChanged } from './CloudSyncHooks';
 
 /** 单次播放会话（听歌日记的最小统计粒度） */
 export interface PlaySession {
@@ -134,6 +135,9 @@ export function appendSession(session: PlaySession): void {
   //（AppStorage 为全局，无需 import —— FavSyncManager 同款手法）。
   const rev: number = AppStorage.get<number>(STORE_SESSION_REV) ?? 0;
   AppStorage.setOrCreate(STORE_SESSION_REV, rev + 1);
+  // 云同步数据变更钩子（20s 去抖后触发一轮云端写回；CloudSyncManager 应用远端
+  // 数据期间自会忽略本通知，不会自我循环）
+  notifyCloudSyncDataChanged();
   const monthKey: string = monthKeyOf(session.startedAt);
   const cached: PlaySession[] | undefined = monthCache.get(monthKey);
   if (cached !== undefined) {
@@ -158,9 +162,14 @@ async function loadMonth(monthKey: string): Promise<PlaySession[]> {
   try {
     raw = await fs.readText(`${logDirPath}/${monthKey}.jsonl`);
   } catch (e) {
-    // 文件不存在（该月无记录）或首读失败：按空月缓存，避免反复重试读盘
-    monthCache.set(monthKey, []);
-    return [];
+    // ⚠️ 必须把「放进 monthCache 的同一个数组」返回出去。以前 set(空数组)
+    // 却 return []（另一个全新的数组），mergeBackupSessions 往返回值 push 的
+    // 会话全落在脱离缓存的临时数组上 —— 云端同步回几百条、磁盘也确实写了，
+    // 读侧却永远命中那个空缓存，拾音页显示 0，只有重启进程重建缓存才恢复。
+    // 文件不存在（该月无记录）或首读失败：按空月缓存，避免反复重试读盘。
+    const empty: PlaySession[] = [];
+    monthCache.set(monthKey, empty);
+    return empty;
   }
   const loaded: PlaySession[] = [];
   const lines: string[] = raw.split('\n');
@@ -321,6 +330,7 @@ export async function mergeBackupSessions(rawSessions: PlaySession[]): Promise<S
       writeChain = writeChain.then((): Promise<void> => appendLine(monthKey, block))
         .then((): void => {
         }, (e: Error): void => {
+          console.error(`[PlaySession] merge append failed month=${monthKey}: ${e.message}`);
           recordPlaybackLog(PLAYBACK_LOG_WARN, `备份会话合并落盘失败: ${e.message}`);
         });
     }
@@ -329,8 +339,81 @@ export async function mergeBackupSessions(rawSessions: PlaySession[]): Promise<S
     // 拾音页 @Watch 本信号判断快照过期（appendSession 同款手法）
     const rev: number = AppStorage.get<number>(STORE_SESSION_REV) ?? 0;
     AppStorage.setOrCreate(STORE_SESSION_REV, rev + 1);
+    notifyCloudSyncDataChanged();
   }
+  const firstMonth: string = valid.length > 0 ? monthKeyOf(valid[0].startedAt) : 'none';
+  console.info(`[PlaySession] merge detail: dir=${logDirPath} valid=${valid.length} `
+    + `firstMonth=${firstMonth} merged=${result.merged} skipped=${result.skipped} `
+    + `cachedMonths=${monthCache.size} monthsOnDisk=${listMonthKeys().length} `
+    + `floor=${retentionFloor} now=${nowMs}`);
   return result;
+}
+
+/**
+ * 是否是月分片文件名（'YYYY-MM.jsonl'）。
+ *
+ * 必须是**一个**判定函数：此前 listMonthKeys 与 pruneOldMonths 各自内联写了一份，
+ * 前者写成「11 字符 / `.jsonl` 在下标 5」（那是 `2026-11.txt` 的尺寸），于是
+ * 永远匹配不到真实文件名 → listMonthKeys 恒返回 []，云同步既不上传拾音、
+ * 也不认为有分片可下发，页面恒显示「拾音 0 个月」。两处共用此处防再次漂移。
+ */
+function isMonthFileName(name: string): boolean {
+  // 'YYYY-MM.jsonl' 固定 13 字符，'.jsonl' 在下标 7
+  if (name.length !== 13 || name.indexOf('.jsonl') !== 7) {
+    return false;
+  }
+  const year: number = Number(name.substring(0, 4));
+  const month: number = Number(name.substring(5, 7));
+  return Number.isInteger(year) && Number.isInteger(month)
+    && year >= 2000 && month >= 1 && month <= 12;
+}
+
+/**
+ * 列出保留窗内存在的月分片键（'YYYY-MM'，云同步写回会话分片用）。
+ * 未 init / 目录不存在返回空数组。
+ */
+export function listMonthKeys(): string[] {
+  if (!inited) {
+    return [];
+  }
+  const keys: string[] = [];
+  try {
+    const names: string[] = fs.listFileSync(logDirPath);
+    for (let i = 0; i < names.length; i++) {
+      const entry: string = names[i];
+      const slash: number = Math.max(entry.lastIndexOf('/'), entry.lastIndexOf('\\'));
+      const name: string = slash >= 0 ? entry.substring(slash + 1) : entry;
+      if (!isMonthFileName(name)) {
+        continue;
+      }
+      keys.push(name.substring(0, 7));
+    }
+  } catch (e) {
+    return [];
+  }
+  return keys;
+}
+
+/**
+ * 读某月分片的原始文本（云同步写回用，逐行结构原样转发到云端）。
+ * 先 await writeChain（在途追加落定），文件不存在返回 null。
+ * 与 loadMonth 刻意不合并：这条路径要**原始字节**（hash 判变依据），
+ * 不进 monthCache、不做逐行消毒 —— 消毒是读取侧的职责。
+ */
+export async function readMonthRaw(monthKey: string): Promise<string | null> {
+  if (!inited) {
+    return null;
+  }
+  await writeChain;
+  const path: string = `${logDirPath}/${monthKey}.jsonl`;
+  try {
+    if (!fs.accessSync(path)) {
+      return null;
+    }
+    return await fs.readText(path);
+  } catch (e) {
+    return null;
+  }
 }
 
 /** 清理保留期外的旧月分片（init 时一次）：文件名 YYYY-MM 解析失败的不动 */
@@ -343,8 +426,7 @@ function pruneOldMonths(): void {
       const entry: string = names[i];
       const slash: number = Math.max(entry.lastIndexOf('/'), entry.lastIndexOf('\\'));
       const name: string = slash >= 0 ? entry.substring(slash + 1) : entry;
-      // 'YYYY-MM.jsonl' 固定 13 字符，前缀不匹配的杂散文件跳过
-      if (name.length !== 13 || name.indexOf('.jsonl') !== 7) {
+      if (!isMonthFileName(name)) {
         continue;
       }
       const year: number = Number(name.substring(0, 4));
