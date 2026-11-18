@@ -3,8 +3,10 @@
  *
  * 职责（与 BiliDevice 管理匿名身份的分工）：
  *   1. initLoginState()：启动时把持久化的登录 Cookie 装填进 HttpUtil（登录通道）；
- *   2. applyQrSuccess() / applySmsLoginCookies()：扫码 / 短信登录成功后提取登录
- *      Cookie（扫码为双通道：回调 url 参数 / 响应 Set-Cookie 头；短信仅响应头）并持久化；
+ *   2. applyQrSuccess() / applySmsLoginCookies() / applyAppLogin() / applyImportedCookie()：
+ *      网页扫码（双通道：回调 url 参数 / 响应 Set-Cookie 头）/ App 短信（响应头）/
+ *      App 端登录（TV 扫码 / 密码 / App 短信，token_info+cookie_info）/ 手动 Cookie 导入，
+ *      成功后提取登录 Cookie（白名单解析）并持久化；
  *   3. refreshLoginUser()：拉 nav 接口刷新昵称 / 头像 / VIP 状态，
  *      返回 -101（Cookie 失效）时自动降级为未登录；
  *   4. logout()：先 best-effort 撤销服务器会话，再清本地登录态。
@@ -21,6 +23,7 @@ import {
   PREF_LOGIN_USER,
   PREF_LOGIN_REFRESH_TOKEN,
   PREF_LOGIN_VERIFIED_AT,
+  PREF_LOGIN_ACCESS_TOKEN,
   STORE_LOGIN_REV
 } from '../common/Constants';
 import { fetchNavUser, revokeLogin } from '../api/BilibiliApi';
@@ -255,6 +258,51 @@ export async function applySmsLoginCookies(responseCookies: string, refreshToken
 }
 
 /**
+ * App 端登录成功（TV 扫码 / 密码 / App 短信）：token_info + cookie_info 的解析结果落库。
+ * cookie 串过一遍白名单解析（与网页链路同款过滤，只留四个身份字段），
+ * 并额外持久化 access_token（App 端凭据，区别于网页链路的 refresh_token）。
+ *
+ * @throws cookie 串里拿不到 SESSDATA 时抛错，由登录页提示用户重试
+ */
+export async function applyAppLogin(
+  cookieString: string,
+  accessToken: string,
+  refreshToken: string
+): Promise<void> {
+  const cookie: string = parseLoginCookieFromResponseCookies(cookieString);
+  if (cookie.indexOf('SESSDATA=') < 0) {
+    throw new Error(
+      `App 登录结果里缺少登录 Cookie ` +
+      `(cookiesLen=${cookieString.length}, ` +
+      `cookiesHasSessdata=${cookieString.indexOf('SESSDATA=') >= 0})`
+    );
+  }
+  await AppPreferences.setLoginAccessToken(accessToken);
+  console.info('login cookie applied from app token_info/cookie_info');
+  await persistLoginCookie(cookie, refreshToken);
+}
+
+/**
+ * Cookie 导入成功（validateWebCookie 校验通过后调用）：导入串走白名单解析落库。
+ * 导入链路没有 token，清掉旧 access_token，避免新 Cookie 配旧 token 的凭据错配。
+ *
+ * @throws 导入串里拿不到 SESSDATA 时抛错，由登录页提示检查格式
+ */
+export async function applyImportedCookie(cookieString: string): Promise<void> {
+  const cookie: string = parseLoginCookieFromResponseCookies(cookieString);
+  if (cookie.indexOf('SESSDATA=') < 0) {
+    throw new Error(
+      `导入的 Cookie 里缺少身份字段 ` +
+      `(len=${cookieString.length}, ` +
+      `hasSessdata=${cookieString.indexOf('SESSDATA=') >= 0})`
+    );
+  }
+  await AppPreferences.setLoginAccessToken('');
+  console.info('login cookie applied from manual import');
+  await persistLoginCookie(cookie, '');
+}
+
+/**
  * 拉取 nav 接口刷新用户信息（昵称/ 头像 / VIP 状态）。
  *
  * ⚠️ **被拒绝时不清凭据**：nav 返回 -101 有多种成因（B 站风控临时拒绝、
@@ -347,8 +395,9 @@ export async function logout(): Promise<void> {
  * 那属于「凭据待重验」，不是「用户要退出」。
  */
 async function clearLoginState(): Promise<void> {
-  // 四个 key 攒一次 removeMany（单次 flush），避免逐 key remove 全量落盘 4 次。
-  await AppPreferences.removeMany([PREF_LOGIN_COOKIE, PREF_LOGIN_USER, PREF_LOGIN_REFRESH_TOKEN, PREF_LOGIN_VERIFIED_AT]);
+  // 五个 key 攒一次 removeMany（单次 flush），避免逐 key remove 全量落盘 5 次。
+  await AppPreferences.removeMany([PREF_LOGIN_COOKIE, PREF_LOGIN_USER, PREF_LOGIN_REFRESH_TOKEN,
+    PREF_LOGIN_VERIFIED_AT, PREF_LOGIN_ACCESS_TOKEN]);
   cachedUser = null;
   HttpUtil.clearLoginCookie();
   bumpLoginRev();

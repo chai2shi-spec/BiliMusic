@@ -2,17 +2,22 @@
  * B 站 API 服务层（原生 ArkTS 版），使用 HttpUtil + WBI 签名。
  * 所有请求自动携带 Referer / buvid Cookie（HttpUtil 统一处理），登录后追加 SESSDATA。
  *
- * 扫码登录（passport web 接口）：生成 / 轮询 / nav / 登出见文件末尾
- * 「扫码登录」一节。密码 / 短信登录依赖极验验证码，第三方客户端无法内置，不做。
+ * 登录体系见文件末尾两节：
+ *   · 「扫码登录」：Web 扫码（generateQrLogin / pollQrLogin，登录页「网页扫码」子模式）；
+ *   · 「App 端登录」：TV 扫码 / 密码（RSA）/ App 短信 / 安心中心风控链 / Cookie 导入，
+ *     含极验滑块（WebView 内完成，凭据回传重发）。
  * buvid 能力（设备指纹）与登录无关，在 `service/BiliDevice.ts`。
  */
 
-import { HttpUtil, HttpTextResult } from '../utils/HttpUtil';
+import { HttpUtil, HttpTextResult, HttpRequestOptions } from '../utils/HttpUtil';
 import { toHttpsUrl, stripHtmlTags, decodeHtmlEntities } from '../utils/TextUtil';
 import { encodeWbi } from './WbiSign';
 import { gaiaWebParams } from '../utils/RiskShield';
 import { appSignQuery, appSignQueryWith } from '../utils/AppSign';
 import { sleep } from '../utils/AsyncUtil';
+import { md5 } from '../utils/CryptoUtil';
+import { rsaEncryptBase64 } from '../utils/RsaUtil';
+import { getBuvid3 } from '../service/BiliDevice';
 import { CdnLineOption, effectiveCdnLine, replaceUposHost } from '../utils/CdnLine';
 import { recordPlaybackLog, PLAYBACK_LOG_WARN } from '../service/PlaybackLogStore';
 import http from '@ohos.net.http';
@@ -23,8 +28,15 @@ import {
   AUDIO_Q_DOLBY,
   AUDIO_Q_HIRES,
   BILI_API,
+  BILI_ANDROID_APP_KEY,
+  BILI_ANDROID_APP_SEC,
+  BILI_ANDROID_APP_UA,
+  BILI_APP_FEED_TRACE_ID,
+  BILI_APP_FEED_UA,
   BILI_APP_UA,
   BILI_LIVE_API,
+  BILI_LOGIN_STATISTICS,
+  BILI_LOGIN_STATISTICS_ANDROID,
   BILI_PASSPORT,
   BILI_TV_UA
 } from '../common/Constants';
@@ -1653,8 +1665,10 @@ interface PartTitle {
   artist: string;
 }
 
-/** 分 P 标题前缀："001."、"01 -"、"P1 " 等序号 */
-const PART_INDEX: RegExp = /^\s*[Pp]?\d{1,3}\s*[.、:：\-_|]*\s*/;
+/** 分 P 标题前缀："001."、"01 -"、"P1 "、"1P"（P 在数字后）等序号 */
+const PART_INDEX: RegExp = /^\s*[Pp]?\d{1,3}[Pp]?\s*[.、:：\-_|]*\s*/;
+/** 4 位以上数字开头（「1080P 高清」分辨率字样）不是分 P 序号，整段保留不剥 */
+const NOT_PART_INDEX: RegExp = /^\d{4,}/;
 /** "周杰伦-晴天" → 歌手「周杰伦」+ 标题「晴天」 */
 const PART_SPLIT: RegExp = /^(.{1,16}?)\s*[-–—]\s*(.+)$/;
 
@@ -1662,7 +1676,10 @@ function splitPartTitle(part: string): PartTitle {
   if (!part) {
     return { title: '', artist: '' };
   }
-  const s: string = part.trim().replace(PART_INDEX, '');
+  const t: string = part.trim();
+  // ⚠️ "1P" 这类数字在前的序号：旧正则只吃掉数字剩下孤零零的 "P"（BV1NH4y1A7fU
+  // 全套分 P 就叫 "1P""2P"…），必须连后面的 P 一起剥；"1080P" 则整段不剥。
+  const s: string = NOT_PART_INDEX.test(t) ? t : t.replace(PART_INDEX, '');
   const m: RegExpMatchArray | null = s.match(PART_SPLIT);
   if (m) {
     return { artist: m[1].trim(), title: m[2].trim() };
@@ -1732,7 +1749,11 @@ export async function expandVideoParts(bvid: string, base?: Track, expandSeason:
     const parsed: PartTitle = splitPartTitle(p.part);
     let title: string = parsed.title;
     if (title.length === 0) {
-      title = detail.title;
+      // 分 P 名剥完序号为空（"1P""P1""01." 纯序号名，或根本没起名）：合成
+      // 「P{序号}」而非回落合集标题 —— 否则 25 个分 P 全显示同一行合集标题，
+      // 无法区分（BV1NH4y1A7fU 全套 "1P""2P"… 命名即此场景）。
+      const pageNo: number = p.page && p.page > 0 ? p.page : i + 1;
+      title = `P${pageNo}`;
     }
     // 首个分 P 复用调用方传入的原始条目（id 已如此），标题也优先用它的：
     // 从搜索 / 榜单进来时这就是**合集标题**，下载页据此把整个合集显示成单个条目
@@ -2424,6 +2445,10 @@ function buildTrackSource(
       const parsed: PartTitle = splitPartTitle(pages[i].part);
       if (parsed.title.length > 0) {
         title = parsed.title;
+      } else if (pages.length > 1) {
+        // 纯序号分 P 名（"1P" 剥完为空）：合成 P 序号，不拿合集标题顶替 ——
+        // 否则多 P 连播时每首显示的都是同一个合集标题。
+        title = `P${pages[i].page && pages[i].page > 0 ? pages[i].page : i + 1}`;
       }
       if (parsed.artist.length > 0) {
         artist = parsed.artist;
@@ -4126,170 +4151,775 @@ export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// 短信验证码登录（对齐 BBPlayer api.ts L1426 / L1477 / L1569）
+// App 端登录（移植 PiliPlus lib/http/login.dart，默认 android_hd 签名域）
 //
-// 三步链路（每步都是独立接口，第二步前必须先过极验滑块）：
-//   1. fetchSmsCaptchaToken()  拿图形验证 token + 极验 gt/challenge；
-//   2. 用户在 WebView 里完成极验滑块 → sendSmsLoginCode() 发送短信，
-//      返回 captcha_key（86211 / -105 = 图形验证已过期，需回到第 1 步重来）；
-//   3. loginWithSmsCode()      用短信验证码换登录 Cookie（响应 Set-Cookie）。
-// 三接口全部 BiliApp UA + 裸 Cookie（skipCookie，对齐 BBPlayer 的
-// credentials:'omit'）；2/3 为 POST 且**参数内联 query**（本引擎 queryParams
-// 发空参、表单体也会被吞，query 内联是唯一可靠通道），Referer / Origin 同 BBPlayer。
+// 四条链路共用「token_info + cookie_info」成功形态（TV 扫码 / 密码 / App 短信 /
+// 安心中心 oauth2），统一解析为 TvTokenResult（cookie 串 + access/refresh token）：
+//   · TV 扫码：fetchTvQrAuthCode → pollTvQrLogin（1s 轮询，0/86038/86090）；
+//   · 密码：fetchWebKey → loginByPwd（status 0/2，-105 极验重试）；
+//   · App 短信：sendAppSmsCode（免极验直达；0/-105 且带 recaptcha_url 时极验重试）
+//     → loginByAppSms；
+//   · 安心中心（密码 status=2 风控）：fetchSafeCenterInfo → fetchSafeCenterPreCapture
+//     → sendSafeCenterSms → verifySafeCenterSms → fetchOauth2Token；
+//   · Cookie 导入校验：validateWebCookie。
+// 请求约定（与现有登录段一致）：**参数全部内联 URL query**（本引擎 queryParams /
+// 表单体均会发空参），需签名的端点用 appSignQuery（android_hd appkey/appsec），
+// 登录链路全程 skipCookie + skipReferer（带旧登录 Cookie 会干扰新凭据下发）。
+//
+// ── 登录域（LOGIN_DOMAIN_*）──
+// App 端 access_token 与**签发时的 appkey（appid）绑定**，跨域不认：
+//   · HD 域（android_hd，appkey dfca71928277209b）：TV 扫码 / 密码 / 短信的默认域；
+//   · 粉版域（android，appkey 1d8b6e7d45233436）：唯一能签出被粉版 playurl
+//     通道（appSignQueryWith + BILI_ANDROID_APP_*，本文件 HDR Vivid 兜底段）
+//     认作登录态的 token 的域，由登录页短信页签「粉版手机端登录」开关启用
+//     （sendAppSmsCode / loginByAppSms 的 domain 参数）。HD 域 token 送给粉版
+//     通道时服务端按匿名处理：fnval 含 16384 位直接 -400，4048 只回 [32,16]。
 // ════════════════════════════════════════════════════════════════════════
 
-/** 第 1 步产物：图形验证 token + 极验参数（WebView 里 initGeetest 用） */
-export interface SmsCaptchaInfo {
-  token: string;
-  gt: string;
+/** 登录域：HD（android_hd，云视听小电视口径，默认） */
+export const LOGIN_DOMAIN_HD: string = 'hd';
+/** 登录域：粉版（android，手机端 8.43.0 口径，粉版 playurl 通道同域） */
+export const LOGIN_DOMAIN_ANDROID: string = 'android';
+
+/** 登录域 → build 号（HD 2001100 / 粉版 8430300，与各自 UA 的 build 一致） */
+function loginBuildForDomain(domain: string): string {
+  return domain === LOGIN_DOMAIN_ANDROID ? '8430300' : '2001100';
+}
+
+/** 登录域 → mobi_app（服务端校验与 appkey 同客户端，配错 -3「API 校验失败」） */
+function loginMobiAppForDomain(domain: string): string {
+  return domain === LOGIN_DOMAIN_ANDROID ? 'android' : 'android_hd';
+}
+
+/** 登录域 → statistics 参数体（HD 登录口径 / 粉版登录口径） */
+function loginStatisticsForDomain(domain: string): string {
+  return domain === LOGIN_DOMAIN_ANDROID ? BILI_LOGIN_STATISTICS_ANDROID : BILI_LOGIN_STATISTICS;
+}
+
+/** 登录域 → appkey/appsec 签名（HD 走 appSignQuery 默认组，粉版走 BILI_ANDROID_APP_*） */
+function appSignQueryForDomain(params: Record<string, string>, domain: string): string {
+  return domain === LOGIN_DOMAIN_ANDROID
+    ? appSignQueryWith(BILI_ANDROID_APP_KEY, BILI_ANDROID_APP_SEC, params)
+    : appSignQuery(params);
+}
+
+/** 极验滑块通过凭据（WebView 回传的三件套，重发请求时回填 gee_* 参数） */
+export interface GeetestProof {
   challenge: string;
+  validate: string;
+  seccode: string;
 }
 
-/** 第 2 步产物：captcha_key，第 3 步登录必带（一次性凭据） */
-export interface SmsSendResult {
-  captchaKey: string;
-}
-
-/** 第 3 步产物：登录 Cookie（Set-Cookie 串）+ refresh_token */
-export interface SmsLoginResult {
-  responseCookies: string;
+/** App 端登录成功形态：cookie_info 拼好的 `k=v; ` 串 + token_info 两枚令牌 */
+export interface TvTokenResult {
+  cookieString: string;
+  accessToken: string;
   refreshToken: string;
 }
 
-interface SmsCaptchaEnvelope {
-  code: number;
+/** TV 扫码二维码凭据 */
+export interface TvQrTicket {
+  authCode: string;
+  qrUrl: string;
+}
+
+/** TV 扫码轮询结果：status 即顶层 code（0 成功 / 86038 过期 / 86090 已扫待确认） */
+export interface TvQrPollResult {
+  status: number;
   message: string;
-  data: SmsCaptchaData;
+  token: TvTokenResult | null;
 }
 
-interface SmsCaptchaData {
-  token: string;
-  geetest: GeetestConfig;
-}
-
-interface GeetestConfig {
+/** 密码登录结果（loginByPwd） */
+export interface PwdLoginResult {
+  /** 0 成功（token 有值）/ 2 风控（riskUrl 有值）/ -105 极验（gt/challenge 有值） */
+  status: number;
+  message: string;
+  token: TvTokenResult | null;
+  /** status=2：安心中心跳转 url（含 tmp_token/request_id/source query） */
+  riskUrl: string;
+  /** status=-105：极验参数 */
   gt: string;
   challenge: string;
+  recaptchaToken: string;
 }
 
-interface SmsSendEnvelope {
+/** App 短信验证码发送结果（sendAppSmsCode） */
+export interface AppSmsSendResult {
+  /** 直达成功时的 captcha_key（needGeetest=false 才有意义） */
+  captchaKey: string;
+  /** true = 需先过极验再用 proof 重发（recaptcha_url 形态） */
+  needGeetest: boolean;
+  gt: string;
+  challenge: string;
+  recaptchaToken: string;
+}
+
+/** 安心中心账号信息（fetchSafeCenterInfo） */
+export interface SafeCenterInfo {
+  hideTel: string;
+  telVerify: boolean;
+}
+
+/** 安心中心人机预凭据（fetchSafeCenterPreCapture） */
+export interface SafeCenterCapture {
+  gt: string;
+  challenge: string;
+  recaptchaToken: string;
+}
+
+/** web key 产物：hash 是密码加密盐，key 是 PEM SPKI 公钥 */
+export interface WebKeyInfo {
+  hash: string;
+  key: string;
+}
+
+interface TokenInfoRaw {
+  access_token?: string;
+  refresh_token?: string;
+}
+
+interface CookieItemRaw {
+  name?: string;
+  value?: string;
+}
+
+interface CookieInfoRaw {
+  cookies?: CookieItemRaw[];
+}
+
+/** token_info + cookie_info 的原始形态（密码 / TV / 短信 / oauth2 共用） */
+interface TokenEnvelopeData {
+  token_info?: TokenInfoRaw;
+  cookie_info?: CookieInfoRaw;
+}
+
+interface TvCodeEnvelope {
   code: number;
-  message: string;
-  data: SmsSendData;
+  message?: string;
+  data?: TvCodeData;
 }
 
-interface SmsSendData {
-  captcha_key: string;
+interface TvCodeData {
+  auth_code?: string;
+  url?: string;
 }
 
-interface SmsLoginEnvelope {
+interface TvPollEnvelope {
   code: number;
-  message: string;
-  data: SmsLoginData;
+  message?: string;
+  data?: TokenEnvelopeData;
 }
 
-interface SmsLoginData {
-  refresh_token: string;
+interface WebKeyEnvelope {
+  code: number;
+  message?: string;
+  data?: WebKeyData;
 }
 
-/** 获取手机登录图形验证信息（GET /x/passport-login/captcha，source=main_web） */
-export async function fetchSmsCaptchaToken(): Promise<SmsCaptchaInfo> {
-  const path: string = '/x/passport-login/captcha';
-  const resp: SmsCaptchaEnvelope = await HttpUtil.requestJson<SmsCaptchaEnvelope>(
-    `${BILI_PASSPORT}${path}?source=main_web&t=${Date.now()}`, {
-      headers: { 'User-Agent': BILI_APP_UA },
+interface WebKeyData {
+  hash?: string;
+  key?: string;
+}
+
+interface PwdLoginEnvelope {
+  code: number;
+  message?: string;
+  data?: PwdLoginDataRaw;
+}
+
+interface PwdLoginDataRaw extends TokenEnvelopeData {
+  status?: number;
+  url?: string;
+}
+
+interface AppSmsSendEnvelope {
+  code: number;
+  message?: string;
+  data?: AppSmsSendDataRaw;
+}
+
+interface AppSmsSendDataRaw {
+  captcha_key?: string;
+  recaptcha_url?: string;
+}
+
+interface SafeCenterInfoEnvelope {
+  code: number;
+  message?: string;
+  data?: SafeCenterInfoDataRaw;
+}
+
+interface SafeCenterInfoDataRaw {
+  account_info?: AccountInfoRaw;
+}
+
+interface AccountInfoRaw {
+  hide_tel?: string;
+  tel_verify?: boolean;
+}
+
+interface PreCaptureEnvelope {
+  code: number;
+  message?: string;
+  data?: PreCaptureDataRaw;
+}
+
+interface PreCaptureDataRaw {
+  gee_gt?: string;
+  gee_challenge?: string;
+  recaptcha_token?: string;
+}
+
+interface CaptchaKeyEnvelope {
+  code: number;
+  message?: string;
+  data?: CaptchaKeyDataRaw;
+}
+
+interface CaptchaKeyDataRaw {
+  captcha_key?: string;
+}
+
+interface SmsVerifyEnvelope {
+  code: number;
+  message?: string;
+  data?: SmsVerifyDataRaw;
+}
+
+interface SmsVerifyDataRaw {
+  code?: string;
+}
+
+interface MemberAccountEnvelope {
+  code: number;
+  message?: string;
+  data?: MemberAccountDataRaw;
+}
+
+interface MemberAccountDataRaw {
+  mid?: number;
+}
+
+/**
+ * App 端登录公共头（对齐 PiliPlus LoginHttp.headers：客户端身份 + buvid 指纹）。
+ * domain 决定客户端身份三件套：HD（默认）android_hd + BILI_APP_FEED_UA；
+ * 粉版 android + BILI_ANDROID_APP_UA —— UA / app-key 头 / 签名 appkey 三者必须
+ * 同属一个客户端，否则服务端 -3「API 校验失败」（见 Constants 的粉版注释）。
+ */
+function buildAppLoginHeaders(domain: string = LOGIN_DOMAIN_HD): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': domain === LOGIN_DOMAIN_ANDROID ? BILI_ANDROID_APP_UA : BILI_APP_FEED_UA,
+    'env': 'prod',
+    'app-key': domain === LOGIN_DOMAIN_ANDROID ? 'android' : 'android_hd',
+    'x-bili-trace-id': BILI_APP_FEED_TRACE_ID,
+    'x-bili-aurora-eid': '',
+    'x-bili-aurora-zone': '',
+    'bili-http-engine': 'cronet',
+    'buvid': getBuvid3()
+  };
+  return headers;
+}
+
+/** App 登录请求公共选项：裸请求（不带旧 Cookie / Referer），Content-Type 表单 */
+function appLoginOptions(domain: string = LOGIN_DOMAIN_HD): HttpRequestOptions {
+  const headers: Record<string, string> = buildAppLoginHeaders(domain);
+  headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  return {
+    method: http.RequestMethod.POST,
+    headers: headers,
+    skipCookie: true,
+    skipReferer: true
+  };
+}
+
+const RANDOM_CHARS: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+/** 随机字符串（dt 的 16 字符随机明文用） */
+function genRandomString(len: number): string {
+  let out: string = '';
+  for (let i: number = 0; i < len; i++) {
+    out += RANDOM_CHARS.charAt(Math.floor(Math.random() * RANDOM_CHARS.length));
+  }
+  return out;
+}
+
+/** 每次启动生成一次的登录设备 id（PiliPlus LoginHttp.deviceId / bilive 算法：md5 + 校验和） */
+let loginDeviceIdCache: string = '';
+
+function getLoginDeviceId(): string {
+  if (loginDeviceIdCache.length > 0) {
+    return loginDeviceIdCache;
+  }
+  const now: Date = new Date();
+  const bytes: number[] = [];
+  for (let i: number = 0; i < 16; i++) {
+    bytes.push(Math.floor(Math.random() * 256));
+  }
+  bytes.push(dec2Bcd(Math.floor(now.getFullYear() / 100)));
+  bytes.push(dec2Bcd(now.getFullYear() % 100));
+  bytes.push(dec2Bcd(now.getMonth() + 1));
+  bytes.push(dec2Bcd(now.getDate()));
+  bytes.push(dec2Bcd(now.getHours()));
+  bytes.push(dec2Bcd(now.getMinutes()));
+  bytes.push(dec2Bcd(now.getSeconds()));
+  for (let i: number = 0; i < 8; i++) {
+    bytes.push(Math.floor(Math.random() * 256));
+  }
+  let sum: number = 0;
+  let raw: string = '';
+  for (let i: number = 0; i < bytes.length; i++) {
+    sum += bytes[i];
+    raw += String.fromCharCode(bytes[i]);
+  }
+  const check: string = (sum & 0xff).toString(16).padStart(2, '0');
+  loginDeviceIdCache = `${md5(raw)}${check}`;
+  return loginDeviceIdCache;
+}
+
+function dec2Bcd(dec: number): number {
+  return ((Math.floor(dec / 10) << 4) | (dec % 10)) & 0xff;
+}
+
+/**
+ * 从 url 的 query 里取参数值（-105 极验 / 安心中心风控 url 解析用）。
+ * 找不到返回空串。
+ */
+function queryParam(url: string, key: string): string {
+  const queryIndex: number = url.indexOf('?');
+  if (queryIndex < 0) {
+    return '';
+  }
+  const pairs: string[] = url.substring(queryIndex + 1).split('&');
+  const prefix: string = `${key}=`;
+  for (let i: number = 0; i < pairs.length; i++) {
+    if (pairs[i].indexOf(prefix) === 0) {
+      return pairs[i].substring(prefix.length);
+    }
+  }
+  return '';
+}
+
+/** token_info + cookie_info → TvTokenResult（缺任一返回 null） */
+function parseTokenResult(data: TokenEnvelopeData | undefined): TvTokenResult | null {
+  const tokenInfo: TokenInfoRaw | undefined = data?.token_info;
+  const cookieInfo: CookieInfoRaw | undefined = data?.cookie_info;
+  if (tokenInfo === undefined || cookieInfo === undefined ||
+    (tokenInfo.access_token ?? '').length === 0) {
+    return null;
+  }
+  const items: CookieItemRaw[] = cookieInfo.cookies ?? [];
+  const parts: string[] = [];
+  for (let i: number = 0; i < items.length; i++) {
+    const name: string = items[i].name ?? '';
+    if (name.length > 0) {
+      parts.push(`${name}=${items[i].value ?? ''}`);
+    }
+  }
+  return {
+    cookieString: parts.join('; '),
+    accessToken: tokenInfo.access_token ?? '',
+    refreshToken: tokenInfo.refresh_token ?? ''
+  };
+}
+
+/** 申请 TV 扫码二维码（POST /x/passport-tv-login/qrcode/auth_code，app 签名） */
+export async function fetchTvQrAuthCode(): Promise<TvQrTicket> {
+  const path: string = '/x/passport-tv-login/qrcode/auth_code';
+  const params: Record<string, string> = {
+    'local_id': '0',
+    'platform': 'android',
+    'mobi_app': 'android_hd'
+  };
+  const resp: TvCodeEnvelope = await HttpUtil.requestJson<TvCodeEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, appLoginOptions());
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '请求错误', path);
+  }
+  const authCode: string = resp.data?.auth_code ?? '';
+  const url: string = resp.data?.url ?? '';
+  if (authCode.length === 0 || url.length === 0) {
+    throw new BiliApiError(resp.code, '二维码凭据缺失', path);
+  }
+  return { authCode: authCode, qrUrl: url };
+}
+
+/**
+ * 轮询 TV 扫码状态（调用方每 1s 一次）。
+ * 成功 / 过期 / 已扫码都**不抛**（status 原样带回，由页面状态机消化）；
+ * token 仅 status===0 时有值（token_info + cookie_info）。
+ */
+export async function pollTvQrLogin(authCode: string): Promise<TvQrPollResult> {
+  const path: string = '/x/passport-tv-login/qrcode/poll';
+  const params: Record<string, string> = {
+    'auth_code': authCode,
+    'local_id': '0'
+  };
+  const resp: TvPollEnvelope = await HttpUtil.requestJson<TvPollEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, appLoginOptions());
+  return {
+    status: resp.code,
+    message: resp.message ?? '',
+    token: resp.code === 0 ? parseTokenResult(resp.data) : null
+  };
+}
+
+/** 获取密码加密公钥与盐（GET /x/passport-login/web/key） */
+export async function fetchWebKey(): Promise<WebKeyInfo> {
+  const path: string = '/x/passport-login/web/key';
+  const resp: WebKeyEnvelope = await HttpUtil.requestJson<WebKeyEnvelope>(
+    `${BILI_PASSPORT}${path}`, {
+      method: http.RequestMethod.GET,
+      headers: buildAppLoginHeaders(),
+      skipCookie: true,
+      skipReferer: true
+    });
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '请求错误', path);
+  }
+  const hash: string = resp.data?.hash ?? '';
+  const key: string = resp.data?.key ?? '';
+  if (hash.length === 0 || key.length === 0) {
+    throw new BiliApiError(resp.code, 'web key 缺失', path);
+  }
+  return { hash: hash, key: key };
+}
+
+/**
+ * App 端密码登录（POST /x/passport-login/oauth2/login，app 签名）。
+ *
+ * status 语义（PiliPlus controller 同款）：
+ *   0  = 成功（token 有值）；
+ *   2  = 风控，需走安心中心链（riskUrl 含 tmp_token / request_id / source）；
+ *   -105 = 需极验（gt/challenge/recaptchaToken 有值，过滑块后带 proof 重调）。
+ * 其余失败码以 status=-1 原样带回 message（不抛，页面统一提示后允许重试）。
+ */
+export async function loginByPwd(username: string, password: string,
+  webKey: WebKeyInfo, proof: GeetestProof | null, recaptchaToken: string): Promise<PwdLoginResult> {
+  const path: string = '/x/passport-login/oauth2/login';
+  const buvid: string = getBuvid3();
+  const passwordEnc: string = await rsaEncryptBase64(webKey.hash + password, webKey.key);
+  const dt: string = await rsaEncryptBase64(genRandomString(16), webKey.key);
+  const deviceId: string = getLoginDeviceId();
+  const params: Record<string, string> = {
+    'bili_local_id': deviceId,
+    'build': '2001100',
+    'buvid': buvid,
+    'c_locale': 'zh_CN',
+    'channel': 'master',
+    'device': 'phone',
+    'device_id': deviceId,
+    'device_name': 'vivo',
+    'device_platform': 'Android14vivo',
+    'disable_rcmd': '0',
+    'dt': dt,
+    'from_pv': 'main.homepage.avatar-nologin.all.click',
+    'from_url': 'bilibili://pegasus/promo',
+    'local_id': buvid,
+    'mobi_app': 'android_hd',
+    'password': passwordEnc,
+    'permission': 'ALL',
+    'platform': 'android',
+    's_locale': 'zh_CN',
+    'statistics': BILI_LOGIN_STATISTICS,
+    'username': username
+  };
+  if (proof !== null) {
+    params['gee_challenge'] = proof.challenge;
+    params['gee_seccode'] = proof.seccode;
+    params['gee_validate'] = proof.validate;
+  }
+  if (recaptchaToken.length > 0) {
+    params['recaptcha_token'] = recaptchaToken;
+  }
+  const resp: PwdLoginEnvelope = await HttpUtil.requestJson<PwdLoginEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, appLoginOptions());
+  if (resp.code === 0) {
+    const dataStatus: number = resp.data?.status ?? -1;
+    if (dataStatus === 0) {
+      const token: TvTokenResult | null = parseTokenResult(resp.data);
+      if (token === null) {
+        return {
+          status: -1, message: '接口未返回身份信息（可能账号风控），请尝试其它登录方式',
+          token: null, riskUrl: '', gt: '', challenge: '', recaptchaToken: ''
+        };
+      }
+      return { status: 0, message: resp.message ?? '', token: token,
+        riskUrl: '', gt: '', challenge: '', recaptchaToken: '' };
+    }
+    if (dataStatus === 2) {
+      return { status: 2, message: resp.data?.url ?? '', token: null,
+        riskUrl: resp.data?.url ?? '', gt: '', challenge: '', recaptchaToken: '' };
+    }
+    return { status: dataStatus, message: resp.message ?? '登录失败', token: null,
+      riskUrl: '', gt: '', challenge: '', recaptchaToken: '' };
+  }
+  if (resp.code === -105) {
+    const captureUrl: string = resp.data?.url ?? '';
+    return {
+      status: -105, message: resp.message ?? '需要安全验证',
+      token: null, riskUrl: '',
+      gt: queryParam(captureUrl, 'gee_gt'),
+      challenge: queryParam(captureUrl, 'gee_challenge'),
+      recaptchaToken: queryParam(captureUrl, 'recaptcha_token')
+    };
+  }
+  return { status: -1, message: resp.message ?? '登录失败', token: null,
+    riskUrl: '', gt: '', challenge: '', recaptchaToken: '' };
+}
+
+/**
+ * 发送 App 端短信验证码（POST /x/passport-login/sms/send，app 签名）。
+ *
+ * domain 决定签发令牌的域（LOGIN_DOMAIN_HD 默认 / LOGIN_DOMAIN_ANDROID 粉版），
+ * send 与 loginByAppSms 必须同域（captcha_key 是域内会话凭据，跨域不认）。
+ *
+ * 返回两种形态：
+ *   · needGeetest=false：直达成功，captcha_key 有值（**此链路常态免极验**）；
+ *   · needGeetest=true：code 0/-105 且带 recaptcha_url（或 preCapture 兜底后由页面
+ *     回填 gt/challenge），需过极验后带 proof + recaptchaToken 重调本函数。
+ * 其余失败码抛 BiliApiError（如手机号格式 / 发送频繁），页面直接提示。
+ */
+export async function sendAppSmsCode(tel: string, cid: number,
+  proof: GeetestProof | null, recaptchaToken: string,
+  domain: string = LOGIN_DOMAIN_HD): Promise<AppSmsSendResult> {
+  const path: string = '/x/passport-login/sms/send';
+  const buvid: string = getBuvid3();
+  const timestamp: number = Date.now();
+  const params: Record<string, string> = {
+    'build': loginBuildForDomain(domain),
+    'buvid': buvid,
+    'c_locale': 'zh_CN',
+    'channel': 'master',
+    'cid': String(cid),
+    'disable_rcmd': '0',
+    'local_id': buvid,
+    'login_session_id': md5(buvid + String(timestamp)),
+    'mobi_app': loginMobiAppForDomain(domain),
+    'platform': 'android',
+    's_locale': 'zh_CN',
+    'statistics': loginStatisticsForDomain(domain),
+    'tel': tel
+  };
+  if (proof !== null) {
+    params['gee_challenge'] = proof.challenge;
+    params['gee_seccode'] = proof.seccode;
+    params['gee_validate'] = proof.validate;
+  }
+  if (recaptchaToken.length > 0) {
+    params['recaptcha_token'] = recaptchaToken;
+  }
+  const resp: AppSmsSendEnvelope = await HttpUtil.requestJson<AppSmsSendEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQueryForDomain(params, domain)}`, appLoginOptions(domain));
+  const recaptchaUrl: string = resp.data?.recaptcha_url ?? '';
+  if (resp.code === 0 && recaptchaUrl.length === 0) {
+    return { captchaKey: resp.data?.captcha_key ?? '', needGeetest: false,
+      gt: '', challenge: '', recaptchaToken: '' };
+  }
+  if (resp.code === 0 || resp.code === -105) {
+    return { captchaKey: '', needGeetest: true,
+      gt: queryParam(recaptchaUrl, 'gee_gt'),
+      challenge: queryParam(recaptchaUrl, 'gee_challenge'),
+      recaptchaToken: queryParam(recaptchaUrl, 'recaptcha_token') };
+  }
+  throw new BiliApiError(resp.code, resp.message ?? '发送验证码失败', path);
+}
+
+/**
+ * App 端短信验证码登录（POST /x/passport-login/login/sms，app 签名）。
+ * webKey 的 PEM 公钥用于加密 dt（PiliPlus loginBySms 同款）。
+ * domain 必须与 sendAppSmsCode 一致（同域才能用 captcha_key 换 token）。
+ * @throws B 站业务码原样抛出（验证码错误 / 过期等），页面提示重试
+ */
+export async function loginByAppSms(tel: string, cid: number, code: string,
+  captchaKey: string, webKey: WebKeyInfo,
+  domain: string = LOGIN_DOMAIN_HD): Promise<TvTokenResult> {
+  const path: string = '/x/passport-login/login/sms';
+  const buvid: string = getBuvid3();
+  const dt: string = await rsaEncryptBase64(genRandomString(16), webKey.key);
+  const deviceId: string = getLoginDeviceId();
+  const params: Record<string, string> = {
+    'bili_local_id': deviceId,
+    'build': loginBuildForDomain(domain),
+    'buvid': buvid,
+    'c_locale': 'zh_CN',
+    'captcha_key': captchaKey,
+    'channel': 'master',
+    'cid': String(cid),
+    'code': code,
+    'device': 'phone',
+    'device_id': deviceId,
+    'device_name': 'vivo',
+    'device_platform': 'Android14vivo',
+    'disable_rcmd': '0',
+    'dt': dt,
+    'from_pv': 'main.my-information.my-login.0.click',
+    'from_url': 'bilibili://user_center/mine',
+    'local_id': buvid,
+    'mobi_app': loginMobiAppForDomain(domain),
+    'platform': 'android',
+    's_locale': 'zh_CN',
+    'statistics': loginStatisticsForDomain(domain),
+    'tel': tel
+  };
+  const resp: TvPollEnvelope = await HttpUtil.requestJson<TvPollEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQueryForDomain(params, domain)}`, appLoginOptions(domain));
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '登录失败', path);
+  }
+  const token: TvTokenResult | null = parseTokenResult(resp.data);
+  if (token === null) {
+    throw new BiliApiError(resp.code, '接口未返回身份信息，请尝试其它登录方式', path);
+  }
+  return token;
+}
+
+/** 安心中心：账号信息（GET /x/safecenter/user/info，打码手机号 / 是否支持手机验证） */
+export async function fetchSafeCenterInfo(tmpCode: string): Promise<SafeCenterInfo> {
+  const path: string = '/x/safecenter/user/info';
+  const resp: SafeCenterInfoEnvelope = await HttpUtil.requestJson<SafeCenterInfoEnvelope>(
+    `${BILI_PASSPORT}${path}?tmp_code=${encodeURIComponent(tmpCode)}`, {
+      method: http.RequestMethod.GET,
+      headers: buildAppLoginHeaders(),
+      skipCookie: true,
+      skipReferer: true
+    });
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '获取安全验证信息失败', path);
+  }
+  const account: AccountInfoRaw | undefined = resp.data?.account_info;
+  return {
+    hideTel: account?.hide_tel ?? '',
+    telVerify: account?.tel_verify === true
+  };
+}
+
+/** 安心中心：人机预凭据（POST /x/safecenter/captcha/pre，极验 gt/challenge + recaptcha_token） */
+export async function fetchSafeCenterPreCapture(): Promise<SafeCenterCapture> {
+  const path: string = '/x/safecenter/captcha/pre';
+  const resp: PreCaptureEnvelope = await HttpUtil.requestJson<PreCaptureEnvelope>(
+    `${BILI_PASSPORT}${path}`, appLoginOptions());
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '获取人机验证参数失败', path);
+  }
+  return {
+    gt: resp.data?.gee_gt ?? '',
+    challenge: resp.data?.gee_challenge ?? '',
+    recaptchaToken: resp.data?.recaptcha_token ?? ''
+  };
+}
+
+/**
+ * 安心中心：发送短信验证码（POST /x/safecenter/common/sms/send，app 签名）。
+ * 必须带风控页 Referer（B 站校验来源）；极验四件套来自 preCapture + 滑块结果。
+ * @returns captcha_key（verify 必带）
+ */
+export async function sendSafeCenterSms(tmpCode: string, proof: GeetestProof,
+  recaptchaToken: string, refererUrl: string): Promise<string> {
+  const path: string = '/x/safecenter/common/sms/send';
+  const params: Record<string, string> = {
+    'disable_rcmd': '0',
+    'sms_type': 'loginTelCheck',
+    'tmp_code': tmpCode,
+    'gee_challenge': proof.challenge,
+    'gee_seccode': proof.seccode,
+    'gee_validate': proof.validate,
+    'recaptcha_token': recaptchaToken
+  };
+  const headers: Record<string, string> = buildAppLoginHeaders();
+  headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  headers['Referer'] = refererUrl;
+  const resp: CaptchaKeyEnvelope = await HttpUtil.requestJson<CaptchaKeyEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, {
+      method: http.RequestMethod.POST,
+      headers: headers,
       skipCookie: true
     });
   if (resp.code !== 0) {
-    throw new BiliApiError(resp.code, resp.message, path);
+    throw new BiliApiError(resp.code, resp.message ?? '发送短信验证码失败', path);
   }
-  return { token: resp.data.token, gt: resp.data.geetest.gt, challenge: resp.data.geetest.challenge };
+  return resp.data?.captcha_key ?? '';
 }
 
 /**
- * 发送短信验证码（POST /x/passport-login/web/sms/send，参数内联 query）。
- * challenge 用**极验回传值**（而非第 1 步下发的原值——滑块通过后服务端会换发）。
- * @throws BiliApiError：code 86211 / -105 = 图形验证已过期
+ * 安心中心：提交短信验证码（POST /x/safecenter/login/tel/verify，app 签名）。
+ * @returns oauth code（换 access_token 用）
  */
-export async function sendSmsLoginCode(tel: string, cid: string, token: string,
-  challenge: string, validate: string, seccode: string): Promise<SmsSendResult> {
-  const path: string = '/x/passport-login/web/sms/send';
-  if (tel.length === 0 || cid.length === 0) {
-    // 服务端对空 tel / 空 cid 只回一句「-400 请求错误」，看不出是哪个字段，
-    // 这里先本地拦下给一句能看懂的（实测：-400 等价于「表单为空/缺字段」）
-    throw new BiliApiError(-400, '手机号缺失，请返回上一步重新输入', path);
-  }
-  // ⚠️ 参数必须**内联进 URL**，绝不能走 `params`（ohos 的
-  // queryParams）。本引擎 queryParams 会静默发出空参请求（view 接口
-  // -400、QR poll 86038 均同因），短信登录同款翻车：
-  // 滑块通过后 send 发空参 → 服务端 -400 → 页面退回手机号输入、短信没发出去。
-  // POST + query B 站接受（实测：同字段走 query → code=0 + captcha_key）。
-  const url: string = `${BILI_PASSPORT}${path}` +
-    `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
-    `&source=main_mini_login&token=${encodeURIComponent(token)}` +
-    `&challenge=${encodeURIComponent(challenge)}&validate=${encodeURIComponent(validate)}` +
-    `&seccode=${encodeURIComponent(seccode)}`;
-  const resp: SmsSendEnvelope = await HttpUtil.requestJson<SmsSendEnvelope>(url, {
-    method: http.RequestMethod.POST,
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': BILI_APP_UA,
-      Origin: 'https://www.bilibili.com'
-    },
-    skipCookie: true
-  });
-  console.info(`sms send: code=${resp.code}, telLen=${tel.length}, ` +
-    `tokenLen=${token.length}, vLen=${validate.length}`);
-  if (resp.code !== 0) {
-    throw new BiliApiError(resp.code, resp.message, path);
-  }
-  return { captchaKey: resp.data.captcha_key };
-}
-
-/**
- * 短信验证码登录（POST /x/passport-login/web/login/sms，参数内联 query）。
- * 走 requestTextWithCookies：登录 Cookie 在本响应的 Set-Cookie 里下发
- * （与扫码 poll 同形态，由 LoginStore.applySmsLoginCookies 解析）。
- */
-export async function loginWithSmsCode(tel: string, cid: string, code: string,
-  captchaKey: string): Promise<SmsLoginResult> {
-  const path: string = '/x/passport-login/web/login/sms';
-  // 同 sendSmsLoginCode：参数内联进 URL。
-  // 本引擎 queryParams 发空参（QR poll 86038 同款缺陷）、字符串表单体也会被吞
-  // （实测 -400），query 内联是唯一在所有引擎上都可靠的通道。
-  const url: string = `${BILI_PASSPORT}${path}` +
-    `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
-    `&code=${encodeURIComponent(code)}&source=main_mini_login` +
-    `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent': BILI_APP_UA,
-    Origin: 'https://www.bilibili.com'
+export async function verifySafeCenterSms(tmpCode: string, code: string,
+  requestId: string, source: string, captchaKey: string, refererUrl: string): Promise<string> {
+  const path: string = '/x/safecenter/login/tel/verify';
+  const params: Record<string, string> = {
+    'type': 'loginTelCheck',
+    'code': code,
+    'tmp_code': tmpCode,
+    'request_id': requestId,
+    'source': source,
+    'captcha_key': captchaKey
   };
-  let raw: HttpTextResult = await HttpUtil.requestTextWithCookies(url, {
-    method: http.RequestMethod.POST,
-    headers: headers,
-    skipCookie: true
-  });
-  let resp: SmsLoginEnvelope = JSON.parse(raw.text) as SmsLoginEnvelope;
-  if (resp.code === -400) {
-    // 兜底：个别引擎只认表单体（与主路径二选一，正常只走一条）
-    raw = await HttpUtil.requestTextWithCookies(`${BILI_PASSPORT}${path}`, {
+  const headers: Record<string, string> = buildAppLoginHeaders();
+  headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  headers['Referer'] = refererUrl;
+  const resp: SmsVerifyEnvelope = await HttpUtil.requestJson<SmsVerifyEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, {
       method: http.RequestMethod.POST,
       headers: headers,
-      skipCookie: true,
-      body: `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
-        `&code=${encodeURIComponent(code)}&source=main_mini_login` +
-        `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`
+      skipCookie: true
     });
-    resp = JSON.parse(raw.text) as SmsLoginEnvelope;
-    console.warn(`sms login: body fallback -> code=${resp.code}`);
-  }
-  console.info(`sms login: code=${resp.code}, cookiesLen=${raw.responseCookies.length}`);
   if (resp.code !== 0) {
-    throw new BiliApiError(resp.code, resp.message, path);
+    throw new BiliApiError(resp.code, resp.message ?? '验证短信验证码失败', path);
   }
-  return { responseCookies: raw.responseCookies, refreshToken: resp.data.refresh_token };
+  return resp.data?.code ?? '';
+}
+
+/** 安心中心：oauth code 换回 token_info + cookie_info（POST /x/passport-login/oauth2/access_token） */
+export async function fetchOauth2Token(oauthCode: string): Promise<TvTokenResult> {
+  const path: string = '/x/passport-login/oauth2/access_token';
+  const buvid: string = getBuvid3();
+  const params: Record<string, string> = {
+    'build': '2001100',
+    'buvid': buvid,
+    'code': oauthCode,
+    'disable_rcmd': '0',
+    'grant_type': 'authorization_code',
+    'local_id': buvid,
+    'mobi_app': 'android_hd',
+    'platform': 'android'
+  };
+  const resp: TvPollEnvelope = await HttpUtil.requestJson<TvPollEnvelope>(
+    `${BILI_PASSPORT}${path}?${appSignQuery(params)}`, appLoginOptions());
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? '登录失败', path);
+  }
+  const token: TvTokenResult | null = parseTokenResult(resp.data);
+  if (token === null) {
+    throw new BiliApiError(resp.code, '接口未返回身份信息，请尝试其它登录方式', path);
+  }
+  return token;
+}
+
+/**
+ * Cookie 导入校验（GET /x/member/web/account，带粘贴的 Cookie 头）。
+ * 裸请求（skipCookie，不带本机 buvid / 旧登录态，只发用户粘贴的 Cookie）。
+ * @returns 校验通过的账号 mid
+ * @throws Cookie 无效 / 已失效时抛 B 站业务码
+ */
+export async function validateWebCookie(cookie: string): Promise<number> {
+  const path: string = '/x/member/web/account';
+  const resp: MemberAccountEnvelope = await HttpUtil.requestJson<MemberAccountEnvelope>(
+    `${BILI_API}${path}`, {
+      method: http.RequestMethod.GET,
+      headers: { 'Cookie': cookie },
+      skipCookie: true,
+      skipReferer: true
+    });
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message ?? 'Cookie 校验失败', path);
+  }
+  const mid: number = resp.data?.mid ?? 0;
+  if (mid === 0) {
+    throw new BiliApiError(-1, 'Cookie 里缺少账号身份信息', path);
+  }
+  return mid;
 }
 
 /** 登录用户信息（nav 接口归一化后的形态） */

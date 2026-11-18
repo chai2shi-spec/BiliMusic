@@ -882,7 +882,9 @@ export class MusicPlayer {
   }
 
   /**
-   * 订阅音频路由变化：**音乐流输出从蓝牙切走、且蓝牙设备确实断开时暂停**。
+   * 订阅音频路由变化：**音乐流输出从蓝牙切走、且蓝牙设备确实断开时暂停**；
+   * 反向迁移（**蓝牙耳机/音箱接入成为首选输出**）走「连接蓝牙自动播放」
+   * （播放设置开关，默认关）。
    *
    * 判据在 AudioRouteWatcher：监听**音乐流首选输出设备**（preferOutputDeviceChange
    * ForRendererInfo）而不是全局 deviceChange —— 后者不与音频流绑定（FAQ
@@ -892,10 +894,16 @@ export class MusicPlayer {
    * 为什么不能靠系统自动处理：耳机一断，系统会把声音切到扬声器继续播，
    * 「耳边突然外放」比停下来更糟（用户会以为 App 出 bug）。
    *
-   * 两条前置判断，避免无谓地打断用户：
+   * 断开侧两条前置判断，避免无谓地打断用户：
    *   · 当前没有在播放 → 什么都不做（本来就没有声音要停）；
    *   · 正处在换源准备中（`isPreparing`）→ 交给 `pause()` 自己处理（它会把播放意图置 false，
    *     等音源就绪后不会自动出声，避免「暂停了却又接着播」）。
+   *
+   * 接入侧守卫链（任一不满足直接放弃，见 onBluetoothGained）：
+   * 开关未开 / 已在播放 / 投播中 → 不动作；通过后延时 1.5s 复核（防 SCO 重协商等
+   * 瞬态路由翻转）再 play() —— 无播放快照时 play() 静默 no-op（与「启动时自动
+   * 播放」同一路径），与「蓝牙断开自动暂停」对称：断开即停、重连即续。
+   * 进程被杀后无监听，属平台限制（开关副文案已注明「应用需在运行中」）。
    */
   private startAudioRouteWatch(): void {
     AudioRouteWatcher.getInstance().start((): void => {
@@ -906,7 +914,46 @@ export class MusicPlayer {
       console.info('bluetooth lost while playing -> pause');
       this.pause();
       this.notifyHint('蓝牙已断开，已暂停播放');
+    }, (): void => {
+      this.onBluetoothGained();
     });
+  }
+
+  /**
+   * 蓝牙音频接入（首选输出「非蓝牙 → 蓝牙」迁移）→「连接蓝牙自动播放」：
+   * 开关开、未在播放、非投播时，延时复核后从上次位置自动续播。
+   * 手表手环不触发（AudioRouteWatcher 设备名过滤）；蓝牙之间切换不触发
+   * （迁移口径只认「非蓝牙 → 蓝牙」）；应用未运行时无监听（平台限制）。
+   */
+  private onBluetoothGained(): void {
+    // 开关就近读偏好（内存缓存）：低频事件不值得常驻 AppStorage 镜像
+    if (!AppPreferences.getSettings().autoPlayOnBluetooth) {
+      return;
+    }
+    // 已在播放：只是出声设备切换，不重复拉起
+    const playing: boolean = (AppStorage.get(STORE_IS_PLAYING) as boolean) ?? false;
+    if (playing) {
+      return;
+    }
+    // 投播中：远端是播放引擎，本机蓝牙接入不该把声音抢回本机
+    if (this.casting) {
+      return;
+    }
+    // 延时 1.5s 复核：SCO/A2DP 重协商可能造成首选输出瞬态翻转，立刻续播会
+    // 「连了一瞬又切走却开始放歌」；复核窗口内用户手动开播（已播放）或路由
+    // 已离开蓝牙（isPreferredBluetooth=false）都放弃。
+    setTimeout((): void => {
+      const stillPlaying: boolean = (AppStorage.get(STORE_IS_PLAYING) as boolean) ?? false;
+      if (stillPlaying || this.casting) {
+        return;
+      }
+      if (!AudioRouteWatcher.getInstance().isPreferredBluetooth()) {
+        return;
+      }
+      console.info('bluetooth audio connected while idle -> auto resume (autoPlayOnBluetooth)');
+      this.play();
+      this.notifyHint('已连接蓝牙，自动继续播放');
+    }, 1500);
   }
 
   /**
@@ -5215,12 +5262,19 @@ export class MusicPlayer {
   }
 
   playNow(track: Track, startAtSec: number = 0): void {
-    const filtered: Track[] = this.queue.filter((t: Track): boolean => t.id !== track.id);
-    this.queue = [track, ...filtered];
-    this.shuffledQueue = this.shuffle(this.queue);
-    this.syncQueue();
-    this.markQueueDirty();
-    this.currentIndex = 0;
+    // 点播曲已在当前队列（典型：歌单播放中手点另一首）：保持队列顺序不动，
+    // 只由 playTrack 把播放游标（currentIndex）对准该曲位置——播完后 next()
+    // 从它的下一首继续。旧实现无条件把点播曲挪到队首并置游标 0，队列顺序被
+    // 打乱，第十首播完回到第二首（上次点播被挪到队首的曲）就是这么来的。
+    // 队列外的点播（搜索结果 / 首页推荐等）保持原有「插队首」语义不变。
+    const inQueue: boolean = this.queue.some((t: Track): boolean => t.id === track.id);
+    if (!inQueue) {
+      const filtered: Track[] = this.queue.filter((t: Track): boolean => t.id !== track.id);
+      this.queue = [track, ...filtered];
+      this.shuffledQueue = this.shuffle(this.queue);
+      this.syncQueue();
+      this.markQueueDirty();
+    }
     this.playTrack(track, startAtSec);
     this.savePlayerStateNow();
     // B 站的音乐「合集」是同一视频的多个分 P，每个分 P 一首歌。

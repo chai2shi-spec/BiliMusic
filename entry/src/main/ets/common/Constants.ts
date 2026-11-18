@@ -41,6 +41,48 @@ export const BILI_TV_UA: string =
   'Mozilla/5.0 BiliDroid/7.38.0 (bbcallen@gmail.com) os/android';
 
 /**
+ * 手机端（粉版 android）appkey/appsec —— App 端登录链路（短信登录的
+ * 「粉版手机端登录」域）专用，与上面 HD（android_hd）那组分开。
+ *
+ * 为什么必须分开：B 站服务端会校验「appkey 与 mobi_app / platform /
+ * UA 是否同属一个客户端」。android_hd 的 appkey 配 `mobi_app=android`
+ * 会被判客户端不一致，返回 -3「API 校验失败」。
+ *
+ * ⚠️ 同样是公开的客户端固定凭据，不是本项目密钥。
+ */
+export const BILI_ANDROID_APP_KEY: string = '1d8b6e7d45233436';
+export const BILI_ANDROID_APP_SEC: string = '560c52ccd288fed045859ed18bffd973';
+/**
+ * 手机端 App UA（粉版 android，对齐上面那组 appkey 的客户端身份，BiliDroid 8.43.0）。
+ * 与 passport 用的 iPhone UA（BILI_APP_UA）分开：appkey 与 UA 必须同属一个客户端。
+ */
+export const BILI_ANDROID_APP_UA: string =
+  'Mozilla/5.0 BiliDroid/8.43.0 (bbcallen@gmail.com) os/android model/Pixel7 ' +
+  'mobi_app/android build/8430300 channel/master innerVer/8430300 osVer/14 network/2';
+/**
+ * HD 版客户端 UA（登录链路 HD 域专用）：TV 扫码 / 密码 / App 短信的
+ * buildAppLoginHeaders 以它标识 android_hd 客户端（build 2001100）。
+ */
+export const BILI_APP_FEED_UA: string =
+  'Mozilla/5.0 BiliDroid/2.0.1 (bbcallen@gmail.com) os/android model/android_hd ' +
+  'mobi_app/android_hd build/2001100 channel/master innerVer/2001100 osVer/15 network/2';
+/** x-bili-trace-id 假值（PiliPlus Constants.traceId 同款，App 登录公共头带） */
+export const BILI_APP_FEED_TRACE_ID: string =
+  '11111111111111111111111111111111:1111111111111111:0:0';
+/**
+ * App 端登录链路（TV 扫码 / 密码 / 短信 / 安心中心）请求参数里的 statistics
+ * （PiliPlus Constants.statistics 同款，HD 客户端口径）。
+ */
+export const BILI_LOGIN_STATISTICS: string = '{"appId":5,"platform":3,"version":"2.0.1","abtest":""}';
+/**
+ * 粉版（android）域登录链路的 statistics（BILI_LOGIN_STATISTICS 的粉版口径）。
+ * 仅供登录页短信页签「粉版手机端登录」开关开启时的 send/login 请求使用 ——
+ * 域三件套（appkey=1d8b6e7d45233436 / mobi_app=android / build=8430300）
+ * 与粉版 8.43.0 客户端同属一身。
+ */
+export const BILI_LOGIN_STATISTICS_ANDROID: string = '{"appId":1,"platform":3,"version":"8.43.0","abtest":""}';
+
+/**
  * ══════════ B 站请求全局节流闸门（BiliRequestGate）══════════
  *
  * 登录态下「预取 + 播放 + 页面刷新」同刻并发形成请求尖峰，账号对尖峰
@@ -172,6 +214,13 @@ export const PREF_LOGIN_REFRESH_TOKEN: string = 'bilimusic_login_refresh_token';
  * 注意：`PREF_VALUE_BUDGET_BYTES` 与 8192 上限只约束 value 大小，这里存十位数毫秒，无风险。
  */
 export const PREF_LOGIN_VERIFIED_AT: string = 'bilimusic_login_verified_at';
+/**
+ * App 端登录访问令牌（access_token）：TV 扫码 / 密码 / App 短信登录成功时随
+ * token_info 一并下发（与 Cookie 是两套凭据体系）。当前主用 Cookie 通道，
+ * access_token 先持久化备用（App 端接口鉴权 / 后续刷新链路的原料）。
+ * 空串 = 从未通过 App 端链路登录过（网页扫码用户即此态，属正常）。
+ */
+export const PREF_LOGIN_ACCESS_TOKEN: string = 'bilimusic_login_access_token';
 
 export const STORE_CURRENT_TRACK: string = 'currentTrack';
 export const STORE_IS_PLAYING: string = 'isPlaying';
@@ -423,6 +472,30 @@ export const STORE_MINI_BAR_PROGRESS: string = 'miniBarProgressShown';
 export const STORE_MINI_BAR_AUTO_EXPAND: string = 'miniBarAutoExpandOn';
 
 /**
+ * 拾音页签显隐镜像（AppSettings.showDiaryTab 的运行时镜像）：
+ * EntryAbility 启动首发（loadContent 前）、外观设置切换时重发，
+ * Index @StorageProp + @Watch 订阅 —— false 时底部导航不渲染拾音页签
+ * （HdsTabs 条件渲染 TabContent + 逻辑/物理下标重锚），听歌记录不受影响。
+ */
+export const STORE_SHOW_DIARY_TAB: string = 'showDiaryTabOn';
+
+/**
+ * 设置页签显隐镜像（AppSettings.showSettingsTab 的运行时镜像）：
+ * EntryAbility 启动首发（loadContent 前）、外观设置切换与首页长按恢复时重发，
+ * Index @StorageProp + @Watch 订阅 —— false 时底部导航不渲染设置页签；
+ * 恢复入口 = 长按首页「BiliMusic」标题。
+ */
+export const STORE_SHOW_SETTINGS_TAB: string = 'showSettingsTabOn';
+
+/**
+ * 首页快捷卡显隐镜像（AppSettings.showHomeCards 的运行时镜像）：
+ * EntryAbility 启动首发（loadContent 前）、外观设置切换时重发，
+ * HomePage @StorageProp + @Watch 订阅 —— false 时首页不渲染快捷卡行，
+ * chips 触栏翻转阈值同步收缩。
+ */
+export const STORE_SHOW_HOME_CARDS: string = 'showHomeCardsOn';
+
+/**
  * 倍速播放总开关镜像（AppSettings.speedEnabled 的运行时镜像）：
  * EntryAbility 启动首发、设置页切换时重发，播放页 ControlAreaComponent
  * @StorageProp 订阅 —— 控制功能行倍速入口是否渲染（默认关）。
@@ -481,6 +554,14 @@ export const STORE_DESC_ENTRY_ENABLED: string = 'descEntryEnabled';
 export const STORE_LYRIC_CENTERED: string = 'lyricCenteredShown';
 
 /**
+ * 拖动歌词跳进度开关镜像（AppSettings.dragLyricSeek 的运行时镜像）：
+ * EntryAbility 启动首发、设置 → 播放「歌词」区块 / 长按歌词面板切换时重发，
+ * LrcViewHost @StorageProp 订阅并透传 LrcView —— 开启后拖动歌词松手 seek
+ * 到目标行（含歌词整体偏移补偿），关闭时拖动仅浏览（默认关）。
+ */
+export const STORE_DRAG_LYRIC_SEEK: string = 'dragLyricSeekOn';
+
+/**
  * 本机 AI 转写歌词运行状态（LyricTranscribeService 发布，歌词面板订阅）：
  * true = 转写任务进行中（解码或识别阶段），按钮转禁用 + 进度横幅显示。
  */
@@ -519,6 +600,16 @@ export const STORE_TRANSCRIBE_DONE_SEQ: string = 'lyricTranscribeDoneSeq';
  * 重建即时生效；标题栏在页面下次重建（重新进入）时生效。
  */
 export const STORE_IMMERSIVE_MATERIAL_TIER: string = 'immersiveMaterialTier';
+
+/**
+ * 字体大小档位镜像（AppSettings.fontScale 的运行时镜像，四档取值见
+ * MusicModels.FONT_SCALE_OPTIONS）：EntryAbility 启动首发、外观页菜单切换时
+ * 重发。全局 fp 文字的实际缩放经 ApplicationContext.setFontSizeScale 生效
+ * （不走本键），本键供 Canvas 自绘歌词（LrcView，vp 单位不随系统通道缩放）
+ * 的 LyricsComponent @StorageProp 订阅 —— 切档时把传入 LrcView 的常规 /
+ * 当前行字号乘以本系数，与全局文字同步缩放。
+ */
+export const STORE_FONT_SCALE: string = 'fontScale';
 
 /**
  * 「在 B 站打开原视频」开关镜像（AppSettings.openInBilibiliEnabled 的运行时镜像）：

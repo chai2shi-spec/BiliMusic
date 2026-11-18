@@ -186,6 +186,11 @@ async function loadByName(name: string): Promise<void> {
       builders.set(name, m.RewardPageWrapped);
       break;
     }
+    case 'Member': {
+      const m = await import('../pages/MemberPage');
+      builders.set(name, m.MemberPageWrapped);
+      break;
+    }
     case 'Login': {
       const m = await import('../pages/LoginPage');
       builders.set(name, m.LoginPageWrapped);

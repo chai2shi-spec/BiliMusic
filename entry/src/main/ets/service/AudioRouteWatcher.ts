@@ -20,7 +20,8 @@
  *     会话、牵动焦点语义，仅「与其他应用同时播放」开关在用，故此处不采用。）
  *  2. **只认「蓝牙 → 非蓝牙」的迁移**：回调只带新设备列表，配合内部缓存的旧状态，
  *     仅在「原来是蓝牙、现在不是」时进入暂停判定；蓝牙 ↔ 蓝牙（多个蓝牙设备间
- *     切换，声音还在蓝牙上）、非蓝牙 → 蓝牙（连上耳机不自动续播，产品决策）只记日志。
+ *     切换，声音还在蓝牙上）、非蓝牙 → 蓝牙（连上耳机，由 gainedHandler 走
+ *     「连接蓝牙自动播放」，播放设置开关控制）只在对应分支处理。
  *  3. **区分「真断开」与「用户强选到扬声器」**：首选输出蓝牙 → 扬声器有两种原因 ——
  *     蓝牙设备断开（该暂停）或用户在播控中心把输出切到扬声器（不该暂停，人家故意
  *     外放）。判据：迁移发生后查一遍当前仍连接的输出设备，还有「非手表」的蓝牙
@@ -41,6 +42,9 @@ import { audio } from '@kit.AudioKit';
 
 /** 蓝牙输出设备断开时的回调（由播放内核注入，内部负责暂停） */
 type BluetoothLostHandler = () => void;
+
+/** 蓝牙输出设备接入（首选输出「非蓝牙 → 蓝牙」迁移）时的回调（由播放内核注入，内部负责续播） */
+type BluetoothGainedHandler = () => void;
 
 /**
  * 手表 / 手环设备名关键词（小写匹配）。
@@ -118,6 +122,8 @@ export class AudioRouteWatcher {
 
   private started: boolean = false;
   private handler: BluetoothLostHandler | null = null;
+  /** 蓝牙接入回调（连接自动播放）；null = 未注入，接入迁移只记日志 */
+  private gainedHandler: BluetoothGainedHandler | null = null;
   /** on() 时的回调引用；off() 要传同一个引用，匿名函数退订不掉 */
   private listener: ((devices: audio.AudioDeviceDescriptors) => void) | null = null;
   /**
@@ -147,10 +153,21 @@ export class AudioRouteWatcher {
   }
 
   /**
-    * 开始监听（幂等）。回调在**音乐流输出设备从蓝牙切走、且蓝牙设备确实断开**
-    * （排除用户强选扬声器、手表手环扰动）时触发。
-    */
-  start(handler: BluetoothLostHandler): void {
+   * 当前音乐流首选输出是否蓝牙（事件驱动更新的最近已知值）。
+   * 供播放内核在接入回调的延时复核窗口内重查——瞬态路由翻转（SCO 重协商等）
+   * 过不了这一关，避免「连了一瞬间又切走」还继续自动续播。
+   */
+  isPreferredBluetooth(): boolean {
+    return this.preferredIsBluetooth;
+  }
+
+  /**
+   * 开始监听（幂等）。lostHandler 在**音乐流输出设备从蓝牙切走、且蓝牙设备确实断开**
+   * （排除用户强选扬声器、手表手环扰动）时触发；gainedHandler（可选）在**首选输出
+   * 「非蓝牙 → 蓝牙」迁移**（连上蓝牙耳机/音箱成为出声设备）时触发。
+   */
+  start(handler: BluetoothLostHandler, gainedHandler?: BluetoothGainedHandler): void {
+    this.gainedHandler = gainedHandler ?? null;
     if (this.started) {
       // 已经在监听：只更新回调，避免重复订阅导致一次断开触发多次暂停
       this.handler = handler;
@@ -193,6 +210,7 @@ export class AudioRouteWatcher {
     this.started = false;
     this.listener = null;
     this.handler = null;
+    this.gainedHandler = null;
   }
 
   /**
@@ -200,8 +218,8 @@ export class AudioRouteWatcher {
    *
    * · 「蓝牙 → 非蓝牙」迁移才可能暂停：仍连着别的蓝牙音频 → 用户强选扬声器，忽略；
    *   蓝牙全断 → 通知（真正该暂停的场景）。
-   * · 「非蓝牙 → 蓝牙」/ 蓝牙之间切换：只记日志（连上耳机不自动续播，声音还在蓝牙
-   *   上时更不该停）。
+   * · 「非蓝牙 → 蓝牙」迁移：通知 gainedHandler（连接蓝牙自动播放，开关在播放设置；
+   *   未注入只记日志）。蓝牙之间切换不触发——声音还在蓝牙上，没有「接入」语义。
    */
   private handlePreferredChange(devices: audio.AudioDeviceDescriptors): void {
     try {
@@ -214,6 +232,15 @@ export class AudioRouteWatcher {
           const d: audio.AudioDeviceDescriptor = devices[i];
           console.info(`music stream preferred output: ${deviceLabelOf(d)} (type ${d.deviceType})`);
         }
+      }
+      // 非蓝牙 → 蓝牙：蓝牙耳机/音箱接入成为出声设备（手表手环被设备名过滤排除）
+      if (!wasBluetooth && nowBluetooth) {
+        const gained: BluetoothGainedHandler | null = this.gainedHandler;
+        if (gained) {
+          console.info('bluetooth audio became preferred output -> notify gained');
+          gained();
+        }
+        return;
       }
       if (!wasBluetooth || nowBluetooth) {
         return;

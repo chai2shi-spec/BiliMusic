@@ -1,7 +1,8 @@
 /**
  * 播放设置页（按类别分五张分组卡片，SectionHeader 标类别）：
- *   · 播放：自动播放下一首 / 启动时自动播放 / 与其他应用同时播放 / 淡入淡出（SelectDialog 弹窗）
+ *   · 播放：自动播放下一首 / 启动时自动播放 / 连接蓝牙自动播放 / 与其他应用同时播放 / 淡入淡出（SelectDialog 弹窗）
  *   · 播放页入口：倍速播放 / 在 B 站打开原视频 / 定时停止入口 / 限定播放进度入口 / 进入 UP 主页入口 / 单曲音量入口 / 分段列表入口 / 视频简介入口 / 桌面歌词入口
+ *   · 歌词：拖动歌词跳进度（长按歌词面板有同款快捷开关，同一设置项）
  *   · 桌面歌词：锁定位置（系统组件能力；总开关已移至播放页功能行一键开 / 关，需先开启桌面歌词才能锁定）
  *   · 网络与音源：仅 WiFi 播放 / 播放音质（SelectDialog 弹窗）/ 播放线路（SelectDialog 弹窗）
  *
@@ -30,6 +31,7 @@ import {
   STORE_DESC_ENTRY_ENABLED,
   STORE_FLOAT_LYRIC_ENTRY_ENABLED,
   STORE_FLOAT_LYRIC_ENABLED,
+  STORE_DRAG_LYRIC_SEEK,
   STORE_THEME_PRIMARY
 } from '../common/Constants';
 import {
@@ -82,6 +84,12 @@ export struct PlaybackSettingsPage {
    * 守卫「锁定歌词位置」前置条件必须订阅镜像取实时值。
    */
   @StorageProp(STORE_FLOAT_LYRIC_ENABLED) floatLyricEnabled: boolean = false;
+  /**
+   * 拖动歌词跳进度开关镜像（实时）：本开关在「长按歌词面板」也有一处入口，
+   * 本页可能在导航栈底存活 —— 快照 settings 只在 aboutToAppear 重读会滞后，
+   * SuffixSwitch 选中态必须订阅镜像取实时值（两处入口同步的关键）。
+   */
+  @StorageProp(STORE_DRAG_LYRIC_SEEK) dragLyricSeekOn: boolean = false;
   /**
    * 播放音质选择弹窗（SelectDialog 单选列表 + 取消）。
    * SelectDialog 的 selectedIndex / radioContent 是构造时定格的（CustomDialog
@@ -479,6 +487,38 @@ export struct PlaybackSettingsPage {
 
             CardDivider()
 
+            // 连接蓝牙自动播放：蓝牙耳机/音箱接入成为音乐流首选输出且未在播放时，
+            // 自动从上次位置续播（MusicPlayer.onBluetoothGained，延时 1.5s 复核防
+            // 瞬态路由翻转误触发）。手表手环被设备名过滤排除不触发；与「蓝牙断开
+            // 自动暂停」对称：断开即停、重连即续。进程被杀后无监听（平台限制）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '连接蓝牙自动播放' },
+                secondaryText: { text: '连接蓝牙耳机或音箱时自动从上次位置继续播放；手表手环不触发，需应用在运行中' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.autoPlayOnBluetooth,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 进页不弹提示：settings 延后一拍读真值时
+                  // isCheck 翻转会让 SuffixSwitch 误触发 onChange —— 用翻转前值
+                  // 守卫，只有值真的从关翻到开才提醒；误触发时 v 与持久值一致被拦下。
+                  const turningOn: boolean = v && !this.settings.autoPlayOnBluetooth;
+                  this.update((s: AppSettings): void => {
+                    s.autoPlayOnBluetooth = v;
+                  });
+                  if (turningOn) {
+                    this.toast('已开启：连接蓝牙时将自动继续播放', 1800);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
             // 与其他应用同时播放：开启后激活 AudioSession 并声明
             // CONCURRENCY_MIX_WITH_OTHERS —— 本应用与其他应用的音频双向混音
             // （不抢占对方、也不被打断）；关闭停用会话，恢复系统默认焦点行为
@@ -862,6 +902,52 @@ export struct PlaybackSettingsPage {
               onClick: (): void => {
                 NavStackHolder.stack.pushPath({ name: 'PlayerFuncOrder' });
               }
+            })
+          }
+        }
+
+        ListItem() {
+          SectionHeader({ headerText: '歌词' })
+        }
+
+        ListItem() {
+          InsetCard() {
+            // 拖动歌词跳进度（默认关）：开启后在播放页拖动歌词，松手跳转到
+            // 指向的行（拖动中显示目标行时间指示）；关闭时拖动仅浏览、
+            // 3.5 秒后自动滚回当前演唱行（现状行为不变）。
+            // 长按歌词面板有同款快捷开关 —— 同一设置项（AppSettings.dragLyricSeek），
+            // 切换即写偏好 + 重发 STORE_DRAG_LYRIC_SEEK 镜像，两处入口天然同步。
+            // isCheck 订阅镜像而非快照：本页可能在栈底存活，面板侧切换要实时可见。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '拖动歌词跳进度' },
+                secondaryText: { text: '拖动歌词松手后跳转到对应位置；关闭时拖动仅浏览' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.dragLyricSeekOn,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  // 翻转前值守卫（见「启动时自动播放」注释）：
+                  // 镜像首帧翻转 / 进页误触发时 v 与当前值一致，被拦下不提示
+                  const turningOn: boolean = v && !this.dragLyricSeekOn;
+                  const turningOff: boolean = !v && this.dragLyricSeekOn;
+                  if (turningOn || turningOff) {
+                    this.update((s: AppSettings): void => {
+                      s.dragLyricSeek = v;
+                    });
+                    AppStorage.setOrCreate(STORE_DRAG_LYRIC_SEEK, v);
+                    if (turningOn) {
+                      this.toast('已开启：拖动歌词松手后跳转到对应位置', 1800);
+                    }
+                    if (turningOff) {
+                      this.toast('已关闭：拖动歌词仅浏览，稍后自动回位', 1500);
+                    }
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
             })
           }
         }

@@ -27,7 +27,7 @@ import { initVideoTagStore, flushVideoTagsNow } from '../service/VideoTagStore';
 import { FormFactorHolder } from '../service/FormFactorHolder';
 import { initHomeFeedCache } from '../service/HomeFeedCacheStore';
 import { CallMethod, CollectAction, PlayActionType, RouterType } from '../widget/model/CardFormConstant';
-import { STORE_CURRENT_TRACK, STORE_IS_PLAYING, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_CHAPTERS_ENTRY_ENABLED, STORE_DESC_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_IMMERSIVE_MATERIAL_TIER, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER, STORE_FLOAT_LYRIC_ENABLED, STORE_FLOAT_LYRIC_LOCKED, STORE_FLOAT_LYRIC_ENTRY_ENABLED } from '../common/Constants';
+import { STORE_CURRENT_TRACK, STORE_IS_PLAYING, STORE_SAFE_TOP, STORE_SAFE_BOTTOM, STORE_NAV_BAR_BOTTOM, STORE_NAV_INDICATOR_BOTTOM, STORE_SAFE_LEFT, STORE_SAFE_RIGHT, STORE_WINDOW_WIDTH_VP, STORE_WINDOW_HEIGHT_VP, STORE_BAR_LAYOUT, STORE_PROGRESS_STYLE, STORE_PLAYER_CLOSE_ANIM, STORE_PLAYER_COVER_STYLE, STORE_ITEM_DISPLAY_STYLE, STORE_MINI_BAR_PROGRESS, STORE_MINI_BAR_AUTO_EXPAND, STORE_SHOW_DIARY_TAB, STORE_SHOW_SETTINGS_TAB, STORE_SHOW_HOME_CARDS, STORE_PLAYBACK_SPEED_ENABLED, STORE_PLAYBACK_SPEED, STORE_APP_FOREGROUND, STORE_AUDIO_MIX_ENABLED, STORE_OPEN_IN_BILI_ENABLED, STORE_SLEEP_TIMER_ENTRY_ENABLED, STORE_SKIP_INTRO_ENTRY_ENABLED, STORE_UP_SPACE_ENTRY_ENABLED, STORE_TRACK_VOLUME_ENTRY_ENABLED, STORE_CHAPTERS_ENTRY_ENABLED, STORE_DESC_ENTRY_ENABLED, STORE_LYRIC_CENTERED, STORE_DRAG_LYRIC_SEEK, STORE_IMMERSIVE_MATERIAL_TIER, STORE_FONT_SCALE, STORE_CARD_OPEN_PLAYER_SEQ, STORE_FUNC_ITEM_ORDER, STORE_FLOAT_LYRIC_ENABLED, STORE_FLOAT_LYRIC_LOCKED, STORE_FLOAT_LYRIC_ENTRY_ENABLED } from '../common/Constants';
 
 /**
  * 空 Parcelable：CalleeCallback 签名要求回调返回 rpc.Parcelable ——
@@ -352,6 +352,15 @@ export default class EntryAbility extends UIAbility {
         // 迷你栏自动展开收起开关同批首发：Index 的 @StorageProp 初值只是占位，
         // 真值必须首帧 build 前就位，否则关掉开关的用户启动后第一下滑动仍会触发收放。
         AppStorage.setOrCreate(STORE_MINI_BAR_AUTO_EXPAND, settings.miniBarAutoExpand);
+        // 拾音 / 设置页签显隐开关（外观设置可切）同批首发：Index 的 @StorageProp
+        // 初值只是占位，真值必须首帧 build 前就位 —— 否则冷启动会先按 4 个页签
+        // 渲染 HdsTabs、镜像到位后再闪变到隐藏后的页签数。
+        AppStorage.setOrCreate(STORE_SHOW_DIARY_TAB, settings.showDiaryTab);
+        AppStorage.setOrCreate(STORE_SHOW_SETTINGS_TAB, settings.showSettingsTab);
+        // 首页快捷卡显隐开关（外观设置可切）同批首发：HomePage 的 @StorageProp
+        // 初值只是占位，真值必须首帧 build 前就位 —— 否则关掉开关的用户冷启动
+        // 会先看到快捷卡行再闪变消失。
+        AppStorage.setOrCreate(STORE_SHOW_HOME_CARDS, settings.showHomeCards);
         // 倍速播放开关 + 倍速值（设置页可改）：播放页 ControlAreaComponent 的
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位；倍速值同时是
         // MusicPlayer.init 恢复 playbackSpeed 字段的数据源。
@@ -398,9 +407,19 @@ export default class EntryAbility extends UIAbility {
         // @StorageProp 初值只是占位，真值必须首帧 build 前就位，否则开居中的
         // 用户启动时会先看到左对齐再跳成居中。
         AppStorage.setOrCreate(STORE_LYRIC_CENTERED, settings.lyricCentered);
+        // 拖动歌词跳进度开关（设置 → 播放 / 长按歌词面板可切）同批首发：
+        // LrcViewHost 的 @StorageProp 初值只是占位（默认关），真值必须首帧
+        // build 前就位，否则已开启的用户首次拖动会先走「仅浏览」旧分支。
+        AppStorage.setOrCreate(STORE_DRAG_LYRIC_SEEK, settings.dragLyricSeek);
         // 沉浸光感材质档位（外观页菜单三档选择）同批首发：MaterialTokens 档位感知
         // 解析 + Index / SubPagePlayBar 的 @StorageProp 订阅同据此键取值。
         AppStorage.setOrCreate(STORE_IMMERSIVE_MATERIAL_TIER, settings.immersiveMaterialTier);
+        // 字体大小档位（外观页菜单四档选择）同批首发：镜像供 LyricsComponent
+        // 订阅（Canvas 自绘歌词按它手动乘系数）；全局 fp 文字缩放经
+        // setFontSizeScale 生效 —— 两者都必须在 loadContent 首帧前就位，
+        // 否则放大档用户启动时会先看到标准字号再跳变。
+        AppStorage.setOrCreate(STORE_FONT_SCALE, settings.fontScale);
+        AppPreferences.applyFontSizeScale(this.context, settings.fontScale);
         // ④ 全量初始化与页面加载并行（fire-and-forget，不阻塞 loadContent）。
         //    时序保障：initRest 只依赖上面已就位的 Preferences，且权限请求已并入其链首。
         AppContainer.initRest(this.context)

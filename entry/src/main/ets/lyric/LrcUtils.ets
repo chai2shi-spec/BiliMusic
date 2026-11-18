@@ -61,6 +61,18 @@ export function angleToRadian(angle: number): number {
 }
 
 /**
+ * 秒 → 播放时间显示文本（m:ss，如 83 → "1:23"）。
+ * 负值钳 0；口径同 PlayerProgressArea 的 formatTime（模块内函数不便跨组件
+ * 文件复用，抽到歌词工具层供 LrcView 拖动跳转的时间胶囊使用）。
+ */
+export function formatLrcTime(sec: number): string {
+  const s: number = Math.max(0, Math.floor(sec));
+  const m: number = Math.floor(s / 60);
+  const r: number = s % 60;
+  return `${m}:${r < 10 ? '0' : ''}${r}`;
+}
+
+/**
  * 毫秒 → LRC 时间标签字符串（[mm:ss.cc]，厘秒两位）。
  * 负值钳 0；超 99 分进位为三位分钟（解析器 \d{2,} 兼容）。
  */

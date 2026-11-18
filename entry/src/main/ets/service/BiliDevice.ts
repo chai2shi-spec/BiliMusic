@@ -49,6 +49,28 @@ function getBuvid(): string {
   return cachedBuvid;
 }
 
+/**
+ * buvid3 原始值（不带 Cookie 语法）：App 端登录链路（TV 扫码 / 密码 / 短信）
+ * 请求头与参数里的 `buvid` 用它（PiliPlus `LoginHttp.buvid` 同位）。
+ * 优先从持久化 Cookie 串解析（官方 spi 下发值优先），解析不到回落本地生成值。
+ */
+export function getBuvid3(): string {
+  const cookie: string = AppPreferences.getString(PREF_BUVID_COOKIE, '');
+  if (cookie.length > 0) {
+    const items: string[] = cookie.split(';');
+    for (let i: number = 0; i < items.length; i++) {
+      const item: string = items[i].trim();
+      if (item.indexOf('buvid3=') === 0) {
+        const value: string = item.slice('buvid3='.length);
+        if (value.length > 0) {
+          return value;
+        }
+      }
+    }
+  }
+  return getBuvid();
+}
+
 interface SpiData {
   b_3: string;
   b_4: string;

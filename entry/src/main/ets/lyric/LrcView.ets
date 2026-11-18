@@ -29,11 +29,18 @@
  * （judgeAndDraw 浏览分支只原地刷新、不滚动）；松手 3.5s 无操作或浏览中
  * 轻点，平滑滚回当前演唱行。纯滚动位置浏览，不触碰任何播放 API（不 seek）。
  * 与外部 LongPressGesture 共存：按住不动 = 开设置弹窗，拖动 = 浏览。
+ *
+ * ── 拖动跳转（dragSeekEnabled，默认关）──
+ * 开关开启时拖动升级为「跳转预览」：目标行（拖动带到焦点位的那行）按当前行
+ * 样式高亮，焦点横线 + 右缘时间胶囊指示落点；松手经 onDragSeek 回调宿主
+ * （携带歌词时间轴 ms，宿主补偿整体偏移后 seek）。同行守卫：目标行与当前
+ * 演唱行相同时松手不跳（微误触不重放本行）；onActionCancel（系统打断）不跳。
+ * 关闭时行为与纯浏览模式完全一致。
  */
 
 import { AnimatorOptions, AnimatorResult } from '@kit.ArkUI';
 import { LrcEntry } from './LrcEntry';
-import { angleToRadian } from './LrcUtils';
+import { angleToRadian, formatLrcTime } from './LrcUtils';
 import { LyricTopPosition, LyricScrollEffect } from './LyricConst';
 import { STORE_PLAYBACK_SPEED, STORE_PLAYBACK_SPEED_ENABLED } from '../common/Constants';
 import { DECORATIVE_ANIM_FRAME_RATE } from '../common/constants/InteractionConstants';
@@ -76,6 +83,18 @@ const WORD_SWEEP_INTERVAL_MS: number = 33;
 const BROWSE_RETURN_DELAY_MS: number = 3500;
 /** 浏览钳位的底部余量（vp）：最后一行底部离可视区下沿至少留这么多，不被渐隐遮罩吞掉 */
 const BROWSE_BOTTOM_MARGIN: number = 48;
+
+/** 拖动跳转预览：焦点横线颜色（半透明白，暗底歌词区可见）与粗细（vp） */
+const SEEK_FOCUS_LINE_COLOR: string = 'rgba(255, 255, 255, 0.25)';
+const SEEK_FOCUS_LINE_WIDTH: number = 1;
+/** 拖动跳转预览：右缘时间胶囊底色 / 文字色 */
+const SEEK_BUBBLE_BG: string = 'rgba(255, 255, 255, 0.18)';
+const SEEK_BUBBLE_TEXT: string = '#FFFFFF';
+/** 拖动跳转预览：时间胶囊高度 / 水平内边距 / 字号（vp）/ 右缘留白（vp） */
+const SEEK_BUBBLE_HEIGHT: number = 28;
+const SEEK_BUBBLE_PAD_H: number = 10;
+const SEEK_BUBBLE_FONT: number = 13;
+const SEEK_BUBBLE_RIGHT: number = 8;
 
 /**
  * 副行（翻译 / 罗马音）字号比例：相对常规行字号。
@@ -161,6 +180,13 @@ export struct LrcView {
   /** 当前行字号（vp，默认 24）：封面舞台分档透传（30/26），同上失效重建 */
   @Prop @Watch('onTextSizeChanged') currentTextSize: number = 24;
   lyricTopPosition: LyricTopPosition = LyricTopPosition.Top;
+  /** 拖动歌词跳进度开关（设置镜像透传，默认关）：开启后拖动松手经 onDragSeek 跳转；关闭时拖动仅浏览（现状行为） */
+  @Prop dragSeekEnabled: boolean = false;
+  /** 拖动跳转回调：松手时携带目标行起始时间（ms，歌词时间轴——宿主收到后自行补偿整体偏移再 seek） */
+  onDragSeek: (lineStartMs: number) => void = (): void => {
+  };
+  /** 拖动跳转预览行（NONE_LINE = 未激活预览）：拖动中指向「松手将跳到的行」 */
+  private seekPreviewLine: number = NONE_LINE;
 
   private readonly mNormalTextColor: string = '#99ffffff';
   /** 0 = 尚未布局：alignImmediately / ensureLayout 据此跳过，杜绝按默认尺寸做错误的全量布局 */
@@ -395,6 +421,7 @@ export struct LrcView {
   /** 退出浏览模式：平滑滚回当前演唱行（暂停态由 startAnimator 瞬时对齐） */
   private exitBrowse(): void {
     this.browsing = false;
+    this.seekPreviewLine = NONE_LINE;
     this.cancelBrowseReturn();
     if (!this.hasLrc()) {
       return;
@@ -443,6 +470,31 @@ export struct LrcView {
       - lastLayout.heightNormal
       - lastLayout.subHeight;
     return Math.max(Math.min(minOffset, 0), Math.min(offset, 0));
+  }
+
+  /**
+   * 拖动跳转预览：按当前画布偏移计算「松手将跳到的行」。
+   * 目标行 = 对齐偏移（getOffset(i) 取负）距当前偏移最近的行 —— 拖动把哪行
+   * 带到焦点位（initFirstLineY），松手就跳到哪行。线性扫描取布局缓存前缀和，
+   * 行数 ≤ 数百、120Hz 触控采样下开销可忽略。
+   * 开关关闭 / 非拖动中 / 无歌词时置 NONE_LINE（不激活预览）。
+   */
+  private updateSeekPreview(offsetY: number): void {
+    if (!this.dragSeekEnabled || !this.browsing || !this.hasLrc()) {
+      this.seekPreviewLine = NONE_LINE;
+      return;
+    }
+    const layouts: LrcLineLayout[] = this.ensureLayout();
+    let best: number = NONE_LINE;
+    let bestDist: number = Number.MAX_VALUE;
+    for (let i = 0; i < layouts.length; i++) {
+      const dist: number = Math.abs(this.getOffset(i) + offsetY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+    this.seekPreviewLine = best;
   }
 
   /** 下一行的起点（ms）；已经是最后一行 / 没有歌词时返回 -1 */
@@ -1078,7 +1130,11 @@ export struct LrcView {
       const layouts: LrcLineLayout[] = this.ensureLayout();
       for (let index = 0; index < list.length; index++) {
         const lyric: LrcEntry = list[index];
-        const isCurrentLine: boolean = this.mCurrentLine === index;
+        // 拖动跳转预览态：目标行按当前行样式高亮（预览覆盖播放高亮，落点即时可见）；
+        // 非预览态照旧按播放行判定
+        const isCurrentLine: boolean = this.seekPreviewLine !== NONE_LINE
+          ? this.seekPreviewLine === index
+          : this.mCurrentLine === index;
         const layout: LrcLineLayout | undefined = index < layouts.length ? layouts[index] : undefined;
         if (layout === undefined) {
           // 缓存未就绪（宽度为 0 等边角态）：退回全量绘制
@@ -1110,6 +1166,36 @@ export struct LrcView {
       grad.addColorStop(1.0, '#00ffffff');
       this.context.fillStyle = grad;
       this.context.fillRect(0, 0, this.viewWidth, this.viewHeight);
+    }
+
+    // 拖动跳转预览指示（在渐隐遮罩之后绘制：恢复 source-over，指示不被遮罩淡化）：
+    // 焦点横线标示「当前对齐位」，右缘时间胶囊标示「松手将跳到的时刻」。
+    if (this.seekPreviewLine !== NONE_LINE) {
+      const target: LrcEntry = this.mLrcEntryList[this.seekPreviewLine];
+      const focusY: number = this.initFirstLineY;
+      this.context.globalCompositeOperation = 'source-over';
+      this.context.fillStyle = SEEK_FOCUS_LINE_COLOR;
+      this.context.fillRect(0, focusY - SEEK_FOCUS_LINE_WIDTH / 2, this.viewWidth, SEEK_FOCUS_LINE_WIDTH);
+      // 时间胶囊：本 SDK 的 Canvas 2D 无 roundRect，胶囊 = 两段半圆 arc
+      // + 自动连线路径（FAQ「如何使用canvas绘制圆角矩形」同款方案）
+      const label: string = formatLrcTime(target.lineStartTime / 1000);
+      this.context.font = 'bold ' + SEEK_BUBBLE_FONT + 'vp ' + this.fontFamily;
+      const textW: number = this.context.measureText(label).width;
+      const radius: number = SEEK_BUBBLE_HEIGHT / 2;
+      const bubbleRight: number = this.viewWidth - SEEK_BUBBLE_RIGHT;
+      const bubbleLeft: number = bubbleRight - textW - SEEK_BUBBLE_PAD_H * 2;
+      this.context.beginPath();
+      this.context.arc(bubbleLeft + radius, focusY, radius, Math.PI / 2, Math.PI * 1.5);
+      this.context.arc(bubbleRight - radius, focusY, radius, -Math.PI / 2, Math.PI / 2);
+      this.context.closePath();
+      this.context.fillStyle = SEEK_BUBBLE_BG;
+      this.context.fill();
+      this.context.fillStyle = SEEK_BUBBLE_TEXT;
+      this.context.textAlign = 'left';
+      this.context.textBaseline = 'middle';
+      this.context.fillText(label, bubbleLeft + SEEK_BUBBLE_PAD_H, focusY);
+      // 画布状态复位：textBaseline 回 bottom（drawLyricLine 的入口约定值）
+      this.context.textBaseline = 'bottom';
     }
   }
 
@@ -1148,6 +1234,7 @@ export struct LrcView {
     // 切歌 / 换词：彻底退出浏览态（随后的 alignImmediately 瞬时对齐，无浏览残留）
     this.cancelBrowseReturn();
     this.browsing = false;
+    this.seekPreviewLine = NONE_LINE;
     this.lastTickMs = this.lyricMilliSecondsTime;
     this.baseLocalMs = Date.now();
     if (!this.pageActive) {
@@ -1173,6 +1260,7 @@ export struct LrcView {
       this.cancelWake();
       this.cancelBrowseReturn();
       this.browsing = false;
+      this.seekPreviewLine = NONE_LINE;
       if (this.animator !== null) {
         this.animator.pause();
       }
@@ -1251,12 +1339,29 @@ export struct LrcView {
             return;
           }
           // offsetY 是从手势开始的累计位移：直接叠加在起始偏移上（跟手）
-          this.drawContent(this.clampBrowseOffset(this.panStartOffsetY + event.offsetY));
+          const nextOffset: number = this.clampBrowseOffset(this.panStartOffsetY + event.offsetY);
+          // 拖动跳转开启：先按新偏移更新目标行（预览高亮 / 时间胶囊与拖动同步不滞后）
+          this.updateSeekPreview(nextOffset);
+          this.drawContent(nextOffset);
         })
         .onActionEnd((): void => {
-          if (this.browsing) {
-            this.scheduleBrowseReturn();
+          if (!this.browsing) {
+            return;
           }
+          // 拖动跳转：目标行已激活、非当前演唱行（同行守卫——微误触不重放本行）
+          // 且仍在歌词范围内时，松手回调宿主跳转（宿主 seek 后进度回流，经
+          // judgeAndDraw 更新 mCurrentLine）；随后 exitBrowse 平滑滚到新行
+          if (this.dragSeekEnabled && this.seekPreviewLine !== NONE_LINE
+            && this.seekPreviewLine !== this.mCurrentLine
+            && this.seekPreviewLine < this.mLrcEntryList.length) {
+            const targetMs: number = this.mLrcEntryList[this.seekPreviewLine].lineStartTime;
+            this.seekPreviewLine = NONE_LINE;
+            this.onDragSeek(targetMs);
+            this.exitBrowse();
+            return;
+          }
+          this.seekPreviewLine = NONE_LINE;
+          this.scheduleBrowseReturn();
         })
         .onActionCancel((): void => {
           if (this.browsing) {
@@ -1282,6 +1387,7 @@ export struct LrcView {
             parseAreaLength(oldArea.width) === 0 && parseAreaLength(oldArea.height) === 0;
           this.cancelBrowseReturn();
           this.browsing = false;
+          this.seekPreviewLine = NONE_LINE;
           // 宽度变了：折行与副行截断要按新 lrcWidth 重算
           this.invalidateLayout();
           this.calculate();

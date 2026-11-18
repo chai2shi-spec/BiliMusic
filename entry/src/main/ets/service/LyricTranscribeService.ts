@@ -3,7 +3,9 @@
  *
  * 链路：原生解码（libentry.so：m4a/mp3/flac → 16kHz 单声道 s16le PCM）
  * → speechRecognizer 离线中文识别（长模式 + recognitionMode:1 写音频流）
- * → 按 55s 分段喂入（writeAudio 文档口径「最大音频长度 60000ms」留余量）
+ * → 按 55s 分段、每段独立引擎实例喂入（writeAudio 文档口径「最大音频长度
+ *   60000ms」：喂入留 5s 余量，maxAudioDuration 固定声明 60000，避免喂入量
+ *   恰好压线或同一引擎跨会话累计写入触发 1002200003 超长错误）
  * → isFinal 结果按喂入进度打行时间戳 → LyricsApi.saveBiliSubtitleChoice
  * 落 manual 缓存（下次播放自动作歌词、不被自动搜索覆盖）。
  *
@@ -42,6 +44,11 @@ const FEED_INTERVAL_MS: number = 20;
 /** 单段上限 55s：writeAudio 文档口径「最大音频长度 60000ms」，留 5s 余量 */
 const SEGMENT_MS: number = 55000;
 const SEGMENT_BYTES: number = SEGMENT_MS * PCM_BYTES_PER_MS;
+/** startListening 声明的 maxAudioDuration：固定取文档上限 60000ms。
+ *  声明值必须大于实际喂入时长，恰好相等会在引擎按字节计数校验时触发 1002200003 */
+const DECLARED_MAX_AUDIO_MS: number = 60000;
+/** 段间引擎重建间隔：规避「频繁创建、销毁引擎引起资源竞争」 */
+const ENGINE_RECREATE_GAP_MS: number = 500;
 /** 长模式 maxAudioDuration 下限：末段静音补齐到该长度 */
 const MIN_SEGMENT_MS: number = 20000;
 const MIN_SEGMENT_BYTES: number = MIN_SEGMENT_MS * PCM_BYTES_PER_MS;
@@ -140,6 +147,12 @@ function stopFeedTimer(): void {
   }
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function resetRuntimeState(): void {
   stopFeedTimer();
   activeEngine = null;
@@ -199,7 +212,10 @@ export async function startTranscribe(track: Track): Promise<void> {
     // 取消（seq 已被 cancelTranscribe 顶掉）由取消侧统一提示，这里静默
     if (mySeq === runSeq) {
       const err = e as BusinessError;
-      const msg: string = err.message && err.message.length > 0 ? err.message : '转写失败';
+      let msg: string = err.message && err.message.length > 0 ? err.message : '转写失败';
+      if (err.code === 1002200003) {
+        msg = '音频段超出识别长度上限，请重试';
+      }
       postAppToast(msg, 2200);
     }
   } finally {
@@ -274,31 +290,37 @@ async function runTranscribe(track: Track, audioPath: string, mySeq: number): Pr
       fs.closeSync(file);
     }
 
-    // ③ 创建识别引擎（离线中文长模式）
+    // ③④ 分段识别：每段独立创建引擎（离线中文长模式），段间 shutdown，
+    //     避免同一引擎实例跨会话累计写入音频量触发 1002200003 超长错误
     publishProgress(mySeq, 'recognizing', 0);
-    const engine: speechRecognizer.SpeechRecognitionEngine = await speechRecognizer.createEngine({
-      language: 'zh-CN',
-      online: 1,
-      extraParams: { 'locate': 'CN', 'recognizerMode': 'long' }
-    });
-    if (mySeq !== runSeq) {
-      engine.shutdown();
-      return;
-    }
-    activeEngine = engine;
-    try {
-      engine.setListener(buildListener(mySeq));
-      // ④ 分段识别
-      const segments: PcmSegment[] = splitSegments();
-      for (let i = 0; i < segments.length; i++) {
+    const segments: PcmSegment[] = splitSegments();
+    for (let i = 0; i < segments.length; i++) {
+      if (mySeq !== runSeq) {
+        return;
+      }
+      if (i > 0) {
+        await sleepMs(ENGINE_RECREATE_GAP_MS);
         if (mySeq !== runSeq) {
           return;
         }
-        await recognizeSegment(engine, segments[i], i, mySeq);
       }
-    } finally {
-      engine.shutdown();
-      activeEngine = null;
+      const engine: speechRecognizer.SpeechRecognitionEngine = await speechRecognizer.createEngine({
+        language: 'zh-CN',
+        online: 1,
+        extraParams: { 'locate': 'CN', 'recognizerMode': 'long' }
+      });
+      if (mySeq !== runSeq) {
+        engine.shutdown();
+        return;
+      }
+      activeEngine = engine;
+      try {
+        engine.setListener(buildListener(mySeq));
+        await recognizeSegment(engine, segments[i], i, mySeq);
+      } finally {
+        activeEngine = null;
+        engine.shutdown();
+      }
     }
     if (mySeq !== runSeq) {
       return;
@@ -378,7 +400,8 @@ function buildListener(mySeq: number): speechRecognizer.RecognitionListener {
       }
     },
     onComplete: (sessionId: string, eventMessage: string): void => {
-      if (mySeq !== runSeq) {
+      // 只认当前段：上一段的迟到回调不得提前 resolve 本段
+      if (mySeq !== runSeq || sessionId !== activeSessionId) {
         return;
       }
       const settle: ((err: BusinessError | null) => void) | null = settleSegment;
@@ -387,9 +410,10 @@ function buildListener(mySeq: number): speechRecognizer.RecognitionListener {
       }
     },
     onError: (sessionId: string, errorCode: number, errorMessage: string): void => {
-      if (mySeq !== runSeq) {
+      if (mySeq !== runSeq || sessionId !== activeSessionId) {
         return;
       }
+      console.error(`[Transcribe] onError: session ${sessionId} code ${errorCode} ${errorMessage}`);
       const settle: ((err: BusinessError | null) => void) | null = settleSegment;
       if (settle !== null) {
         const err: BusinessError = { code: errorCode, name: 'BusinessError', message: errorMessage };
@@ -452,7 +476,7 @@ function recognizeSegment(engine: speechRecognizer.SpeechRecognitionEngine, seg:
         },
         extraParams: {
           'recognitionMode': 1,
-          'maxAudioDuration': maxMs
+          'maxAudioDuration': DECLARED_MAX_AUDIO_MS
         }
       });
     } catch (e) {
@@ -479,8 +503,11 @@ function recognizeSegment(engine: speechRecognizer.SpeechRecognitionEngine, seg:
       try {
         engine.writeAudio(sessionId, pcmChunkOf(seg, from));
       } catch (e) {
+        const werr: BusinessError = e as BusinessError;
+        console.error(`[Transcribe] writeAudio failed: seg ${index} chunk ${sentChunks}/${chunkCount}` +
+          ` code ${werr.code} ${werr.message}`);
         // 1002200003 超长 / 1002200010 未启动等：本段放弃
-        settle(e as BusinessError);
+        settle(werr);
         return;
       }
       sentChunks++;

@@ -3,7 +3,7 @@
  *   · 主题：主题（菜单弹层选择）/ 主题色（bindSheet 半屏 8 色面板）
  *   · 播放页：进度条样式 / 收起动画 / 封面风格（均菜单弹层选择，播放页「加入歌单」弹层同款）
  *   · 全局外观：条目展示 / 沉浸光感材质（均菜单弹层选择；精美档设备能力门控灰置）
- *   · 底部导航与迷你栏：底部导航布局（菜单弹层选择，SM 断点才渲染）/ 迷你栏进度条 / 自动展开收起（SM 断点才渲染）
+ *   · 底部导航与迷你栏：底部导航布局（菜单弹层选择，SM 断点才渲染）/ 迷你栏进度条 / 自动展开收起（SM 断点才渲染）/ 拾音页签 / 设置页签（均可隐藏底部导航对应页签）
  *
  * 主题深浅 / 主题色经 publishThemeColors 写 AppStorage，全局组件 @StorageProp 订阅
  * 即时刷新，无需重启；样式类设置（进度条 / 收起动画 / 封面风格 / 底部导航布局 /
@@ -29,7 +29,11 @@ import {
   STORE_ITEM_DISPLAY_STYLE,
   STORE_MINI_BAR_PROGRESS,
   STORE_MINI_BAR_AUTO_EXPAND,
-  STORE_IMMERSIVE_MATERIAL_TIER
+  STORE_SHOW_DIARY_TAB,
+  STORE_SHOW_SETTINGS_TAB,
+  STORE_SHOW_HOME_CARDS,
+  STORE_IMMERSIVE_MATERIAL_TIER,
+  STORE_FONT_SCALE
 } from '../common/Constants';
 import {
   AppSettings,
@@ -54,7 +58,9 @@ import {
   itemDisplayLabelOf,
   IMMERSIVE_TIER_EXQUISITE,
   IMMERSIVE_TIER_OPTIONS,
-  immersiveTierLabelOf
+  immersiveTierLabelOf,
+  FONT_SCALE_OPTIONS,
+  fontScaleLabelOf
 } from '../model/MusicModels';
 import { MaterialCompat } from '../utils/MaterialCompat';
 import { AppPreferences } from '../preferences/AppPreferences';
@@ -415,6 +421,40 @@ export struct AppearanceSettingsPage {
     this.toast(`沉浸光感：${immersiveTierLabelOf(next)}`, 1500);
   }
 
+  /** 字体大小选择菜单项：小 / 标准 / 大 / 特大（FONT_SCALE_OPTIONS 顺序），当前档尾部 ✓ */
+  private fontScaleMenuItems(): MenuElement[] {
+    const items: MenuElement[] = [];
+    for (const option of FONT_SCALE_OPTIONS) {
+      const label: string = fontScaleLabelOf(option);
+      items.push({
+        value: option === this.settings.fontScale ? `${label} ✓` : label,
+        action: (): void => {
+          this.selectFontScale(option);
+        }
+      });
+    }
+    return items;
+  }
+
+  /**
+   * 选择字体大小档位：小（0.85）/ 标准（1.0）/ 大（1.15）/ 特大（1.3）。
+   * 写偏好 + 写 AppStorage 镜像（STORE_FONT_SCALE，Canvas 自绘歌词据此
+   * 同步缩放）→ 同步调 setFontSizeScale 把档位真正应用到全局 fp 文字
+   * （启动时的恢复逻辑在 EntryAbility，loadContent 首帧前）。
+   */
+  private selectFontScale(next: number): void {
+    this.closeMenu();
+    this.update((s: AppSettings): void => {
+      s.fontScale = next;
+    });
+    AppStorage.setOrCreate(STORE_FONT_SCALE, next);
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx) {
+      AppPreferences.applyFontSizeScale(ctx, next);
+    }
+    this.toast(`字体大小：${fontScaleLabelOf(next)}`, 1500);
+  }
+
   /**
    * 选择主题色：写偏好 → 重发布 AppStorage 主题色键（全局订阅组件即时变色）
    * → toast → 关面板。同一色再点只关面板不重发布。
@@ -765,6 +805,35 @@ export struct AppearanceSettingsPage {
                 }
               }
             })
+
+            CardDivider()
+
+            // 字体大小（菜单弹层选择）：小（0.85）/ 标准（1.0，默认）/
+            // 大（1.15）/ 特大（1.3）。写偏好 + AppStorage 镜像
+            // （STORE_FONT_SCALE，Canvas 自绘歌词订阅同步缩放），
+            // 并同步调 setFontSizeScale 全局缩放 fp 文字（启动恢复在
+            // EntryAbility，loadContent 首帧前）。各形态均有文字 → 不做断点隐藏。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '字体大小' },
+                secondaryText: { text: '小 / 标准 / 大 / 特大' }
+              },
+              suffixItem: new SuffixText({ text: fontScaleLabelOf(this.settings.fontScale) }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0,
+              onClick: (): void => {
+                this.menuOpen = 'fontScale';
+              }
+            })
+            .bindMenu(this.menuOpen === 'fontScale', this.fontScaleMenuItems(), {
+              placement: Placement.BottomRight,
+              onDisappear: (): void => {
+                if (this.menuOpen === 'fontScale') {
+                  this.menuOpen = '';
+                }
+              }
+            })
           }
         }
 
@@ -860,6 +929,86 @@ export struct AppearanceSettingsPage {
                 cardSuffixMargin: 0
               })
             }
+
+            CardDivider()
+
+            // 拾音页签显隐：关闭后底部导航不渲染拾音页签（Index 条件渲染
+            // TabContent + 重锚，即时生效无需重启）；听歌记录照常采集，
+            // 重新打开即恢复完整数据展示。写偏好 + AppStorage 镜像
+            // （STORE_SHOW_DIARY_TAB）。各形态底部导航均受影响，不做断点隐藏。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '拾音页签' },
+                secondaryText: { text: '在底部导航显示拾音页，听歌记录不受影响' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.showDiaryTab,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.update((s: AppSettings): void => {
+                    s.showDiaryTab = v;
+                  });
+                  AppStorage.setOrCreate(STORE_SHOW_DIARY_TAB, v);
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 设置页签显隐：同款条件渲染（STORE_SHOW_SETTINGS_TAB 镜像）。
+            // 关闭时 toast 提示恢复方式 —— 隐藏后底部导航不再有设置页，
+            // 唯一恢复入口是长按首页「BiliMusic」标题（Index.homeTitleRow）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '设置页签' },
+                secondaryText: { text: '在底部导航显示设置页' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.showSettingsTab,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.update((s: AppSettings): void => {
+                    s.showSettingsTab = v;
+                  });
+                  AppStorage.setOrCreate(STORE_SHOW_SETTINGS_TAB, v);
+                  if (!v) {
+                    this.toast('已隐藏设置页签，长按首页 BiliMusic 标题可恢复', 2600);
+                  }
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
+
+            CardDivider()
+
+            // 首页快捷卡显隐：关闭后首页搜索框下方的快捷卡行（最近播放卡 +
+            // 歌单卡）整行隐藏，卡片数据照常维护、重新打开即恢复。写偏好 +
+            // AppStorage 镜像（STORE_SHOW_HOME_CARDS），HomePage 的
+            // @StorageProp + @Watch 订阅即时生效（chips 触栏阈值同步收缩）。
+            HdsListItemCard({
+              textItem: {
+                primaryText: { text: '首页快捷卡' },
+                secondaryText: { text: '在首页显示最近播放与歌单快捷卡' }
+              },
+              suffixItem: new SuffixSwitch({
+                isCheck: this.settings.showHomeCards,
+                selectColor: this.themePrimary,
+                onChange: (v: boolean): void => {
+                  this.update((s: AppSettings): void => {
+                    s.showHomeCards = v;
+                  });
+                  AppStorage.setOrCreate(STORE_SHOW_HOME_CARDS, v);
+                }
+              }),
+              cardBackgroundColor: Color.Transparent,
+              cardPrefixMargin: 0,
+              cardSuffixMargin: 0
+            })
           }
         }
       }

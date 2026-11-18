@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.chai.bilimusic",
     "vendor": "Hanversion",
-    "versionCode": 1003008,
-    "versionName": "1.3.8",
+    "versionCode": 1003009,
+    "versionName": "1.3.9",
     // 2026-10-08 图标分层（应用市场审核要求）：改指分层描述 layered_image.json，
     // 前景 app_icon_fg / 背景 app_icon_bg 各 1024×1024，圆角由系统遮罩处理。
     "icon": "$media:layered_image",
@@ -29,6 +29,9 @@
     // 2026-10-31 新增 16 粉底唱片机（design/app-icon-v6：满幅 1024² 不透明，
     // 图案 0 改动只重做四周 —— 圆角外白底与方框立体光晕逐像素填成连续粉底；
     // 同 14/15 满幅方案，bg 层仅占位，圆角由系统遮罩裁切。）
+    // 2026-11-17 新增 17 粉底电视字标（design/app-icon-v7：用户提供设计稿
+    // 只处理边缘 —— 黑边距、灰色描边与边界混合带逐像素填成连续粉底，
+    // 图案内容 0 改动；满幅 1024² 不透明，bg 层仅占位，圆角由系统遮罩裁切。）
     "alternateIcons": [
       { "name": "wave_bars", "icon": "$media:alt_icon_01" },
       { "name": "headphones", "icon": "$media:alt_icon_02" },
@@ -43,7 +46,8 @@
       { "name": "md_walkman", "icon": "$media:alt_icon_12" },
       { "name": "mini_tv", "icon": "$media:alt_icon_13" },
       { "name": "pink_headphones", "icon": "$media:alt_icon_15" },
-      { "name": "pink_turntable", "icon": "$media:alt_icon_16" }
+      { "name": "pink_turntable", "icon": "$media:alt_icon_16" },
+      { "name": "pink_tv_logo", "icon": "$media:alt_icon_17" }
     ]
   }
 }

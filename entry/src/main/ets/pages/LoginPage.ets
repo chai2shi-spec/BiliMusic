@@ -1,33 +1,50 @@
 /**
- * 登录页（扫码 + 短信验证码合并，一页两页签）。
+ * 登录页（四页签：密码 / 短信 / 扫码 / Cookie，对齐 PiliPlus LoginPage）。
  *
  * 顶部滑块（CapsuleSegmentButtonV2，与观看历史页「观看历史 / 稍后再看」同款）在
- * 「扫码登录」「短信登录」两个页签间切换。
+ * 四个页签间切换。App 端登录链路（android_hd 签名域，参数内联 URL + appSignQuery）
+ * 的公共收尾是 finishAppLogin（applyAppLogin 落库 → refreshLoginUser → 先退栈再提示）。
  *
- * ── 扫码页签 ──
- * 流程：生成二维码（passport web 接口）→ 本地 QRCode 组件渲染 → 每 2s 轮询扫码状态
- * → 成功后 LoginStore 双通道提取登录 Cookie（回调 url 参数 / 响应 Set-Cookie 头）并持久化
- * → 自动返回。
- * 状态机（qrPhase）：loading（取二维码中）/ ready（等待扫码，86101）/ scanned（已扫码
- * 待确认，86090）/ expired（86038，二维码约 180s 过期，点击蒙层刷新重新生成）。
+ * ── 密码页签 ──
+ * fetchWebKey 取盐与 PEM 公钥 → loginByPwd（RSA 加密）→ status 0 落库；
+ * -105 极验 → 整屏极验层（geetestConsumer='pwd'）通过后带 proof 重发；
+ * status 2 风控 → 安心中心链（打码手机号 → preCapture → 极验 → 短信 →
+ * verify → fetchOauth2Token → 落库）。
  *
- * ── 短信页签（三步状态机，对齐 BBPlayer usePhoneLogin）──
- *   input_phone   输入手机号 → fetchSmsCaptchaToken 拿图形验证 token + 极验参数；
- *   geetest_verify **整屏**极验 WebView（gt.js product=popup，内联 HTML + javaScriptProxy
- *                 桥回传 validate/seccode/challenge）→ sendSmsLoginCode 发短信，
- *                 86211 / -105 = 图形验证过期，退回 input_phone；
- *   input_code    输入短信验证码 → loginWithSmsCode 换登录 Cookie →
- *                 LoginStore.applySmsLoginCookies 落库 → 自动返回。
- * ⚠️ 极验 WebView 只在 geetest_verify 阶段挂载，且**必须是整屏**（`geetestOverlay`）：
- * B 站这个 gt 的 gettype 是 `fullpage`，面板是整屏 fixed 浮层 —— 塞在 360vp 卡片里
- * 真机表现就是「安全验证页一片空白」。每次重进都换新的 WebviewController（同一实例
- * 二次绑定 Web 节点会冲突）。白屏不再静默：看门狗（GEETEST_WATCHDOG_MS）+ HTML 的
- * gterr/gtready/gtok title 通道，失败一定会显示「重试 / 改用扫码登录」。
+ * ── 短信页签（App 端短信，两步状态机）──
+ *   PHASE_PHONE  手机号 + 区号选择（半模态 Sheet，DialPrefixData 全量表）
+ *                → sendAppSmsCode（常态免极验直达；needGeetest 时过极验层重发）；
+ *   PHASE_CODE   短信验证码 → loginByAppSms → 落库 → 自动返回。
+ *   卡内「粉版手机端登录」开关（默认关）：开启后 send/login 改在粉版
+ *   （LOGIN_DOMAIN_ANDROID）域签名，签出的 access_token 与粉版 appkey
+ *   （BILI_ANDROID_APP_*）同 appid；关闭时与 TV 扫码 / 密码同 HD 域，行为不变。
+ *
+ * ── 大会员登录福利（BiliMusic 特有）──
+ * 登录成功后若为大会员（vipStatus===1），自动把播放 / 下载音质提升为
+ * 「无损」（applyVipLosslessQuality），toast 带「已切换为无损音质」变体；
+ * 覆盖全部登录成功路径（App 端四链 + 网页扫码 + Cookie 导入）。
+ *
+ * ── 扫码页签（TV ↔ 网页子切换）──
+ * TV（默认）：fetchTvQrAuthCode → 本地 QRCode 渲染 → 每 1s pollTvQrLogin
+ * （0 成功 / 86090 已扫 / 86038 过期 / 86039 等待）→ 成功走 finishAppLogin。
+ * 网页：generateQrLogin → 每 2s pollQrLogin（86101/86090/86038/0，
+ * 早失效自动换码）→ applyQrSuccess，原实现整体保留。
+ *
+ * ── Cookie 页签 ──
+ * 粘贴 Cookie → validateWebCookie 校验 → applyImportedCookie 白名单落库 → 自动返回。
+ *
+ * ── 整屏极验层（泛化，流程无关）──
+ * startGeetest(gt, challenge, consumer) 挂载（product=popup，内联 HTML +
+ * javaScriptProxy 桥回传 validate/seccode/challenge，gtok title 兜底），
+ * handleGeetestResult 按 geetestConsumer 分发（'pwd' / 'appsms' / 'safecenter'）。
+ * ⚠️ 必须整屏（B 站这个 gt 的 gettype 是 fullpage，面板是整屏 fixed 浮层），
+ * 每次重进都换新的 WebviewController。看门狗（GEETEST_WATCHDOG_MS）+
+ * gterr/gtready/gtok title 通道，失败一定显示重试出口。
  *
  * 布局与转场复用 AboutPage 的模式：HDS 沉浸光感标题栏（HdsNavDestination.titleBar，
  * stackBuilder 承载标题（返回键为 HDS 默认键）、bottomBuilder 承载滑块切换行）、Stack 承载滚动内容
  * + 极验整屏覆盖层、customTransition 横移转场。
- * ⚠️ 二维码轮询定时器与极验看门狗必须在 aboutToDisappear 清掉，离开页面后不能空转。
+ * ⚠️ 双二维码轮询定时器与极验看门狗必须在 aboutToDisappear 清掉，离开页面后不能空转。
  */
 
 import { STORE_SAFE_TOP, STORE_THEME_PRIMARY, STORE_THEME_ON, STORE_THEME_DEEP } from '../common/Constants';
@@ -50,29 +67,51 @@ import {
 } from '../utils/HeaderBarMaterial';
 import {
   BiliApiError,
-  fetchSmsCaptchaToken,
   generateQrLogin,
-  loginWithSmsCode,
   pollQrLogin,
   QrLoginTicket,
   QrPollResult,
-  sendSmsLoginCode,
-  SmsCaptchaInfo,
-  SmsLoginResult,
-  SmsSendResult
+  fetchTvQrAuthCode,
+  pollTvQrLogin,
+  fetchWebKey,
+  loginByPwd,
+  sendAppSmsCode,
+  loginByAppSms,
+  fetchSafeCenterInfo,
+  fetchSafeCenterPreCapture,
+  sendSafeCenterSms,
+  verifySafeCenterSms,
+  fetchOauth2Token,
+  validateWebCookie,
+  GeetestProof,
+  TvQrTicket,
+  TvQrPollResult,
+  TvTokenResult,
+  PwdLoginResult,
+  AppSmsSendResult,
+  SafeCenterInfo,
+  SafeCenterCapture,
+  WebKeyInfo,
+  LOGIN_DOMAIN_HD,
+  LOGIN_DOMAIN_ANDROID
 } from '../api/BilibiliApi';
-import { applyQrSuccess, applySmsLoginCookies, getLoginUser, refreshLoginUser, LoginUser } from '../service/LoginStore';
+import { applyQrSuccess, applyAppLogin, applyImportedCookie, refreshLoginUser, getLoginUser, LoginUser } from '../service/LoginStore';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AudioQuality, AppSettings } from '../model/MusicModels';
+import { DialPrefix, DIAL_PREFIXES, findDialPrefix } from '../model/DialPrefixData';
 import { HttpUtil } from '../utils/HttpUtil';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { BarNarrowShell } from '../components/BarNarrowShell';
+// 页面版式：全应用统一的 inset 分组卡片 / 区块标题 / 区块脚注
+import { InsetCard, SectionHeader, SectionFooter } from '../components/InsetCardGroup';
 
-/** 二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
+/** 网页二维码轮询间隔（ms）：B 站网页版同款节奏，太快会被风控 */
 const QR_POLL_INTERVAL_MS: number = 2000;
+/** TV 扫码轮询间隔（ms）：passport-tv-login 官方客户端节奏（PiliPlus 同款 1s） */
+const TV_POLL_INTERVAL_MS: number = 1000;
 
 /**
  * 二维码「早失效」判定阈值（ms）：
@@ -88,31 +127,55 @@ const QR_AUTO_REFRESH_MAX: number = 3;
 const QR_AUTO_REFRESH_DELAYS_MS: number[] = [1000, 3000, 7000];
 
 /** 页签下标（刻意用数字常量而不是 enum：.ets 里声明 enum 会连带报 SDK 解析错误） */
-const TAB_QR: number = 0;
+const TAB_PWD: number = 0;
 const TAB_SMS: number = 1;
+const TAB_QR: number = 2;
+const TAB_COOKIE: number = 3;
+
+/** 扫码页签子模式：TV 扫码（默认）/ 网页扫码 */
+const QR_MODE_TV: string = 'tv';
+const QR_MODE_WEB: string = 'web';
+
+/** 密码页签阶段：表单 / 安心中心（风控短信验证） */
+const PWD_STAGE_FORM: string = 'form';
+const PWD_STAGE_SAFE: string = 'safe';
+/** 安心中心子步骤：发短信 / 输验证码 */
+const SC_PHASE_SMS: string = 'sms';
+const SC_PHASE_CODE: string = 'code';
 
 /**
- * 标题栏滑块切换行（扫码登录 / 短信登录）固定高：
+ * 标题栏滑块切换行（密码登录 / 短信登录 / 扫码登录 / Cookie）固定高：
  * 段切换 Column 40 + 行 padding bottom 4 = 44。
  * bottomBuilder 高度不自适应（官方约束），必须与行内容定高一致。
  */
 const LOGIN_TABS_ROW_HEIGHT: number = 44;
 
-/**
- * 短信卡底部上移占位：页面内容整体垂直居中，
- * 弹出输入法时系统避让只保证焦点输入框可见，卡内更下方的验证码按钮仍会被
- * 键盘盖住（平板实测盖住 ~67px）。在短信卡下方补一块占位，把居中点上抬
- * 约一半高度，让「输入框 + 按钮」在手机 / 平板上都落到键盘上方。
- */
-const SMS_CARD_LIFT_VP: number = 160;
+// ── 页面版式 token（全部对齐「inset 分组卡片」体系，见 components/InsetCardGroup）──
+/** 表单行高（vp）：与设置页行高同口径（28 图标片 + 上下呼吸），整行可点即聚焦 */
+const FORM_FIELD_H: number = 56;
+/** 行首图标片边长 / 圆角（vp）：设置页 ENTRY 图标片同款 28 / 7 */
+const FORM_ICON_SIZE: number = 28;
+const FORM_ICON_RADIUS: number = 7;
+/** 图标片与输入文字的水平间距（vp） */
+const FORM_ICON_GAP: number = 12;
+/** 行分隔线左缩进 = 卡片内边距 16 + 图标 28 + 间距 12（文字起点对齐） */
+const FORM_DIVIDER_INSET: number = 56;
+/** 主按钮高度 / 圆角（vp）：圆角与分组卡片同 12，全宽 CTA 统一 48 高 */
+const CTA_HEIGHT_VP: number = 48;
+const CTA_RADIUS_VP: number = 12;
+/** 二维码边长（vp）：比旧版 220 收一档，给上下说明文字留呼吸 */
+const QR_SIZE_VP: number = 200;
 
-/** 区号固定中国大陆（对齐 BBPlayer usePhoneLogin 的 COUNTRY_CODE） */
-const COUNTRY_CODE: string = '86';
 const PHONE_PATTERN: RegExp = /^\d{5,15}$/;
 const CODE_PATTERN: RegExp = /^\d{4,8}$/;
 const PHASE_PHONE: string = 'input_phone';
-const PHASE_GEETEST: string = 'geetest_verify';
 const PHASE_CODE: string = 'input_code';
+
+/** 极验层发起流程（结果分发去向）：密码 -105 / App 短信 needGeetest / 安心中心人机预验证 */
+const GEETEST_CONSUMER_PWD: string = 'pwd';
+const GEETEST_CONSUMER_APPSMS: string = 'appsms';
+const GEETEST_CONSUMER_SAFE: string = 'safecenter';
+
 /**
  * 极验加载看门狗（ms）：到点仍没收到 `gtready` / `gtok` 就判加载失败、显示重试出口。
  *
@@ -146,6 +209,25 @@ function errorBiliCode(e: Object): number {
     return e.code;
   }
   return 0;
+}
+
+/**
+ * 从 url 的 query 里取参数值（riskUrl 的 tmp_token / request_id / source 解析用）。
+ * BilibiliApi 里的同款 queryParam 未导出，这里页面级复制一份；找不到返回空串。
+ */
+function urlQueryParam(url: string, key: string): string {
+  const queryIndex: number = url.indexOf('?');
+  if (queryIndex < 0) {
+    return '';
+  }
+  const pairs: string[] = url.substring(queryIndex + 1).split('&');
+  const prefix: string = `${key}=`;
+  for (let i: number = 0; i < pairs.length; i++) {
+    if (pairs[i].indexOf(prefix) === 0) {
+      return pairs[i].substring(prefix.length);
+    }
+  }
+  return '';
 }
 
 /**
@@ -259,7 +341,7 @@ function buildGeetestHtml(gt: string, challenge: string): string {
           seccode: r.geetest_seccode,
           challenge: r.geetest_challenge
         });
-        setStatus('验证通过，正在发送短信…');
+        setStatus('验证通过，正在提交…');
         // 兜底通道：即便 javaScriptProxy 没注入，也能把结果送回 ArkTS
         try { document.title = 'gtok:' + json; } catch (e) { }
         try {
@@ -279,7 +361,8 @@ function buildGeetestHtml(gt: string, challenge: string): string {
           captchaObj.onError(function () { READY = false; fail('verify'); });
           captchaObj.onClose(function () { try { document.title = 'gtclose:1'; } catch (e) { } });
           try { document.title = 'gtready:1'; } catch (e) { }
-          console.info('geetest ready, verify=' + typeof captchaObj.verify);
+          // WebView 里没有 ArkTS 侧模块，只能用 console（onConsole 收）
+          console.log('geetest ready, verify=' + typeof captchaObj.verify);
           // fullpage 面板本应自己铺满整屏；万一没展示（容器尺寸/时序），主动拉起并给按钮
           setTimeout(function () {
             var box = document.getElementById('captcha');
@@ -326,9 +409,9 @@ export struct LoginPage {
   /** 状态栏高度（vp）：内容区要整体落在状态栏下方，由本页自己顶下来 */
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
 
-  /** 主题色主色：二维码刷新图标、短信登录按钮底色与提示文字跟随切色刷新 */
+  /** 主题色主色：二维码刷新图标、登录按钮底色与提示文字跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
-  /** 主题色深字色：短信登录按钮文字跟随切色刷新 */
+  /** 主题色深字色：登录按钮文字跟随切色刷新 */
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 主题色深强调色：白底小字强调（过期/失败状态行、覆盖层取消文字），对比度达标（设计规范双粉策略） */
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
@@ -357,24 +440,46 @@ export struct LoginPage {
    */
   @State navTransX: string = '0%';
 
-  /** 当前页签：0 = 扫码登录（默认），1 = 短信登录 */
+  /** 当前页签：0 = 密码登录，1 = 短信登录，2 = 扫码登录（默认），3 = Cookie */
   @State tab: number = TAB_QR;
-  /** 段切换（扫码登录 / 短信登录）分段按钮条目：静态一次构造 */
+  /** 页签滑块条目（密码登录 / 短信登录 / 扫码登录 / Cookie）：静态一次构造 */
   private segmentItems: SegmentButtonV2Items = new SegmentButtonV2Items([
+    { text: '密码登录' },
+    { text: '短信登录' },
     { text: '扫码登录' },
-    { text: '短信登录' }
+    { text: 'Cookie' }
+  ]);
+  /** 扫码页签子切换条目（TV 扫码 / 网页扫码）：静态一次构造 */
+  private qrModeItems: SegmentButtonV2Items = new SegmentButtonV2Items([
+    { text: 'TV 扫码' },
+    { text: '网页扫码' }
   ]);
   /** 分段按钮主题色配色组：每次渲染现取（读 AppStorage），缓存成字段切色不刷新 */
   private segColors(): SegmentColors {
     return makeBiliSegmentColors();
   }
 
+  /**
+   * 主题色 10% 透明底（`#RRGGBB` → `#1ARRGGBB`）：行首图标片 / 区号胶囊的底色。
+   * 与设置页 ENTRY 图标片同一套配方，换主题色时随 themePrimary 即时跟随。
+   */
+  private iconTint(): string {
+    const hex: string = this.themePrimary;
+    if (hex.length === 7 && hex.charAt(0) === '#') {
+      return `#1A${hex.substring(1)}`;
+    }
+    return '#1AFB7299';
+  }
+
   // ── 扫码页签状态 ──
-  /** 二维码内容（passport 下发的 url）；为空表示还没取到 */
+  /** 扫码子模式：QR_MODE_TV（默认）/ QR_MODE_WEB */
+  @State qrMode: string = QR_MODE_TV;
+
+  /** 网页二维码内容（passport 下发的 url）；为空表示还没取到 */
   @State qrUrl: string = '';
-  /** 扫码状态机：loading / ready / scanned / expired */
+  /** 网页扫码状态机：loading / ready / scanned / expired */
   @State qrPhase: string = 'loading';
-  /** 状态文案：跟随 qrPhase 与轮询结果更新 */
+  /** 网页扫码状态文案：跟随 qrPhase 与轮询结果更新 */
   @State statusText: string = '正在获取二维码…';
 
   /** 轮询凭据（generateQrLogin 下发，poll 必带） */
@@ -389,31 +494,95 @@ export struct LoginPage {
   /** 早失效自动刷新定时器 id（-1 = 未启动；aboutToDisappear 成对清理） */
   private autoRefreshTimer: number = -1;
 
-  // ── 短信页签状态（三步状态机 + 极验面板） ──
-  /** 三步状态机：PHASE_PHONE / PHASE_GEETEST / PHASE_CODE */
+  /** TV 二维码内容（passport-tv-login 下发的 url）；为空表示还没取到 */
+  @State tvQrUrl: string = '';
+  /** TV 扫码状态机：loading / ready / scanned / expired */
+  @State tvQrPhase: string = 'loading';
+  /** TV 扫码状态文案 */
+  @State tvStatusText: string = '正在获取二维码…';
+  /** TV 轮询凭据（fetchTvQrAuthCode 下发的 auth_code，poll 必带） */
+  private tvAuthCode: string = '';
+  private tvPollTimer: number = -1;
+  /** TV 单次轮询进行中标记：防止慢响应叠帧轮询 */
+  private tvPolling: boolean = false;
+
+  // ── 短信页签状态（App 端短信，两步状态机） ──
+  /** 两步状态机：PHASE_PHONE / PHASE_CODE */
   @State phase: string = PHASE_PHONE;
   @State phone: string = '';
   @State smsCode: string = '';
   @State phoneError: string = '';
   @State codeError: string = '';
-  /** 请求进行中（取 token / 发短信 / 登录）：按钮禁用与防重入 */
-  @State busy: boolean = false;
+  /** 短信请求进行中（发验证码 / 登录）：按钮禁用与防重入 */
+  @State busySms: boolean = false;
+  /** 已选区号条目 id（DialPrefixData 主键，默认中国大陆 86） */
+  @State selectedDialId: number = 1;
+  /** 区号选择半模态可见（bindSheet 双向绑定） */
+  @State dialSheetVisible: boolean = false;
+  /** 区号搜索关键字（名称 / 区号匹配） */
+  @State dialSearch: string = '';
+  /** sendAppSmsCode 下发的一次性凭据，loginByAppSms 必带 */
+  private smsCaptchaKey: string = '';
+  /**
+   * 短信登录域：LOGIN_DOMAIN_HD（默认，与 TV 扫码 / 密码同域）/
+   * LOGIN_DOMAIN_ANDROID（粉版，见下方开关行说明）。
+   * send 与 login 必须同域（captcha_key 是域内会话凭据）；
+   * 开关只在 PHASE_PHONE 渲染，进 PHASE_CODE 后不再可变。
+   */
+  @State smsDomain: string = LOGIN_DOMAIN_HD;
+
+  // ── 密码页签状态 ──
+  /** 密码页签阶段：PWD_STAGE_FORM 表单 / PWD_STAGE_SAFE 安心中心（风控） */
+  @State pwdStage: string = PWD_STAGE_FORM;
+  @State pwdUsername: string = '';
+  @State pwdPassword: string = '';
+  @State pwdError: string = '';
+  @State busyPwd: boolean = false;
+  /** doPwdLogin 时缓存的盐 + PEM 公钥（极验通过后 retryPwdWithProof 复用） */
+  private pwdWebKey: WebKeyInfo | null = null;
+
+  // ── 安心中心（密码 status=2 风控）状态 ──
+  /** 安心中心子步骤：SC_PHASE_SMS 发短信 / SC_PHASE_CODE 输验证码 */
+  @State scPhase: string = SC_PHASE_SMS;
+  /** 打码手机号（fetchSafeCenterInfo 下发，仅展示） */
+  @State scHideTel: string = '';
+  @State scCode: string = '';
+  @State scError: string = '';
+  @State busySafe: boolean = false;
+  /** riskUrl 解析的四件套：tmp_code（请求参数叫 tmp_code，取值是 tmp_token） */
+  private scTmpCode: string = '';
+  private scRequestId: string = '';
+  private scSource: string = '';
+  /** 风控页 url：sendSafeCenterSms / verifySafeCenterSms 的 Referer（B 站校验来源） */
+  private scReferer: string = '';
+  /** preCapture 下发的极验 challenge：proof.challenge 用它而非滑块回传值（PiliPlus 同款） */
+  private scGeeChallenge: string = '';
+  /** sendSafeCenterSms 下发的一次性凭据，verify 必带 */
+  private scCaptchaKey: string = '';
+
+  // ── Cookie 页签状态 ──
+  @State cookieText: string = '';
+  @State cookieError: string = '';
+  @State busyCookie: boolean = false;
+
+  // ── 整屏极验层（泛化，流程无关） ──
+  /** 极验整屏覆盖层是否挂载（密码 -105 / 短信 needGeetest / 安心中心人机预验证共用） */
+  @State geetestVisible: boolean = false;
   /** 极验面板是否已就绪（收到 `gtready`）：控制「正在加载…」提示与看门狗 */
   @State geetestReady: boolean = false;
   /** 极验加载失败原因（非空 = 覆盖层显示失败态 + 重试出口，绝不留死白屏） */
   @State geetestError: string = '';
-
-  /** 第 1 步下发的图形验证信息（第 2 步发短信必带 token） */
-  private captcha: SmsCaptchaInfo | null = null;
-  /** 第 2 步下发的一次性凭据，第 3 步登录必带 */
-  private captchaKey: string = '';
-  /** 极验页内容：进入 geetest 阶段前用 gt/challenge 构建 */
+  /** 本轮极验的发起流程（结果分发用）：GEETEST_CONSUMER_* */
+  private geetestConsumer: string = '';
+  /** 本轮极验随 gt/challenge 一起下发的 recaptcha_token（重发请求必带） */
+  private pendingRecaptchaToken: string = '';
+  /** 极验页内容：mountGeetest 时用 gt/challenge 构建 */
   private geetestHtml: string = '';
   /** 本轮极验页地址（真实 https + t 防缓存；内容由 onInterceptRequest 返回） */
   private geetestPageUrl: string = '';
   /** 拦截未命中时的应急回落是否已用掉（data: 导航，每轮只用一次） */
   private geetestFallbackUsed: boolean = false;
-  /** 每次进入 geetest 阶段都换新实例（同一 controller 不能二次绑定 Web 节点） */
+  /** 每次挂载极验层都换新实例（同一 controller 不能二次绑定 Web 节点） */
   private webController: web_webview.WebviewController = new web_webview.WebviewController();
   private bridge: GeetestBridge = new GeetestBridge();
   /** 加载看门狗定时器 id（-1 = 未启动） */
@@ -425,17 +594,15 @@ export struct LoginPage {
     // 挂载前先存当前偏移对应的进度（updater 未挂载只存值，
     // 挂载时 initializeModifier 补上），防「已滚过再进页」首帧缺模糊。
     this.syncTopBlurProgress();
-    // 平板登录诊断：若「二维码 3 秒换一张」实为页面被反复重挂
-    //（startQrLogin 被重复触发而非 86038 早失效），短时间内出现多条本日志即可定位。
-    console.info(`[Login] appear ts=${Date.now()}`);
     this.bridge.onGeetestResult = (message: string): void => {
       this.handleGeetestResult(message);
     };
-    this.startQrLogin();
+    this.startTvQrLogin();
   }
 
   aboutToDisappear(): void {
     this.stopPolling();
+    this.stopTvPolling();
     this.clearAutoRefresh();
     this.clearWatchdog();
     // 页面销毁后桥对象仍被 Web 持有：断开回调，避免迟到的回调打到已卸载的组件
@@ -444,22 +611,41 @@ export struct LoginPage {
   }
 
   /**
-   * 滑块切页签：离开短信页签时若正处于极验阶段，先取消极验
-   * （看门狗 / WebView 状态不能跟着页签潜伏，否则后台空转或迟到回调）。
+   * 滑块切页签：极验层开着时先取消（看门狗 / WebView 状态不能跟着页签潜伏，
+   * 否则后台空转或迟到回调打到错误的流程上）。
    */
   private switchTab(index: number): void {
     if (index === this.tab) {
       return;
     }
-    if (this.tab === TAB_SMS && this.phase === PHASE_GEETEST) {
-      this.backToPhone();
+    if (this.geetestVisible) {
+      this.cancelGeetest();
     }
     this.tab = index;
   }
 
-  // ── 扫码页签逻辑 ──
+  /** 扫码页签内 TV ↔ 网页子切换：先停旧模式轮询再启新模式 */
+  private switchQrMode(mode: string): void {
+    if (mode === this.qrMode) {
+      return;
+    }
+    if (this.qrMode === QR_MODE_TV) {
+      this.stopTvPolling();
+    } else {
+      this.stopPolling();
+      this.clearAutoRefresh();
+    }
+    this.qrMode = mode;
+    if (mode === QR_MODE_TV) {
+      this.startTvQrLogin();
+    } else {
+      this.startQrLogin();
+    }
+  }
 
-  /** 重新生成二维码并开始新一轮轮询（首进页面 / 过期刷新 / 早失效自动刷新共用） */
+  // ── 网页扫码逻辑（原实现整体保留） ──
+
+  /** 重新生成网页二维码并开始新一轮轮询（切到网页模式 / 过期刷新 / 早失效自动刷新共用） */
   private startQrLogin(): void {
     // 先清掉 pending 的自动刷新：用户点击 expired 蒙层手动刷新时，
     // 不能让迟到的自动刷新再换一张码（打断扫码确认）
@@ -565,6 +751,123 @@ export struct LoginPage {
     }
   }
 
+  /** 网页扫码成功落库：解析 Cookie → 持久化 → 刷新用户信息 → toast + 返回 */
+  private async finishLogin(callbackUrl: string, responseCookies: string, refreshToken: string): Promise<void> {
+    this.statusText = '登录成功';
+    try {
+      await applyQrSuccess(callbackUrl, responseCookies, refreshToken);
+      await refreshLoginUser();
+      const upgraded: boolean = await this.applyVipLosslessQuality();
+      this.finishPopToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded);
+    } catch (e) {
+      // 落库失败（两条 Cookie 通道都没拿到身份字段 / 存储异常）：给刷新入口让用户重试。
+      // 诊断日志只记长度与字段命中布尔，不输出凭据值。
+      const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.error(`finishLogin failed: ${msg} ` +
+        `(urlLen=${callbackUrl.length}, urlHasSessdata=${callbackUrl.indexOf('SESSDATA=') >= 0}, ` +
+        `cookiesLen=${responseCookies.length}, cookiesHasSessdata=${responseCookies.indexOf('SESSDATA=') >= 0}, ` +
+        `cookieKeys=[${HttpUtil.cookieKeys(responseCookies).join(', ')}])`);
+      this.qrPhase = 'expired';
+      this.statusText = '登录失败，点击二维码重试';
+    }
+  }
+
+  // ── TV 扫码逻辑 ──
+
+  /** 重新生成 TV 二维码并开始新一轮 1s 轮询（首进页面 / 过期刷新共用） */
+  private startTvQrLogin(): void {
+    this.stopTvPolling();
+    this.tvQrPhase = 'loading';
+    this.tvStatusText = '正在获取二维码…';
+    fetchTvQrAuthCode()
+      .then((ticket: TvQrTicket): void => {
+        this.tvQrUrl = ticket.qrUrl;
+        this.tvAuthCode = ticket.authCode;
+        this.tvQrPhase = 'ready';
+        this.tvStatusText = '请使用哔哩哔哩客户端扫码';
+        this.startTvPolling();
+      })
+      .catch((e: BusinessError): void => {
+        this.tvQrPhase = 'expired';
+        this.tvStatusText = `获取二维码失败：${e.message}`;
+      });
+  }
+
+  private startTvPolling(): void {
+    if (this.tvPollTimer !== -1) {
+      return;
+    }
+    this.tvPollTimer = setInterval((): void => {
+      this.pollTvOnce();
+    }, TV_POLL_INTERVAL_MS);
+  }
+
+  private stopTvPolling(): void {
+    if (this.tvPollTimer !== -1) {
+      clearInterval(this.tvPollTimer);
+      this.tvPollTimer = -1;
+    }
+  }
+
+  /**
+   * TV 轮询单次：0 成功 / 86090 已扫待确认 / 86038 过期 / 86039 等待扫码（TV 专属未扫码码）。
+   * 与网页码不同：TV 码没有「早失效自愈」，86038 一律转手动刷新。
+   */
+  private async pollTvOnce(): Promise<void> {
+    if (this.tvPolling || this.tvQrPhase === 'expired' || this.tvAuthCode.length === 0) {
+      return;
+    }
+    this.tvPolling = true;
+    try {
+      const result: TvQrPollResult = await pollTvQrLogin(this.tvAuthCode);
+      if (result.status === 0) {
+        this.stopTvPolling();
+        const token: TvTokenResult | null = result.token;
+        if (token === null) {
+          console.warn('tv qr poll: status 0 but token missing');
+          this.tvQrPhase = 'expired';
+          this.tvStatusText = '登录失败，点击二维码重试';
+          return;
+        }
+        await this.finishAppLogin(token);
+      } else if (result.status === 86090) {
+        this.tvQrPhase = 'scanned';
+        this.tvStatusText = '已扫码，请在手机上确认';
+      } else if (result.status === 86038) {
+        this.stopTvPolling();
+        this.tvQrPhase = 'expired';
+        this.tvStatusText = '二维码已过期';
+      } else {
+        // 86039 等待扫码（TV 专属）；手机上取消确认后也会回到等待/已扫
+        this.tvQrPhase = 'ready';
+        this.tvStatusText = '请使用哔哩哔哩客户端扫码';
+      }
+    } catch (e) {
+      const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.warn(`pollTvOnce failed: ${msg}`);
+    } finally {
+      this.tvPolling = false;
+    }
+  }
+
+  // ── App 端登录公共收尾 ──
+
+  /**
+   * 登录成功后的收尾：**先退栈、再提示**。
+   *
+   * `showAppToast` 紧挨着 pop 调用会被一起收掉：toast 挂在当前页的 UIContext 上，
+   * 页面一销毁就跟着消失（日志表现 `closeToast(...) → Toast not found`）。
+   * 所以提示延迟到退栈动画之后再发。登录只有一层路由，
+   * pop 一层即回到来源页（设置 / 关注 / 收藏同步等）。
+   */
+  private finishPopToast(text: string, longDuration: boolean = false): void {
+    console.info(`login done: pop nav stack, size=${NavStackHolder.stack.size()}`);
+    NavStackHolder.stack.pop();
+    setTimeout((): void => {
+      showAppToast(text, longDuration ? 2200 : 1800);
+    }, 200);
+  }
+
   /**
    * 大会员登录福利：登录成功后若为大会员/年度大会员（vipStatus===1），
    * 把播放音质与下载音质自动提升为「无损」。仅登录成功时设置一次；
@@ -587,37 +890,56 @@ export struct LoginPage {
     return true;
   }
 
-  /** 扫码成功落库：解析 Cookie → 持久化 → 刷新用户信息 → toast + 返回 */
-  private async finishLogin(callbackUrl: string, responseCookies: string, refreshToken: string): Promise<void> {
-    this.statusText = '登录成功';
+  /**
+   * App 端登录链路公共收尾（TV 扫码 / 密码 / App 短信 / 安心中心）：
+   * applyAppLogin 落库 → refreshLoginUser → 先退栈再提示。
+   * @returns false = 落库 / 刷新失败，由调用方回填各自失败态
+   */
+  private async finishAppLogin(token: TvTokenResult): Promise<boolean> {
     try {
-      await applyQrSuccess(callbackUrl, responseCookies, refreshToken);
+      await applyAppLogin(token.cookieString, token.accessToken, token.refreshToken);
       await refreshLoginUser();
       const upgraded: boolean = await this.applyVipLosslessQuality();
-      showAppToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded ? 2200 : 1800);
-      NavStackHolder.stack.pop();
+      this.finishPopToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded);
+      return true;
     } catch (e) {
-      // 落库失败（两条 Cookie 通道都没拿到身份字段 / 存储异常）：给刷新入口让用户重试。
-      // 诊断日志只记长度与字段命中布尔，不输出凭据值。
+      // 落库失败（cookie_info 缺身份字段 / 存储异常）：诊断只记长度，不输出凭据值
       const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
-      console.error(`finishLogin failed: ${msg} ` +
-        `(urlLen=${callbackUrl.length}, urlHasSessdata=${callbackUrl.indexOf('SESSDATA=') >= 0}, ` +
-        `cookiesLen=${responseCookies.length}, cookiesHasSessdata=${responseCookies.indexOf('SESSDATA=') >= 0}, ` +
-        `cookieKeys=[${HttpUtil.cookieKeys(responseCookies).join(', ')}])`);
-      this.qrPhase = 'expired';
-      this.statusText = '登录失败，点击二维码重试';
+      console.error(`app login finish failed: ${msg} (cookiesLen=${token.cookieString.length})`);
+      return false;
     }
   }
 
-  // ── 短信页签逻辑 ──
+  // ── 短信页签逻辑（App 端短信） ──
 
-  /** 第 1 步：校验手机号 → 取图形验证信息 → 进极验页 */
-  private requestCaptcha(): void {
-    // 重入守卫（JS_ERROR 根因）：busy（取凭据在途，按钮禁用要等重渲染，
-    // 同帧双击可穿透）或已在极验阶段时再开一轮，会在挂载中的 Web 节点底下
-    // 把 webController 换成未关联的新实例 —— Web 仍绑旧实例，onPageEnd 的
-    // probePage 拿新实例调 runJavaScript 即抛 17100001。
-    if (this.busy || this.phase === PHASE_GEETEST) {
+  /** 已选区号的国际电话区号（请求 cid 参数） */
+  private selectedDialCountryId(): number {
+    const dial: DialPrefix | null = findDialPrefix(this.selectedDialId);
+    return dial !== null ? dial.countryId : 86;
+  }
+
+  /** 区号搜索过滤（名称 / 区号前缀匹配，空关键字返回全表） */
+  private filteredDialPrefixes(): DialPrefix[] {
+    const kw: string = this.dialSearch.trim().toLowerCase();
+    if (kw.length === 0) {
+      return DIAL_PREFIXES;
+    }
+    const out: DialPrefix[] = [];
+    for (let i: number = 0; i < DIAL_PREFIXES.length; i++) {
+      const item: DialPrefix = DIAL_PREFIXES[i];
+      if (item.cname.toLowerCase().indexOf(kw) >= 0 ||
+        String(item.countryId).indexOf(kw) >= 0) {
+        out.push(item);
+      }
+    }
+    return out;
+  }
+
+  /** 第 1 步：校验手机号 → 发送 App 短信验证码（常态免极验直达） */
+  private requestSmsCode(): void {
+    // 重入守卫：busy 在途（按钮禁用要等重渲染，同帧双击可穿透）或极验层开着时
+    // 不再开一轮，否则会在挂载中的 Web 节点底下把 webController 换成未关联的新实例
+    if (this.busySms || this.geetestVisible) {
       return;
     }
     const tel: string = this.phone.trim();
@@ -630,44 +952,406 @@ export struct LoginPage {
       return;
     }
     this.phoneError = '';
-    this.busy = true;
-    fetchSmsCaptchaToken()
-      .then((info: SmsCaptchaInfo): void => {
-        this.captcha = info;
-        this.geetestHtml = buildGeetestHtml(info.gt, info.challenge);
-        this.geetestPageUrl = `${GEETEST_PAGE_URL}?t=${Date.now()}`;
-        this.webController = new web_webview.WebviewController();
-        // 每轮都重置转场状态：结果一次性、失败态清空、看门狗重开
-        this.geetestReady = false;
-        this.geetestError = '';
-        this.geetestConsumed = false;
-        this.geetestFallbackUsed = false;
-        this.phase = PHASE_GEETEST;
-        this.busy = false;
-        this.startWatchdog();
-        // 只记长度指纹（token/gt/challenge 均为凭据类值，不落日志）
-        console.info(`sms captcha fetched: tokenLen=${info.token.length}` +
-          `, gtLen=${info.gt.length}, challengeLen=${info.challenge.length}, htmlLen=${this.geetestHtml.length}`);
-      })
-      .catch((e: BusinessError): void => {
-        this.busy = false;
-        this.phoneError = `获取验证码失败：${e.message}`;
-        console.warn(`sms captcha fetch failed: ${e.message}`);
-      });
+    this.busySms = true;
+    this.sendSmsWithProof(tel, null, '');
   }
 
   /**
-   * 第 2 步：极验通过（WebView 回传）→ 发送短信验证码。
+   * 发送 App 短信验证码（首发 / 极验通过后带 proof 重发共用）。
+   * needGeetest 时挂极验层（GEETEST_CONSUMER_APPSMS），通过后回到这里重发；
+   * recaptcha_url 形态缺 gt/challenge 参数时用 preCapture 兜底（PiliPlus getCaptcha 同款）。
+   */
+  private sendSmsWithProof(tel: string, proof: GeetestProof | null, recaptchaToken: string): void {
+    const cid: number = this.selectedDialCountryId();
+    sendAppSmsCode(tel, cid, proof, recaptchaToken, this.smsDomain)
+      .then((result: AppSmsSendResult): void => {
+        if (!result.needGeetest) {
+          if (result.captchaKey.length === 0) {
+            // 防御：成功帧缺 captcha_key，退回第 1 步重来
+            this.busySms = false;
+            this.phoneError = '发送验证码失败，请重试';
+            return;
+          }
+          this.smsCaptchaKey = result.captchaKey;
+          this.busySms = false;
+          this.phase = PHASE_CODE;
+          showAppToast('验证码已发送', 1800);
+          return;
+        }
+        this.busySms = false;
+        if (result.gt.length > 0) {
+          this.mountGeetest(GEETEST_CONSUMER_APPSMS, result.gt, result.challenge, result.recaptchaToken);
+        } else {
+          fetchSafeCenterPreCapture()
+            .then((cap: SafeCenterCapture): void => {
+              this.mountGeetest(GEETEST_CONSUMER_APPSMS, cap.gt, cap.challenge, cap.recaptchaToken);
+            })
+            .catch((e: BusinessError): void => {
+              this.phoneError = `获取安全验证参数失败：${e.message}`;
+            });
+        }
+      })
+      .catch((e: BusinessError): void => {
+        this.busySms = false;
+        const biliCode: number = errorBiliCode(e);
+        if (biliCode === 86211 || biliCode === -105) {
+          this.phoneError = '图形验证已过期，请重新获取验证码';
+        } else {
+          this.phoneError = `发送验证码失败：${e.message}`;
+        }
+      });
+  }
+
+  /** 第 2 步：短信验证码换登录凭据 → 落库 → 自动返回 */
+  private doSmsLogin(): void {
+    const code: string = this.smsCode.trim();
+    if (code.length === 0) {
+      this.codeError = '请输入验证码';
+      return;
+    }
+    if (!CODE_PATTERN.test(code)) {
+      this.codeError = '验证码格式不正确';
+      return;
+    }
+    if (this.smsCaptchaKey.length === 0) {
+      // 正常走不到（进本阶段前必有 captchaKey），防御性回退
+      this.codeError = '';
+      this.phase = PHASE_PHONE;
+      return;
+    }
+    this.codeError = '';
+    this.busySms = true;
+    const tel: string = this.phone.trim();
+    const cid: number = this.selectedDialCountryId();
+    fetchWebKey()
+      .then(async (webKey: WebKeyInfo): Promise<void> => {
+        const token: TvTokenResult = await loginByAppSms(tel, cid, code, this.smsCaptchaKey, webKey, this.smsDomain);
+        const ok: boolean = await this.finishAppLogin(token);
+        if (!ok) {
+          this.busySms = false;
+          this.codeError = '登录失败，请重试';
+        }
+      })
+      .catch((e: BusinessError): void => {
+        this.busySms = false;
+        // 诊断只记异常消息（BiliApiError 消息含业务码，不含凭据值）
+        console.warn(`sms login failed: ${e.message}`);
+        this.codeError = e.message.length > 0 ? e.message : '登录失败，请检查验证码';
+      });
+  }
+
+  // ── 密码页签逻辑 ──
+
+  /** 密码登录：fetchWebKey 取盐与公钥 → loginByPwd → 按 status 分流（0 / 2 风控 / -105 极验） */
+  private doPwdLogin(): void {
+    if (this.busyPwd || this.geetestVisible) {
+      return;
+    }
+    const username: string = this.pwdUsername.trim();
+    const password: string = this.pwdPassword;
+    if (username.length === 0) {
+      this.pwdError = '请输入账号';
+      return;
+    }
+    if (password.length === 0) {
+      this.pwdError = '请输入密码';
+      return;
+    }
+    this.pwdError = '';
+    this.busyPwd = true;
+    fetchWebKey()
+      .then(async (webKey: WebKeyInfo): Promise<void> => {
+        this.pwdWebKey = webKey;
+        const result: PwdLoginResult = await loginByPwd(username, password, webKey, null, '');
+        this.handlePwdResult(result);
+      })
+      .catch((e: BusinessError): void => {
+        this.busyPwd = false;
+        this.pwdError = `登录失败：${e.message}`;
+      });
+  }
+
+  /** loginByPwd 结果分流：0 落库 / 2 安心中心 / -105 极验 / 其它报错 */
+  private handlePwdResult(result: PwdLoginResult): void {
+    if (result.status === 0 && result.token !== null) {
+      const token: TvTokenResult = result.token;
+      this.finishAppLogin(token).then((ok: boolean): void => {
+        if (!ok) {
+          this.busyPwd = false;
+          this.pwdError = '登录失败，请重试';
+        }
+      });
+      return;
+    }
+    this.busyPwd = false;
+    if (result.status === 2) {
+      this.enterSafeCenter(result.riskUrl);
+      return;
+    }
+    if (result.status === -105) {
+      if (result.gt.length === 0 || result.challenge.length === 0) {
+        this.pwdError = '安全验证参数缺失，请重试';
+        return;
+      }
+      this.mountGeetest(GEETEST_CONSUMER_PWD, result.gt, result.challenge, result.recaptchaToken);
+      return;
+    }
+    this.pwdError = result.message.length > 0 ? result.message : '登录失败';
+  }
+
+  /** 极验通过后带 proof 重发密码登录（webKey 复用首轮缓存的盐 + 公钥） */
+  private retryPwdWithProof(proof: GeetestProof): void {
+    if (this.pwdWebKey === null) {
+      this.pwdError = '登录超时，请重试';
+      return;
+    }
+    const username: string = this.pwdUsername.trim();
+    const password: string = this.pwdPassword;
+    this.busyPwd = true;
+    loginByPwd(username, password, this.pwdWebKey, proof, this.pendingRecaptchaToken)
+      .then((result: PwdLoginResult): void => {
+        this.handlePwdResult(result);
+      })
+      .catch((e: BusinessError): void => {
+        this.busyPwd = false;
+        this.pwdError = `登录失败：${e.message}`;
+      });
+  }
+
+  // ── 安心中心（密码 status=2 风控）逻辑 ──
+
+  /**
+   * 进入安心中心：解析 riskUrl 的 tmp_token / request_id / source（verify 必带），
+   * 拉取打码手机号展示。riskUrl 本体作为后续请求的 Referer。
+   */
+  private enterSafeCenter(riskUrl: string): void {
+    this.scTmpCode = urlQueryParam(riskUrl, 'tmp_token');
+    this.scRequestId = urlQueryParam(riskUrl, 'request_id');
+    this.scSource = urlQueryParam(riskUrl, 'source');
+    this.scReferer = riskUrl;
+    this.scPhase = SC_PHASE_SMS;
+    this.scHideTel = '';
+    this.scCode = '';
+    this.scError = '';
+    this.scGeeChallenge = '';
+    this.scCaptchaKey = '';
+    this.busySafe = false;
+    this.pwdStage = PWD_STAGE_SAFE;
+    if (this.scTmpCode.length === 0) {
+      this.scError = '风控信息缺失，请返回重试';
+      return;
+    }
+    fetchSafeCenterInfo(this.scTmpCode)
+      .then((info: SafeCenterInfo): void => {
+        this.scHideTel = info.hideTel;
+      })
+      .catch((e: BusinessError): void => {
+        this.scError = `获取安全验证信息失败：${e.message}`;
+      });
+  }
+
+  /** 安心中心发短信：preCapture 取极验参数 → 挂极验层（GEETEST_CONSUMER_SAFE） */
+  private sendSafeCenterCode(): void {
+    if (this.busySafe || this.geetestVisible) {
+      return;
+    }
+    if (this.scTmpCode.length === 0) {
+      this.exitSafeCenter();
+      return;
+    }
+    this.scError = '';
+    this.busySafe = true;
+    fetchSafeCenterPreCapture()
+      .then((cap: SafeCenterCapture): void => {
+        this.busySafe = false;
+        if (cap.gt.length === 0 || cap.challenge.length === 0) {
+          this.scError = '获取人机验证参数失败，请重试';
+          return;
+        }
+        // proof.challenge 用 preCapture 下发的这份（非滑块回传值，PiliPlus 同款）
+        this.scGeeChallenge = cap.challenge;
+        this.mountGeetest(GEETEST_CONSUMER_SAFE, cap.gt, cap.challenge, cap.recaptchaToken);
+      })
+      .catch((e: BusinessError): void => {
+        this.busySafe = false;
+        this.scError = `获取人机验证参数失败：${e.message}`;
+      });
+  }
+
+  /** 极验通过 → sendSafeCenterSms（风控 Referer + preCapture 极验四件套） */
+  private completeSafeCenterSms(proofSlider: GeetestProof): void {
+    const proof: GeetestProof = {
+      challenge: this.scGeeChallenge.length > 0 ? this.scGeeChallenge : proofSlider.challenge,
+      validate: proofSlider.validate,
+      seccode: proofSlider.seccode
+    };
+    this.busySafe = true;
+    sendSafeCenterSms(this.scTmpCode, proof, this.pendingRecaptchaToken, this.scReferer)
+      .then((captchaKey: string): void => {
+        this.busySafe = false;
+        if (captchaKey.length === 0) {
+          this.scError = '发送短信验证码失败，请重试';
+          return;
+        }
+        this.scCaptchaKey = captchaKey;
+        this.scPhase = SC_PHASE_CODE;
+      })
+      .catch((e: BusinessError): void => {
+        this.busySafe = false;
+        this.scError = e.message.length > 0 ? e.message : '发送短信验证码失败';
+      });
+  }
+
+  /** 安心中心提交短信验证码：verify → oauth code → fetchOauth2Token → 落库 */
+  private confirmSafeCenter(): void {
+    if (this.busySafe) {
+      return;
+    }
+    const code: string = this.scCode.trim();
+    if (code.length === 0) {
+      this.scError = '请输入短信验证码';
+      return;
+    }
+    if (this.scCaptchaKey.length === 0) {
+      // 正常走不到（进本步骤前必有 captchaKey），防御性回退
+      this.scPhase = SC_PHASE_SMS;
+      return;
+    }
+    this.scError = '';
+    this.busySafe = true;
+    verifySafeCenterSms(this.scTmpCode, code, this.scRequestId, this.scSource, this.scCaptchaKey, this.scReferer)
+      .then(async (oauthCode: string): Promise<void> => {
+        if (oauthCode.length === 0) {
+          this.busySafe = false;
+          this.scError = '验证失败，请重试';
+          return;
+        }
+        const token: TvTokenResult = await fetchOauth2Token(oauthCode);
+        const ok: boolean = await this.finishAppLogin(token);
+        if (!ok) {
+          this.busySafe = false;
+          this.scError = '登录失败，请重试';
+        }
+      })
+      .catch((e: BusinessError): void => {
+        this.busySafe = false;
+        this.scError = e.message.length > 0 ? e.message : '验证失败';
+      });
+  }
+
+  /** 退出安心中心回到密码表单（清空风控中间态） */
+  private exitSafeCenter(): void {
+    this.pwdStage = PWD_STAGE_FORM;
+    this.scPhase = SC_PHASE_SMS;
+    this.scTmpCode = '';
+    this.scRequestId = '';
+    this.scSource = '';
+    this.scReferer = '';
+    this.scHideTel = '';
+    this.scCode = '';
+    this.scGeeChallenge = '';
+    this.scCaptchaKey = '';
+    this.scError = '';
+  }
+
+  // ── Cookie 页签逻辑 ──
+
+  /** Cookie 导入：本地预检 → validateWebCookie → 白名单落库 → 自动返回 */
+  private doCookieImport(): void {
+    if (this.busyCookie) {
+      return;
+    }
+    const raw: string = this.cookieText.trim();
+    if (raw.length === 0) {
+      this.cookieError = '请粘贴 Cookie';
+      return;
+    }
+    if (raw.indexOf('SESSDATA=') < 0) {
+      this.cookieError = 'Cookie 里缺少 SESSDATA 字段';
+      return;
+    }
+    this.cookieError = '';
+    this.busyCookie = true;
+    validateWebCookie(raw)
+      .then(async (mid: number): Promise<void> => {
+        console.info(`cookie import validated: mid=${mid}`);
+        await applyImportedCookie(raw);
+        await refreshLoginUser();
+        const upgraded: boolean = await this.applyVipLosslessQuality();
+        this.busyCookie = false;
+        this.finishPopToast(upgraded ? '导入成功，已切换为无损音质' : '导入成功', upgraded);
+      })
+      .catch((e: BusinessError): void => {
+        this.busyCookie = false;
+        const biliCode: number = errorBiliCode(e);
+        if (biliCode === -101) {
+          this.cookieError = 'Cookie 已失效，请重新获取';
+        } else {
+          this.cookieError = `Cookie 校验失败：${e.message}`;
+        }
+      });
+  }
+
+  // ── 整屏极验层（泛化，流程无关） ──
+
+  /**
+   * 挂载极验层：构建 HTML + 换新 WebviewController + 重置状态 + 开看门狗。
+   * 每次挂载都是全新一轮（旧 challenge 一次性失效），consumer 决定结果分发去向。
+   */
+  private mountGeetest(consumer: string, gt: string, challenge: string, recaptchaToken: string): void {
+    this.geetestConsumer = consumer;
+    this.pendingRecaptchaToken = recaptchaToken;
+    this.geetestHtml = buildGeetestHtml(gt, challenge);
+    this.geetestPageUrl = `${GEETEST_PAGE_URL}?t=${Date.now()}`;
+    this.webController = new web_webview.WebviewController();
+    this.geetestReady = false;
+    this.geetestError = '';
+    this.geetestConsumed = false;
+    this.geetestFallbackUsed = false;
+    this.geetestVisible = true;
+    this.startWatchdog();
+    // 只记消费者与长度指纹（gt/challenge 均为凭据类值，不落日志）
+    console.info(`geetest mount: consumer=${consumer}, htmlLen=${this.geetestHtml.length}`);
+  }
+
+  /** 取消极验（覆盖层取消出口 / 切页签 / 页面销毁共用）：验证作废，回发起流程的待命态 */
+  private cancelGeetest(): void {
+    this.clearWatchdog();
+    this.geetestVisible = false;
+    this.geetestHtml = '';
+    this.geetestReady = false;
+    this.geetestError = '';
+    this.geetestConsumed = false;
+    this.geetestConsumer = '';
+  }
+
+  /** 重试极验：卸载后重走发起流程（新 challenge，旧的一次性失效） */
+  private retryGeetest(): void {
+    const consumer: string = this.geetestConsumer;
+    this.cancelGeetest();
+    if (consumer === GEETEST_CONSUMER_PWD) {
+      this.doPwdLogin();
+    } else if (consumer === GEETEST_CONSUMER_APPSMS) {
+      this.requestSmsCode();
+    } else if (consumer === GEETEST_CONSUMER_SAFE) {
+      this.sendSafeCenterCode();
+    }
+  }
+
+  /**
+   * 极验通过（WebView 回传）→ 按 geetestConsumer 分发：
+   *   pwd        → retryPwdWithProof（带 proof 重发密码登录）
+   *   appsms     → sendSmsWithProof（带 proof 重发短信）
+   *   safecenter → completeSafeCenterSms（带 proof 发安心中心短信）
    *
    * 两个来源都会调到这里：`appProxy.postGeetestResult`（主通道）与
    * `onTitleReceive` 的 `gtok:`（兜底通道）—— 用 `geetestConsumed` 保证只消费一次，
-   * 否则会重复发两条短信。
+   * 否则会重复触发后续请求。
    */
   private handleGeetestResult(message: string): void {
     // 桥回调可能来自非 UI 线程派发，先留痕再处理（出现 UI 不刷新时按此定位）
     console.info(`geetest result: len=${message.length}`);
-    if (this.busy || this.geetestConsumed || this.captcha === null
-      || this.phase !== PHASE_GEETEST) {
+    if (!this.geetestVisible || this.geetestConsumed) {
       return;
     }
     let validate: string = '';
@@ -687,90 +1371,17 @@ export struct LoginPage {
     }
     this.geetestConsumed = true;
     this.clearWatchdog();
-    this.busy = true;
-    // 诊断：-400「请求错误」= 服务端收到空表单/缺 tel，这里记长度确认 tel 是否丢失
-    console.info(`sms send start: phoneLen=${this.phone.trim().length}, ` +
-      `tokenLen=${this.captcha.token.length}, vLen=${validate.length}`);
-    sendSmsLoginCode(this.phone.trim(), COUNTRY_CODE, this.captcha.token, challenge, validate, seccode)
-      .then((result: SmsSendResult): void => {
-        this.captchaKey = result.captchaKey;
-        this.busy = false;
-        this.phase = PHASE_CODE;
-        showAppToast('验证码已发送', 1800);
-      })
-      .catch((e: BusinessError): void => {
-        this.busy = false;
-        this.phase = PHASE_PHONE;
-        // 86211 / -105：图形验证已过期（BBPlayer useGeetest 同款判定），退回第 1 步重来
-        const biliCode: number = errorBiliCode(e);
-        if (biliCode === 86211 || biliCode === -105) {
-          this.phoneError = '图形验证已过期，请重新获取验证码';
-        } else {
-          this.phoneError = `发送验证码失败：${e.message}`;
-        }
-      });
-  }
-
-  /** 第 3 步：短信验证码换登录 Cookie → 落库 → 刷新用户信息 → 返回 */
-  private doLogin(): void {
-    const code: string = this.smsCode.trim();
-    if (code.length === 0) {
-      this.codeError = '请输入验证码';
-      return;
+    const proof: GeetestProof = { challenge: challenge, validate: validate, seccode: seccode };
+    const consumer: string = this.geetestConsumer;
+    this.geetestVisible = false;
+    this.geetestConsumer = '';
+    if (consumer === GEETEST_CONSUMER_PWD) {
+      this.retryPwdWithProof(proof);
+    } else if (consumer === GEETEST_CONSUMER_APPSMS) {
+      this.sendSmsWithProof(this.phone.trim(), proof, this.pendingRecaptchaToken);
+    } else if (consumer === GEETEST_CONSUMER_SAFE) {
+      this.completeSafeCenterSms(proof);
     }
-    if (!CODE_PATTERN.test(code)) {
-      this.codeError = '验证码格式不正确';
-      return;
-    }
-    if (this.captchaKey.length === 0) {
-      // 正常走不到（进本阶段前必有 captchaKey），防御性回退
-      this.codeError = '';
-      this.phase = PHASE_PHONE;
-      return;
-    }
-    this.codeError = '';
-    this.busy = true;
-    loginWithSmsCode(this.phone.trim(), COUNTRY_CODE, code, this.captchaKey)
-      .then(async (result: SmsLoginResult): Promise<void> => {
-        await applySmsLoginCookies(result.responseCookies, result.refreshToken);
-        await refreshLoginUser();
-        const upgraded: boolean = await this.applyVipLosslessQuality();
-        this.busy = false;
-        this.finishSmsLogin(upgraded);
-      })
-      .catch((e: BusinessError): void => {
-        this.busy = false;
-        // 诊断只记异常消息（BiliApiError 消息含业务码，不含凭据值）
-        console.warn(`sms login failed: ${e.message}`);
-        this.codeError = e.message.length > 0 ? e.message : '登录失败，请检查验证码';
-      });
-  }
-
-  /**
-   * 短信登录成功后的收尾：**先退栈、再提示**。
-   *
-   * `showAppToast` 紧挨着 pop 调用会被一起收掉：toast 挂在当前页的 UIContext 上，
-   * 页面一销毁就跟着消失（日志表现 `closeToast(...) → Toast not found`）。
-   * 所以提示延迟到退栈动画之后再发。登录只有一层路由，
-   * pop 一层即回到来源页（设置 / 关注 / 收藏同步等）。
-   */
-  private finishSmsLogin(upgraded: boolean): void {
-    console.info(`sms login done: pop nav stack, size=${NavStackHolder.stack.size()}`);
-    NavStackHolder.stack.pop();
-    setTimeout((): void => {
-      showAppToast(upgraded ? '登录成功，已切换为无损音质' : '登录成功', upgraded ? 2200 : 1800);
-    }, 200);
-  }
-
-  /** 退回手机号输入（取消极验 / 重新获取验证码 / 切走页签共用） */
-  private backToPhone(): void {
-    this.clearWatchdog();
-    this.phase = PHASE_PHONE;
-    this.geetestHtml = '';
-    this.captcha = null;
-    this.geetestReady = false;
-    this.geetestError = '';
-    this.geetestConsumed = false;
   }
 
   /**
@@ -783,7 +1394,7 @@ export struct LoginPage {
     this.clearWatchdog();
     this.watchdogTimer = setTimeout((): void => {
       this.watchdogTimer = -1;
-      if (this.phase !== PHASE_GEETEST || this.geetestReady) {
+      if (!this.geetestVisible || this.geetestReady) {
         return;
       }
       console.warn('geetest web: watchdog fired');
@@ -870,7 +1481,7 @@ export struct LoginPage {
   }
 
   /**
-   * `onTitleReceive` 兜底通道：解析页面主动写的三种标题。
+   * `onTitleReceive` 兜底通道：解析页面主动写的四种标题。
    *
    *   gtready:<type>  面板就绪（清看门狗、撤「正在加载…」）
    *   gtok:<json>     验证通过（与 proxy 同一个消费入口，有一次性守卫）
@@ -907,24 +1518,6 @@ export struct LoginPage {
       // 用户关掉极验面板：只留痕，不强行退步骤（他可能想再试一次）
       console.info('geetest web: captcha closed by user');
     }
-  }
-
-  /**
-   * 重试极验：**必须先卸载 Web 节点**再重新取凭据。
-   * 同一 `WebviewController` 不能二次绑定 Web 节点，且旧 challenge 一次性失效，
-   * 所以走「回手机号 → 重新 requestCaptcha」而不是原地 reload。
-   */
-  private retryGeetest(): void {
-    if (this.busy) {
-      return;
-    }
-    this.phase = PHASE_PHONE;
-    this.geetestHtml = '';
-    this.captcha = null;
-    this.geetestError = '';
-    this.geetestReady = false;
-    this.geetestConsumed = false;
-    this.requestCaptcha();
   }
 
   /**
@@ -966,7 +1559,7 @@ export struct LoginPage {
 
   /**
    * 标题行下方自定义区（titleBar 的 bottomBuilder 承载，恒配置）：
-   * 滑块切换行（扫码登录 / 短信登录），与观看历史页「观看历史 / 稍后再看」同款。
+   * 滑块切换行（密码登录 / 短信登录 / 扫码登录 / Cookie），与观看历史页分段按钮同款。
    * ⚠️ bottomBuilder 高度不自适应（官方约束），由 titleBar 参数显式给定
    * （LOGIN_TABS_ROW_HEIGHT），行定高排布。
    */
@@ -975,7 +1568,7 @@ export struct LoginPage {
     Row() {
       // 段切换：CapsuleSegmentButtonV2 标准分段按钮，B 站粉经
       // itemSelectedBackgroundColor 覆写；selectedIndex 由 this.tab 重算，
-      // 点击 → onItemClicked → switchTab（内含极验阶段取消守卫）。
+      // 点击 → onItemClicked → switchTab（内含极验层取消守卫）。
       CapsuleSegmentButtonV2({
         items: this.segmentItems,
         selectedIndex: this.tab,
@@ -998,9 +1591,9 @@ export struct LoginPage {
         itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
       })
         .height(32)
-        // V2 分段按钮测量特性：给多大渲染多大（均摊到各段），不会内容自适应
-        // —— 宽度显式收紧（背板 padding 4×2 + 两段 4 字文案 + itemPadding 8×2）。
-        .width(150)
+        // 撑满行宽（行左右各 16 让位 → 实得 328vp）：四段文案「密码登录 /
+        // 短信登录 / 扫码登录 / Cookie」在 270 定宽下会被压成「密码…」。
+        .width('100%')
     }
     .width('100%')
     .height(LOGIN_TABS_ROW_HEIGHT)
@@ -1037,18 +1630,137 @@ export struct LoginPage {
     .hitTestBehavior(HitTestMode.Transparent)
   }
 
-  /** 二维码本体 + 过期蒙层（loading 态显示进度圈） */
+  /**
+   * 行首图标片：主题色 10% 底 + 主题色字形，28 圆角 7。
+   *
+   * 与设置 / 关于等页的行首图标同一套规格（28 / 7 / tint 10%），登录表单
+   * 因此和全应用的「inset 分组卡片 + 图标片」语言对齐，而不是另起一套。
+   */
+  @Builder
+  formIcon(glyph: Resource) {
+    Stack({ alignContent: Alignment.Center }) {
+      SymbolGlyph(glyph)
+        .fontSize(17)
+        .fontColor([this.themePrimary])
+    }
+    .width(FORM_ICON_SIZE)
+    .height(FORM_ICON_SIZE)
+    .borderRadius(FORM_ICON_RADIUS)
+    .backgroundColor(this.iconTint())
+  }
+
+  /** 表单行分隔线：左缩进到文字起点（卡片内边距 16 + 图标 28 + 间距 12） */
+  @Builder
+  formDivider() {
+    Divider()
+      .color($r('app.color.bg_divider'))
+      .margin({ left: FORM_DIVIDER_INSET })
+  }
+
+  /**
+   * 单行输入：行首图标片 + 无边框 TextInput。
+   *
+   * 行高 56、整行可点即聚焦；输入框自身**不吃背景色**（透明），底色由所在
+   * InsetCard 提供 —— 旧版在卡片里叠一层 bg_page 圆角色块，是「不像设置页」
+   * 最明显的一处。
+   */
+  @Builder
+  formField(glyph: Resource, placeholder: string, value: string, inputType: InputType,
+    onValueChange: (v: string) => void, onSubmitAction: () => void) {
+    Row() {
+      this.formIcon(glyph)
+      TextInput({ placeholder: placeholder, text: value })
+        .layoutWeight(1)
+        .height(FORM_FIELD_H)
+        .padding({ left: FORM_ICON_GAP, right: 0 })
+        .backgroundColor(Color.Transparent)
+        .borderRadius(0)
+        .fontSize(16)
+        .fontColor($r('app.color.text_primary'))
+        .placeholderColor($r('app.color.text_tertiary'))
+        .placeholderFont({ size: 15 })
+        .type(inputType)
+        .maxLength(64)
+        .onChange((v: string): void => {
+          onValueChange(v);
+        })
+        .onSubmit((): void => {
+          onSubmitAction();
+        })
+    }
+    .width('100%')
+    .height(FORM_FIELD_H)
+    .padding({ left: 16, right: 16 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** 错误行：贴在卡片下方，字色走 state_error（与各页错误提示一致） */
+  @Builder
+  formError(text: string) {
+    Text(text)
+      .fontSize(12)
+      .fontColor($r('app.color.state_error'))
+      .width('100%')
+      .padding({ left: 20, right: 20 })
+      .margin({ top: 8 })
+  }
+
+  /**
+   * 主按钮：48 高、圆角 12（与分组卡片同一套圆角语言），左右让位 16 与卡片齐边。
+   * 禁用态 dim 0.5（与全应用全宽 CTA 同款），loading 文案由调用点改写。
+   */
+  @Builder
+  primaryButton(label: string, enabled: boolean, onTap: () => void) {
+    Row() {
+      Button(label, { type: ButtonType.Normal })
+        .layoutWeight(1)
+        .height(CTA_HEIGHT_VP)
+        .borderRadius(CTA_RADIUS_VP)
+        .backgroundColor(this.themePrimary)
+        .fontColor(this.themeOn)
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .attributeModifier(this.buttonMaterial)
+        .enabled(enabled)
+        .opacity(enabled ? 1 : 0.5)
+        .onClick((): void => {
+          onTap();
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16 })
+    .margin({ top: 16 })
+  }
+
+  /** 次级文字动作（换登录方式等）：主题深色小字，居中，命中区含内边距 */
+  @Builder
+  textAction(label: string, onTap: () => void) {
+    Row() {
+      Text(label)
+        .fontSize(13)
+        .fontColor(this.themeDeep)
+        .padding({ left: 12, right: 12, top: 9, bottom: 9 })
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
+    .margin({ top: 4 })
+    .onClick((): void => {
+      onTap();
+    })
+  }
+
+  /** 二维码本体 + 过期蒙层（loading 态显示进度圈）：白底黑码，圆角与卡片同 12 */
   @Builder
   qrArea() {
     Stack() {
       if (this.qrUrl.length > 0) {
         // 二维码必须白底黑码：bg_card 在深色主题下是深底，直接透出会扫不出来
         QRCode(this.qrUrl)
-          .width(220)
-          .height(220)
+          .width(QR_SIZE_VP)
+          .height(QR_SIZE_VP)
           .color(Color.Black)
           .backgroundColor(Color.White)
-          .borderRadius(8)
+          .borderRadius(12)
           .clip(true)
       } else {
         Column() {
@@ -1057,9 +1769,9 @@ export struct LoginPage {
             .height(36)
             .color(this.themePrimary)
         }
-        .width(220)
-        .height(220)
-        .borderRadius(8)
+        .width(QR_SIZE_VP)
+        .height(QR_SIZE_VP)
+        .borderRadius(12)
         .backgroundColor(Color.White)
         .justifyContent(FlexAlign.Center)
       }
@@ -1076,9 +1788,9 @@ export struct LoginPage {
             .fontColor(this.themePrimary)
             .margin({ top: 6 })
         }
-        .width(220)
-        .height(220)
-        .borderRadius(8)
+        .width(QR_SIZE_VP)
+        .height(QR_SIZE_VP)
+        .borderRadius(12)
         .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
@@ -1089,188 +1801,534 @@ export struct LoginPage {
         })
       }
     }
-    .margin({ top: 18 })
+    .margin({ top: 14 })
   }
 
-  /** 扫码页签卡片：标题 + 二维码 + 状态文案 */
+  /** TV 二维码本体 + 过期蒙层（loading 态显示进度圈） */
+  @Builder
+  tvQrArea() {
+    Stack() {
+      if (this.tvQrUrl.length > 0) {
+        // 二维码必须白底黑码：bg_card 在深色主题下是深底，直接透出会扫不出来
+        QRCode(this.tvQrUrl)
+          .width(QR_SIZE_VP)
+          .height(QR_SIZE_VP)
+          .color(Color.Black)
+          .backgroundColor(Color.White)
+          .borderRadius(12)
+          .clip(true)
+      } else {
+        Column() {
+          LoadingProgress()
+            .width(36)
+            .height(36)
+            .color(this.themePrimary)
+        }
+        .width(QR_SIZE_VP)
+        .height(QR_SIZE_VP)
+        .borderRadius(12)
+        .backgroundColor(Color.White)
+        .justifyContent(FlexAlign.Center)
+      }
+
+      if (this.tvQrPhase === 'expired') {
+        // 过期蒙层：半透明盖住二维码，整块可点刷新
+        Column() {
+          SymbolGlyph($r('sys.symbol.arrow_clockwise'))
+            .fontSize(28)
+            .fontColor([this.themePrimary])
+          Text('点击刷新')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.themePrimary)
+            .margin({ top: 6 })
+        }
+        .width(QR_SIZE_VP)
+        .height(QR_SIZE_VP)
+        .borderRadius(12)
+        .backgroundColor('#B3000000')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .accessibilityText('二维码已过期，点击刷新')
+        .accessibilityLevel('yes')
+        .onClick((): void => {
+          this.startTvQrLogin();
+        })
+      }
+    }
+    .margin({ top: 14 })
+  }
+
+  /**
+   * 扫码页签：子切换（TV / 网页）+ 二维码 + 状态行。
+   *
+   * 结构走全应用统一的「SectionHeader + InsetCard + SectionFooter」，与设置 /
+   * 关于 / 观看历史等页同宽同圆角；卡内不再重复「扫码登录」大标题 —— 页签
+   * 已经写明当前方式。
+   */
   @Builder
   qrCard() {
     Column() {
-      Text('扫码登录')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('app.color.text_primary'))
-        .margin({ top: 22 })
-      Text('登录后可解锁更高音质档位（杜比 / Hi-Res 需大会员）')
-        .fontSize(13)
-        .fontColor($r('app.color.text_secondary'))
-        .margin({ top: 6 })
-      this.qrArea()
-      // 过期/失败态小字用 themeDeep（白底 13px 品牌粉仅 2.2:1，
-      // 设计规范红线；themeDeep #C2185B 5.81:1 且随主题切换 —— 双粉策略）
-      Text(this.statusText)
-        .fontSize(13)
-        .fontColor(this.qrPhase === 'expired' ? this.themeDeep : $r('app.color.text_secondary'))
-        .margin({ top: 16 })
-      Text('二维码 3 分钟内有效，过期可刷新重试')
-        .fontSize(11)
-        .fontColor($r('app.color.text_tertiary'))
-        .margin({ top: 4, bottom: 22 })
+      SectionHeader({ headerText: '扫码登录' })
+      InsetCard() {
+        Column() {
+          // TV ↔ 网页子切换：与页签滑块同款分段按钮，宽度按两段文案收紧
+          CapsuleSegmentButtonV2({
+            items: this.qrModeItems,
+            selectedIndex: this.qrMode === QR_MODE_TV ? 0 : 1,
+            onItemClicked: (index: number): void => {
+              this.switchQrMode(index === 0 ? QR_MODE_TV : QR_MODE_WEB);
+            },
+            itemSelectedBackgroundColor: this.segColors().selectedBg,
+            itemSelectedFontColor: this.segColors().selectedFont,
+            itemSelectedFontWeight: FontWeight.Medium,
+            itemFontColor: this.segColors().unselectedFont,
+            itemFontWeight: FontWeight.Normal,
+            itemFontSize: LengthMetrics.vp(13),
+            itemSelectedFontSize: LengthMetrics.vp(13),
+            buttonBackgroundColor: this.segColors().grooveBg,
+            buttonBorderRadius: LengthMetrics.vp(BUTTON_RADIUS_VP),
+            itemBorderRadius: LengthMetrics.vp(6),
+            buttonMinHeight: LengthMetrics.vp(32),
+            itemPadding: { start: LengthMetrics.vp(8), end: LengthMetrics.vp(8) }
+          })
+            .height(32)
+            .width(150)
+            .margin({ top: 16 })
+
+          if (this.qrMode === QR_MODE_TV) {
+            this.tvQrArea()
+            // 过期/失败态小字用 themeDeep（白底 13px 品牌粉仅 2.2:1，
+            // 设计规范红线；themeDeep 5.81:1 且随主题切换 —— 双粉策略）
+            Text(this.tvStatusText)
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.tvQrPhase === 'expired' ? this.themeDeep : $r('app.color.text_secondary'))
+              .margin({ top: 14 })
+          } else {
+            this.qrArea()
+            Text(this.statusText)
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.qrPhase === 'expired' ? this.themeDeep : $r('app.color.text_secondary'))
+              .margin({ top: 14 })
+          }
+
+          Text('打开 B 站 App「扫一扫」，确认后自动登录')
+            .fontSize(12)
+            .fontColor($r('app.color.text_tertiary'))
+            .textAlign(TextAlign.Center)
+            .padding({ left: 20, right: 20 })
+            .margin({ top: 6, bottom: 20 })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Center)
+      }
+      SectionFooter({ noteText: '二维码 3 分钟内有效，过期可点击刷新重试' })
     }
     .width('100%')
-    .backgroundColor($r('app.color.bg_card'))
-    .borderRadius(12)
-    // 左右让位 16（InsetCard 分组卡片规范，设置/歌单页同宽）
-    .margin({ left: 16, right: 16, top: 10, bottom: 20 })
-    .alignItems(HorizontalAlign.Center)
   }
 
   /**
-   * 短信页签主按钮：粉底胶囊（loading 态文案变化 + 禁用防重入）。
-   * 字阶 16、圆角取 BUTTON_RADIUS_VP、沉浸光感材质
-   * （buttonMaterial，全应用兄弟页按钮同款）与禁用态 dim 0.5（FavSyncPage 全宽 CTA 同款）。
+   * 密码页签：账号 / 密码两行（行首图标片 + 分隔线），主按钮在卡片外。
+   * 错误行贴在卡片下方的卡片外区域 —— 卡片内出现红字会把行高顶乱。
    */
   @Builder
-  primaryButton(label: string, enabled: boolean, onTap: () => void) {
-    Button(label, { type: ButtonType.Normal })
-      .width('100%')
-      .height(44)
-      .borderRadius(BUTTON_RADIUS_VP)
-      .backgroundColor(this.themePrimary)
-      .fontColor(this.themeOn)
-      .fontSize(16)
-      .fontWeight(FontWeight.Medium)
-      .attributeModifier(this.buttonMaterial)
-      .enabled(enabled)
-      .opacity(enabled ? 1 : 0.5)
-      .onClick((): void => {
-        onTap();
-      })
-  }
-
-  /** 短信第 1 步：手机号输入卡 */
-  @Builder
-  phoneCard() {
-    Text('短信登录')
-      .fontSize(18)
-      .fontWeight(FontWeight.Bold)
-      .fontColor($r('app.color.text_primary'))
-      .margin({ top: 22 })
-    Text('使用手机号接收短信验证码登录 B 站')
-      .fontSize(13)
-      .fontColor($r('app.color.text_secondary'))
-      .margin({ top: 6 })
-    TextInput({
-      placeholder: '请输入手机号',
-      text: this.phone
-    })
-      .width('100%')
-      .height(46)
-      .borderRadius(8)
-      .backgroundColor($r('app.color.bg_page'))
-      .type(InputType.PhoneNumber)
-      .maxLength(15)
-      .onChange((v: string): void => {
-        this.phone = v;
-        this.phoneError = '';
-      })
-      .margin({ top: 20 })
-    if (this.phoneError.length > 0) {
-      Text(this.phoneError)
-        .fontSize(12)
-        .fontColor($r('app.color.state_error'))
+  pwdCard() {
+    Column() {
+      SectionHeader({ headerText: '账号密码' })
+      InsetCard() {
+        Column() {
+          this.formField($r('sys.symbol.person'), '手机号 / 邮箱', this.pwdUsername,
+            InputType.USER_NAME, (v: string): void => {
+              this.pwdUsername = v;
+              this.pwdError = '';
+            }, (): void => {
+              this.doPwdLogin();
+            })
+          this.formDivider()
+          this.formField($r('sys.symbol.lock'), '密码', this.pwdPassword,
+            InputType.Password, (v: string): void => {
+              this.pwdPassword = v;
+              this.pwdError = '';
+            }, (): void => {
+              this.doPwdLogin();
+            })
+        }
         .width('100%')
-        .margin({ top: 6 })
-    }
-    this.primaryButton(this.busy ? '正在获取…' : '获取验证码', !this.busy, (): void => {
-      this.requestCaptcha();
-    })
-    // 卡片底部呼吸空间
-    Blank()
-      .height(22)
-  }
-
-  /**
-   * 短信第 2 步：卡片里只留「等待验证」提示 —— 极验 WebView 挂在整屏覆盖层
-   * （`geetestOverlay`），这里**不能挂第二个 Web 实例**。
-   */
-  @Builder
-  geetestCard() {
-    Text('安全验证')
-      .fontSize(18)
-      .fontWeight(FontWeight.Bold)
-      .fontColor($r('app.color.text_primary'))
-      .margin({ top: 22 })
-    Text('已打开全屏安全验证，完成后会自动发送短信')
-      .fontSize(13)
-      .fontColor($r('app.color.text_secondary'))
-      .margin({ top: 6 })
-    if (this.busy) {
-      Text('正在发送短信验证码…')
-        .fontSize(12)
-        .fontColor($r('app.color.text_secondary'))
-        .width('100%')
-        .textAlign(TextAlign.Center)
-        .margin({ top: 16 })
-    }
-    // 字阶 16、圆角取 BUTTON_RADIUS_VP、沉浸光感材质
-    Button('取消', { type: ButtonType.Normal })
-      .width('100%')
-      .height(44)
-      .borderRadius(BUTTON_RADIUS_VP)
-      .backgroundColor($r('app.color.bg_divider'))
-      .fontColor($r('app.color.text_primary'))
-      .fontSize(16)
-      .attributeModifier(this.buttonMaterial)
-      .margin({ top: 20, bottom: 22 })
-      .onClick((): void => {
-        this.backToPhone();
+      }
+      if (this.pwdError.length > 0) {
+        this.formError(this.pwdError)
+      }
+      this.primaryButton(this.busyPwd ? '正在登录…' : '登录', !this.busyPwd, (): void => {
+        this.doPwdLogin();
       })
+      this.textAction('忘记密码？改用短信登录', (): void => {
+        this.switchTab(TAB_SMS);
+      })
+      SectionFooter({ noteText: '登录后同步收藏、投币与观看历史；异常登录需通过安全验证' })
+    }
+    .width('100%')
   }
 
-  /** 短信第 3 步：短信验证码输入卡 */
+  /** 密码页签（风控）：安心中心卡（打码手机号 → 极验 → 短信验证） */
   @Builder
-  codeCard() {
-    Text('输入验证码')
-      .fontSize(18)
-      .fontWeight(FontWeight.Bold)
-      .fontColor($r('app.color.text_primary'))
-      .margin({ top: 22 })
-    Text(`验证码已发送至 +86 ${this.phone.trim()}`)
-      .fontSize(13)
-      .fontColor($r('app.color.text_secondary'))
-      .margin({ top: 6 })
-    TextInput({
-      placeholder: '请输入短信验证码',
-      text: this.smsCode
-    })
-      .width('100%')
-      .height(46)
-      .borderRadius(8)
-      .backgroundColor($r('app.color.bg_page'))
-      .type(InputType.Number)
-      .maxLength(8)
-      .onChange((v: string): void => {
-        this.smsCode = v;
+  safeCenterCard() {
+    Column() {
+      SectionHeader({ headerText: '安全验证' })
+      InsetCard() {
+        Column() {
+          // 头部说明行：图标片 + 两行文字（标题 + 打码手机号）
+          Row() {
+            this.formIcon($r('sys.symbol.lock'))
+            Column() {
+              Text('当前登录存在风险')
+                .fontSize(15)
+                .fontColor($r('app.color.text_primary'))
+              Text(this.scHideTel.length > 0 ? `验证手机号 ${this.scHideTel}` : '正在获取验证手机号…')
+                .fontSize(13)
+                .fontColor($r('app.color.text_secondary'))
+                .margin({ top: 2 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            .margin({ left: FORM_ICON_GAP })
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+          .alignItems(VerticalAlign.Center)
+
+          if (this.scPhase === SC_PHASE_CODE) {
+            this.formDivider()
+            this.formField($r('sys.symbol.message'), '短信验证码', this.scCode,
+              InputType.Number, (v: string): void => {
+                this.scCode = v;
+                this.scError = '';
+              }, (): void => {
+                this.confirmSafeCenter();
+              })
+          }
+        }
+        .width('100%')
+      }
+      if (this.scError.length > 0) {
+        this.formError(this.scError)
+      }
+      if (this.scPhase === SC_PHASE_SMS) {
+        this.primaryButton(this.busySafe ? '正在获取…' : '发送短信验证码', !this.busySafe, (): void => {
+          this.sendSafeCenterCode();
+        })
+      } else {
+        this.primaryButton(this.busySafe ? '正在验证…' : '完成验证', !this.busySafe, (): void => {
+          this.confirmSafeCenter();
+        })
+      }
+      this.textAction('返回密码登录', (): void => {
+        this.exitSafeCenter();
+      })
+    }
+    .width('100%')
+  }
+
+  /** 短信第 1 步：区号（主题色胶囊）+ 手机号，同一行 */
+  @Builder
+  smsPhoneCard() {
+    Column() {
+      SectionHeader({ headerText: '手机号登录' })
+      InsetCard() {
+        Row() {
+          this.formIcon($r('sys.symbol.message'))
+          // 区号胶囊：点开半模态全量表（收起键盘由 Sheet 自身处理）
+          Row({ space: 2 }) {
+            Text(`+${this.selectedDialCountryId()}`)
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.themePrimary)
+            SymbolGlyph($r('sys.symbol.chevron_down'))
+              .fontSize(12)
+              .fontColor([this.themePrimary])
+          }
+          .padding({ left: 10, right: 8, top: 6, bottom: 6 })
+          .borderRadius(8)
+          .backgroundColor(this.iconTint())
+          .margin({ left: FORM_ICON_GAP })
+          .onClick((): void => {
+            this.dialSheetVisible = true;
+          })
+
+          TextInput({ placeholder: '请输入手机号', text: this.phone })
+            .layoutWeight(1)
+            .height(FORM_FIELD_H)
+            .padding({ left: 10, right: 0 })
+            .backgroundColor(Color.Transparent)
+            .borderRadius(0)
+            .fontSize(16)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_tertiary'))
+            .placeholderFont({ size: 15 })
+            .type(InputType.PhoneNumber)
+            .maxLength(15)
+            .onChange((v: string): void => {
+              this.phone = v;
+              this.phoneError = '';
+            })
+            .onSubmit((): void => {
+              this.requestSmsCode();
+            })
+        }
+        .width('100%')
+        .height(FORM_FIELD_H)
+        .padding({ left: 16, right: 16 })
+        .alignItems(VerticalAlign.Center)
+
+        // 粉版域开关行：开启后 send/login 都在粉版（android）域签名，
+        // 签出的 access_token 与粉版 appkey（BILI_ANDROID_APP_*，BilibiliApi
+        // 粉版接口段同款凭据）同 appid；关闭时与 TV 扫码 / 密码同 HD 域。
+        // 开关只在第 1 步渲染（进第 2 步后 captcha_key 已绑定域，不可再切）。
+        this.formDivider()
+        Row() {
+          this.formIcon($r('sys.symbol.sun_max'))
+          Column() {
+            Text('粉版手机端登录')
+              .fontSize(14)
+              .fontColor($r('app.color.text_primary'))
+            Text('令牌与手机端（粉版）接口同域；默认 HD 域即可正常使用')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .margin({ top: 2 })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+          .margin({ left: FORM_ICON_GAP })
+          Toggle({ type: ToggleType.Switch, isOn: this.smsDomain === LOGIN_DOMAIN_ANDROID })
+            .selectedColor(this.themePrimary)
+            .onChange((v: boolean): void => {
+              this.smsDomain = v ? LOGIN_DOMAIN_ANDROID : LOGIN_DOMAIN_HD;
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 12, top: 10, bottom: 12 })
+        .alignItems(VerticalAlign.Center)
+        .accessibilityText('粉版手机端登录')
+        .accessibilityLevel('yes')
+      }
+      if (this.phoneError.length > 0) {
+        this.formError(this.phoneError)
+      }
+      this.primaryButton(this.busySms ? '正在发送…' : '获取验证码', !this.busySms, (): void => {
+        this.requestSmsCode();
+      })
+      SectionFooter({
+        noteText: this.smsDomain === LOGIN_DOMAIN_ANDROID
+          ? '粉版域令牌与手机端接口同 appid；后续改用其它登录方式会令牌域回退'
+          : '验证码将发送至该手机号，仅用于本次登录'
+      })
+    }
+    .width('100%')
+  }
+
+  /** 短信第 2 步：验证码输入 + 行内「重新获取」，主按钮登录 */
+  @Builder
+  smsCodeCard() {
+    Column() {
+      SectionHeader({ headerText: '输入验证码' })
+      InsetCard() {
+        Row() {
+          this.formIcon($r('sys.symbol.message'))
+          TextInput({ placeholder: '请输入短信验证码', text: this.smsCode })
+            .layoutWeight(1)
+            .height(FORM_FIELD_H)
+            .padding({ left: FORM_ICON_GAP, right: 0 })
+            .backgroundColor(Color.Transparent)
+            .borderRadius(0)
+            .fontSize(16)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_tertiary'))
+            .placeholderFont({ size: 15 })
+            .type(InputType.Number)
+            .maxLength(8)
+            .onChange((v: string): void => {
+              this.smsCode = v;
+              this.codeError = '';
+            })
+            .onSubmit((): void => {
+              this.doSmsLogin();
+            })
+          // 行内重发：走同一条发送链路（成功后仍停在验证码阶段，只刷新凭据）
+          Text(this.busySms ? '发送中' : '重新获取')
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.busySms ? $r('app.color.text_disabled') : this.themePrimary)
+            .padding({ left: 10, right: 2, top: 8, bottom: 8 })
+            .onClick((): void => {
+              this.requestSmsCode();
+            })
+        }
+        .width('100%')
+        .height(FORM_FIELD_H)
+        .padding({ left: 16, right: 16 })
+        .alignItems(VerticalAlign.Center)
+      }
+      if (this.codeError.length > 0) {
+        this.formError(this.codeError)
+      }
+      this.primaryButton(this.busySms ? '正在登录…' : '登录', !this.busySms, (): void => {
+        this.doSmsLogin();
+      })
+      this.textAction('更换手机号', (): void => {
+        this.phase = PHASE_PHONE;
+        this.smsCode = '';
         this.codeError = '';
       })
-      .margin({ top: 20 })
-      .onSubmit((): void => {
-        this.doLogin();
-      })
-    if (this.codeError.length > 0) {
-      Text(this.codeError)
-        .fontSize(12)
-        .fontColor($r('app.color.state_error'))
-        .width('100%')
-        .margin({ top: 6 })
+      SectionFooter({ noteText: `验证码已发送至 +${this.selectedDialCountryId()} ${this.phone.trim()}` })
     }
-    this.primaryButton(this.busy ? '正在登录…' : '登录', !this.busy, (): void => {
-      this.doLogin();
-    })
-    // 卡片底部呼吸空间
-    Blank()
-      .height(22)
+    .width('100%')
+  }
+
+  /** Cookie 页签：多行粘贴框（卡片内无边距输入，行高随内容） */
+  @Builder
+  cookieCard() {
+    Column() {
+      SectionHeader({ headerText: 'Cookie 导入' })
+      InsetCard() {
+        Column() {
+          TextArea({
+            placeholder: '粘贴 Cookie，例如：SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx',
+            text: this.cookieText
+          })
+            .width('100%')
+            .height(120)
+            .padding(16)
+            .backgroundColor(Color.Transparent)
+            .borderRadius(0)
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+            .placeholderColor($r('app.color.text_tertiary'))
+            .placeholderFont({ size: 14 })
+            .maxLength(4096)
+            .onChange((v: string): void => {
+              this.cookieText = v;
+              this.cookieError = '';
+            })
+          this.formDivider()
+          // 安全说明行：与设置页「说明行」同款（图标片 + 灰字），说明凭据去向
+          Row() {
+            this.formIcon($r('sys.symbol.lock'))
+            Text('凭据仅保存在本机，退出登录即清除')
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+              .layoutWeight(1)
+              .margin({ left: FORM_ICON_GAP })
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 12, bottom: 14 })
+          .alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+      }
+      if (this.cookieError.length > 0) {
+        this.formError(this.cookieError)
+      }
+      this.primaryButton(this.busyCookie ? '正在校验…' : '导入登录', !this.busyCookie, (): void => {
+        this.doCookieImport();
+      })
+      SectionFooter({ noteText: '需包含 SESSDATA 字段；Cookie 失效时请重新从浏览器复制' })
+    }
+    .width('100%')
+  }
+
+  /** 品牌区：欢迎语 + 一行权益说明（卡片内居中；纯文字版式，BiliMusic 音质权益口径） */
+  @Builder
+  brandHero() {
+    Row() {
+      Column() {
+        Text('欢迎回来')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Text('登录后可解锁更高音质档位（杜比 / Hi-Res 需大会员）')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+          .textAlign(TextAlign.Center)
+          .padding({ left: 18, right: 18 })
+          .margin({ top: 6 })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor($r('app.color.bg_card'))
+      .borderRadius(12)
+      .padding({ top: 22, bottom: 20 })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16 })
+    .margin({ top: 8 })
+  }
+
+  /** 区号选择半模态：搜索框 + 全量区号表（DialPrefixData） */
+  @Builder
+  dialSheetBuilder() {
+    Column() {
+      Text('选择国家 / 地区')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+        .width('100%')
+        .textAlign(TextAlign.Center)
+        .margin({ top: 14, bottom: 10 })
+      Column() {
+        TextInput({
+          placeholder: '搜索国家 / 地区或区号',
+          text: this.dialSearch
+        })
+          .width('100%')
+          .height(40)
+          .borderRadius(8)
+          .backgroundColor($r('app.color.bg_page'))
+          .onChange((v: string): void => {
+            this.dialSearch = v;
+          })
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16 })
+      List() {
+        ForEach(this.filteredDialPrefixes(), (item: DialPrefix) => {
+          ListItem() {
+            Row() {
+              Text(item.cname)
+                .fontSize(15)
+                .fontColor($r('app.color.text_primary'))
+                .maxLines(1)
+                .layoutWeight(1)
+              Text(`+${item.countryId}`)
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.selectedDialId === item.id ? this.themeDeep : $r('app.color.text_secondary'))
+            }
+            .width('100%')
+            .height(48)
+            .padding({ left: 20, right: 20 })
+            .alignItems(VerticalAlign.Center)
+            .onClick((): void => {
+              this.selectedDialId = item.id;
+              this.dialSearch = '';
+              this.dialSheetVisible = false;
+            })
+          }
+        }, (item: DialPrefix) => item.id.toString())
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .margin({ top: 8 })
+      .scrollBar(BarState.Auto)
+      .divider({
+        strokeWidth: 0.5,
+        color: $r('app.color.bg_divider'),
+        startMargin: 20,
+        endMargin: 20
+      })
+    }
+    .width('100%')
+    .height('100%')
   }
 
   /**
@@ -1278,7 +2336,7 @@ export struct LoginPage {
    *
    * 层级：本层是页面根 Stack 的最后一个子节点 → 盖住 Scroll 内容；
    * HDS 标题栏（标题行 + 滑块行）由宿主绘制在上层，所以这里只需让出
-   * safeTop + 标题行 + 滑块行。
+   * safeTop + 标题行 + 滑块行。密码 / 短信 / 安心中心三条链路共用（geetestVisible 挂载）。
    */
   @Builder
   geetestOverlay() {
@@ -1303,7 +2361,7 @@ export struct LoginPage {
             normal: { .backgroundColor(Color.Transparent) }
           })
           .onClick((): void => {
-            this.backToPhone();
+            this.cancelGeetest();
           })
       }
       .width('100%')
@@ -1312,7 +2370,7 @@ export struct LoginPage {
       .alignItems(VerticalAlign.Center)
 
       if (this.geetestError.length > 0) {
-        // 失败态：绝不留死白屏 —— 说明原因 + 重试 + 切回扫码
+        // 失败态：绝不留死白屏 —— 说明原因 + 重试 + 取消出口
         // 主文案 16（WatchHistoryPage 失败态同款）、辅助行 13、
         // 按钮字阶 13 + BUTTON_RADIUS_VP + 沉浸光感材质（兄弟页重试按钮同款）。
         Column() {
@@ -1320,7 +2378,7 @@ export struct LoginPage {
             .fontSize(16)
             .fontColor($r('app.color.state_error'))
             .textAlign(TextAlign.Center)
-          Text('可以重试，或切换到扫码登录')
+          Text('可以重试，或取消后换个登录方式')
             .fontSize(13)
             .fontColor($r('app.color.text_secondary'))
             .textAlign(TextAlign.Center)
@@ -1337,7 +2395,7 @@ export struct LoginPage {
             .onClick((): void => {
               this.retryGeetest();
             })
-          Button('改用扫码登录', { type: ButtonType.Normal })
+          Button('取消验证', { type: ButtonType.Normal })
             .width(160)
             .height(40)
             .borderRadius(BUTTON_RADIUS_VP)
@@ -1347,7 +2405,7 @@ export struct LoginPage {
             .attributeModifier(this.buttonMaterial)
             .margin({ top: 10 })
             .onClick((): void => {
-              this.switchTab(TAB_QR);
+              this.cancelGeetest();
             })
         }
         .width('100%')
@@ -1469,40 +2527,44 @@ export struct LoginPage {
       Stack() {
         Scroll(this.loginScroller) {
           Column() {
-            // 顶部占位（官方沉浸口径）：开启沉浸后内容向上穿透进标题栏区域，
-            // 让位不能加在滚动容器外层（否则内容被裁在栏底缘之下、材质无内容可采样），
-            // 必须在页面内容内部做占位。高度 = safeTop + 56（标题行）+ 44（滑块行），
-            // 滑块行经 bottomBuilder 恒配置，让位量恒定无需实测。
-            Blank()
-              .height(this.safeTop + NAV_TITLE_BAR_HEIGHT + LOGIN_TABS_ROW_HEIGHT)
-              .width('100%')
+            // 顶部让位：**不再手写占位**。HDS 标题栏（含 bottomBuilder 滑块行）
+            // 在本机型上本身就占布局高度 —— 内容区原点已经是标题栏底缘
+            //（实测 NavDestination content 起点 = 状态栏下沿，标题行 56 + 滑块行
+            // 44 已让出）。旧版在这里再垫一份 safeTop + 56 + 44 的 Blank，等于
+            // 让位两遍：首屏顶部凭空多出 ~100vp 死白，卡片被压到屏幕下半部分。
+            // 现在只留品牌区自身的 8vp 视觉呼吸。
 
-            // ── 内容卡：随页签切换 ──
+            // ── 品牌区：字标 + 欢迎语 + 一行权益说明 ──
+            this.brandHero()
+
+            // ── 内容：随页签切换（每张卡自带 SectionHeader + InsetCard + SectionFooter）──
             if (this.tab === TAB_QR) {
               this.qrCard()
-            } else {
-              Column() {
-                if (this.phase === PHASE_PHONE) {
-                  this.phoneCard()
-                } else if (this.phase === PHASE_GEETEST) {
-                  this.geetestCard()
-                } else {
-                  this.codeCard()
-                }
+            } else if (this.tab === TAB_SMS) {
+              if (this.phase === PHASE_PHONE) {
+                this.smsPhoneCard()
+              } else {
+                this.smsCodeCard()
               }
-              .width('100%')
-              .alignItems(HorizontalAlign.Center)
-              .padding({ left: 20, right: 20 })
-              .backgroundColor($r('app.color.bg_card'))
-              .borderRadius(12)
-              // 左右让位 16（与扫码卡同口径，InsetCard 规范）
-              .margin({ left: 16, right: 16, top: 10, bottom: 20 })
-
-            // 短信卡上移占位：只加在短信页签，扫码页签维持原居中。
-            Blank()
-              .height(SMS_CARD_LIFT_VP)
-              .width('100%')
+            } else if (this.tab === TAB_PWD) {
+              if (this.pwdStage === PWD_STAGE_SAFE) {
+                this.safeCenterCard()
+              } else {
+                this.pwdCard()
+              }
+            } else {
+              this.cookieCard()
             }
+
+            // 页脚：协议说明（11 号三级灰居中，单行不折行；凭据去向由各卡内
+            // 说明行承担，避免这里出现两行小字压住首屏）
+            Text('登录即表示同意《哔哩哔哩用户协议》与《隐私政策》')
+              .fontSize(11)
+              .fontColor($r('app.color.text_tertiary'))
+              .textAlign(TextAlign.Center)
+              .width('100%')
+              .padding({ left: 20, right: 20 })
+              .margin({ top: 26, bottom: 28 })
           }
           .width('100%')
         }
@@ -1513,6 +2575,12 @@ export struct LoginPage {
         .edgeEffect(EdgeEffect.Spring)
         // 大屏适配：内容列收窄居中（与 AboutPage 同款）
         .constraintSize({ maxWidth: BreakpointConstants.contentMaxWidth(this.currentBreakpoint) })
+        // 区号选择半模态（短信页签）：挂常驻的 Scroll 上，detents 双档高度
+        .bindSheet($$this.dialSheetVisible, this.dialSheetBuilder(), {
+          detents: [SheetSize.MEDIUM, SheetSize.LARGE],
+          dragBar: true,
+          showClose: false
+        })
         // 标题栏让位已内移为内容首部占位（见 Column 首子），不在滚动容器上加 padding。
         // 逐帧驱动自绘渐变模糊层（Scroll 版 onDidScroll 三参
         // 签名 (xOffset, yOffset, state)；onDidScroll 在偏移已应用后回调）。
@@ -1532,10 +2600,10 @@ export struct LoginPage {
           updater: this.topBlurUpdater
         })
 
-        // 极验整屏覆盖层：只在短信页签的 geetest 阶段挂载。
+        // 极验整屏覆盖层：密码 / 短信 / 安心中心三条链路共用（geetestVisible 挂载）。
         // ⚠️ 必须写在 Stack 的**子节点块内**（不能写在 Stack 的属性之后 —— 那样会被
         // 当成 HdsNavDestination 的子节点，Web 照样加载、但永远不进可视层）。
-        if (this.tab === TAB_SMS && this.phase === PHASE_GEETEST) {
+        if (this.geetestVisible) {
           this.geetestOverlay()
         }
       }
@@ -1558,7 +2626,7 @@ export struct LoginPage {
         stackBuilder: (): void => {
           this.loginBarNarrow();
         },
-        // 标题行下方自定义区：滑块切换行（扫码登录 / 短信登录），恒配置
+        // 标题行下方自定义区：滑块切换行（四页签），恒配置
         //（收窄容器内与内容列对齐）。
         // ⚠️ 滑块行不能塞进 stackBuilder（会溢出 56vp 标题行、与内容重叠，真机复现），
         // 必须走 bottomBuilder 显式高度。

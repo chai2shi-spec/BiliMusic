@@ -105,14 +105,16 @@ export struct AppIconSettingsPage {
   @State navTransX: string = '0%';
 
   /**
-   * 15 个选项：默认（'' 恢复）+ 14 套预设设计。key 与 AppScope/app.json5
+   * 16 个选项：默认（'' 恢复）+ 15 套预设设计。key 与 AppScope/app.json5
    * alternateIcons 的 name 一一对应；01/02/04 副标题沿用 design/app-icon/README.md
    * 的小尺寸可读性结论（04 黑胶 32px 纹理退化需提示），05/07/08 沿用
    * design/app-icon-v2/README.md 的对比度 / 32px 结论，09–13 沿用
    * design/app-icon-v3/README.md 的使用建议（11 唱臂小尺寸会糊需提示），
    * 15 沿用 design/app-icon-v5/README.md（满幅粉底、四角与背景连续不露白），
    * 16 沿用 design/app-icon-v6/README.md（图案 0 改动只重做四周，满幅粉底
-   * 连续不露白，图案外接圆 42% 在 24px 下仍居中完整）。
+   * 连续不露白，图案外接圆 42% 在 24px 下仍居中完整），
+   * 17 沿用 design/app-icon-v7/README.md（用户设计稿只处理边缘，满幅粉底
+   * 连续不露白）。
    *（03 音频环 / 06 播放环 2026-10-31 移除，资源文件一并清理。）
    */
   private readonly options: AppIconOption[] = [
@@ -152,18 +154,24 @@ export struct AppIconSettingsPage {
     // 唱片机图案 0 改动只重做四周 —— 圆角外白底与方框光晕填成连续粉底，
     // 系统裁形不露白；24px 下图案仍居中完整
     new AppIconOption('pink_turntable', '粉底唱片机', '第五组 · 满幅粉底',
-      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_16'))
+      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_16')),
+    // 2026-11-17 新增（design/app-icon-v7）：满幅不透明整图（bg 层仅占位），
+    // 用户提供的设计稿只处理边缘 —— 黑边距 / 灰描边 / 边界混合带填成连续
+    // 粉底，图案内容 0 改动；系统裁形不露白
+    new AppIconOption('pink_tv_logo', '粉底电视字标', '第六组 · 满幅粉底',
+      $r('app.media.alt_icon_bg_pink'), $r('app.media.alt_icon_fg_17'))
   ];
 
   /**
-   * 网格行下标（2026-10-30 一行三列改版）：15 项按 3 个一行切片，整除无残行。
+   * 网格行下标（2026-10-30 一行三列改版）：16 项按 3 个一行切片，末行 1 项。
    */
   private readonly gridRows: number[][] = [
     [0, 1, 2],
     [3, 4, 5],
     [6, 7, 8],
     [9, 10, 11],
-    [12, 13, 14]
+    [12, 13, 14],
+    [15]
   ];
 
   aboutToAppear(): void {

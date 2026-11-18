@@ -508,6 +508,10 @@ export interface AppSettings {
   autoPlay: boolean;
   /** 启动时自动播放：开启后应用冷启动时从上次播放的曲目/进度继续播放（默认关 —— 无交互不出声） */
   autoPlayOnStart: boolean;
+  /** 连接蓝牙自动播放（默认关）：蓝牙耳机/音箱成为音乐流首选输出且未在播放时，
+   *  自动从上次位置续播（手表手环不触发；仅应用进程存活期间生效，与
+   *  「蓝牙断开自动暂停」对称：断开即停、重连即续） */
+  autoPlayOnBluetooth: boolean;
   /** 续播（设置 → 播放；默认开）：开启后切歌/新播放从「上次听到」记忆位置起播；
    *  关闭后一律从头起播（「限定播放进度·跳过片头」仍生效）。位置记录不受影响 */
   resumeFromProgress: boolean;
@@ -587,6 +591,13 @@ export interface AppSettings {
   /** 歌词居中显示（长按歌词面板可切，默认关）：开启后每行歌词水平居中绘制（Apple Music 风格） */
   lyricCentered: boolean;
   /**
+   * 拖动歌词跳进度（设置 → 播放「歌词」区块 + 长按歌词面板，两处同步；默认关）：
+   * 开启后拖动歌词显示目标行时间指示，松手 seek 到该行起点（含歌词整体偏移补偿）；
+   * 关闭时拖动仅浏览（松手 3.5s 滚回当前行，不触发跳转）。
+   * 运行时镜像 STORE_DRAG_LYRIC_SEEK。
+   */
+  dragLyricSeek: boolean;
+  /**
    * 沉浸光感材质档位（设置 → 外观，三档；默认 IMMERSIVE_TIER_EXQUISITE）：
    * exquisite 精美（MaterialLevel.EXQUISITE，设备能力门控）/ gentle 轻柔
    * （GENTLE）/ smooth 流畅（SMOOTH）。生效面：底部胶囊 + 二级页播放栏
@@ -661,7 +672,33 @@ export interface AppSettings {
    * （已开启的桌面歌词不受影响，仍由系统继续显示）。
    * 运行时镜像 STORE_FLOAT_LYRIC_ENTRY_ENABLED。
    */
-  floatLyricEntryEnabled: boolean;
+   floatLyricEntryEnabled: boolean;
+  /**
+   * 拾音页签显隐（设置 → 外观；默认开）：关闭后底部导航不渲染拾音页签
+   * （Index 按 AppStorage 镜像条件渲染 TabContent），听歌记录照常采集，
+   * 重新打开即恢复完整数据展示。运行时镜像 STORE_SHOW_DIARY_TAB。
+   */
+  showDiaryTab: boolean;
+  /**
+   * 设置页签显隐（设置 → 外观；默认开）：关闭后底部导航不渲染设置页签；
+   * 恢复入口 = 长按首页「BiliMusic」标题（写回偏好 + 自动切到设置页签）。
+   * 运行时镜像 STORE_SHOW_SETTINGS_TAB。
+   */
+  showSettingsTab: boolean;
+  /**
+   * 字体大小缩放系数（设置 → 外观「字体大小」，四档见 FONT_SCALE_OPTIONS；默认 1.0）：
+   * 经 ApplicationContext.setFontSizeScale 全局缩放所有 fp 单位文字（全仓 fontSize
+   * 数值字面量均为 fp 单位），Canvas 自绘歌词（LrcView，vp 单位）不随该通道缩放，
+   * 由 LyricsComponent 按运行时镜像 STORE_FONT_SCALE 手动乘系数。
+   * 运行时镜像 STORE_FONT_SCALE。
+   */
+   fontScale: number;
+  /**
+   * 首页快捷卡显隐（设置 → 外观「底部导航与迷你栏」区块；默认开）：关闭后
+   * 首页搜索框下方的快捷卡行（最近播放卡 + 歌单卡）整行隐藏，卡片数据照常
+   * 维护、重新打开即恢复。运行时镜像 STORE_SHOW_HOME_CARDS。
+   */
+  showHomeCards: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -671,6 +708,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   downloadDir: '',
   autoPlay: true,
   autoPlayOnStart: false,
+  autoPlayOnBluetooth: false,
   resumeFromProgress: true,
   wifiOnlyDownload: DEFAULT_WIFI_ONLY_DOWNLOAD,
   wifiOnlyPlay: false,
@@ -696,6 +734,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   chaptersEntryEnabled: false,
   descEntryEnabled: false,
   lyricCentered: false,
+  dragLyricSeek: false,
   immersiveMaterialTier: IMMERSIVE_TIER_EXQUISITE,
   listenCacheEnabled: true,
   saveToPublicDownloads: false,
@@ -707,7 +746,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   sleepTimerEnd: 0,
   floatLyricEnabled: false,
   floatLyricLocked: false,
-  floatLyricEntryEnabled: true
+  floatLyricEntryEnabled: true,
+  showDiaryTab: true,
+  showSettingsTab: true,
+  fontScale: 1.0,
+  showHomeCards: true
 };
 
 /** 播放倍速档位（与 media.PlaybackSpeed 枚举成员一一对应） */
@@ -765,6 +808,27 @@ export function immersiveTierLabelOf(tier: string): string {
     return '流畅';
   }
   return '精美';
+}
+
+/**
+ * 字体大小档位（设置 → 外观「字体大小」；数值 = 全局 fp 文字缩放系数）。
+ * 上限取 1.3：迷你栏胶囊 / 底部页签标签 / 功能行 chips 均为固定高度布局，
+ * 1.3 是布局安全上限（主流音乐类 App 同款口径）。
+ */
+export const FONT_SCALE_OPTIONS: number[] = [0.85, 1.0, 1.15, 1.3];
+
+/** 字体大小档位显示标签（设置页后缀 / toast 用；未知值回落「标准」） */
+export function fontScaleLabelOf(scale: number): string {
+  if (scale === 0.85) {
+    return '小';
+  }
+  if (scale === 1.15) {
+    return '大';
+  }
+  if (scale === 1.3) {
+    return '特大';
+  }
+  return '标准';
 }
 
 /** 逐字片段（卡拉 OK 高亮用） */

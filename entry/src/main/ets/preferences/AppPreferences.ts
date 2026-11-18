@@ -18,7 +18,8 @@ import {
   PLAYER_COVER_STYLE_SQUARE,
   IMMERSIVE_TIER_EXQUISITE,
   IMMERSIVE_TIER_SMOOTH,
-  IMMERSIVE_TIER_OPTIONS
+  IMMERSIVE_TIER_OPTIONS,
+  FONT_SCALE_OPTIONS
 } from '../model/MusicModels';
 import {
   PREF_SETTINGS,
@@ -31,7 +32,8 @@ import {
   PREF_LOGIN_COOKIE,
   PREF_LOGIN_USER,
   PREF_LOGIN_REFRESH_TOKEN,
-  PREF_LOGIN_VERIFIED_AT
+  PREF_LOGIN_VERIFIED_AT,
+  PREF_LOGIN_ACCESS_TOKEN
 } from '../common/Constants';
 
 let preferences: dataPreferences.Preferences | null = null;
@@ -142,6 +144,15 @@ function normalizeImmersiveTier(tier: string | undefined): string {
 }
 
 /**
+ * 字体大小档位白名单归一化：存量偏好无 fontScale 字段（旧版本数据）或
+ * 值不在四档白名单内时，一律回落默认「标准」档（1.0），升级零感知。
+ */
+function normalizeFontScale(scale: number | undefined): number {
+  const valid: boolean = scale !== undefined && FONT_SCALE_OPTIONS.includes(scale);
+  return valid ? scale : DEFAULT_APP_SETTINGS.fontScale;
+}
+
+/**
  * 功能行功能项顺序白名单归一化：过滤未知 id、去重、按存量顺序保留已知 id、
  * 缺失的已知 id 按默认序补尾；恒返回**全新数组**（不共享任何引用）。
  * 老版本数据（无 funcItemOrder 字段 / 坏 JSON）→ 默认序副本（= 历史布局，升级零感知）。
@@ -185,6 +196,7 @@ function getSettings(): AppSettings {
     downloadDir: stored?.downloadDir ?? DEFAULT_APP_SETTINGS.downloadDir,
     autoPlay: stored?.autoPlay ?? DEFAULT_APP_SETTINGS.autoPlay,
     autoPlayOnStart: stored?.autoPlayOnStart ?? DEFAULT_APP_SETTINGS.autoPlayOnStart,
+    autoPlayOnBluetooth: stored?.autoPlayOnBluetooth ?? DEFAULT_APP_SETTINGS.autoPlayOnBluetooth,
     resumeFromProgress: stored?.resumeFromProgress ?? DEFAULT_APP_SETTINGS.resumeFromProgress,
     wifiOnlyDownload: stored?.wifiOnlyDownload ?? DEFAULT_APP_SETTINGS.wifiOnlyDownload,
     wifiOnlyPlay: stored?.wifiOnlyPlay ?? DEFAULT_APP_SETTINGS.wifiOnlyPlay,
@@ -210,6 +222,7 @@ function getSettings(): AppSettings {
     chaptersEntryEnabled: stored?.chaptersEntryEnabled ?? DEFAULT_APP_SETTINGS.chaptersEntryEnabled,
     descEntryEnabled: stored?.descEntryEnabled ?? DEFAULT_APP_SETTINGS.descEntryEnabled,
     lyricCentered: stored?.lyricCentered ?? DEFAULT_APP_SETTINGS.lyricCentered,
+    dragLyricSeek: stored?.dragLyricSeek ?? DEFAULT_APP_SETTINGS.dragLyricSeek,
     immersiveMaterialTier: normalizeImmersiveTier(stored?.immersiveMaterialTier),
     listenCacheEnabled: stored?.listenCacheEnabled ?? DEFAULT_APP_SETTINGS.listenCacheEnabled,
     saveToPublicDownloads: stored?.saveToPublicDownloads ?? DEFAULT_APP_SETTINGS.saveToPublicDownloads,
@@ -221,7 +234,11 @@ function getSettings(): AppSettings {
       sleepTimerEnd: stored?.sleepTimerEnd ?? DEFAULT_APP_SETTINGS.sleepTimerEnd,
       floatLyricEnabled: stored?.floatLyricEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEnabled,
       floatLyricLocked: stored?.floatLyricLocked ?? DEFAULT_APP_SETTINGS.floatLyricLocked,
-      floatLyricEntryEnabled: stored?.floatLyricEntryEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEntryEnabled
+      floatLyricEntryEnabled: stored?.floatLyricEntryEnabled ?? DEFAULT_APP_SETTINGS.floatLyricEntryEnabled,
+      showDiaryTab: stored?.showDiaryTab ?? DEFAULT_APP_SETTINGS.showDiaryTab,
+      showSettingsTab: stored?.showSettingsTab ?? DEFAULT_APP_SETTINGS.showSettingsTab,
+      showHomeCards: stored?.showHomeCards ?? DEFAULT_APP_SETTINGS.showHomeCards,
+      fontScale: normalizeFontScale(stored?.fontScale)
     };
   }
   return copyAppSettings(settingsCache);
@@ -247,6 +264,7 @@ function copyAppSettings(s: AppSettings): AppSettings {
     downloadDir: s.downloadDir,
     autoPlay: s.autoPlay,
     autoPlayOnStart: s.autoPlayOnStart,
+    autoPlayOnBluetooth: s.autoPlayOnBluetooth,
     resumeFromProgress: s.resumeFromProgress,
     wifiOnlyDownload: s.wifiOnlyDownload,
     wifiOnlyPlay: s.wifiOnlyPlay,
@@ -268,6 +286,7 @@ function copyAppSettings(s: AppSettings): AppSettings {
     chaptersEntryEnabled: s.chaptersEntryEnabled,
     descEntryEnabled: s.descEntryEnabled,
     lyricCentered: s.lyricCentered,
+    dragLyricSeek: s.dragLyricSeek,
     immersiveMaterialTier: s.immersiveMaterialTier,
     listenCacheEnabled: s.listenCacheEnabled,
     saveToPublicDownloads: s.saveToPublicDownloads,
@@ -285,7 +304,11 @@ function copyAppSettings(s: AppSettings): AppSettings {
     sleepTimerEnd: s.sleepTimerEnd,
     floatLyricEnabled: s.floatLyricEnabled,
     floatLyricLocked: s.floatLyricLocked,
-    floatLyricEntryEnabled: s.floatLyricEntryEnabled
+    floatLyricEntryEnabled: s.floatLyricEntryEnabled,
+    showDiaryTab: s.showDiaryTab,
+    showSettingsTab: s.showSettingsTab,
+    showHomeCards: s.showHomeCards,
+    fontScale: s.fontScale
   };
 }
 
@@ -327,6 +350,24 @@ function applyThemeMode(context: common.Context, mode: ThemeMode): void {
   } catch (e) {
     const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
     console.error(`applyThemeMode failed: ${msg}`);
+  }
+}
+
+/**
+ * 把字体大小档位真正应用到应用（外观页切档时 + 启动恢复时调用）。
+ *
+ * setFontSizeScale（API 13+）是运行时设置不落盘，每次启动都要重新应用
+ * （EntryAbility 在 loadContent 首帧前调用，防先标准后放大的跳变）；
+ * 缩放全部 fp 单位文字（全仓 fontSize 数值字面量均为 fp），Canvas 自绘
+ * 歌词（vp 单位）不在此通道、由 LyricsComponent 按镜像手动乘系数。
+ * 仅主线程可调（EntryAbility 启动链与设置页回调均在主线程）。
+ */
+function applyFontSizeScale(context: common.Context, scale: number): void {
+  try {
+    context.getApplicationContext().setFontSizeScale(scale);
+  } catch (e) {
+    const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+    console.error(`applyFontSizeScale failed: ${msg}`);
   }
 }
 
@@ -438,6 +479,19 @@ async function setLoginVerifiedAt(ts: number): Promise<void> {
   await setString(PREF_LOGIN_VERIFIED_AT, String(ts));
 }
 
+/**
+ * App 端登录访问令牌（access_token，TV 扫码 / 密码 / App 短信登录下发）。
+ * 当前只存不读（主用 Cookie 通道），备用作 App 端接口鉴权 / 后续刷新链路原料。
+ * 空串 = 从未通过 App 端链路登录过（网页扫码用户即此态，属正常）。
+ */
+function getLoginAccessToken(): string {
+  return getString(PREF_LOGIN_ACCESS_TOKEN, '');
+}
+
+async function setLoginAccessToken(token: string): Promise<void> {
+  await setString(PREF_LOGIN_ACCESS_TOKEN, token);
+}
+
 /** 命名空间导出：供 `import { AppPreferences }` 以对象方式调用。 */
 export const AppPreferences = {
   initPreferences,
@@ -455,6 +509,7 @@ export const AppPreferences = {
   copyAppSettings,
   updateSettings,
   applyThemeMode,
+  applyFontSizeScale,
   getTotalListenSeconds,
   addListenSeconds,
   getRecentTracks,
@@ -471,5 +526,7 @@ export const AppPreferences = {
   getLoginRefreshToken,
   setLoginRefreshToken,
   getLoginVerifiedAt,
-  setLoginVerifiedAt
+  setLoginVerifiedAt,
+  getLoginAccessToken,
+  setLoginAccessToken
 };

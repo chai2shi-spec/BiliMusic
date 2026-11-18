@@ -9,6 +9,8 @@
  *   · 搜索框下方：快捷卡行（HomeQuickCards）—— 最近播放卡（点播放 = 播放全部最近、点卡进最近播放页）+
  *     收藏歌单卡（歌单 ⋯ 菜单「加入首页」自选，点播放 = 整单起播、点卡进
  *     歌单），最多 5 卡横滑；数据经 STORE_LIBRARY_REV 驱动重灌。
+ *     外观设置「首页快捷卡」开关（showHomeCards 镜像）可整行隐藏，
+ *     隐藏时 chips 触栏阈值经 tabsFlipVp 同步收缩。
  *   · 卡行下方：分类 chip 条（HomeCategoryChips：推荐 / 热歌榜 / 音乐中心 /
  *     热门歌单）+ 随所选 tab 显示对应数据源的条目列表。
  *
@@ -30,7 +32,8 @@
  * 网易云第三方源（api/NeteaseApi）：
  *   · 热歌榜 —— 云音乐热歌榜（固定歌单 3778678，v6 trackIds + v3 分批详情），
  *     一次拿全后前端切片展示（HOT_CHART_PAGE_SIZE）；单曲无 B 站 bvid，
- *     点行实时 matchSongForPlayback 匹配 B 站音源播放（仅单曲点播）。
+ *     点行实时 matchSongForPlayback 匹配 B 站音源播放（单曲点播）；行首
+ *     「播放全部」走 NeteasePlayChain 惰性连播（整榜渐进匹配入队）。
  *   · 热门歌单 —— api/playlist/list 热门歌单网格，点卡进 NeteasePlaylist 预览页。
  * 两个 tab 都不进启动轮、不落 HomeFeedCacheStore（ExternalSong 系模型不适配
  * Track 缓存），首次切到 tab 时懒加载（onTabChanged → maybeLoadHotChart /
@@ -65,6 +68,7 @@ import {
   fetchNeteaseHotChart
 } from '../api/NeteaseApi';
 import { ExternalSong, matchSongForPlayback } from '../service/PlaylistImporter';
+import { NeteasePlayChain } from '../service/NeteasePlayChain';
 import { ensureLazyPageLoaded } from '../service/LazyPageRegistry';
 import {
   DownloadManager,
@@ -83,6 +87,9 @@ import {
   STORE_SEARCH_TAB,
   STORE_ITEM_DISPLAY_STYLE,
   STORE_THEME_DEEP,
+  STORE_THEME_PRIMARY,
+  STORE_THEME_ON,
+  STORE_SHOW_HOME_CARDS,
   STORE_HOME_SEARCH_ENTRY_ACTIVE,
   STORE_HOME_CHIPS_ACTIVE,
   STORE_LIBRARY_REV,
@@ -130,6 +137,7 @@ import {
   PULL_SKELETON_EXIT_VP,
   PULL_SKELETON_FADE_MS,
   BUTTON_RADIUS_VP,
+  ACTION_ROW_H,
   LIST_FOOTER_HEIGHT_VP
 } from '../common/constants/InteractionConstants';
 
@@ -302,9 +310,16 @@ const HOME_ENTRY_FLIP_VP: number = 56;
  * 排行榜 / 音乐中心）顶缘刚上移到导航栏底，翻转 STORE_HOME_CHIPS_ACTIVE
  * 让 Index 标题栏在问候语右侧淡入三个分类 tab 图标（标题与问候语常驻，
  * 与 HOME_ENTRY_FLIP_VP 同一套滚动翻转镜像）。
- * 距顶距离 = 起始让位 8 + 搜索行 56 + 快捷卡行 184（卡行高度计入本阈值）。
+ * 距顶距离 = 起始让位 8 + 搜索行 56 + 快捷卡行 184（卡行高度计入本阈值，
+ * 卡行隐藏时经 tabsFlipVp 动态收缩，见 QUICK_CARD_ROW_VP）。
  */
 const HOME_TABS_FLIP_VP: number = 248;
+/**
+ * 快捷卡行高（vp）：与 HomeQuickCards 的 QUICK_CARD_HEIGHT_VP 同值
+ * （跨组件不导出、两处注释互指；卡高调整时需同步改）。
+ * 卡行隐藏（showHomeCards = false）时 chips 触栏阈值按它收缩。
+ */
+const QUICK_CARD_ROW_VP: number = 184;
 
 /**
  * 骨架屏占位行：首屏整页用 8 行（贴合首屏可见条数），上拉加载更多用 3 行。
@@ -321,6 +336,17 @@ export struct HomePage {
   @StorageLink(STORE_SEARCH_TAB) @Watch('onTabChanged') tab: string = 'recommend';
   /** 主题色深色运行时值：歌单选择弹层的「新建歌单并加入」跟随切色刷新 */
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
+  /** 主题色运行时值：热歌榜「播放全部」主 CTA 实底跟随切色刷新 */
+  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /** 主 CTA 实底上的深字色（播放全部 themePrimary 底 + themeOn 字，设计方案 §2 规则 2） */
+  @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
+  /**
+   * 首页快捷卡显隐（设置 → 外观「首页快捷卡」，AppSettings.showHomeCards 的
+   * 运行时镜像）：false 时头部条目 2（快捷卡行）不渲染，chips 触栏翻转阈值
+   * 经 tabsFlipVp 同步收缩；@Watch 在阈值变化后重同步 STORE_HOME_CHIPS_ACTIVE
+   *（设置页切换时本页在后台，scroller 单例仍可读，按最近偏移立即校准）。
+   */
+  @StorageProp(STORE_SHOW_HOME_CARDS) @Watch('onHomeCardsVisibilityChanged') showHomeCards: boolean = true;
   @State @Watch('onListSourceChanged') recommend: Track[] = [];
   /** 网易云热歌榜歌曲（ranking tab）：@Watch → ArrayDataSource reload */
   @State @Watch('onListSourceChanged') hotSongs: NeteaseHotSong[] = [];
@@ -515,6 +541,8 @@ export struct HomePage {
   private hotChartLoadedOnce: boolean = false;
   /** 正在匹配播放的行下标（-1 = 空闲；单飞互斥防 B 站搜索风控，行尾转圈反馈） */
   @State matchingIndex: number = -1;
+  /** 热歌榜「播放全部」首曲匹配进行中（CTA 图标位转 LoadingProgress，防连点） */
+  @State hotChartPlayAllPending: boolean = false;
   /**
    * 推荐位首屏双源暂存（热门 / 推荐流）：与 centerNewTracks/centerHotTracks 同款
    * staging 模式 —— 各自落定后由 settleRecommend 按固定顺序合成整表替换，
@@ -960,13 +988,31 @@ export struct HomePage {
   }
 
   /**
-   * chip 条在场状态同步：列表偏移跨越 HOME_TABS_FLIP_VP（chip 条顶缘触及
-   * 导航栏底）时翻转 STORE_HOME_CHIPS_ACTIVE。与 syncEntryActive 同构 ——
-   * 只在翻转时写 AppStorage，onDidScroll 每帧回调不翻转零开销。
+   * chips 触栏翻转阈值（vp）：HOME_TABS_FLIP_VP 常量值在快捷卡行隐藏
+   *（showHomeCards = false）时扣除卡行高 QUICK_CARD_ROW_VP —— 阈值必须
+   * 与头部实际布局一致，否则标题栏三 tab 图标会提前 / 滞后 184vp 淡入。
+   */
+  private tabsFlipVp(): number {
+    return this.showHomeCards ? HOME_TABS_FLIP_VP : HOME_TABS_FLIP_VP - QUICK_CARD_ROW_VP;
+  }
+
+  /**
+   * 快捷卡显隐翻转（@Watch）：阈值随卡行增删变化后按当前滚动位置重同步
+   * STORE_HOME_CHIPS_ACTIVE —— 列表停在中间偏移时（8+56 < y < 248 区间）
+   * 不重同步会出现图标状态与真实位置错位。syncEntryActive 不受卡行影响。
+   */
+  private onHomeCardsVisibilityChanged(): void {
+    this.syncChipsActive();
+  }
+
+  /**
+   * chip 条在场状态同步：列表偏移跨越 chips 触栏阈值（tabsFlipVp，chip 条
+   * 顶缘触及导航栏底）时翻转 STORE_HOME_CHIPS_ACTIVE。与 syncEntryActive
+   * 同构 —— 只在翻转时写 AppStorage，onDidScroll 每帧回调不翻转零开销。
    */
   private syncChipsActive(): void {
     const y: number = TabScrollerHolder.home.currentOffset()?.yOffset ?? 0;
-    const active: boolean = y < HOME_TABS_FLIP_VP;
+    const active: boolean = y < this.tabsFlipVp();
     if (active !== this.chipsActive) {
       this.chipsActive = active;
       AppStorage.setOrCreate(STORE_HOME_CHIPS_ACTIVE, active);
@@ -1233,6 +1279,34 @@ export struct HomePage {
     } finally {
       this.matchingIndex = -1;
     }
+  }
+
+  /**
+   * 热歌榜「播放全部」= 惰性连播（NeteasePlayChain，网易云歌单同款）：整榜
+   * 全量（hotChartAll，不吃前端展示切片）映射 ExternalSong 后起链 —— 首曲
+   * 匹配秒开起播，其余曲目后台逐首匹配入队渐进填充（约 3 秒一首）。起播 /
+   * 跳过 / 风控熔断的提示由链服务负责；返回的 Promise 在首曲落定（或整榜
+   * 无源 / 熔断终止）后 resolve，用它清 CTA loading 态。
+   */
+  private startHotChartPlayAll(): void {
+    if (this.hotChartPlayAllPending || this.loadingHotChart || this.hotChartAll.length === 0) {
+      return;
+    }
+    const songs: ExternalSong[] = this.hotChartAll.map((s: NeteaseHotSong): ExternalSong => {
+      return {
+        title: s.title,
+        artist: s.artist,
+        durationSec: s.durationSec
+      };
+    });
+    this.hotChartPlayAllPending = true;
+    NeteasePlayChain.getInstance().start(songs)
+      .then((): void => {
+        this.hotChartPlayAllPending = false;
+      })
+      .catch((): void => {
+        this.hotChartPlayAllPending = false;
+      });
   }
 
   private resetCenter(): void {
@@ -1834,7 +1908,48 @@ export struct HomePage {
   }
 
   /**
-    * 热歌榜单曲行（ranking tab）：榜位序号 + 封面 + 歌名 /「歌手 · 时长」副行，
+   * 热歌榜「播放全部」主 CTA 行（榜单行首，随列表滚动）：品牌色实底 +
+   * themeOn 深字（设计方案 §2 规则 2），首曲匹配中图标位转 LoadingProgress
+   * （防连点）。版式与 NeteasePlaylistPage / PlaylistDetail 播放全部主 CTA
+   * 同语言（play_fill 图标 + 13fp Medium 文字）。
+   */
+  @Builder
+  PlayAllRow(): void {
+    Button() {
+      Row({ space: 6 }) {
+        if (this.hotChartPlayAllPending) {
+          LoadingProgress()
+            .width(15)
+            .height(15)
+            .color(this.themeOn)
+        } else {
+          SymbolGlyph($r('sys.symbol.play_fill'))
+            .fontSize(15)
+            .fontColor([this.themeOn])
+        }
+        Text('播放全部')
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.themeOn)
+      }
+    }
+    .type(ButtonType.Normal)
+    .height(ACTION_ROW_H)
+    .borderRadius(10)
+    .backgroundColor(this.themePrimary)
+    .width('100%')
+    // ⚠️ 左右让位不能在这里用 margin：百分比宽按父（ListItem）内容区解析、
+    // margin 叠加在外，总占位 = 列表宽 + 32，右缘会超出屏幕 16vp（热歌榜
+    // 线上 bug）。水平 16vp 让位改由调用侧 ListItem padding 承载
+    //（SearchEntryRow 同款），width('100%') 即撑满收窄后的内容区。
+    .margin({ top: 4, bottom: 8 })
+    .onClick((): void => {
+      this.startHotChartPlayAll();
+    })
+  }
+
+  /**
+   * 热歌榜单曲行（ranking tab）：榜位序号 + 封面 + 歌名 /「歌手 · 时长」副行，
     * 整行点按即播（playHotSongAt 实时匹配 B 站音源）；匹配中的行行尾转圈。
     * 版式参照 NeteasePlaylistPage 曲目行，加封面与前三名高亮。
     */
@@ -1880,7 +1995,9 @@ export struct HomePage {
       }
     }
     .width('100%')
-    .padding({ top: 10, bottom: 10 })
+    // 左右让位 NAV_H_PADDING 基线：与搜索框行 / chip 条 / 播放全部 CTA 同一条
+    // 水平缘（TrackItem / SkeletonTrackItem 同款 16vp），序号不贴屏幕左缘。
+    .padding({ left: NAV_H_PADDING, right: NAV_H_PADDING, top: 10, bottom: 10 })
     .alignItems(VerticalAlign.Center)
     .stateStyles({
       pressed: { .backgroundColor($r('app.color.press_overlay')) },
@@ -2732,23 +2849,27 @@ export struct HomePage {
             // + 收藏歌单卡（歌单 ⋯ 菜单「加入首页」自选），最多 5 卡横滑；点播放
             // 按钮起播 / 点卡跳转（见 HomeQuickCards）。卡行高度计入
             // HOME_TABS_FLIP_VP（chips 触栏判定阈值同步加高，见该常量注释）。
-            ListItem() {
-              HomeQuickCards({
-                recentTracks: this.recentTracks,
-                cardPlaylists: this.cardPlaylists,
-                upArchiveCounts: this.upArchiveCounts,
-                onAddClick: (): void => {
-                  this.onAddCardClick();
-                },
-                onRemoveCard: (p: Playlist): void => {
-                  this.removeHomeCard(p);
-                },
-                onReplaceCard: (p: Playlist): void => {
-                  this.openReplaceCardPicker(p);
-                }
-              })
+            // 外观设置「首页快捷卡」开关（showHomeCards 镜像）关闭时整行隐藏，
+            // 卡片数据照常维护、重新打开即恢复；阈值经 tabsFlipVp 动态收缩。
+            if (this.showHomeCards) {
+              ListItem() {
+                HomeQuickCards({
+                  recentTracks: this.recentTracks,
+                  cardPlaylists: this.cardPlaylists,
+                  upArchiveCounts: this.upArchiveCounts,
+                  onAddClick: (): void => {
+                    this.onAddCardClick();
+                  },
+                  onRemoveCard: (p: Playlist): void => {
+                    this.removeHomeCard(p);
+                  },
+                  onReplaceCard: (p: Playlist): void => {
+                    this.openReplaceCardPicker(p);
+                  }
+                })
+              }
+              .width('100%')
             }
-            .width('100%')
 
             // 头部条目 3：分类 chip 条（推荐 / 排行榜 / 音乐中心，MusicHome
             // CategoryChipsSection 同款；点击写 STORE_SEARCH_TAB 切换下方内容）。
@@ -2822,6 +2943,17 @@ export struct HomePage {
                   .padding({ top: 48, bottom: 24 })
                 }
               } else {
+                // 榜单行首：「播放全部」主 CTA（整榜惰性连播，见 startHotChartPlayAll）。
+                // 骨架 / 空态阶段不出（本分支 = 已有榜单内容）。
+                ListItem() {
+                  this.PlayAllRow()
+                }
+                .width('100%')
+                // 左右让位 NAV_H_PADDING 基线（与搜索框行同一水平基线）：
+                // 实底 CTA 贴屏幕边缘观感差，收进 16vp 与页面内容对齐
+                //（放 ListItem padding 而非按钮 margin，见 PlayAllRow 注释）。
+                .padding({ left: NAV_H_PADDING, right: NAV_H_PADDING })
+
                 LazyForEach(
                   this.hotSongSource,
                   (s: NeteaseHotSong, index: number): void => {

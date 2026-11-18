@@ -89,7 +89,7 @@ const FEEDBACK_QQ_GROUP: string = '1129926978';
 
 /** PiLink 邀测链接（应用市场邀测页）：确认后经 openLink 跳转，不推二级页 */
 const PILINK_INVITE_URL: string =
-  'https://appgallery.huawei.com/link/invite-test-wap?taskId=3a0510d4a77f2a1fa42c033991b1b118&invitationCode=XMFbRSukNQ';
+  'https://appgallery.huawei.com/link/invite-test-wap?taskId=373050494dc80164b4a906ef1cd1544c&invitationCode=XMFbRSukNQ';
 
 function themeModeLabel(mode: ThemeMode): string {
   if (mode === ThemeMode.DARK) {

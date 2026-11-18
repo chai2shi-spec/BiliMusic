@@ -54,6 +54,8 @@ import {
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
   STORE_LYRIC_CENTERED,
+  STORE_DRAG_LYRIC_SEEK,
+  STORE_FONT_SCALE,
   STORE_TRANSCRIBE_DONE_SEQ,
   STORE_TRANSCRIBE_PHASE,
   STORE_TRANSCRIBE_PROGRESS,
@@ -99,6 +101,11 @@ struct LrcViewHost {
   @Prop normalTextSize: number = 20;
   /** 当前行字号（vp）：封面舞台分档透传；默认 24 = LrcView 缺省档 */
   @Prop currentTextSize: number = 24;
+  /** 拖动歌词跳进度开关镜像（AppSettings.dragLyricSeek；EntryAbility 首发 / 设置切换重发） */
+  @StorageProp(STORE_DRAG_LYRIC_SEEK) dragSeekEnabled: boolean = false;
+  /** 拖动跳转回调（毫秒，歌词时间轴）：透传宿主，宿主补偿整体偏移后 seek */
+  onDragSeek: (lineStartMs: number) => void = (): void => {
+  };
   /** 长按歌词区回调（打开「歌词设置」面板） */
   onLongPress: () => void = (): void => {
   };
@@ -113,6 +120,8 @@ struct LrcViewHost {
       pageActive: this.pageActive,
       normalTextSize: this.normalTextSize,
       currentTextSize: this.currentTextSize,
+      dragSeekEnabled: this.dragSeekEnabled,
+      onDragSeek: this.onDragSeek,
       lyricTopPosition: LyricTopPosition.Middle
     })
       .layoutWeight(1)
@@ -135,6 +144,14 @@ export struct LyricsComponent {
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
   /** 歌词居中显示（AppSettings.lyricCentered 的运行时镜像，长按面板可切，默认关 = 左对齐） */
   @StorageProp(STORE_LYRIC_CENTERED) lyricCentered: boolean = false;
+  /** 拖动歌词跳进度（AppSettings.dragLyricSeek 的运行时镜像；长按面板 / 设置 → 播放两处可切，默认关） */
+  @StorageProp(STORE_DRAG_LYRIC_SEEK) dragLyricSeekOn: boolean = false;
+  /**
+   * 字体大小档位（AppSettings.fontScale 的运行时镜像，四档 0.85/1.0/1.15/1.3）：
+   * LrcView 用 Canvas 自绘、字号 vp 单位，不随 setFontSizeScale 的全局 fp
+   * 通道缩放 —— 这里按镜像手动乘系数，与全局文字档位同步。
+   */
+  @StorageProp(STORE_FONT_SCALE) fontScale: number = 1.0;
   @StorageLink(STORE_CURRENT_TRACK) @Watch('onTrackChanged') currentTrack: Track | null = null;
   /**
    * 当前章节表（MusicPlayer / ChapterStore 发布，只读订阅）。
@@ -1386,6 +1403,26 @@ export struct LyricsComponent {
       }
       .width(StyleConstants.FULL_WIDTH)
 
+      // 拖动歌词跳进度（与设置 → 播放「歌词」区块同一开关）：开启后拖动歌词
+      // 显示目标行时间指示、松手跳转到该行（含整体偏移补偿）；关闭时拖动仅
+      // 浏览。切换 = 偏好落盘 + 镜像重发，两处入口天然同步。
+      Row() {
+        Text('拖动歌词跳进度')
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.dragLyricSeekOn })
+          .selectedColor(this.themePrimary)
+          .onChange((v: boolean): void => {
+            AppPreferences.updateSettings((s: AppSettings): void => {
+              s.dragLyricSeek = v;
+            });
+            AppStorage.setOrCreate(STORE_DRAG_LYRIC_SEEK, v);
+          })
+      }
+      .width(StyleConstants.FULL_WIDTH)
+      .alignItems(VerticalAlign.Center)
+
       Row({ space: 12 }) {
         Text('重置偏移')
           .fontSize(13)
@@ -1981,8 +2018,13 @@ export struct LyricsComponent {
                   lyricScrollEffect: this.lyricScrollEffect,
                   lyricCentered: this.lyricCentered,
                   pageActive: this.pageActive,
-                  normalTextSize: this.normalTextSize,
-                  currentTextSize: this.currentTextSize,
+                  normalTextSize: this.normalTextSize * this.fontScale,
+                  currentTextSize: this.currentTextSize * this.fontScale,
+                  // 拖动跳转落点补偿：LrcView 时间轴已按 −偏移平移，
+                  // 实际播放位置 = 歌词行起点 + 整体偏移
+                  onDragSeek: (ms: number): void => {
+                    MusicPlayer.getInstance().seek((ms + this.lyricOffsetMs) / 1000);
+                  },
                   onLongPress: (): void => {
                     this.showLyricSheet = true;
                   }
@@ -1999,8 +2041,13 @@ export struct LyricsComponent {
           lyricScrollEffect: this.lyricScrollEffect,
           lyricCentered: this.lyricCentered,
           pageActive: this.pageActive,
-          normalTextSize: this.normalTextSize,
-          currentTextSize: this.currentTextSize,
+          normalTextSize: this.normalTextSize * this.fontScale,
+          currentTextSize: this.currentTextSize * this.fontScale,
+          // 拖动跳转落点补偿：LrcView 时间轴已按 −偏移平移，
+          // 实际播放位置 = 歌词行起点 + 整体偏移
+          onDragSeek: (ms: number): void => {
+            MusicPlayer.getInstance().seek((ms + this.lyricOffsetMs) / 1000);
+          },
           onLongPress: (): void => {
             this.showLyricSheet = true;
           }

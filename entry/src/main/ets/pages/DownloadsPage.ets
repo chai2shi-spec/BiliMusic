@@ -790,6 +790,11 @@ export struct DownloadsPage {
    */
   private taskTitleText(t: DownloadTask, nested: boolean): string {
     if (nested && t.partTotal > 1 && t.partNo > 0) {
+      // 标题本身已是合成的 P 序号（纯序号分 P 名，见 expandVideoParts 的
+      // 「P{序号}」回落）时不再叠前缀，避免出现「P3 · P3」。
+      if (t.title === `P${t.partNo}`) {
+        return t.title;
+      }
       return `P${t.partNo} · ${t.title}`;
     }
     return t.title;

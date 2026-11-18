@@ -94,7 +94,7 @@ import {
 import window from '@ohos.window';
 import common from '@ohos.app.ability.common';
 import { BusinessError } from '@ohos.base';
-import { Track, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
+import { Track, AppSettings, BAR_LAYOUT_HORIZONTAL, BAR_LAYOUT_VERTICAL } from '../model/MusicModels';
 import { HomePage } from './HomePage';
 import { PlaylistsPage } from './PlaylistsPage';
 import { ListenDiaryPage } from './ListenDiaryPage';
@@ -145,6 +145,8 @@ import {
   MINI_BAR_ANIM_TO_EXPAND,
   MINI_BAR_ANIM_TO_COLLAPSE,
   STORE_MINI_BAR_AUTO_EXPAND,
+  STORE_SHOW_DIARY_TAB,
+  STORE_SHOW_SETTINGS_TAB,
   STORE_MAIN_MINI_BAR_WIDTH,
   STORE_PLAYER_OPEN,
   STORE_PLAYER_OVERLAY_MOUNTED,
@@ -181,6 +183,7 @@ import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
 import { PlTitleActions } from '../components/PlaylistsTabBar';
 import { HOME_CATEGORY_CHIPS, CategoryChipUi } from '../components/HomeCategoryChips';
+import { AppPreferences } from '../preferences/AppPreferences';
 
 /**
  * 悬浮页签栏完整避开系统底部控件（三键导航栏 / 手势指示条避让区）后的净空隙（vp）。
@@ -197,14 +200,16 @@ const BAR_BOTTOM_MARGIN: number = 2;
  */
 const BAR_SIDE_MARGIN_LG: number = 83;
 /**
- * 悬浮页签胶囊**锁定**宽度（vp，4 页签）：barFloatingStyle.barWidth 显设值，
- * 居中公式 sideMargin=(容器宽−本值)/2 的被减数。选 304（= 76×4）与「队列非空
- * lg 双胶囊散开」时 HDS 的实测宽度（S=83 → 304vp）一致，跨状态切换宽度不跳变。
+ * 悬浮页签胶囊**单页签宽度**（vp）：barFloatingStyle.barWidth 显设锁宽值 =
+ * 单宽 × 可见页签数（隐藏拾音 / 设置后按 76×N 缩放：4 页签 304 / 3 页签 228 /
+ * 2 页签 152），是居中公式 sideMargin=(容器宽−锁宽)/2 的被减数。
+ * 校准源：4 页签实测 304（= 76×4），与「队列非空 lg 双胶囊散开」时 HDS 的
+ * 实测宽度（S=83 → 304vp）一致，跨状态切换宽度不跳变。
  * ⚠️ 不锁宽时 HDS 宽度随边距漂移（dumpLayout 实测：默认 S→328、S=83→304、
  * S=318→272），公式里的「宽」不可控，必须配 barWidth 一起设。
  * 若 HDS 版本升级导致宽度漂移，用 uitest dumpLayout 重测本校准。
  */
-const BAR_FLOATING_BAR_WIDTH: number = 304;
+const BAR_TAB_WIDTH_VP: number = 76;
 
 /**
  * 根 HdsNavigation 统一标题栏：
@@ -216,6 +221,8 @@ const BAR_FLOATING_BAR_WIDTH: number = 304;
 const TAB_SEARCH: number = 0;
 const TAB_PLAYLISTS: number = 1;
 const TAB_DIARY: number = 2;
+/** 设置页签逻辑 id（拾音 / 设置可隐藏，id 与物理下标经映射层换算，见 physicalIndexOf） */
+const TAB_SETTINGS: number = 3;
 /**
  * 屏幕竖向滑动（parallelGesture）判定收/放意图的触发阈值（vp）：
  * 上滑超过 → 展开、下滑超过 → 收起；一次手势只触发一次。
@@ -358,6 +365,21 @@ struct Index {
    * 显式交互不受影响。默认开（保持手势上线以来的既有行为）。
    */
   @StorageProp(STORE_MINI_BAR_AUTO_EXPAND) miniBarAutoExpand: boolean = true;
+
+  /**
+   * 拾音页签显隐（设置 → 外观「拾音页签」，AppSettings.showDiaryTab 的运行时镜像，
+   * EntryAbility 首帧前首发真值）：false 时 phoneShell 不渲染拾音 TabContent
+   * （底部导航只剩 首页 / 歌单 / 设置），听歌记录采集不受影响。
+   * 变化经 onTabVisibilityChanged 重锚 HdsTabs 非受控 index（见其注释）。
+   */
+  @StorageProp(STORE_SHOW_DIARY_TAB) @Watch('onTabVisibilityChanged') showDiaryTab: boolean = true;
+
+  /**
+   * 设置页签显隐（设置 → 外观「设置页签」，AppSettings.showSettingsTab 的运行时镜像）：
+   * false 时底部导航不渲染设置页签；恢复入口 = 长按首页「BiliMusic」标题
+   * （homeTitleRow，写回偏好 + 镜像重发 + 自动切到设置页签）。
+   */
+  @StorageProp(STORE_SHOW_SETTINGS_TAB) @Watch('onTabVisibilityChanged') showSettingsTab: boolean = true;
 
   /**
    * 沉浸光感材质档位（设置 → 外观「沉浸光感材质」三档选择，AppSettings.
@@ -751,13 +773,90 @@ struct Index {
    */
   @StorageProp(STORE_TAB_SWITCH_REQUEST) @Watch('onTabSwitchRequest') tabSwitchRequest: number = 0;
 
+  /**
+   * 逻辑页签 id → HdsTabs 物理下标：TAB_* 常量与 activeTab 始终持有**逻辑 id**
+   * （0 首页 / 1 歌单 / 2 拾音 / 3 设置，全工程消费方零改动），仅在与
+   * HdsTabs 交互的边界（changeIndex / onChange / 条件渲染）经本组映射换算。
+   * 首页 / 歌单恒可见（物理位固定 0 / 1）；拾音 / 设置可被外观设置隐藏
+   * （物理位随前排隐藏页签前移）；不可见返回 -1，调用方必须守卫。
+   */
+  private physicalIndexOf(logical: number): number {
+    if (logical === TAB_SEARCH) {
+      return 0;
+    }
+    if (logical === TAB_PLAYLISTS) {
+      return 1;
+    }
+    if (logical === TAB_DIARY) {
+      return this.showDiaryTab ? 2 : -1;
+    }
+    if (logical === TAB_SETTINGS) {
+      if (!this.showSettingsTab) {
+        return -1;
+      }
+      return this.showDiaryTab ? 3 : 2;
+    }
+    return -1;
+  }
+
+  /** HdsTabs 物理下标 → 逻辑页签 id（越界 / 未知返回 -1，调用方守卫） */
+  private logicalIndexOf(physical: number): number {
+    if (physical === 0) {
+      return TAB_SEARCH;
+    }
+    if (physical === 1) {
+      return TAB_PLAYLISTS;
+    }
+    if (physical === 2) {
+      return this.showDiaryTab ? TAB_DIARY : (this.showSettingsTab ? TAB_SETTINGS : -1);
+    }
+    if (physical === 3) {
+      return this.showSettingsTab ? TAB_SETTINGS : -1;
+    }
+    return -1;
+  }
+
+  /** 当前可见页签数（barFloatingStyle 锁宽公式用） */
+  private visibleTabCount(): number {
+    let count: number = 2;
+    if (this.showDiaryTab) {
+      count++;
+    }
+    if (this.showSettingsTab) {
+      count++;
+    }
+    return count;
+  }
+
+  /**
+   * 页签显隐变化重锚（showDiaryTab / showSettingsTab 的 @Watch 共用）：
+   * HdsTabs 是非受控 index，TabContent 增删后 HDS 内部下标会错位 / 越界
+   * （隐藏拾音时设置的物理位 3→2；重新显示时 HDS 内部 2 仍指旧位 —— 不重锚
+   * 会显示错页或空白）。setTimeout(0) 等条件渲染落位后再 changeIndex 重新锚定；
+   * 当前页签本身被隐藏（隐藏设置页签场景）时先回首页。
+   */
+  private onTabVisibilityChanged(): void {
+    setTimeout((): void => {
+      if (this.physicalIndexOf(this.activeTab) < 0) {
+        this.activeTab = TAB_SEARCH;
+      }
+      const physical: number = this.physicalIndexOf(this.activeTab);
+      if (physical > 0) {
+        this.tabController.changeIndex(physical);
+      }
+    }, 0);
+  }
+
   /** 消费跨层切页签请求：HdsTabs 非受控 index，唯一有效通道是 changeIndex（见上方注释） */
   private onTabSwitchRequest(): void {
     const target: number = AppStorage.get<number>(STORE_TAB_SWITCH_TARGET) ?? -1;
     if (target < 0) {
       return;
     }
-    this.tabController.changeIndex(target);
+    const physical: number = this.physicalIndexOf(target);
+    if (physical >= 0) {
+      this.tabController.changeIndex(physical);
+    }
   }
 
   /**
@@ -828,9 +927,10 @@ struct Index {
   @StorageProp(STORE_HOME_SEARCH_ENTRY_ACTIVE) homeEntryActive: boolean = true;
 
   /**
-   * 首页 chip 条在场镜像：列表偏移 < HOME_TABS_FLIP_VP（分类 chip 条顶缘
-    * 尚未触及导航栏底）时 true；chip 条上移到导航栏后 false —— 三个分类
-    * tab 图标（homeTitleRow 内、问候语右侧）淡入，标题与问候语常驻不变。
+   * 首页 chip 条在场镜像：列表偏移 < chips 触栏阈值（分类 chip 条顶缘
+     * 尚未触及导航栏底）时 true；chip 条上移到导航栏后 false —— 三个分类
+     * tab 图标（homeTitleRow 内、问候语右侧）淡入，标题与问候语常驻不变。
+   * 阈值随快捷卡行显隐动态（见 HomePage.tabsFlipVp），本组件只读。
    * 写入口在 HomePage.syncChipsActive，本组件只读（@StorageProp 单向）。
    */
   @StorageProp(STORE_HOME_CHIPS_ACTIVE) homeChipsActive: boolean = true;
@@ -934,8 +1034,15 @@ struct Index {
         }
         // 非受控 index（见 activeTab 注释）的代价 = 冷启动不再自动落回上次页签，
         // 这里一次性恢复（activeTab 未持久化时恒为 0，守卫跳过；持久化过则恢复）。
-        if (this.activeTab !== 0) {
-          this.tabController.changeIndex(this.activeTab);
+        // 拾音 / 设置页签可隐藏：物理下标经映射层换算；上次停留的页签本次启动
+        // 已隐藏（physicalIndexOf < 0）时回首页，不越界 changeIndex。
+        if (this.activeTab !== TAB_SEARCH) {
+          const physical: number = this.physicalIndexOf(this.activeTab);
+          if (physical < 0) {
+            this.activeTab = TAB_SEARCH;
+          } else {
+            this.tabController.changeIndex(physical);
+          }
         }
       }
     }, 100);
@@ -1187,9 +1294,11 @@ struct Index {
     //   · 其余（手机 / sm 折叠闭合）→ 全不设，HDS sm 默认即居中（实测佐证）。
     const emptyQueue: boolean = this.queue.length === 0;
     const centerSingleBar: boolean = emptyQueue && this.windowWidthVp >= 600;
+    // 锁宽值随可见页签数缩放（隐藏拾音 / 设置后胶囊相应收窄）
+    const lockedBarWidth: number = BAR_TAB_WIDTH_VP * this.visibleTabCount();
     let sideMargin: number | undefined = undefined;
     if (centerSingleBar) {
-      sideMargin = Math.max(0, (this.windowWidthVp - BAR_FLOATING_BAR_WIDTH) / 2);
+      sideMargin = Math.max(0, (this.windowWidthVp - lockedBarWidth) / 2);
     } else if (!emptyQueue && this.currentBreakpoint === BreakpointConstants.BREAKPOINT_LG) {
       sideMargin = BAR_SIDE_MARGIN_LG;
     }
@@ -1197,7 +1306,7 @@ struct Index {
       + `|${this.materialTier}`
       + `|${this.themePrimary}|${this.barLayout}|${this.queue.length > 0 ? 1 : 0}`
       + `|${expandedNow ? 1 : 0}|${sideMargin ?? 0}`
-      + `|${this.subPageActive ? 1 : 0}`;
+      + `|${this.subPageActive ? 1 : 0}|${this.visibleTabCount()}`;
     if (this.cachedFloatingStyle !== null && this.cachedFloatingStyleKey === key) {
       return this.cachedFloatingStyle;
     }
@@ -1225,8 +1334,8 @@ struct Index {
       // 其余分支不设（undefined），维持 HDS 默认宽度。
       barWidth: centerSingleBar
         ? {
-          mediumWidth: BAR_FLOATING_BAR_WIDTH,
-          largeWidth: BAR_FLOATING_BAR_WIDTH
+          mediumWidth: lockedBarWidth,
+          largeWidth: lockedBarWidth
         }
         : undefined,
       systemMaterialEffect: {
@@ -1405,9 +1514,17 @@ struct Index {
    * 跨度 n → BASE + (n-1)*STEP，封顶 MAX。点当前页签（跨度 0）不切页，
    * 预置 BASE 只是保持基线。快速连点时 activeTab 尚未回写（onChange 在
    * 动画完成后才触发），距离按旧起点算，误差最多一档时长，可接受。
+   * 跨度按**物理下标**算：隐藏拾音后 歌单→设置 物理相邻，不放大到 420ms；
+   * 目标 / 当前页签不在可见序列（-1，理论不可达）时回落 BASE。
    */
   private presetTabSwitchDuration(target: number): void {
-    const distance: number = Math.abs(target - this.activeTab);
+    const fromPhysical: number = this.physicalIndexOf(this.activeTab);
+    const toPhysical: number = this.physicalIndexOf(target);
+    if (fromPhysical < 0 || toPhysical < 0) {
+      this.tabSwitchDuration = TAB_SWITCH_BASE_MS;
+      return;
+    }
+    const distance: number = Math.abs(toPhysical - fromPhysical);
     if (distance <= 1) {
       this.tabSwitchDuration = TAB_SWITCH_BASE_MS;
       return;
@@ -1553,24 +1670,48 @@ struct Index {
 
   /**
    * 首页标题行（TAB_SEARCH，MusicHome HomeTopBar 落地）：
-   * 「BiliMusic」标题 + 时间段问候语 + 右上搜索按钮。列表停在顶部时入口式
-   * 搜索框可见，按钮隐藏（opacity 0 + 不响应点击）；搜索框随内容滚出后
-   * 按钮 200ms 淡入。
-   * chip 条上移到导航栏（homeChipsActive 翻转）时标题与问候语常驻显示；
-   * 三个分类 tab 图标在问候语右侧 200ms 淡入。图标点击写 homeTab
-   * （STORE_SEARCH_TAB 写穿），与 chip 点击切 tab 完全等价。
+   * 「BiliMusic」标题 + 时间段问候语 + 右上搜索按钮。标题 / 问候语保持自然宽
+   * 完整显示；宽度弹性全部交给四个分类 tab 图标与搜索按钮之间的 Blank 间距
+   *（随屏宽自适应伸缩，最小 0），屏宽不足时先收间距、再由问候语兜底截断，
+   * 标题保完整。
+   * 列表停在顶部时入口式搜索框可见，图标组与按钮条件卸载（零占位，不挤压
+   * 左侧文案）；chip 条 / 搜索框随内容滚出后各自 200ms OPACITY 转场淡入。
+   * 图标点击写 homeTab（STORE_SEARCH_TAB 写穿），与 chip 点击切 tab 完全等价。
    */
   @Builder
   homeTitleRow() {
     Row() {
-      // 标题 + 时间段问候语：常驻显示
-      //（上滑出头部后不随图标淡出）；问候语 flexShrink 兜底窄屏截断，标题保完整。
+      // 标题 + 时间段问候语：常驻显示（上滑出头部后不随图标淡出）。
+      // ⚠️ 保持自然宽，不设 layoutWeight / flexShrink 封顶 —— 封顶会让标题块
+      // 被右侧固定内容挤到不足自身内容宽而出省略号（线上反馈过）；宽度弹性
+      // 全部交给下方 Blank 间距，不足时仅问候语（flexShrink）兜底截断。
       Row({ space: 6 }) {
         Text('BiliMusic')
           .fontSize(22)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_primary'))
           .maxLines(1)
+          // 设置页签隐藏时的恢复入口（外观设置「设置页签」开关关闭后，
+          // 底部导航不再有设置页，这里是唯一恢复路径）：
+          // 写回偏好 + 镜像重发 → Index @Watch 重锚并自动切到设置页签。
+          // 未隐藏时长按无动作（防误触打扰）；显式 LongPressGesture
+          // （HomeQuickCards / ControlAreaComponent 同款，Text 无 onLongPress）。
+          .gesture(
+            LongPressGesture({ repeat: false, duration: 500 })
+              .onAction((): void => {
+                if (this.showSettingsTab) {
+                  return;
+                }
+                // 先把 activeTab 指到设置（此时设置页签尚不可见，写穿不触发切换），
+                // 镜像翻转后 onTabVisibilityChanged 的重锚据此落到设置页签。
+                this.activeTab = TAB_SETTINGS;
+                AppPreferences.updateSettings((s: AppSettings): void => {
+                  s.showSettingsTab = true;
+                });
+                AppStorage.setOrCreate(STORE_SHOW_SETTINGS_TAB, true);
+                showAppToast('设置页签已恢复', 1500);
+              })
+          )
         Text(this.timeGreeting())
           .fontSize(14)
           .fontColor($r('app.color.text_secondary'))
@@ -1579,35 +1720,43 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .alignItems(VerticalAlign.Center)
-      Row({ space: 4 }) {
-        ForEach(
-          HOME_CATEGORY_CHIPS,
-          (item: CategoryChipUi): void => {
-            this.HomeNavTabIcon(item)
-          },
-          (item: CategoryChipUi): string => `nav_${item.key}`
-        )
+      // 四个分类 tab 图标：chip 条滚出导航栏后条件挂载 + OPACITY 转场淡入。
+      // ⚠️ 不用「常驻 + opacity(0)」隐藏 —— 隐藏态仍占 180vp 布局位，列表停在
+      // 顶部时会挤压问候语出省略号；条件挂载让隐藏态零占位。挂载 / 卸载的
+      // 布局变化由 Blank 间距吞掉，标题左锚、按钮右锚均不位移。
+      if (!this.homeChipsActive) {
+        Row({ space: 4 }) {
+          ForEach(
+            HOME_CATEGORY_CHIPS,
+            (item: CategoryChipUi): void => {
+              this.HomeNavTabIcon(item)
+            },
+            (item: CategoryChipUi): string => `nav_${item.key}`
+          )
+        }
+        .margin({ left: 8 })
+        .transition(TransitionEffect.OPACITY.animation({ duration: 200, curve: Curve.EaseOut }))
       }
-      .margin({ left: 8 })
-      .opacity(this.homeChipsActive ? 0 : 1)
-      .hitTestBehavior(this.homeChipsActive ? HitTestMode.None : HitTestMode.Default)
-      .animation({ duration: 200, curve: Curve.EaseOut })
+      // 自适应间距：吃掉标题块与图标组 / 搜索按钮之间的全部剩余宽度，随屏宽
+      // 伸缩（最小 0）；屏宽不足时先收间距、再由上方问候语兜底截断。
       Blank()
-      Button() {
-        SymbolGlyph($r('sys.symbol.magnifyingglass'))
-          .fontSize(20)
-          .fontColor([$r('app.color.text_primary')])
+      // 右上搜索按钮：入口式搜索框滚出视口后条件挂载 + OPACITY 转场淡入
+      //（同上方图标组：隐藏态零占位，不挤左侧标题 / 问候语）。
+      if (!this.homeEntryActive) {
+        Button() {
+          SymbolGlyph($r('sys.symbol.magnifyingglass'))
+            .fontSize(20)
+            .fontColor([$r('app.color.text_primary')])
+        }
+        .type(ButtonType.Circle)
+        .width(40)
+        .height(40)
+        .backgroundColor(Color.Transparent)
+        .transition(TransitionEffect.OPACITY.animation({ duration: 200, curve: Curve.EaseOut }))
+        .onClick((): void => {
+          NavStackHolder.push('Search', undefined);
+        })
       }
-      .type(ButtonType.Circle)
-      .width(40)
-      .height(40)
-      .backgroundColor(Color.Transparent)
-      .opacity(this.homeEntryActive ? 0 : 1)
-      .hitTestBehavior(this.homeEntryActive ? HitTestMode.None : HitTestMode.Default)
-      .animation({ duration: 200, curve: Curve.EaseOut })
-      .onClick((): void => {
-        NavStackHolder.push('Search', undefined);
-      })
     }
     .width('100%')
     .height(NAV_TITLE_BAR_HEIGHT)
@@ -1795,13 +1944,20 @@ struct Index {
               PlaylistsPage()
             }.tabBar(this.tabItem(1, '歌单', $r('sys.symbol.list_bullet')))
 
-            TabContent() {
-              ListenDiaryPage()
-            }.tabBar(this.tabItem(2, '拾音', $r('sys.symbol.waveform_path_ecg_heart')))
+            // 拾音 / 设置页签可隐藏（外观设置开关）：条件渲染 TabContent，
+            // 物理下标由映射层（physicalIndexOf / logicalIndexOf）换算，
+            // activeTab 恒存逻辑 id，两页页内逻辑零改动。
+            if (this.showDiaryTab) {
+              TabContent() {
+                ListenDiaryPage()
+              }.tabBar(this.tabItem(2, '拾音', $r('sys.symbol.waveform_path_ecg_heart')))
+            }
 
-            TabContent() {
-              SettingsPage()
-            }.tabBar(this.tabItem(3, '设置', $r('sys.symbol.gearshape')))
+            if (this.showSettingsTab) {
+              TabContent() {
+                SettingsPage()
+              }.tabBar(this.tabItem(3, '设置', $r('sys.symbol.gearshape')))
+            }
           }
           .vertical(false)
           .barPosition(BarPosition.End)
@@ -1822,7 +1978,12 @@ struct Index {
           // 属性恒定 → 悬浮栏不重排。冷启动恢复上次页签由 aboutToAppear 的
           // 100ms 延迟块一次性 changeIndex()。
           .onChange((index: number): void => {
-            this.activeTab = index;
+            // 物理下标 → 逻辑 id 后回写（拾音 / 设置可隐藏，两者不再恒等）；
+            // 越界回调（重锚竞态，理论不可达）守卫跳过，保住旧值。
+            const logical: number = this.logicalIndexOf(index);
+            if (logical >= 0) {
+              this.activeTab = logical;
+            }
           })
           .barFloatingStyle(this.barFloatingStyle())
           .width('100%')
