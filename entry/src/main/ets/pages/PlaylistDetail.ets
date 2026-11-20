@@ -72,11 +72,13 @@ import {
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
+  PairDataSource,
   makePairs,
   TWO_COL_GAP_VP,
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { showAppToast } from '../components/AppToast';
 import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
@@ -111,6 +113,11 @@ function delay(ms: number): Promise<void> {
       resolve();
     }, ms);
   });
+}
+
+/** 配对行 ForEach/LazyForEach 的 key：两列 id 拼接（缺右列用 'x' 占位） */
+function pairKeyOf(pair: PairOf<Track>): string {
+  return `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`;
 }
 
 /**
@@ -262,6 +269,16 @@ export struct PlaylistDetail {
    */
   @State tracks: Track[] = [];
 
+  /**
+   * LazyForEach 驱动源（非多选态挂载；多选态 ForEach 读 this.tracks，双路径纪律
+   * 见下方各 *TrackItems @Builder）：与 tracks 切片保持同步 —— load / 搜索 /
+   * 排序走 syncTrackSource() 整表重载，onReachEnd / 定位扩切片走 append
+   * （只通知新增下标，可视区已建节点不重建、滚动锚点不重算）。
+   */
+  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  /** 两列视图数据源（无状态视图）：trackSource 变化处显式 sync() */
+  private trackPairs: PairDataSource<Track> = new PairDataSource<Track>(this.trackSource);
+
   /** 搜索框文本：输入即本地过滤歌单内曲目（onChange 显式调 onKeywordChanged，不走 @Watch —— UpSpacePage 同款显式调用风格） */
   @State searchKeyword: string = '';
   /**
@@ -390,7 +407,14 @@ export struct PlaylistDetail {
         ids.push(t.musicId);
       }
     }
+    // 集合没变就不动数据源：下载快照每 500ms 推一次（进度推进也推），
+    // LazyForEach 徽标靠整表重载刷新，无差别 reload 会让列表在下载中频繁重建。
+    const changed: boolean = ids.length !== this.downloadedIds.length
+      || ids.some((id: string): boolean => this.downloadedIds.indexOf(id) < 0);
     this.downloadedIds = ids;
+    if (changed) {
+      this.syncTrackSource();
+    }
   }
 
   /**
@@ -454,6 +478,16 @@ export struct PlaylistDetail {
     const all: Track[] = this.activeSource();
     const keep: number = Math.max(this.tracks.length, PD_REVEAL_PAGE_SIZE);
     this.tracks = all.slice(0, Math.min(keep, all.length));
+    this.syncTrackSource();
+  }
+
+  /**
+   * tracks 切片整表同步进 LazyForEach 数据源（换源 / 重排 / 删改后调用）：
+   * 整表 reload + 两列视图 sync。可视区外的节点按需重建，滚动锚点保持。
+   */
+  private syncTrackSource(): void {
+    this.trackSource.reload(this.tracks);
+    this.trackPairs.sync();
   }
 
   /** 是否还有未揭示的曲目（底部状态行与 onReachEnd 闸门共用；搜索态对匹配数组比较） */
@@ -471,12 +505,17 @@ export struct PlaylistDetail {
       return;
     }
     // 增量揭示（SearchPage.revealMoreRanking 同款）：push 揭示区间，
-    // 不再 slice 整表重新赋值，ForEach 只 diff 新增 key。
+    // 不再 slice 整表重新赋值；LazyForEach 走 append（只通知新增下标，
+    // 滚动中不整表重建、不跳变），两列视图无状态、显式 sync。
     const from: number = this.tracks.length;
     const next: number = Math.min(from + PD_REVEAL_PAGE_SIZE, all.length);
+    const added: Track[] = [];
     for (let i = from; i < next; i++) {
       this.tracks.push(all[i]);
+      added.push(all[i]);
     }
+    this.trackSource.append(added);
+    this.trackPairs.sync();
   }
 
   // ===== 歌单内搜索（纯本地过滤，无远程搜索）=====
@@ -516,6 +555,7 @@ export struct PlaylistDetail {
       this.filterDebounceTimer = -1;
       this.applyLocalFilter();
       this.tracks = this.activeSource().slice(0, PD_REVEAL_PAGE_SIZE);
+      this.syncTrackSource();
     }, SEARCH_FILTER_DEBOUNCE_MS);
   }
 
@@ -532,6 +572,7 @@ export struct PlaylistDetail {
     this.searchKeyword = '';
     this.applyLocalFilter();
     this.tracks = this.activeSource().slice(0, PD_REVEAL_PAGE_SIZE);
+    this.syncTrackSource();
   }
 
   /**
@@ -590,12 +631,16 @@ export struct PlaylistDetail {
       return;
     }
     // 目标在未揭示区（前端分页切片之外）：扩切片到含目标（+1 便于居中后有上下文；
-    // 增量 push 揭示区间，ForEach 只 diff 新增 key，onReachEnd 同款）。
+    // 增量 push 揭示区间 + LazyForEach append，onReachEnd 同款）。
     if (target >= this.tracks.length) {
       const next: number = Math.min(target + 1, all.length);
-      for (let i: number = this.tracks.length; i < next; i++) {
+      const added: Track[] = [];
+      for (let i = this.tracks.length; i < next; i++) {
         this.tracks.push(all[i]);
+        added.push(all[i]);
       }
+      this.trackSource.append(added);
+      this.trackPairs.sync();
     }
     // List 下标换算：首项为顶部占位（+1）；网格 / 两列分支 makePairs 配对
     //（每个 ListItem 两个曲目，÷2 取行）；单列直接用曲目下标。
@@ -661,6 +706,10 @@ export struct PlaylistDetail {
     const target: number = Math.max(0, Math.min(to, next.length));
     next.splice(target, 0, moved);
     this.tracks = next;
+    // LazyForEach 数据源先行同步（onMove 官方口径：回调内同步改数据源、
+    // 仅顺序变化，落位动画才正常）；随后的 load() 重切为同序，幂等。
+    this.trackSource.move(from, target);
+    this.trackPairs.sync();
     LibraryStore.movePlaylistTrack(p.id, moved.id, target);
   }
 
@@ -1866,6 +1915,127 @@ export struct PlaylistDetail {
     .width('100%')
   }
 
+  /**
+   * 大封面网格配对行（ListItem 内容）：LazyForEach / ForEach 双渲染路径共用。
+   * 选择态在这读取（UpSpacePage.GridPairRow 同款）：ForEach 路径（多选态挂载）
+   * 随页面 @State 重跑 builder 就地更新勾选；LazyForEach 路径仅在非多选态挂载，
+   * 选择态恒为关。
+   */
+  @Builder
+  GridPairRow(pair: PairOf<Track>): void {
+    Row() {
+      TrackCard({
+        track: pair.first,
+        downloaded: this.isDownloaded(pair.first),
+        onPlay: (tr: Track): void => {
+          this.onRowPlay(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+        selecting: this.selecting,
+        selected: this.selectedIds.indexOf(pair.first.id) >= 0,
+        onToggleSelect: (tr: Track): void => {
+          this.toggleSelected(tr);
+        }
+      }).layoutWeight(1)
+      // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+      // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+      // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+      // 间隔条，末卡与满行卡等宽。
+      Blank().width(TWO_COL_GAP_VP)
+      if (pair.second !== null) {
+        TrackCard({
+          track: pair.second,
+          downloaded: this.isDownloaded(pair.second),
+          onPlay: (tr: Track): void => {
+            this.onRowPlay(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+          selecting: this.selecting,
+          selected: this.selectedIds.indexOf(pair.second.id) >= 0,
+          onToggleSelect: (tr: Track): void => {
+            this.toggleSelected(tr);
+          }
+        }).layoutWeight(1)
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+    // 网格行页边距：两边留白 + 封面整体
+    // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+    .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+    // Top 对齐：卡高随标题行数浮动，
+    // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
+    // Top 让左右封面严格同高起步。
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /** 横屏宽屏配对行（ListItem 内容）：双渲染路径共用，选择态读取见 GridPairRow */
+  @Builder
+  TwoColPairRow(pair: PairOf<Track>, pIndex: number): void {
+    Row() {
+      TrackItem({
+        track: pair.first,
+        entranceIndex: pIndex * 2,
+        // 已下载徽标：LazyForEach 路径靠 rebuildDownloadedIds 集合变化时
+        // syncTrackSource 整表重载刷新（见其注释）
+        downloaded: this.isDownloaded(pair.first),
+        onPlay: (tr: Track): void => {
+          this.onRowPlay(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+        selecting: this.selecting,
+        selected: this.selectedIds.indexOf(pair.first.id) >= 0,
+        onToggleSelect: (tr: Track): void => {
+          this.toggleSelected(tr);
+        }
+      }).layoutWeight(1)
+      if (pair.second !== null) {
+        TrackItem({
+          track: pair.second,
+          entranceIndex: pIndex * 2 + 1,
+          downloaded: this.isDownloaded(pair.second),
+          onPlay: (tr: Track): void => {
+            this.onRowPlay(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+          selecting: this.selecting,
+          selected: this.selectedIds.indexOf(pair.second.id) >= 0,
+          onToggleSelect: (tr: Track): void => {
+            this.toggleSelected(tr);
+          }
+        }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+  }
+
+  /** 单列行（ListItem 内容）：双渲染路径共用，选择态读取见 GridPairRow */
+  @Builder
+  SingleTrackRow(t: Track, index: number): void {
+    TrackItem({
+      track: t,
+      entranceIndex: index,
+      // 已下载徽标：LazyForEach 路径靠 rebuildDownloadedIds 集合变化时
+      // syncTrackSource 整表重载刷新，与下载页「正在播放」（@StorageProp
+      // 组件内自订阅）不同——downloaded 是 @Prop，页面级重载才回得来
+      downloaded: this.isDownloaded(t),
+      onPlay: (tr: Track): void => {
+        this.onRowPlay(tr);
+      },
+      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+      selecting: this.selecting,
+      selected: this.selectedIds.indexOf(t.id) >= 0,
+      onToggleSelect: (tr: Track): void => {
+        this.toggleSelected(tr);
+      }
+    })
+  }
+
   build() {
     HdsNavDestination() {
       Stack() {
@@ -1888,161 +2058,102 @@ export struct PlaylistDetail {
                   .width('100%')
                   .height(this.barTotalHeight())
               }
-               // 条目渲染（SearchPage 同款）：@State tracks 切片数组直接驱动 ForEach。
-               // 多选三件套（selecting / selected / onToggleSelect）直接接线：
-               // 本页三分支全部是 ForEach（无需 UpSpacePage 的 ForEach/LazyForEach
-               // 双路径），@State 变化重跑 itemGenerator 就地更新勾选回显。
-               // 长按拖动排序：ForEach.onMove 是官方推荐路线（系统自带
-              // 浮起/让位动画 + 拖到列表边缘自动滚动；List.onItemDragStart 路线拖到
-              // 边缘不滚动，见 list.d.ts 注释）。onMove 下标限定在 ForEach 数据
-              //（this.tracks 切片）内，自动避开首尾占位/状态条目；系统只在**松手后**
-              // 回调一次，落库与刷新见 onTrackMove。
-              // 收藏夹镜像禁用：canReorder() 为 false 时传 undefined = 不注册，
-              // 长按不浮起（顺序由 B 站服务端决定，完整同步会覆盖手动顺序）。
-              //
+               // 条目渲染（UpSpacePage 同款双路径纪律）：
+               // 非多选走 LazyForEach（trackSource / trackPairs 按需建行，
+               // 千首歌单首屏不再全量构建节点），多选走 ForEach（读 @State tracks，
+               // 随页面 @State 重跑 itemGenerator 就地更新勾选回显 ——
+               // LazyForEach 只认数据源通知，选择态 @Prop 不会随 @State 同步）；
+               // 进出多选切换渲染控件的一次性整表重建视为模式转场。
+               // 多选三件套（selecting / selected / onToggleSelect）在行 @Builder
+               //（GridPairRow / TwoColPairRow / SingleTrackRow）内接线。
+               // 长按拖动排序：onMove 是官方推荐路线（系统自带
+               // 浮起/让位动画 + 拖到列表边缘自动滚动；List.onItemDragStart 路线拖到
+               // 边缘不滚动，见 list.d.ts 注释）。onMove 下标限定在渲染数据
+               //（this.tracks 切片）内，自动避开首尾占位/状态条目；系统只在**松手后**
+               // 回调一次，落库与刷新见 onTrackMove。
+               // 收藏夹镜像禁用：canReorder() 为 false 时传 undefined = 不注册，
+               // 长按不浮起（顺序由 B 站服务端决定，完整同步会覆盖手动顺序）。
+               //
                // 横屏宽屏：不可排序歌单条目配对，每个
-              // ListItem 左右两列；可排序歌单（isTwoCol() 已含 !canReorder 门控）
-              // 走单列 + onMove，拖动排序不受影响。
-              //
+               // ListItem 左右两列；可排序歌单（isTwoCol() 已含 !canReorder 门控）
+               // 走单列 + onMove，拖动排序不受影响。
+               //
                // 大封面模式（外观设置「条目展示」）：不可排序歌单
-              // （收藏夹镜像等）的曲目配对成双列网格卡（TrackCard），竖屏 /
-              // 横屏均双列；可排序歌单恒为长条（isGrid() 已含 !canReorder 门控，
-              // 拖动排序优先于展示样式）。已下载徽标读 @State downloadedIds。
+               //（收藏夹镜像等）的曲目配对成双列网格卡（TrackCard），竖屏 /
+               // 横屏均双列；可排序歌单恒为长条（isGrid() 已含 !canReorder 门控，
+               // 拖动排序优先于展示样式）。已下载徽标读 @State downloadedIds
+               //（LazyForEach 路径的刷新机制见 rebuildDownloadedIds）。
               if (this.isGrid()) {
-                ForEach(
-                  makePairs<Track>(this.tracks),
-                  (pair: PairOf<Track>): void => {
-                    ListItem() {
-                        Row() {
-                          TrackCard({
-                            track: pair.first,
-                            downloaded: this.isDownloaded(pair.first),
-                            onPlay: (tr: Track): void => {
-                              this.onRowPlay(tr);
-                            },
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                            selecting: this.selecting,
-                            selected: this.selectedIds.indexOf(pair.first.id) >= 0,
-                            onToggleSelect: (tr: Track): void => {
-                              this.toggleSelected(tr);
-                            }
-                          }).layoutWeight(1)
-                         // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
-                         // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
-                         // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
-                         // 间隔条，末卡与满行卡等宽。
-                         Blank().width(TWO_COL_GAP_VP)
-                          if (pair.second !== null) {
-                            TrackCard({
-                              track: pair.second,
-                              downloaded: this.isDownloaded(pair.second),
-                              onPlay: (tr: Track): void => {
-                                this.onRowPlay(tr);
-                              },
-                              moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                              selecting: this.selecting,
-                              selected: this.selectedIds.indexOf(pair.second.id) >= 0,
-                              onToggleSelect: (tr: Track): void => {
-                                this.toggleSelected(tr);
-                              }
-                            }).layoutWeight(1)
-                         } else {
-                           // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
-                           Blank().layoutWeight(1)
-                         }
-                       }
-                       .width('100%')
-                        // 网格行页边距：两边留白 + 封面整体
-                       // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
-                       .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
-                        // Top 对齐：卡高随标题行数浮动，
-                       // Row 默认 Center 会把矮卡垂直居中 → 左右封面错位；
-                       // Top 让左右封面严格同高起步。
-                       .alignItems(VerticalAlign.Top)
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
-              } else if (this.isTwoCol()) {
-                ForEach(
-                  makePairs<Track>(this.tracks),
-                  (pair: PairOf<Track>, pIndex: number): void => {
-                    ListItem() {
-                      Row() {
-                         TrackItem({
-                           track: pair.first,
-                            entranceIndex: pIndex * 2,
-                            // 已下载徽标：读 @State downloadedIds，下载完成的
-                            // 快照到达时可见行局部刷新出徽标
-                            downloaded: this.isDownloaded(pair.first),
-                            onPlay: (tr: Track): void => {
-                              this.onRowPlay(tr);
-                            },
-                           moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                           selecting: this.selecting,
-                           selected: this.selectedIds.indexOf(pair.first.id) >= 0,
-                           onToggleSelect: (tr: Track): void => {
-                             this.toggleSelected(tr);
-                           }
-                         }).layoutWeight(1)
-                         if (pair.second !== null) {
-                           TrackItem({
-                             track: pair.second,
-                              entranceIndex: pIndex * 2 + 1,
-                              downloaded: this.isDownloaded(pair.second),
-                              onPlay: (tr: Track): void => {
-                                this.onRowPlay(tr);
-                              },
-                             moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                             selecting: this.selecting,
-                             selected: this.selectedIds.indexOf(pair.second.id) >= 0,
-                             onToggleSelect: (tr: Track): void => {
-                               this.toggleSelected(tr);
-                             }
-                           }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
-                          Blank().layoutWeight(1)
-                        }
+                if (this.selecting) {
+                  ForEach(
+                    makePairs<Track>(this.tracks),
+                    (pair: PairOf<Track>): void => {
+                      ListItem() {
+                        this.GridPairRow(pair)
                       }
-                      .width('100%')
-                    }
-                  },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
-                )
+                    },
+                    pairKeyOf
+                  )
+                } else {
+                  LazyForEach(
+                    this.trackPairs,
+                    (pair: PairOf<Track>): void => {
+                      ListItem() {
+                        this.GridPairRow(pair)
+                      }
+                    },
+                    pairKeyOf
+                  )
+                }
+              } else if (this.isTwoCol()) {
+                if (this.selecting) {
+                  ForEach(
+                    makePairs<Track>(this.tracks),
+                    (pair: PairOf<Track>, pIndex: number): void => {
+                      ListItem() {
+                        this.TwoColPairRow(pair, pIndex)
+                      }
+                    },
+                    pairKeyOf
+                  )
+                } else {
+                  LazyForEach(
+                    this.trackPairs,
+                    (pair: PairOf<Track>, pIndex: number): void => {
+                      ListItem() {
+                        this.TwoColPairRow(pair, pIndex)
+                      }
+                    },
+                    pairKeyOf
+                  )
+                }
               } else {
-                ForEach(
-                  this.tracks,
-                  (t: Track, index: number): void => {
-                    ListItem() {
-                     TrackItem({
-                         track: t,
-                         entranceIndex: index,
-                          // 已下载徽标：读 @State downloadedIds，
-                          // 下载完成的快照到达时可见行局部刷新出徽标（保留节点读
-                          // @State 是活的，与下载页「正在播放」同一机制）
-                          downloaded: this.isDownloaded(t),
-                          onPlay: (tr: Track): void => {
-                            this.onRowPlay(tr);
-                          },
-                         moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                         selecting: this.selecting,
-                         selected: this.selectedIds.indexOf(t.id) >= 0,
-                         onToggleSelect: (tr: Track): void => {
-                           this.toggleSelected(tr);
-                         }
-                       })
-                    }
-                  },
-                  (t: Track): string => t.id
-                )
-                  .onMove(this.canReorder() && !this.selecting && this.searchKeyword.trim().length === 0
-                    ? (from: number, to: number): void => {
-                      this.onTrackMove(from, to);
-                    }
-                    : undefined)
+                if (this.selecting) {
+                  ForEach(
+                    this.tracks,
+                    (t: Track, index: number): void => {
+                      ListItem() {
+                        this.SingleTrackRow(t, index)
+                      }
+                    },
+                    (t: Track): string => t.id
+                  )
+                } else {
+                  LazyForEach(
+                    this.trackSource,
+                    (t: Track, index: number): void => {
+                      ListItem() {
+                        this.SingleTrackRow(t, index)
+                      }
+                    },
+                    (t: Track): string => t.id
+                  )
+                    .onMove(this.canReorder() && !this.selecting && this.searchKeyword.trim().length === 0
+                      ? (from: number, to: number): void => {
+                        this.onTrackMove(from, to);
+                      }
+                      : undefined)
+                }
               }
               // 搜索状态行（关键词激活时常驻，UpSpacePage footer 口径对齐）：
               // 命中 N 首给计数，0 命中给人话提示。
