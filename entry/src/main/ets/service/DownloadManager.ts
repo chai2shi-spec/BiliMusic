@@ -133,6 +133,16 @@ const DOWNLOAD_MAX_ATTEMPTS: number = 3;
 const RETRY_BASE_DELAY_MS: number = 2000;
 /** 退避等待期间的轮询间隔（ms）：为了能及时响应「全部暂停」） */
 const RETRY_WAIT_POLL_MS: number = 100;
+/**
+ * 快照推送节流窗口（ms，leading + trailing）。
+ *
+ * http 的 dataReceiveProgress 每 200ms 回调一次、dataReceive 更密，每次 notify
+ * 都全量重建快照（tasks.copy + sort）再写 AppStorage，所有 @StorageLink /
+ * ForEach 消费方跟着整表重渲染。下载数十条时这是主线程最大的周期性开销。
+ * 节流到 500ms（2fps 进度刷新，肉眼够用）；trailing 定时器保证最终态
+ * （COMPLETED / ERROR / PAUSED）在流停止后必达 —— 上一次调用永远补得回来。
+ */
+const NOTIFY_THROTTLE_MS: number = 500;
 
 /**
  * 「仅 WiFi 下载」被触发时给 UI 的固定文案。
@@ -308,6 +318,10 @@ export class DownloadManager {
   private pausedIds: Set<string> = new Set<string>();
   private loaded: boolean = false;
   private loadingPromise: Promise<void> | null = null;
+  /** 上次快照实际推送时间（notify 节流用） */
+  private lastNotifyPushAt: number = 0;
+  /** 尾沿推送定时器 ID；-1 = 无排队（notify 节流用） */
+  private notifyTrailingTimer: number = -1;
 
   static getInstance(): DownloadManager {
     if (!DownloadManager.instance) {
@@ -491,9 +505,25 @@ export class DownloadManager {
    * 一旦在这里抛出未捕获异常，异常发生在**事件回调**里而不是 Promise 链上，
    * 不会被任何 .catch() 接住 —— 主线程未捕获异常会直接把应用干掉（用户看到的就是「闪退」）。
    * 推送 UI 只是附带效果，绝不能让它成为崩溃源。
+   *
+   * 节流（leading + trailing）：窗口内的调用只挂一个尾沿定时器（已有则不重复挂），
+   * 定时器到期后重入本方法完成推送 —— 最终状态保证落进 AppStorage。
    */
   private notify(): void {
     try {
+      if (this.notifyTrailingTimer !== -1) {
+        // 已有尾沿推送在排队：它会把本次变更一起带走
+        return;
+      }
+      const since: number = Date.now() - this.lastNotifyPushAt;
+      if (since < NOTIFY_THROTTLE_MS) {
+        this.notifyTrailingTimer = setTimeout((): void => {
+          this.notifyTrailingTimer = -1;
+          this.notify();
+        }, NOTIFY_THROTTLE_MS - since);
+        return;
+      }
+      this.lastNotifyPushAt = Date.now();
       const snapshot: DownloadTask[] = [];
       this.tasks.forEach((t: DownloadTask): void => {
         snapshot.push(this.copy(t));
