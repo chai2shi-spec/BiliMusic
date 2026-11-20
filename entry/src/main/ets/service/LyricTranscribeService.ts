@@ -104,11 +104,6 @@ export function isTranscribeSupported(): boolean {
   return canIUse('SystemCapability.AI.SpeechRecognizer');
 }
 
-/** 是否有转写任务进行中（按钮禁用 / 横幅显隐） */
-export function isTranscribeRunning(): boolean {
-  return running;
-}
-
 /**
  * 解析曲目的本地音频源（与 MusicPlayer 本地优先链同口径）：
  * track.localFilePath > 下载完成文件 > 听后缓存。

@@ -45,11 +45,6 @@ export function currentEngineId(): string {
   return thirdPartyEnabled ? currentId : ASR_ENGINE_SYSTEM;
 }
 
-/** 用户选择的引擎 id（即使总开关关闭也保留原值） */
-export function selectedEngineId(): string {
-  return currentId;
-}
-
 /** 第三方引擎总开关是否开启 */
 export function isThirdPartyAsrEnabled(): boolean {
   return thirdPartyEnabled;

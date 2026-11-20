@@ -33,11 +33,6 @@ let running: boolean = false;
 let runSeq: number = 0;
 let activeEngine: AsrEngine | null = null;
 
-/** 是否有第三方转写任务进行中 */
-export function isAsrTranscribeRunning(): boolean {
-  return running;
-}
-
 /**
  * 从 Track 解析本地音频（与 LyricTranscribeService.resolveAudioPath 同口径）：
  * track.localFilePath > 下载完成文件 > 听后缓存。

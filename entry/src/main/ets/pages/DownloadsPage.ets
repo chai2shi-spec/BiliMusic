@@ -63,8 +63,8 @@ import {
 } from '../common/utils/TwoColumnList';
 import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
-import { PRESS_SCALE, PRESS_ANIM_MS, SELECT_SLOT_VP, SELECT_TOGGLE_MS, DOWNLOAD_SMOOTH_MS, BUTTON_RADIUS_VP, NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
-import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
+import { PRESS_SCALE, PRESS_ANIM_MS, SELECT_SLOT_VP, SELECT_TOGGLE_MS, DOWNLOAD_SMOOTH_MS, NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
+import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { HdsTitleBarStyle } from '../utils/HdsTitleBarStyle';
 import { BarNarrowShell } from '../components/BarNarrowShell';

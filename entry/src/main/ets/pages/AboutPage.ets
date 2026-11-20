@@ -9,7 +9,6 @@
 
 import { STORE_SAFE_BOTTOM, STORE_SAFE_TOP } from '../common/Constants';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
-import { NavStackHolder } from '../service/NavStackHolder';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
 import { bundleManager } from '@kit.AbilityKit';

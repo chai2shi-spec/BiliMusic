@@ -252,14 +252,6 @@ export function getCloudDeviceId(): string {
   return state.deviceId;
 }
 
-/**
- * 本机历史安装用过的 deviceId（旧版本随机 UUID 时代留下的目录）。
- * 这些目录里的数据要读（重装后靠它把旧数据拉回来），但**不能算作别的设备**。
- */
-export function getLegacyDeviceIds(): string[] {
-  return state.legacyDeviceIds.slice();
-}
-
 /** 自动读取（打开 App 时拉取云端最新数据），默认开 */
 export function isAutoRead(): boolean {
   return state.autoRead;

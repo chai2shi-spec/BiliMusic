@@ -47,3 +47,9 @@ build_stdout.log
 *.bak*
 backup_*/
 backup/
+.login-port-backup/
+
+# AI session scratch (PuraX outer-screen layout adaptation, 2026-11)
+wb_*.jpeg
+wb2.jpeg
+wb_layout*.json

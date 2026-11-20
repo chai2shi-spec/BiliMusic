@@ -64,43 +64,6 @@ export function makeButtonMaterialModifier(): ButtonMaterialModifier {
 }
 
 /**
- * 输入框沉浸光感材质的属性修饰器：与 ButtonMaterialModifier 同款通路（THIN +
- * interactive + lightEffect），仅类型钉在 TextInputAttribute 上 —— ArkTS 无结构化
- * 泛型复用，按钮版不能直接挂 TextInput，需要本平行类。
- * 材质对象为 undefined（API < 26 / 运行时缺失）时 no-op，输入框自带的链式实色底
- * 即兜底（UP 主页搜索框：bg_card）。
- */
-export class TextInputMaterialModifier implements AttributeModifier<TextInputAttribute> {
-  private material: uiMaterial.ImmersiveMaterial | undefined;
-
-  constructor(material: uiMaterial.ImmersiveMaterial | undefined) {
-    this.material = material;
-  }
-
-  applyNormalAttribute(instance: TextInputAttribute): void {
-    const m: uiMaterial.ImmersiveMaterial | undefined = this.material;
-    if (m === undefined) {
-      return;
-    }
-    try {
-      instance.systemMaterial(m);
-    } catch (e) {
-      console.error(`apply textInput systemMaterial failed: ${JSON.stringify(e)}`);
-    }
-  }
-}
-
-/**
- * 生成输入框用 THIN 档交互材质修饰器：
- * UP 主页头部搜索框（与同行播放全部 / 订阅投稿 / 搜索按钮同档，玻璃观感统一）。
- */
-export function makeTextInputMaterialModifier(): TextInputMaterialModifier {
-  return new TextInputMaterialModifier(
-    MaterialCompat.immersiveMaterial(MaterialCompatStyle.THIN, { interactive: true, lightEffect: true })
-  );
-}
-
-/**
  * 解析颜色为 ColorMetrics（CapsuleSegmentButtonV2 / Chip 等标准组件的
  * 着色参数用）。入参放宽到 ResourceColor —— 主题切换后主色是 AppStorage 里的
  * hex 字符串而不是资源引用。解析失败返回 undefined —— 组件可空参数回落系统

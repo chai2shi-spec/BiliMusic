@@ -6,9 +6,6 @@
 
 import { AsrLine } from './AsrEngine';
 
-/** 每秒 PCM 字节数：16000 样本 × 2 字节 */
-export const PCM_BYTES_PER_SEC: number = 32000;
-
 /** 每段时长（秒）：28s 留余量 —— sherpa 多数模型输入硬上限 30s，真机日志曾报
  *  「Only waves less than 30 seconds are supported…discard remaining」，留 2s
  *  余量避免段尾被截断丢词（2026-11-19 真机验证时发现）。 */

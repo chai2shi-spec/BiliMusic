@@ -26,7 +26,6 @@ import { MusicPlayer } from '../player/MusicPlayer';
 import { TrackItem } from '../components/TrackItem';
 import { TrackCard } from '../components/TrackCard';
 import { formatDurationText } from '../utils/TextUtil';
-import { NavStackHolder } from '../service/NavStackHolder';
 import { NAV_TITLE_BAR_HEIGHT } from '../utils/NavTitleStyle';
 import {
   ButtonMaterialModifier,

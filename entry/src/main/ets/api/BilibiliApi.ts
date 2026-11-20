@@ -2664,31 +2664,6 @@ export async function getVideoTags(bvid: string): Promise<string[]> {
 // 另外注意：这里的 duration 是**秒**，跟旧 region 接口的 "0:15" 字符串不是一回事，
 // 两套映射函数不能混用（照抄 detail 字段会让整榜被 catch 成空）。
 
-export interface RankingVideoItem {
-  aid: number;
-  bvid: string;
-  cid: number;
-  title: string;
-  pic: string;
-  owner: VideoOwner;
-  stat: VideoStat;
-  /** 秒 */
-  duration: number;
-  /** 视频发布时间（unix 秒）。原始响应带；可缺 */
-  pubdate?: number;
-  /** 分区名，首页筛选用；可缺 */
-  tname?: string;
-}
-
-/** 全站排行榜（ranking/v2?rid=0，每日更新）。字段与"视频详情"一致：有 owner 对象、有 cid */
-export async function getGlobalRankingV2(): Promise<RankingVideoItem[]> {
-  const data: { list: RankingVideoItem[] } = await biliFetch<{ list: RankingVideoItem[] }>(
-    '/x/web-interface/ranking/v2',
-    { rid: 0, type: 'all' }
-  );
-  return data.list || [];
-}
-
 // ===== 音乐中心（music.bilibili.com 同源） =====
 
 export interface MusicCenterRelatedArchive {

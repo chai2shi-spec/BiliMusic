@@ -120,11 +120,6 @@ export function isAsrDownloadRunning(): boolean {
   return downloadRunning;
 }
 
-/** 模型根目录（SherpaOnnxAsrEngine 加载模型时用） */
-export function getAsrModelsDir(): string {
-  return modelsDir;
-}
-
 /** 取某个模型已安装到的目录路径 */
 export function getInstalledModelDir(modelId: string): string {
   return `${modelsDir}/${modelId}`;
@@ -730,11 +725,6 @@ export function deleteModel(modelId: string): boolean {
   delete manifest[modelId];
   saveManifest();
   return true;
-}
-
-/** 清理所有模型的临时下载残骸（设置页「清理缓存」可调用） */
-export function clearModelTemp(): void {
-  removeDirRecursively(`${modelsDir}/_tmp`);
 }
 
 /**

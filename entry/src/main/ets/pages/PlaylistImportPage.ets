@@ -20,7 +20,6 @@ import {
   ExternalPlaylist,
   ExternalSong,
   ImportItem,
-  ImportItemStatus,
   ImportPhase,
   ImportState,
   ImportTaskManager,

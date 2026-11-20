@@ -43,7 +43,6 @@ import {
   PLAYER_FUNC_CHAPTERS,
   PLAYER_FUNC_DESC,
   PLAYER_FUNC_FLOAT_LYRIC,
-  AppSettings,
   DEFAULT_FUNC_ITEM_ORDER
 } from '../../model/MusicModels';
 import { AppPreferences } from '../../preferences/AppPreferences';

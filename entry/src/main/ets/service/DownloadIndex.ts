@@ -232,12 +232,3 @@ export async function writeIndex(audioPath: string, task: DownloadTask): Promise
     }
   }
 }
-
-/** 删一份随行索引（音频被删除时调用；不存在 / 失败一律忽略） */
-export function deleteIndex(audioPath: string): void {
-  try {
-    fs.unlinkSync(indexPathOf(audioPath));
-  } catch (e) {
-    // 不存在或权限回收都视为已清理
-  }
-}

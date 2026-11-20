@@ -3,8 +3,8 @@
  *
  * 职责（与 BiliDevice 管理匿名身份的分工）：
  *   1. initLoginState()：启动时把持久化的登录 Cookie 装填进 HttpUtil（登录通道）；
- *   2. applyQrSuccess() / applySmsLoginCookies() / applyAppLogin() / applyImportedCookie()：
- *      网页扫码（双通道：回调 url 参数 / 响应 Set-Cookie 头）/ App 短信（响应头）/
+ *   2. applyQrSuccess() / applyAppLogin() / applyImportedCookie()：
+ *      网页扫码（双通道：回调 url 参数 / 响应 Set-Cookie 头）/
  *      App 端登录（TV 扫码 / 密码 / App 短信，token_info+cookie_info）/ 手动 Cookie 导入，
  *      成功后提取登录 Cookie（白名单解析）并持久化；
  *   3. refreshLoginUser()：拉 nav 接口刷新昵称 / 头像 / VIP 状态，
@@ -184,7 +184,7 @@ export function getLoginCsrf(): string {
 
 /**
  * 落库公共核心：持久化 Cookie / refresh_token → 装填 HttpUtil → 广播版本号。
- * 扫码（applyQrSuccess）与短信（applySmsLoginCookies）两条登录链路共用。
+ * 扫码（applyQrSuccess）与 App 端（applyAppLogin）两条登录链路共用。
  */
 async function persistLoginCookie(cookie: string, refreshToken: string): Promise<void> {
   await AppPreferences.setLoginCookie(cookie);
@@ -234,26 +234,6 @@ export async function applyQrSuccess(
     );
   }
   console.info(`login cookie applied from ${source}`);
-  await persistLoginCookie(cookie, refreshToken);
-}
-
-/**
- * 短信验证码登录成功：从登录响应的 Set-Cookie 串解析登录 Cookie 并落库。
- * 短信链路只有响应头这一条 Cookie 通道（无回调 url），解析复用白名单逻辑。
- *
- * @throws 响应里拿不到 SESSDATA 时抛带诊断元数据（不含凭据值）的错，由短信登录页提示重试
- */
-export async function applySmsLoginCookies(responseCookies: string, refreshToken: string): Promise<void> {
-  const cookie: string = parseLoginCookieFromResponseCookies(responseCookies);
-  if (cookie.indexOf('SESSDATA=') < 0) {
-    throw new Error(
-      `短信登录响应里缺少登录 Cookie ` +
-      `(cookiesLen=${responseCookies.length}, ` +
-      `cookiesHasSessdata=${responseCookies.indexOf('SESSDATA=') >= 0}, ` +
-      `cookieKeys=[${HttpUtil.cookieKeys(responseCookies).join(', ')}])`
-    );
-  }
-  console.info('login cookie applied from sms response cookies');
   await persistLoginCookie(cookie, refreshToken);
 }
 
