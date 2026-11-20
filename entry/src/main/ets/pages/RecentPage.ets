@@ -49,7 +49,6 @@ import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
   PairDataSource,
-  makePairs,
   TWO_COL_GAP_VP,
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
