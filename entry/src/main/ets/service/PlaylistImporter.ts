@@ -20,6 +20,9 @@
  * 进度广播：ImportTaskManager 单例（DownloadManager 的 queue/pump 同款思路），
  * 每处理一首向 AppStorage(STORE_IMPORT_STATE) 广播一份新快照对象，导入向导页
  * @StorageLink + @Watch 订阅；离开页面任务继续跑，回来能看到进度。
+ *
+ * 后台保活：匹配期间经 BackgroundPlayback 协调器申报 DATA_TRANSFER 长时任务，
+ * 应用退后台/锁屏后进程不被系统挂起，任务继续在后台跑；任务结束即撤销申报。
  */
 
 import { HttpUtil } from '../utils/HttpUtil';
@@ -35,6 +38,8 @@ import {
   updatePlaylist
 } from './LibraryStore';
 import { STORE_IMPORT_STATE } from '../common/Constants';
+import { common } from '@kit.AbilityKit';
+import { BackgroundPlayback } from './BackgroundPlayback';
 
 //
 // ─────────────────────────── 模型 ───────────────────────────
@@ -1030,6 +1035,8 @@ export class ImportTaskManager {
   private matchCache: Map<string, CachedMatch> = new Map<string, CachedMatch>();
   /** 节流广播是否已挂起（见 notifyThrottled） */
   private notifyPending: boolean = false;
+  /** 长时任务申报所需上下文（AppContainer.init 注入；未注入时保活申报静默跳过） */
+  private context: common.Context | null = null;
 
   getState(): ImportState {
     return this.state;
@@ -1037,6 +1044,27 @@ export class ImportTaskManager {
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** 注入上下文（AppContainer.init）：长时任务申报需要 Context，页面调用方无感。 */
+  init(context: common.Context): void {
+    this.context = context;
+  }
+
+  /**
+   * 导入任务保活意愿同步给长时任务协调器（fire-and-forget，失败只记日志，
+   * 不传染导入流程 —— 同 DownloadManager.syncTransferTask 范式）。
+   * 匹配在跑（含限流自动退避冷却）期间申报 DATA_TRANSFER；任务结束即撤销。
+   * 协调器内部对 target === currentMode 幂等，重复申报/撤销无副作用。
+   */
+  private syncBgTask(wanted: boolean): void {
+    if (!this.context) {
+      return;
+    }
+    BackgroundPlayback.getInstance().setImportWanted(this.context, wanted)
+      .catch((e: Error): void => {
+        console.error(`sync import bg task failed: ${e.message}`);
+      });
   }
 
   /** 开始新一轮匹配（旧任务必须已结束；sourceName / coverUrl 供落库默认值） */
@@ -1083,6 +1111,7 @@ export class ImportTaskManager {
     this.aborting = false;
     this.matchCache.clear();
     this.running = true;
+    this.syncBgTask(true);
     this.notify();
     this.run();
   }
@@ -1109,6 +1138,7 @@ export class ImportTaskManager {
     this.riskRetries = 0;
     this.aborting = false;
     this.running = true;
+    this.syncBgTask(true);
     this.notify();
     this.run();
   }
@@ -1122,6 +1152,8 @@ export class ImportTaskManager {
   stop(): void {
     this.aborting = true;
     this.running = false;
+    // 用户中断：任务不再跑，立即撤销保活意愿（RISK/STOPPED 态无活动工作）
+    this.syncBgTask(false);
     if (this.state.phase === ImportPhase.MATCHING) {
       this.state.phase = ImportPhase.STOPPED;
       this.state.riskMessage = '';
@@ -1235,6 +1267,7 @@ export class ImportTaskManager {
   reset(): void {
     this.aborting = true;
     this.running = false;
+    this.syncBgTask(false);
     this.state = emptyImportState();
     this.cursor = 0;
     this.done = 0;
@@ -1294,6 +1327,9 @@ export class ImportTaskManager {
         this.state.riskMessage = `已连续 ${this.riskRetries} 次被限流，先暂停（已完成 ${this.done} 首）。稍后点「继续匹配」可接着跑`;
       }
       this.notify();
+      // 任务停摆（RISK 等手动续跑 / 用户中止）：撤销保活。注意自动退避路径
+      // 不经过这里（while 循环未退出），冷却倒计时期间意愿保持不断。
+      this.syncBgTask(false);
       return;
     }
     if (this.running) {
@@ -1305,6 +1341,8 @@ export class ImportTaskManager {
       }
       this.notify();
     }
+    // 匹配完成（DONE）：撤销保活申报
+    this.syncBgTask(false);
   }
 
   /**

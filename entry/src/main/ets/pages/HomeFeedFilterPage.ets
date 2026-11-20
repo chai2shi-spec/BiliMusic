@@ -24,8 +24,10 @@ import {
   CONTENT_END_OFFSET,
   STORE_SAFE_BOTTOM,
   STORE_SAFE_TOP,
-  STORE_THEME_PRIMARY
+  STORE_THEME_PRIMARY,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { SelectDialog, CustomContentDialog } from '@kit.ArkUI';
 import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
@@ -69,6 +71,12 @@ export struct HomeFeedFilterPage {
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   /** 主题色（开关选中色 / chips 选中底色） */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：编辑器面板滚动区的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   /**
    * 本页编辑的配置副本：进页时从 store 取深拷贝，每次修改后整体重赋值
    * （接口对象嵌套属性变更不触发 V1 刷新，拷贝重赋值是可靠口径）再提交，
@@ -857,8 +865,9 @@ export struct HomeFeedFilterPage {
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
       // FIT_CONTENT 面板：滚动区必须有高度上限，否则内容测量不出边界；
-      // 短名单时面板收到内容高度（不再像 LARGE 那样占满九成屏幕留一大片空）
-      .constraintSize({ maxHeight: 360 })
+      // 短名单时面板收到内容高度（不再像 LARGE 那样占满九成屏幕留一大片空）。
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防面板连装饰超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 360) })
 
       if (this.editorMode === 'scheme') {
         this.SchemeAddRow()

@@ -1,0 +1,4689 @@
+/**
+ * B 站 API 服务层（原生 ArkTS 版），使用 HttpUtil + WBI 签名。
+ * 所有请求自动携带 Referer / buvid Cookie（HttpUtil 统一处理），登录后追加 SESSDATA。
+ *
+ * 扫码登录（passport web 接口）：生成 / 轮询 / nav / 登出见文件末尾
+ * 「扫码登录」一节。密码 / 短信登录依赖极验验证码，第三方客户端无法内置，不做。
+ * buvid 能力（设备指纹）与登录无关，在 `service/BiliDevice.ts`。
+ */
+
+import { HttpUtil, HttpTextResult } from '../utils/HttpUtil';
+import { toHttpsUrl, stripHtmlTags, decodeHtmlEntities } from '../utils/TextUtil';
+import { encodeWbi } from './WbiSign';
+import { gaiaWebParams } from '../utils/RiskShield';
+import { appSignQuery, appSignQueryWith } from '../utils/AppSign';
+import { sleep } from '../utils/AsyncUtil';
+import { CdnLineOption, effectiveCdnLine, replaceUposHost } from '../utils/CdnLine';
+import { recordPlaybackLog, PLAYBACK_LOG_WARN } from '../service/PlaybackLogStore';
+import http from '@ohos.net.http';
+import {
+  AUDIO_Q_64K,
+  AUDIO_Q_132K,
+  AUDIO_Q_192K,
+  AUDIO_Q_DOLBY,
+  AUDIO_Q_HIRES,
+  BILI_API,
+  BILI_APP_UA,
+  BILI_LIVE_API,
+  BILI_PASSPORT,
+  BILI_TV_UA
+} from '../common/Constants';
+import {
+  AudioStream,
+  DashData,
+  DolbyData,
+  DurlItem,
+  FlacStream,
+  PlayUrlData,
+  ReplyItem,
+  ReplyMainData,
+  SeasonEpisode,
+  SearchResultItem,
+  TopReplyResult,
+  Track,
+  TrackSource,
+  UgcSeason,
+  VideoDetail,
+  VideoOwner,
+  VideoPageInfo,
+  VideoStat,
+  buildTrack
+} from '../model/MusicModels';
+
+export { SearchResultItem };
+
+export class BiliApiError extends Error {
+  code: number;
+  path: string;
+
+  constructor(code: number, message: string, path: string) {
+    super(`BiliBili API Error [${code}]: ${message} (${path})`);
+    this.code = code;
+    this.path = path;
+  }
+}
+
+interface BiliEnvelope<T> {
+  code: number;
+  message: string;
+  data: T;
+}
+
+async function biliFetch<T>(
+  path: string,
+  params?: Record<string, string | number>,
+  anonymous: boolean = false
+): Promise<T> {
+  // ⚠️ 真机/平板实测：走 `params`（ohos 的 queryParams）时，
+  // `/x/web-interface/view` 拿到的是「没有 bvid」的空请求 → `-400 请求错误`
+  //（同一 bvid 用 curl 直连是 code=0）。工程里能用的 GET（搜索 / 推荐）
+  // 全是把 query 直接拼进 URL 的，这里统一成同一口径：
+  // **参数内联到 URL**，不依赖 queryParams。
+  let url: string = `${BILI_API}${path}`;
+  if (params) {
+    const parts: string[] = [];
+    const keys: string[] = Object.keys(params);
+    for (let i = 0; i < keys.length; i++) {
+      parts.push(`${encodeURIComponent(keys[i])}=${encodeURIComponent(String(params[keys[i]]))}`);
+    }
+    if (parts.length > 0) {
+      url = `${url}?${parts.join('&')}`;
+    }
+  }
+  // anonymous = 不带登录 Cookie（buvid 保留）：账号级风控的匿名降级重试用，
+  // 见 extractAudioFromVideo 的通道选择说明。
+  const data: BiliEnvelope<T> = await HttpUtil.requestJson<BiliEnvelope<T>>(
+    url, anonymous ? { skipLoginCookie: true } : undefined);
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, path);
+  }
+  return data.data;
+}
+
+/**
+ * B 站**表单 POST**（`application/x-www-form-urlencoded`），与 `biliFetch` 同口径：
+ * `code !== 0` 抛 `BiliApiError`。
+ *
+ * 为什么必须另写一个：`biliFetch` 只能发 GET（参数走 queryParams），而 B 站的
+ * 收藏写接口（收藏 / 取消收藏）要求 `csrf`（bili_jct）走**表单体**，发到 query 上会被拒。
+ * 表单体格式对齐已有的 `revokeLogin`（见文件末尾「扫码登录」一节）。
+ */
+async function biliPost<T>(path: string, form: Record<string, string | number>): Promise<T> {
+  const parts: string[] = [];
+  const keys: string[] = Object.keys(form);
+  for (let i = 0; i < keys.length; i++) {
+    parts.push(`${encodeURIComponent(keys[i])}=${encodeURIComponent(String(form[keys[i]]))}`);
+  }
+  const data: BiliEnvelope<T> = await HttpUtil.requestJson<BiliEnvelope<T>>(`${BILI_API}${path}`, {
+    method: http.RequestMethod.POST,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: parts.join('&')
+  });
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, path);
+  }
+  return data.data;
+}
+
+//
+// 为什么必须有：`extractAudioFromVideo` 是「view → playurl」**两次串行请求**，
+// 任意一次瞬时失败，整首歌就被判定为「无法播放」。
+//
+// 而线上对照实验证明服务端这条链路 100% 正常：
+//   官方 buvid / 本地伪 buvid / 完全不带 Cookie → 全部 code=0 且 dash.audio 有 3 条；
+//   并发 8 路（音乐中心 + 推荐 + 热门 + view + playurl×2 + nav + spi）→ 全部成功；
+//   同一 buvid 连续 6 次 playurl → 每次都是 code=0，0.15s 返回。
+// 所以客户端报「无法播放」只可能来自**瞬态**：连接冷启动、HTTP 连接池被同刻的
+// 其它请求挤满、Wi-Fi/蜂窝切换瞬间被拒、或 B 站短时的 -352 / -412 / -509 限流。
+//
+// 这类失败的特征恰恰是「隔几百毫秒再发一次就好」——用户描述的
+// 「点一次失败、点两次有概率、点三次大概率能播」就是它在手动重试。
+// 与其让用户点三次，不如在这里自动退避重试。
+
+/** 退避间隔（ms）：最多 3 次重试、合计约 2.45s，足以覆盖绝大多数瞬态抖动 */
+const SOURCE_RETRY_DELAYS_MS: number[] = [250, 700, 1500];
+/** 值得重试的业务码：B 站瞬时风控 / 限流，隔一会儿往往自行恢复 */
+export const RETRYABLE_BIZ_CODES: number[] = [-352, -412, -509, -799];
+
+/**
+ * 判定错误是否值得重试。
+ * 确定性缺陷（无音轨 / 数据本身缺失）重试多少次结果都一样，直接放弃，
+ * 免得把「这首歌真的没有音频」拖慢成三倍等待。
+ */
+function isRetryableFetchError(e: Object): boolean {
+  if (e instanceof BiliApiError) {
+    return RETRYABLE_BIZ_CODES.indexOf(e.code) >= 0;
+  }
+  if (e instanceof Error) {
+    const msg: string = e.message;
+    if (msg.indexOf('No audio stream') >= 0) {
+      return false;
+    }
+    // 网络层错误（超时 / 连接被拒 / DNS 失败 / 响应解析失败）都值得重试
+    return true;
+  }
+  return true;
+}
+
+/**
+ * 带退避重试的 biliFetch。
+ * **只用于「决定这首歌能不能出声」的音源解析链路**，不要拿去包普通列表接口：
+ * 列表失败用户会自己下拉刷新，音源失败则完全没有替代路径。
+ */
+async function biliFetchRetry<T>(
+  path: string,
+  params: Record<string, string | number>,
+  tag: string,
+  anonymous: boolean = false
+): Promise<T> {
+  const total: number = SOURCE_RETRY_DELAYS_MS.length;
+  for (let attempt = 0; attempt <= total; attempt++) {
+    try {
+      return await biliFetch<T>(path, params, anonymous);
+    } catch (err) {
+      const left: number = total - attempt;
+      if (left <= 0 || !isRetryableFetchError(err)) {
+        throw err;
+      }
+      const delay: number = SOURCE_RETRY_DELAYS_MS[attempt];
+      console.warn(`${tag} failed (attempt ${attempt + 1}/${total + 1}), retry in ${delay}ms: ${JSON.stringify(err)}`);
+      await sleep(delay);
+    }
+  }
+  // 循环内要么 return 要么 throw，这里只是让类型收敛
+  throw new Error(`${tag} failed after retry`);
+}
+
+export interface SearchResponse {
+  seid: string;
+  page: number;
+  pagesize: number;
+  numResults: number;
+  numPages: number;
+  result: SearchResultItem[];
+}
+
+/**
+ * 搜索结果标题清洗。
+ *
+ * **API 通道返回的是未解码的原始标题**（真机实测）：带引号的稿件，
+ * `/x/web-interface/wbi/search/type` 给的是 `&quot;虚妄堆起了虚妄山…&quot; DOUDOU《…》`。
+ * 不解码会造成两个后果，而且第二个很隐蔽：
+ *   ① 歌单里存成 `&quot;…&quot;`，用户可见的脏字符；
+ *   ② 拿它当关键词去搜歌词时，query 里真的带着 `&quot`（hilog 里可见
+ *      `s=%E5%AE%9D%E8%88%B9%20%26quot%20…`），命中率直接归零。
+ * HTML 兜底通道（`parseSearchCardHtml`）已解码，本函数把 API 通道对齐。
+ *
+ * 顺序与 HTML 通道保持一致：先解实体、再剥标签（`&lt;em&gt;` 解出来才剥得掉）。
+ */
+function sanitizeSearchResponse(resp: SearchResponse): SearchResponse {
+  if (!Array.isArray(resp.result)) {
+    return resp;
+  }
+  const list: SearchResultItem[] = resp.result;
+  for (let i: number = 0; i < list.length; i++) {
+    const raw: string = list[i].title ?? '';
+    list[i].title = stripHtmlTags(decodeHtmlEntities(raw));
+  }
+  return resp;
+}
+
+export async function searchVideo(
+  keyword: string,
+  page: number = 1,
+  pageSize: number = 20
+): Promise<SearchResponse> {
+  const query: string = await encodeWbi({
+    search_type: 'video',
+    keyword: keyword,
+    page: page,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SearchResponse> = await HttpUtil.requestJson<BiliEnvelope<SearchResponse>>(
+    `${BILI_API}/x/web-interface/wbi/search/type?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/wbi/search/type');
+  }
+  return sanitizeSearchResponse(data.data);
+}
+
+//
+// ────────── HTML 搜索页兜底通道 ──────────
+//
+/**
+ * API 搜索是**按 IP 计量**的硬配额，长歌单必然撞墙，撞墙后整批「未找到」。
+ *
+ * 实测（本机，PC UA + buvid）：
+ *   · `/x/web-interface/wbi/search/type` 干净起步第 **48** 次请求 → HTTP 412；
+ *   · 撞墙后换全新 buvid / 不带任何 Cookie / 换 iPhone UA → **全部仍然 412**
+ *     （所以限流跟设备指纹无关，是 IP 维度）；封禁持续 **9 分钟以上**未恢复；
+ *   · 同一时刻 `search.bilibili.com/all?keyword=` 的 **HTML 页仍返回 200**，
+ *     且压测 40/40 次全部正常，每页 41~42 张卡片。
+ *
+ * 所以走 HTML 页兜底：SSR 卡片里 bvid / 标题 / UP 主 / mid / 时长 / 封面都在，够打分。
+ * 拿不到的三项（aid / 播放量 / 发布时间）填空值 —— 它们只影响「同分时按播放量排序」，
+ * 播放本身走 bvid，不受影响。
+ *
+ * ⚠️ 解析依赖 B 站前端的 class 名（`bili-video-card__wrap` / `info--tit` / `stats__duration`），
+ * B 站改版会失效。它只是兜底：解析不到就返回空数组，上层按「没搜到」处理，主通道不受影响。
+ */
+const CARD_SPLIT: string = 'bili-video-card__wrap';
+const RE_CARD_BVID: RegExp = /\/video\/(BV[0-9A-Za-z]{10})/;
+const RE_CARD_TITLE: RegExp = /bili-video-card__info--tit"\s+title="([^"]*)"/;
+const RE_CARD_MID: RegExp = /space\.bilibili\.com\/(\d+)/;
+const RE_CARD_AUTHOR: RegExp = /bili-video-card__info--author"[^>]*>([^<]*)</;
+const RE_CARD_DURATION: RegExp = /stats__duration"[^>]*>([0-9:]+)</;
+const RE_CARD_COVER: RegExp = /src="(\/\/[a-z0-9.]*hdslb\.com\/bfs\/archive\/[^"]+)"/;
+
+function parseSearchCardHtml(block: string): SearchResultItem | null {
+  const mBvid: RegExpMatchArray | null = block.match(RE_CARD_BVID);
+  const mTitle: RegExpMatchArray | null = block.match(RE_CARD_TITLE);
+  if (mBvid === null || mTitle === null) {
+    return null;
+  }
+  const mMid: RegExpMatchArray | null = block.match(RE_CARD_MID);
+  const mAuthor: RegExpMatchArray | null = block.match(RE_CARD_AUTHOR);
+  const mDur: RegExpMatchArray | null = block.match(RE_CARD_DURATION);
+  const mCover: RegExpMatchArray | null = block.match(RE_CARD_COVER);
+  const item: SearchResultItem = {
+    bvid: mBvid[1],
+    // HTML 卡片不含 aid；播放走 bvid，这里填 0（`mapSearchResultToTrack` 会给成 '0'）
+    aid: 0,
+    title: stripHtmlTags(decodeHtmlEntities(mTitle[1])),
+    author: mAuthor !== null ? decodeHtmlEntities(mAuthor[1]).trim() : '',
+    mid: mMid !== null ? Number.parseInt(mMid[1], 10) : undefined,
+    // 卡片不显示播放量（B 站已隐藏），只用于同分排序，填 0
+    play: 0,
+    videoReview: 0,
+    duration: mDur !== null ? mDur[1] : '',
+    pubdate: 0,
+    pic: mCover !== null ? toHttpsUrl(mCover[1]) : '',
+    description: ''
+  };
+  return item;
+}
+
+/**
+ * 走 HTML 搜索页取候选（兜底通道，见上）。
+ *
+ * ⚠️ 若 HTML 页本身也返回 >= 400，`HttpUtil.requestText` 会抛 `HTTP <code>` 普通 Error，
+ * 上层 `ImportTaskManager.isRiskError` 能识别 412/429 并走退避。
+ */
+export async function searchVideoByHtml(keyword: string): Promise<SearchResultItem[]> {
+  const url: string = `https://search.bilibili.com/all?keyword=${encodeURIComponent(keyword)}`;
+  const html: string = await HttpUtil.requestText(url);
+  const out: SearchResultItem[] = [];
+  if (html.length === 0) {
+    return out;
+  }
+  // 按卡片容器切块：一张卡一块（block[0] 是首卡之前的页面骨架，丢掉）
+  const blocks: string[] = html.split(CARD_SPLIT);
+  for (let i: number = 1; i < blocks.length; i++) {
+    const item: SearchResultItem | null = parseSearchCardHtml(blocks[i]);
+    if (item !== null) {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+export interface UserSearchResult {
+  type: string;
+  mid: number;
+  uname: string;
+  usign: string;
+  fans: number;
+  videos: number;
+  upic: string;
+  level: number;
+  /**
+   * 头像（另一尺寸）。匿名实测返回里有它，与 `upic` 同为 `//i0.hdslb.com/...` 头图。
+   * 保留是因为 `upic` 偶尔为空、这个不为空时可以兜底。
+   */
+  face_nft?: string;
+  /**
+   * 认证信息：`{ type: 0|1, desc: "…" }`（type=0 个人认证 / 1 企业认证）。
+   * 音乐类 UP 多是企业认证（索尼音乐中国、环球音乐等），显示出来能有效区分
+   * 「官方号」和「同名搬运号」—— 这在匿名搜 UP 时是最需要的信息。
+   */
+  verify_info?: { type: number; desc: string };
+  /** 性别（1 男 / 2 女），UI 不用，留着是因为接口给全了、以后可能做筛选 */
+  gender?: number;
+}
+
+export interface UserSearchResponse {
+  numResults: number;
+  numPages: number;
+  result: UserSearchResult[];
+}
+
+export async function searchUser(
+  keyword: string,
+  page: number = 1,
+  pageSize: number = 20
+): Promise<UserSearchResponse> {
+  const query: string = await encodeWbi({
+    search_type: 'bili_user',
+    keyword: keyword,
+    page: page,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<UserSearchResponse> = await HttpUtil.requestJson<BiliEnvelope<UserSearchResponse>>(
+    `${BILI_API}/x/web-interface/wbi/search/type?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/wbi/search/type');
+  }
+  return data.data;
+}
+
+//
+// ────────── B 站热搜词 ──────────
+//
+
+/** 热搜词条（`/x/web-interface/wbi/search/square`，只声明 UI 用到的字段） */
+interface HotSearchSquareItem {
+  keyword: string;
+  show_name: string;
+}
+
+/** 热搜榜单容器：实测（真机 + 直连抓包）列表挂在 `data.trending.list`，
+ *  并非 `data.list`——按后者解析恒为空，表现为「没有获取到热搜」。 */
+interface HotSearchSquareTrending {
+  list: HotSearchSquareItem[];
+}
+
+interface HotSearchSquareData {
+  trending?: HotSearchSquareTrending;
+}
+
+/**
+ * B 站当前热搜词（搜索页「热搜」页签数据源）。
+ *
+ * 接口：`/x/web-interface/wbi/search/square?limit=N`（WBI 签名，与搜索同门，
+ * 匿名实测可用）。limit 服务端上限 10，超出直接 -400，这里内部封顶防误传。
+ *
+ * 返回去重后的热搜词数组（顺序即榜单顺序，首位最热）；code !== 0 抛
+ * `BiliApiError` 由上层提示，不影响搜索主流程。
+ */
+export async function getHotSearchKeywords(limit: number = 10): Promise<string[]> {
+  const capped: number = Math.min(Math.max(limit, 1), 10);
+  const query: string = await encodeWbi({ limit: capped });
+  const data: BiliEnvelope<HotSearchSquareData> =
+    await HttpUtil.requestJson<BiliEnvelope<HotSearchSquareData>>(
+      `${BILI_API}/x/web-interface/wbi/search/square?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/wbi/search/square');
+  }
+  const out: string[] = [];
+  const list: HotSearchSquareItem[] = data.data?.trending?.list ?? [];
+  for (let i = 0; i < list.length; i++) {
+    const word: string = (list[i].keyword ?? '').trim();
+    if (word.length > 0 && out.indexOf(word) < 0) {
+      out.push(word);
+    }
+  }
+  return out;
+}
+
+export interface SpaceVideo {
+  bvid: string;
+  aid: number;
+  title: string;
+  pic: string;
+  length: string;
+  play: number;
+  created: number;
+  description: string;
+  author: string;
+}
+
+interface SpaceArcSearchData {
+  list: { vlist: SpaceVideo[] };
+  page: { pn: number; ps: number; count: number };
+}
+
+/**
+ * 空间投稿接口 `ps`（每页条数）上限。
+ *
+ * 实测（`x/space/arc/search` 匿名直打）：ps=50 只受常规风控（412 抖动），
+ * **ps=60 恒返回 `code:-400 请求错误`**（ps=100 则 -799）—— 超上限是**确定性**失败。
+ * 所以在这里统一钳制：调用方要再多也只给 50，要更多自己翻页（pn）。
+ */
+const SPACE_PS_MAX: number = 50;
+
+/**
+ * UP 主投稿列表（老接口）。
+ *
+ * 实测：**带不带 `jsonp=jsonp` 与成败无关**（同一 URL 一带一不带各测过，
+ * 成功和失败都出现过）。该参数只是无害冗余，真正起作用的是调用时机（别密集请求）。
+ *
+ * 它不需要 wbi 签名 → 在 wbi 版被限的轮次里作为替补。
+ */
+async function getUserVideosLegacy(
+  mid: number,
+  page: number = 1,
+  pageSize: number = 30,
+  order: string = 'pubdate',
+  keyword: string = ''
+): Promise<SpaceArcSearchData> {
+  lastArcSearchUsedLegacy = false;
+  // ps 超上限 = 确定性 -400，钳到 50（见 SPACE_PS_MAX 注释）
+  const ps: number = Math.min(pageSize, SPACE_PS_MAX);
+  // keyword 非空 = 空间内服务端搜索（B 站空间页「搜索 TA 的投稿」同款，见
+  // searchSpaceVideosByKeyword）；空 = 普通投稿列表，参数不带 keyword
+  const query: string = `mid=${mid}&pn=${page}&ps=${ps}&order=${order}&jsonp=jsonp`
+    + (keyword.length > 0 ? `&keyword=${encodeURIComponent(keyword)}` : '');
+  const data: BiliEnvelope<SpaceArcSearchData> = await HttpUtil.requestJson<BiliEnvelope<SpaceArcSearchData>>(
+    `${BILI_API}/x/space/arc/search?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/space/arc/search');
+  }
+  return data.data;
+}
+
+/** 搜索反查的结果：必须区分「搜到了 0 条」和「搜索请求本身失败」 */
+export interface UpVideosSearchResult {
+  list: SpaceVideo[];
+  /**
+   * 搜索请求是否**成功**（`code=0`）。
+   * true + list 为空 = B 站搜索里确实没有该 UP 的投稿（昵称可能不出现在视频标题里）；
+   * false = 搜索接口自己被限 / 出错 → 该提示「稍后重试」，不该让用户以为是「没投稿」。
+   */
+  searchOk: boolean;
+}
+
+/**
+ * UP 主投稿列表（**首选路径**：用搜索接口反查）。
+ *
+ * 为什么不用空间接口当首选（实测）：
+ *   · `x/space/wbi/arc/search` 与 `x/space/arc/search` 对匿名访问风控极强，
+ *     同一 URL 连打 8 次 **0/8 成功**（失败形态在 HTTP 412 与 -799 之间随机跳），
+ *     冷却 45s / 间隔 8s / 间隔 20s 各试一次，**没有可用规律**；
+ *   · 而搜索接口稳定 `code=0`（wbi 版与非 wbi 老版各 4/4 成功），**结果里带 mid** →
+ *     能按 mid 精确过滤出该 UP 的投稿。实测「索尼音乐中国」第 1 页 20 条里 19 条命中。
+ *
+ * 局限（要有预期）：
+ *   1. 搜索是按**视频内容**匹配的 —— UP 的视频标题里没出现它的昵称时就搜不到，
+ *      所以会出现「搜索成功但 0 命中」（`searchOk=true` + `list` 为空）；
+ *   2. 最多翻 `maxSearchPages` 页；
+ *   3. 排序用 `order=pubdate`（按发布时间）而不是默认的相关性 —— 对「找最近的投稿」更贴。
+ */
+async function getUserVideosViaSearch(
+  targetMid: string,
+  nickname: string,
+  maxItems: number,
+  maxSearchPages: number = 3
+): Promise<UpVideosSearchResult> {
+  const keyword: string = nickname.trim();
+  if (keyword.length === 0 || targetMid.length === 0) {
+    return { list: [], searchOk: false };
+  }
+  const out: SpaceVideo[] = [];
+  const seen: Set<string> = new Set<string>();
+  for (let pn = 1; pn <= maxSearchPages; pn++) {
+    let resp: SearchResponse;
+    try {
+      resp = await searchVideoByDate(keyword, pn, 20);
+    } catch (e) {
+      // 第一页就失败才算「搜索不可用」；翻页途中失败保留已拿到的
+      console.warn(`search by up name failed at page ${pn}: ${JSON.stringify(e)}`);
+      return { list: out, searchOk: pn === 1 ? false : true };
+    }
+    const list: SearchResultItem[] = resp.result || [];
+    if (list.length === 0) {
+      break;
+    }
+    for (let i = 0; i < list.length; i++) {
+      const item: SearchResultItem = list[i];
+      // 三个条件缺一不可：mid 相同、bvid 有效、没重复（搜索会返回同一视频的多条命中）
+      if (String(item.mid ?? '') !== targetMid || !item.bvid || seen.has(item.bvid)) {
+        continue;
+      }
+      seen.add(item.bvid);
+      out.push({
+        bvid: item.bvid,
+        aid: item.aid,
+        title: item.title,
+        pic: item.pic,
+        length: item.duration,
+        play: item.play,
+        created: item.pubdate,
+        description: item.description,
+        author: item.author
+      });
+      if (out.length >= maxItems) {
+        break;
+      }
+    }
+    if (out.length >= maxItems) {
+      break;
+    }
+  }
+  return { list: out, searchOk: true };
+}
+
+/**
+ * `searchUpVideosByKeyword` 的单轮搜索：按 term 相关性搜索 + mid 过滤 + 去重，
+ * 命中追加进 out / seen。返回该轮搜索请求是否成功（false = 第一页就被拒）。
+ */
+async function collectKeywordMatches(
+  targetMid: string,
+  term: string,
+  maxSearchPages: number,
+  out: SpaceVideo[],
+  seen: Set<string>
+): Promise<boolean> {
+  for (let pn = 1; pn <= maxSearchPages; pn++) {
+    let resp: SearchResponse;
+    try {
+      // 相关性排序（totalrank，不带 order 参数）：带 mid 过滤的搜索里，
+      // 「UP名 + 关键词」的相关性结果天然把该 UP 的稿件排在最前；
+      // pubdate 会把 TA 的视频埋进全站最新匹配里，小 UP 基本捞不到。
+      resp = await searchVideo(term, pn, 20);
+    } catch (e) {
+      // 第一页就失败才算「搜索不可用」；翻页途中失败保留已拿到的
+      console.warn(`search up videos by keyword failed at page ${pn}: ${JSON.stringify(e)}`);
+      return pn === 1 ? false : true;
+    }
+    const list: SearchResultItem[] = resp.result || [];
+    if (list.length === 0) {
+      break;
+    }
+    for (let i = 0; i < list.length; i++) {
+      const item: SearchResultItem = list[i];
+      // 与 getUserVideosViaSearch 同款三条件：mid 相同、bvid 有效、去重
+      if (String(item.mid ?? '') !== targetMid || !item.bvid || seen.has(item.bvid)) {
+        continue;
+      }
+      seen.add(item.bvid);
+      out.push({
+        bvid: item.bvid,
+        aid: item.aid,
+        title: item.title,
+        pic: item.pic,
+        length: item.duration,
+        play: item.play,
+        created: item.pubdate,
+        description: item.description,
+        author: item.author
+      });
+    }
+  }
+  return true;
+}
+
+/**
+ * 按**任意关键词**搜索某个 UP 的投稿（UP 主页站内搜索）。
+ *
+ * 两轮策略：
+ *  · 第一轮拿「UP名 + 关键词」做**相关性**搜索 —— 昵称反查（getUserVideosViaSearch）
+ *    能用搜索+mid 过滤走通，正是因为搜索词就是 UP 名；拼上关键词后结果仍集中在
+ *    该 UP 的稿件上，mid 过滤即得「TA 的投稿里匹配关键词的」。
+ *    用 pubdate 排序搜裸关键词会把该 UP 的视频埋进全站最新匹配里，
+ *    3 页 60 条捞不到 → 必然 0 命中。
+ *  · 第一轮 0 命中时用裸关键词再兜底一轮：捞回「标题/简介只含关键词、
+ *    作者恰好是 TA」的投稿（搜索把昵称当硬条件时第一轮会漏掉这类）。
+ *
+ * 边界预期（写在这里防止后来者误判为 bug）：
+ *  · 泛关键词下该 UP 的视频仍可能挤不进前几页 → **0 命中 ≠ 接口失败**
+ *    （`searchOk` 字段已区分两者）；
+ *  · 结果一律按 `mid === targetMid` 过滤，其它 UP 的同词视频不会混进来；
+ *  · 两轮各自最多 `maxSearchPages` 页（每页 20），命中全收不设上限。
+ */
+export async function searchUpVideosByKeyword(
+  targetMid: string,
+  upName: string,
+  keyword: string,
+  maxSearchPages: number = 3
+): Promise<UpVideosSearchResult> {
+  const kw: string = keyword.trim();
+  const name: string = upName.trim();
+  if (kw.length === 0 || targetMid.length === 0) {
+    return { list: [], searchOk: false };
+  }
+  const out: SpaceVideo[] = [];
+  const seen: Set<string> = new Set<string>();
+  // 第一轮：昵称可得时拼「UP名 + 关键词」；昵称缺失（理论少见）退化为裸关键词
+  let searchOk: boolean = await collectKeywordMatches(
+    targetMid, name.length > 0 ? `${name} ${kw}` : kw, maxSearchPages, out, seen
+  );
+  // 第二轮兜底：仅在第一轮请求成功但 0 命中时才发起（避免重复打限流配额）
+  if (searchOk && out.length === 0 && name.length > 0) {
+    searchOk = await collectKeywordMatches(targetMid, kw, maxSearchPages, out, seen);
+  }
+  return { list: out, searchOk };
+}
+
+/** 空间内搜索单次封顶：keyword 命中很少超页，200 防泛关键词翻页风暴 */
+const SPACE_SEARCH_MAX_ITEMS: number = 200;
+
+/**
+ * 空间内服务端搜索：`x/space/wbi/arc/search` 的 `keyword` 参数（B 站空间页
+ * 「搜索 TA 的投稿」同款）—— 结果就是「TA 的投稿里匹配关键词的全部」，按
+ * `page.count` 精确翻页拉齐（骨架镜像 `collectUpVideosAll`）。
+ *
+ * `searchUpVideosByKeyword`（全站搜索 + mid 过滤）按相关性排名，该 UP 的匹配
+ * 视频挤不进全站前几页就搜不到；本函数在空间内过滤，天然完整。风控失败
+ * （searchOk=false）时由调用方（UpSpacePage.runRemoteSearch 阶梯）落回全站兜底。
+ *
+ * 边界预期：
+ *  · 首页失败重试耗尽 → { list: [], searchOk: false }（接口被限 ≠ 0 命中）；
+ *  · 首页 0 行 → { list: [], searchOk: true }（TA 空间内确实无匹配）；
+ *  · 翻页中途失败 → 保留已拉到的部分返回（searchOk: true，log 标 partial）
+ *    —— 仍严格多于全站搜索的 3 页 × 20 窗口。
+ */
+export async function searchSpaceVideosByKeyword(
+  mid: string,
+  keyword: string,
+  hardCap: number = SPACE_SEARCH_MAX_ITEMS
+): Promise<UpVideosSearchResult> {
+  const kw: string = keyword.trim();
+  if (kw.length === 0 || mid.length === 0) {
+    return { list: [], searchOk: false };
+  }
+  const ps: number = Math.min(hardCap, SPACE_PS_MAX);
+  // 匿名态首页重试只用 2 次：风控下多试一次只是多白等 2.5s，失败反正有全站兜底
+  const firstAttempts: number = HttpUtil.getLoginCookie().length > 0 ? 3 : 2;
+  let first: SpaceArcSearchData;
+  try {
+    first = await fetchSpacePageWithRetry(Number(mid), 1, ps, 'pubdate', firstAttempts, false, kw);
+  } catch (e) {
+    console.warn(`searchSpaceVideosByKeyword: first page failed mid=${mid}: ${
+      e instanceof Error ? e.message : JSON.stringify(e)}`);
+    return { list: [], searchOk: false };
+  }
+  const firstRows: SpaceVideo[] = first && first.list ? first.list.vlist : [];
+  if (firstRows.length === 0) {
+    // TA 空间内无匹配（或没投稿）：这是确定的空结果，不是失败
+    return { list: [], searchOk: true };
+  }
+  const seen: Set<string> = new Set<string>();
+  const out: SpaceVideo[] = [];
+  // count = 空间内匹配关键词的总数；拉齐 min(count, hardCap) 为止
+  const total: number = first && first.page ? first.page.count : 0;
+  const want: number = total > 0 ? Math.min(total, hardCap) : hardCap;
+  // 翻页上界：防 count 口径异常 / 返回重复行时 bvid 去重停滞 → 死循环
+  const maxPage: number = Math.ceil(want / ps) + 1;
+  let partial: boolean = false;
+  for (let pn = 1; pn <= maxPage && out.length < want; pn++) {
+    let pageData: SpaceArcSearchData;
+    if (pn === 1) {
+      pageData = first;
+    } else {
+      try {
+        pageData = await fetchSpacePageWithRetry(Number(mid), pn, ps, 'pubdate', 2, false, kw);
+      } catch (e) {
+        console.warn(`searchSpaceVideosByKeyword: page ${pn} failed mid=${mid}: ${
+          e instanceof Error ? e.message : JSON.stringify(e)}`);
+        partial = true;
+        break;
+      }
+    }
+    const rows: SpaceVideo[] = pageData && pageData.list ? pageData.list.vlist : [];
+    if (rows.length === 0) {
+      break;
+    }
+    for (let i = 0; i < rows.length && out.length < want; i++) {
+      const v: SpaceVideo = rows[i];
+      if (v.bvid.length > 0 && !seen.has(v.bvid)) {
+        seen.add(v.bvid);
+        out.push(v);
+      }
+    }
+  }
+  console.info(`searchSpaceVideosByKeyword: mid=${mid} kw=${kw} n=${out.length} partial=${partial}`);
+  return { list: out, searchOk: true };
+}
+
+/**
+ * 搜索视频（`order=pubdate`：按发布时间排序）。
+ *
+ * 与 `searchVideo` 的区别只在这个参数，但对「找某个 UP 最近的投稿」影响很大：
+ * 默认 `totalrank`（相关性）会把最相关的排在前面，热门旧稿容易挤掉新稿。
+ */
+async function searchVideoByDate(
+  keyword: string,
+  page: number = 1,
+  pageSize: number = 20
+): Promise<SearchResponse> {
+  const query: string = await encodeWbi({
+    search_type: 'video',
+    keyword: keyword,
+    order: 'pubdate',
+    page: page,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SearchResponse> = await HttpUtil.requestJson<BiliEnvelope<SearchResponse>>(
+    `${BILI_API}/x/web-interface/wbi/search/type?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/wbi/search/type');
+  }
+  return sanitizeSearchResponse(data.data);
+}
+
+/**
+ * 空间接口带重试的「整页」取数（含 `page.count`，供全量翻页算总页数）。
+ *
+ * 重试骨架与 `getUserVideosWithRetry` 共用一份（本函数是骨架本体，那边是薄封装）。
+ * 关键差异在空列表语义：
+ *   · `retryEmpty = true`（旧调用方）：空列表 = 可重试失败，重试耗尽后抛错 ——
+ *     「要第 1 页却给了空」多半是风控抖动，值得再试；
+ *   · `retryEmpty = false`（`collectUpVideosAll` 翻页用）：空列表**直接返回** ——
+ *     翻页终止由调用方按 `page.count` / 短页判断，这里把空当失败重试只会让
+ *     「拉到最后一页」白等 2×2.5s 再抛错。
+ * `keyword` 非空时透传给空间接口做服务端搜索（见 searchSpaceVideosByKeyword）；
+ * 不传 = 参数不带 keyword。
+ */
+async function fetchSpacePageWithRetry(
+  mid: number,
+  page: number = 1,
+  pageSize: number = 30,
+  order: string = 'pubdate',
+  attempts: number = 3,
+  retryEmpty: boolean = true,
+  keyword: string = ''
+): Promise<SpaceArcSearchData> {
+  let lastError: string = '';
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await delay(SPACE_RETRY_GAP_MS);
+    }
+    try {
+      const data: SpaceArcSearchData = await getUserVideos(mid, page, pageSize, order, keyword);
+      const vlist: SpaceVideo[] = data && data.list ? data.list.vlist : [];
+      if (vlist.length > 0) {
+        return data;
+      }
+      if (!retryEmpty) {
+        return data;
+      }
+      lastError = '空列表';
+    } catch (e) {
+      // -400 / -101 这类确定性错误：重试无意义，立即上抛（网络错 / 风控码照常重试）
+      if (!isRetryableFetchError(e)) {
+        throw e;
+      }
+      lastError = e instanceof Error ? e.message : JSON.stringify(e);
+      console.warn(`getUserVideos attempt ${i + 1}/${attempts} failed: ${lastError}`);
+    }
+  }
+  throw new BiliApiError(-1, `空间接口重试 ${attempts} 次仍失败：${lastError}`, '/x/space/arc/search');
+}
+
+/**
+ * 空间接口的有限重试包装（返回 vlist；空列表按旧语义重试后抛）。
+ *
+ * 该接口单次成功率实测约 20%（失败形态随机），但**并非完全不可用**：
+ * 隔开时间重试有一定命中率。所以给它 3 次机会、每次间隔 2.5 秒 ——
+ * 理论累计成功率约 1-0.8³ ≈ 49%，比只试一次强得多。
+ *
+ * ⚠️ 间隔必须给够：实测「连打 8 次间隔 1.5s」是 0/8，密集请求会自己撞满限流阈值。
+ * ⚠️ `getUserVideos` 内部会在 wbi ↔ 老接口之间自动交替，所以重试天然在换接口试。
+ * ⚠️ **确定性业务错误不重试**：-400（参数错误，如 ps 超限）、
+ *   -101（登录失效）重试多少次结果都一样 —— 立即抛出让上层走兜底，
+ *   否则用户对着「正在拉取…」白等 3×2.5s 才见到失败（复用 isRetryableFetchError 的判定）。
+ *
+ * ⚠️ **页码必须透传**：签名与 `getUserVideos` 参数序对齐
+ *   （mid, page, pageSize, order, attempts），翻页调用方务必把 pn 传进来；
+ *   只取首页的调用点显式传 1。
+ */
+export async function getUserVideosWithRetry(
+  mid: number,
+  page: number = 1,
+  pageSize: number = 30,
+  order: string = 'pubdate',
+  attempts: number = 3
+): Promise<SpaceVideo[]> {
+  const data: SpaceArcSearchData =
+    await fetchSpacePageWithRetry(mid, page, pageSize, order, attempts, true);
+  return data && data.list ? data.list.vlist : [];
+}
+
+/** 空间接口重试间隔（ms）：实测密集请求（1.5s 间隔）必然被拒 */
+const SPACE_RETRY_GAP_MS: number = 2500;
+
+/** setTimeout 的 Promise 化（ArkTS 里没有原生 sleep） */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout((): void => {
+      resolve();
+    }, ms);
+  });
+}
+
+/**
+ * 上一次「投稿列表」请求走的是哪个接口。
+ *
+ * 重复实验（同一 URL 连打 8 次、间隔 1.5s）：**0/8 成功**，
+ * 失败形态在 `HTTP 412` 与 `code=-799 请求过于频繁` 之间随机切换；
+ * 而隔开一段时间再打，同一个 URL 又能拿到 30 条。
+ * 结论：**该接口是按 IP 限流的，密集请求必被拒，且失败形态随机**。
+ *
+ * 所以这里不做「同一次调用里 wbi 失败立刻降级」——那会在一次进入里连发两个请求，
+ * 正好把限流阈值撞满。采用**跨轮次交替**：这次走 wbi，下次（用户点重试）走老接口。
+ */
+let lastArcSearchUsedLegacy: boolean = false;
+
+/**
+ * UP 主投稿列表（wbi 签名版，优先）。
+ *
+ * 失败时**不在同一次调用里降级**（会连发两枪），只把错误抛给界面；
+ * 下一次调用（用户点「重试」）会自动换用老接口，见 `getUserVideosLegacy`。
+ */
+async function getUserVideos(
+  mid: number,
+  page: number = 1,
+  pageSize: number = 30,
+  order: string = 'pubdate',
+  keyword: string = ''
+): Promise<SpaceArcSearchData> {
+  if (lastArcSearchUsedLegacy) {
+    return getUserVideosLegacy(mid, page, pageSize, order, keyword);
+  }
+  lastArcSearchUsedLegacy = true;
+  // ps 超上限 = 确定性 -400，钳到 50（见 SPACE_PS_MAX 注释）
+  const ps: number = Math.min(pageSize, SPACE_PS_MAX);
+  // keyword 非空 = 空间内服务端搜索（见 searchSpaceVideosByKeyword）；且必须进
+  // wbi 签名参数 —— 服务器按收到的全部参数重算 w_rid，签名后再拼会 -403
+  const wbiParams: Record<string, string | number> = {
+    mid: mid,
+    pn: page,
+    ps: ps,
+    order: order,
+    platform: 'web'
+  };
+  if (keyword.length > 0) {
+    wbiParams['keyword'] = keyword;
+  }
+  const query: string = await encodeWbi(wbiParams);
+  const data: BiliEnvelope<SpaceArcSearchData> = await HttpUtil.requestJson<BiliEnvelope<SpaceArcSearchData>>(
+    `${BILI_API}/x/space/wbi/arc/search?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/space/wbi/arc/search');
+  }
+  return data.data;
+}
+
+// ===== 投稿获取：多源兜底 =====
+//
+// 空间接口（`x/space/wbi/arc/search`）对匿名访问风控极强（间隔 20s 打 4 次也只
+// 成功 2 次，1.5s 连打 8 次是 0/8）。对照实验结论：
+//   · 搜索接口 `wbi/search/type` 连打 8 次 **8/8 成功** —— 它根本没被限流；
+//   · `x/web-interface/archive/related`（相关推荐）连打 3 次 **3/3 code=0**，
+//     40 条里同 UP 的占 11~20 条（随种子变化）—— 这是一条**独立的第三数据源**，
+//     且它不依赖「UP 昵称出现在视频标题里」（搜索反查的致命弱点）；
+//   · App 端 `app.bilibili.com/x/v2/space/archive/cursor` 恒 -400（要 appkey 签名），走不通；
+//   · 动态流 `x/polymer/web-dynamic/v1/feed/space` 恒 -352，走不通。
+//
+// 所以策略是**三级兜底**，前两级都是匿名稳定接口，空间接口只在两者都没货时才动：
+//   ① 搜索反查（结果带 pubdate，天然是「最近的投稿」，最贴「拉新」语义）
+//   ② related 扩散（用歌单里已有的该 UP 视频当种子，捞出同 UP 的其它投稿）
+//   ③ 空间接口（老路，成功率不稳定，仅兜底）
+//
+// ⚠️ 登录态：SESSDATA 会由 HttpUtil 自动附到所有请求上，空间接口的匿名风控
+// （412/-799/-352）大幅缓解 → collectUpVideos 在登录时把空间接口**提到最前**
+// （⓪）：它是唯一全量、按 pubdate 排序、支持真分页的准确数据源，
+// 搜索反查的「UP 昵称必须在视频内容里」与 related 的「相关≠最新」局限它都没有。
+// 失败仍落回匿名态同款 ①→②→③ 顺序。
+
+/** 相关推荐条目（`x/web-interface/archive/related`） */
+interface RelatedVideo {
+  bvid: string;
+  aid: number;
+  title: string;
+  pic: string;
+  ownerMid: number;
+  ownerName: string;
+  /** 时长（秒）—— 与 `SpaceVideo.length`("3:45") 不同源，别混用 */
+  duration: number;
+  pubdate: number;
+  play: number;
+}
+
+interface RelatedRawItem {
+  bvid?: string;
+  aid?: number;
+  title?: string;
+  pic?: string;
+  duration?: number;
+  pubdate?: number;
+  owner?: { mid?: number; name?: string };
+  stat?: { view?: number };
+}
+
+/**
+ * 相关推荐。
+ *
+ * 实测：匿名 `code=0` 稳定返回 **40 条**，连打 3 次全成功；
+ * 条目带 `owner.mid` → 能过滤出同一 UP 的投稿。
+ * 局限：它是「相关」不是「最新」，所以只作兜底，不拿来替代搜索反查。
+ */
+async function getRelatedVideos(bvid: string): Promise<RelatedVideo[]> {
+  if (bvid.length === 0) {
+    return [];
+  }
+  const data: BiliEnvelope<RelatedRawItem[]> = await HttpUtil.requestJson<BiliEnvelope<RelatedRawItem[]>>(
+    `${BILI_API}/x/web-interface/archive/related?bvid=${bvid}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/web-interface/archive/related');
+  }
+  const raw: RelatedRawItem[] = data.data || [];
+  const out: RelatedVideo[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const it: RelatedRawItem = raw[i];
+    if (!it.bvid) {
+      continue;
+    }
+    out.push({
+      bvid: it.bvid,
+      aid: it.aid ?? 0,
+      title: it.title ?? '',
+      pic: it.pic ?? '',
+      ownerMid: it.owner?.mid ?? 0,
+      ownerName: it.owner?.name ?? '',
+      duration: it.duration ?? 0,
+      pubdate: it.pubdate ?? 0,
+      play: it.stat?.view ?? 0
+    });
+  }
+  return out;
+}
+
+/** 秒 → "M:SS"（与 `SpaceVideo.length` 同格式，喂给 `parseDurationText` 解析） */
+function secondsToLength(seconds: number): string {
+  const total: number = seconds > 0 ? Math.floor(seconds) : 0;
+  const mm: number = Math.floor(total / 60);
+  const ss: number = total % 60;
+  return `${mm}:${ss < 10 ? '0' : ''}${ss}`;
+}
+
+/**
+ * 用「歌单里已有的该 UP 视频」当种子，从相关推荐里捞出同 UP 的其它投稿。
+ *
+ * 为什么它能救搜索反查救不了的场：搜索是按**视频内容**匹配的，UP 昵称不出现在标题里时
+ * 命中就是 0；related 是 B 站自己的推荐关系，**不需要任何关键词**。
+ *
+ * ⚠️ 种子来自调用方（已订阅歌单 / 当前列表），首次订阅时歌单是空的 → 无种子 → 返回空，
+ * 由调用方继续退到空间接口。
+ */
+async function getUserVideosViaRelated(
+  targetMid: string,
+  seedBvids: string[],
+  maxItems: number,
+  maxSeeds: number = 2
+): Promise<UpVideosSearchResult> {
+  if (targetMid.length === 0 || seedBvids.length === 0) {
+    return { list: [], searchOk: true };
+  }
+  const out: SpaceVideo[] = [];
+  const seen: Set<string> = new Set<string>();
+  let usedSeeds: number = 0;
+  for (let i = 0; i < seedBvids.length && usedSeeds < maxSeeds; i++) {
+    const seed: string = seedBvids[i];
+    if (!seed || seen.has(seed)) {
+      continue;
+    }
+    seen.add(seed);
+    let rel: RelatedVideo[] = [];
+    try {
+      rel = await getRelatedVideos(seed);
+    } catch (e) {
+      console.warn(`related failed for seed ${seed}: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+      continue;
+    }
+    usedSeeds++;
+    for (let j = 0; j < rel.length; j++) {
+      const v: RelatedVideo = rel[j];
+      if (String(v.ownerMid) !== targetMid || !v.bvid || seen.has(v.bvid)) {
+        continue;
+      }
+      seen.add(v.bvid);
+      out.push({
+        bvid: v.bvid,
+        aid: v.aid,
+        title: v.title,
+        pic: v.pic,
+        length: secondsToLength(v.duration),
+        play: v.play,
+        created: v.pubdate,
+        description: '',
+        author: v.ownerName
+      });
+      if (out.length >= maxItems) {
+        break;
+      }
+    }
+    if (out.length >= maxItems) {
+      break;
+    }
+  }
+  // 种子全挂（接口被限）才算「这条路不可用」；种子有效但 0 命中是正常结果
+  return { list: out, searchOk: usedSeeds > 0 };
+}
+
+/** `collectUpVideos` 的数据来源（ArkTS 不用 enum，用数字常量） */
+export const UP_VIA_NONE: number = 0;
+const UP_VIA_SEARCH: number = 1;
+const UP_VIA_RELATED: number = 2;
+export const UP_VIA_SPACE: number = 3;
+
+/** 多源兜底的统一结果 */
+export interface UpVideosCollectResult {
+  list: SpaceVideo[];
+  /** 数据来自哪条路（UP_VIA_*）：决定提示文案该说「已是最新」还是「被限流」 */
+  via: number;
+  /** via=UP_VIA_NONE 时的真实原因（人话），其余情况为空串 */
+  reason: string;
+  /**
+   * true = 全量翻页中途有页失败，只拿到部分（订阅全量路径 `collectUpVideosAll` 用）。
+   * 单页 `collectUpVideos` 恒 false（它要么整页拿到要么走兜底，没有「一半」态）。
+   */
+  partial: boolean;
+}
+
+/**
+ * 取某 UP 的投稿（**多源兜底统一入口**）。
+ *
+ * ⚠️ 两个页面（PlaylistDetail 的「拉取新投稿」、UpSpacePage 的订阅 / 拉取）**都必须调这里**，
+ * 不要各自拼链路 —— 分开的副本容易在改签名时漏改调用点。策略只在这里维护一份。
+ *
+ * 三级兜底见本小节顶部注释。返回 `via` 是为了让 UI 能区分：
+ *   · 拿到了数据但全被去重 → 「已经是最新」（不是故障，别让用户以为 App 坏了）；
+ *   · 三条路都没货 → 「B 站暂时不给，稍后再试」。
+ */
+export async function collectUpVideos(
+  mid: string,
+  nickname: string,
+  seedBvids: string[],
+  maxItems: number,
+  spaceAttempts: number = 3
+): Promise<UpVideosCollectResult> {
+  // ⓪ 登录态优先空间接口：全量、pubdate 排序、真分页（UpSpacePage hasMore 的前提）。
+  //    失败（SESSDATA 失效 / 瞬态风控）→ 落回下面的匿名态同款顺序。
+  //    ps 由 getUserVideos* 内部钳到 50（超上限恒 -400，见 SPACE_PS_MAX）。
+  if (HttpUtil.getLoginCookie().length > 0) {
+    try {
+      const vlist: SpaceVideo[] = await getUserVideosWithRetry(Number(mid), 1, maxItems, 'pubdate', spaceAttempts);
+      if (vlist.length > 0) {
+        console.info(`collectUpVideos: via=space(logged-in) mid=${mid} n=${vlist.length}`);
+        return { list: vlist, via: UP_VIA_SPACE, reason: '', partial: false };
+      }
+    } catch (e) {
+      console.warn(`collectUpVideos: space(logged-in) failed: ${
+        e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+  }
+
+  // ① 搜索反查
+  try {
+    const r: UpVideosSearchResult = await getUserVideosViaSearch(mid, nickname, maxItems);
+    if (r.list.length > 0) {
+      console.info(`collectUpVideos: via=search mid=${mid} n=${r.list.length}`);
+      return { list: r.list, via: UP_VIA_SEARCH, reason: '', partial: false };
+    }
+  } catch (e) {
+    console.warn(`collectUpVideos: search failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+  }
+
+  // ② related 扩散
+  try {
+    const r: UpVideosSearchResult = await getUserVideosViaRelated(mid, seedBvids, maxItems);
+    if (r.list.length > 0) {
+      console.info(`collectUpVideos: via=related mid=${mid} n=${r.list.length}`);
+      return { list: r.list, via: UP_VIA_RELATED, reason: '', partial: false };
+    }
+  } catch (e) {
+    console.warn(`collectUpVideos: related failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+  }
+
+  // ③ 空间接口（老路，不稳定，仅兜底）
+  try {
+    const vlist: SpaceVideo[] = await getUserVideosWithRetry(Number(mid), 1, maxItems, 'pubdate', spaceAttempts);
+    if (vlist.length > 0) {
+      console.info(`collectUpVideos: via=space(fallback) mid=${mid} n=${vlist.length}`);
+      return { list: vlist, via: UP_VIA_SPACE, reason: '', partial: false };
+    }
+    console.warn(`collectUpVideos: all sources empty (space returned empty list) mid=${mid}`);
+    return { list: [], via: UP_VIA_NONE, reason: '', partial: false };
+  } catch (e) {
+    console.warn(`collectUpVideos: all sources failed mid=${mid}: ${
+      e instanceof Error ? e.message : JSON.stringify(e)}`);
+    return {
+      list: [],
+      via: UP_VIA_NONE,
+      reason: e instanceof Error ? e.message : JSON.stringify(e),
+      partial: false
+    };
+  }
+}
+
+/**
+ * 订阅全量拉取：翻页拉某 UP 的**全部投稿**（`order=pubdate` 倒序，封顶 hardCap 保最新）。
+ *
+ * 与单页 `collectUpVideos` 的关系：
+ *   · 第 1 页空间接口成功 → 用响应里的 `page.count` 精确算总页数循环翻页
+ *     （一次都不多请求，避免翻过头踩「空列表重试空转」）；
+ *   · 中途某页失败 → **保留已拉到的部分**返回（`partial: true`）——够用总比全丢强，
+ *     订阅歌单按 id 去重幂等，用户稍后再点一次订阅即可补齐；
+ *   · 第 1 页就失败 / 该 UP 没投稿 → 落回单页 `collectUpVideos` 多源兜底链
+ *     （搜索反查 → related 扩散 → 空间老路），行为与旧订阅完全一致。
+ *
+ * 匿名态空间接口按 IP 风控（412/-799），全量翻页失败概率高 —— 失败即 partial 止损，
+ * 不做「匿名态跳过全量」的特判（列表页滚动翻页匿名本来也走这条路）。
+ *
+ * `onProgress` 每成功一页回调一次已累计条数，调用方据此刷新「已拉取 N 条」提示。
+ */
+export async function collectUpVideosAll(
+  mid: string,
+  nickname: string,
+  seedBvids: string[],
+  hardCap: number,
+  onProgress?: (fetched: number) => void
+): Promise<UpVideosCollectResult> {
+  const ps: number = Math.min(hardCap, SPACE_PS_MAX);
+  let first: SpaceArcSearchData;
+  try {
+    // 匿名态首页重试只用 2 次：风控下多试一次只是多白等 2.5s，失败反正有兜底链
+    const firstAttempts: number = HttpUtil.getLoginCookie().length > 0 ? 3 : 2;
+    first = await fetchSpacePageWithRetry(Number(mid), 1, ps, 'pubdate', firstAttempts, false);
+  } catch (e) {
+    console.warn(`collectUpVideosAll: first page failed mid=${mid}: ${
+      e instanceof Error ? e.message : JSON.stringify(e)}`);
+    return collectUpVideos(mid, nickname, seedBvids, ps);
+  }
+  const firstRows: SpaceVideo[] = first && first.list ? first.list.vlist : [];
+  if (firstRows.length === 0) {
+    // 没投稿或接口给空：交给单页兜底链给出准确 reason
+    return collectUpVideos(mid, nickname, seedBvids, ps);
+  }
+
+  const seen: Set<string> = new Set<string>();
+  const out: SpaceVideo[] = [];
+  const pushPage = (rows: SpaceVideo[]): void => {
+    for (let i = 0; i < rows.length && out.length < hardCap; i++) {
+      const v: SpaceVideo = rows[i];
+      if (v.bvid.length > 0 && !seen.has(v.bvid)) {
+        seen.add(v.bvid);
+        out.push(v);
+      }
+    }
+  };
+  pushPage(firstRows);
+  if (onProgress !== undefined) {
+    onProgress(out.length);
+  }
+
+  // count = 该 UP 投稿总数；拉齐 min(count, hardCap) 为止
+  const total: number = first && first.page ? first.page.count : 0;
+  const want: number = total > 0 ? Math.min(total, hardCap) : hardCap;
+  let partial: boolean = false;
+  for (let pn = 2; out.length < want; pn++) {
+    let pageData: SpaceArcSearchData;
+    try {
+      // 后续页 attempts=2：单页最坏 ~5s，比首页宽松（首页失败会整段落空，值得多试一次）
+      pageData = await fetchSpacePageWithRetry(Number(mid), pn, ps, 'pubdate', 2, false);
+    } catch (e) {
+      console.warn(`collectUpVideosAll: page ${pn} failed mid=${mid}: ${
+        e instanceof Error ? e.message : JSON.stringify(e)}`);
+      partial = true;
+      break;
+    }
+    const rows: SpaceVideo[] = pageData && pageData.list ? pageData.list.vlist : [];
+    if (rows.length === 0) {
+      // 短页/空页 = 没有更多了（count 不准或 UP 中途删稿时兜底）
+      break;
+    }
+    pushPage(rows);
+    if (onProgress !== undefined) {
+      onProgress(out.length);
+    }
+  }
+  console.info(`collectUpVideosAll: mid=${mid} n=${out.length} partial=${partial}`);
+  return { list: out, via: UP_VIA_SPACE, reason: '', partial: partial };
+}
+
+// ===== UP 主合集与系列（web-space 聚合物接口） =====
+//
+// 「合集」（ugc_season）与「系列」（series）都是 UP 主把多个独立投稿组织起来的
+// 形态（B 站空间页「合集」Tab 的两个分组）：合集是官方结构性组织（season_id），
+// 系列是 UP 主手动维护的列表（series_id）。view 接口的 ugc_season 只覆盖
+// 「视频 → 它所属的合集」，本节补「UP → 全部合集/系列」的列表与条目分页。
+//
+// ⚠️ 风控口径（与 x/space/wbi/arc/search 同域同结论）：web-space 聚合物接口
+// 匿名访问风控强（-352/-412/HTTP 412），登录态（SESSDATA 自动附上）大幅缓解；
+// 全部走 wbi 签名（encodeWbi），且**签名后不得再拼任何参数**（-403 先例见 getUserVideos）。
+// 响应壳只声明用到的字段、全部可选，字段名与真实结构有出入时只改解析层。
+
+/** UP 主「合集」摘要（seasons_list[].meta 摊平） */
+export interface UpSeasonSummary {
+  seasonId: number;
+  title: string;
+  cover: string;
+}
+
+/** UP 主「系列」摘要（series_list[].meta 摊平） */
+export interface UpSeriesSummary {
+  seriesId: number;
+  title: string;
+  cover: string;
+}
+
+/** 合集 + 系列一次请求的双列表结果 */
+export interface UpSeasonsSeriesResult {
+  seasons: UpSeasonSummary[];
+  series: UpSeriesSummary[];
+}
+
+/** 合集 / 系列条目分页结果：已转 Track（bvid 为 id，cid 空串由播放内核解析） */
+export interface SeasonSeriesPage {
+  tracks: Track[];
+  /** 服务端条目总数（page.total），缺省按已取条数兜底 */
+  total: number;
+  hasMore: boolean;
+}
+
+/** seasons_series_list 响应（只声明用到的字段，逐层可选防御） */
+interface SeasonsSeriesListRaw {
+  items_lists?: {
+    seasons_list?: SeasonsListItemRaw[];
+    series_list?: SeriesListItemRaw[];
+  };
+  page?: { page_num?: number; page_size?: number; total?: number };
+}
+
+interface SeasonsListItemRaw {
+  meta?: { season_id?: number; title?: string; cover?: string };
+}
+
+interface SeriesListItemRaw {
+  meta?: { series_id?: number; title?: string; cover?: string };
+}
+
+/** seasons/series_archives_list 响应（两者结构同源） */
+interface SeasonArchivesRaw {
+  archives?: ArchiveRawItem[];
+  page?: { page_num?: number; page_size?: number; total?: number };
+}
+
+interface ArchiveRawItem {
+  aid?: number;
+  bvid?: string;
+  title?: string;
+  pic?: string;
+  /** 时长（秒） */
+  duration?: number;
+  pubdate?: number;
+}
+
+/** 条目归一化：bvid 无效（空 / 非 BV 开头，下架 / 付费形态）返回 null 由调用方跳过 */
+function archiveToTrack(it: ArchiveRawItem, upName: string, upMid: string): Track | null {
+  const bvid: string = it.bvid ?? '';
+  if (bvid.indexOf('BV') !== 0) {
+    return null;
+  }
+  return buildTrack({
+    id: bvid,
+    bvid: bvid,
+    aid: String(it.aid ?? 0),
+    cid: '',
+    title: stripHtmlTags(it.title ?? ''),
+    artist: upName,
+    coverUrl: toHttpsUrl(it.pic ?? ''),
+    duration: it.duration ?? 0,
+    upMid: upMid,
+    pubdate: 0
+  });
+}
+
+/**
+ * UP 主的合集 + 系列列表（一次请求双列表）。
+ * 多数 UP 合集/系列 < 20 个，默认一页 20 足够；更极端的由调用方翻页（page_num）。
+ */
+export async function getUpSeasonsSeriesList(
+  mid: number,
+  pageNum: number = 1,
+  pageSize: number = 20
+): Promise<UpSeasonsSeriesResult> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonsSeriesListRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonsSeriesListRaw>>(
+      `${BILI_API}/x/polymer/web-space/seasons_series_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/seasons_series_list');
+  }
+  const raw: SeasonsSeriesListRaw = data.data;
+  const seasons: UpSeasonSummary[] = [];
+  const seasonsRaw: SeasonsListItemRaw[] = raw.items_lists?.seasons_list ?? [];
+  for (let i = 0; i < seasonsRaw.length; i++) {
+    const meta = seasonsRaw[i].meta;
+    if (!meta || !meta.season_id || !meta.title) {
+      continue;
+    }
+    seasons.push({
+      seasonId: meta.season_id,
+      title: stripHtmlTags(meta.title),
+      cover: toHttpsUrl(meta.cover ?? '')
+    });
+  }
+  const series: UpSeriesSummary[] = [];
+  const seriesRaw: SeriesListItemRaw[] = raw.items_lists?.series_list ?? [];
+  for (let i = 0; i < seriesRaw.length; i++) {
+    const meta = seriesRaw[i].meta;
+    if (!meta || !meta.series_id || !meta.title) {
+      continue;
+    }
+    series.push({
+      seriesId: meta.series_id,
+      title: stripHtmlTags(meta.title),
+      cover: toHttpsUrl(meta.cover ?? '')
+    });
+  }
+  console.info(`[SeasonsSeries] mid=${mid} page=${pageNum} seasons=${seasons.length} series=${series.length}`);
+  return { seasons: seasons, series: series };
+}
+
+/** 合集条目分页（`seasons_archives_list`，30 条/页，sort_reverse=false 即合集编排正序） */
+export async function getSeasonArchives(
+  mid: number,
+  seasonId: number,
+  upName: string,
+  upMid: string,
+  pageNum: number = 1,
+  pageSize: number = 30
+): Promise<SeasonSeriesPage> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    season_id: seasonId,
+    sort_reverse: 'false',
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonArchivesRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonArchivesRaw>>(
+      `${BILI_API}/x/polymer/web-space/seasons_archives_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/seasons_archives_list');
+  }
+  return parseSeasonArchivesRaw(data.data, `season=${seasonId}`, upName, upMid, pageNum, pageSize);
+}
+
+/** 系列条目分页（`series_archives_list`，only_normal 只取普通投稿，sort=desc 最新在前） */
+export async function getSeriesArchives(
+  mid: number,
+  seriesId: number,
+  upName: string,
+  upMid: string,
+  pageNum: number = 1,
+  pageSize: number = 30
+): Promise<SeasonSeriesPage> {
+  const query: string = await encodeWbi({
+    mid: mid,
+    series_id: seriesId,
+    only_normal: 'true',
+    sort: 'desc',
+    page_num: pageNum,
+    page_size: pageSize
+  });
+  const data: BiliEnvelope<SeasonArchivesRaw> =
+    await HttpUtil.requestJson<BiliEnvelope<SeasonArchivesRaw>>(
+      `${BILI_API}/x/polymer/web-space/series_archives_list?${query}`
+    );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/polymer/web-space/series_archives_list');
+  }
+  return parseSeasonArchivesRaw(data.data, `series=${seriesId}`, upName, upMid, pageNum, pageSize);
+}
+
+/** archives 响应 → SeasonSeriesPage（合集/系列共用） */
+function parseSeasonArchivesRaw(
+  raw: SeasonArchivesRaw,
+  tag: string,
+  upName: string,
+  upMid: string,
+  pageNum: number,
+  pageSize: number
+): SeasonSeriesPage {
+  const items: ArchiveRawItem[] = raw.archives ?? [];
+  const tracks: Track[] = [];
+  let skipped: number = 0;
+  for (let i = 0; i < items.length; i++) {
+    const t: Track | null = archiveToTrack(items[i], upName, upMid);
+    if (t === null) {
+      skipped++;
+      continue;
+    }
+    tracks.push(t);
+  }
+  if (skipped > 0) {
+    console.warn(`[SeasonsSeries] ${tag} ${skipped} 个条目 bvid 无效（下架/付费），已跳过`);
+  }
+  const total: number = raw.page?.total ?? tracks.length;
+  // page.total 缺省时退化为「满页即还有下一页」的保守判断
+  const hasMore: boolean = raw.page?.total !== undefined
+    ? pageNum * pageSize < total
+    : items.length >= pageSize;
+  console.info(`[SeasonsSeries] ${tag} page=${pageNum} got=${items.length} built=${tracks.length} total=${total} hasMore=${hasMore}`);
+  return { tracks: tracks, total: total, hasMore: hasMore };
+}
+
+// ===== 音源解析缓存 =====
+//
+// 「点歌到出声」的链路 = view + playurl 两次串行请求 + 播放器缓冲，全串在一起
+// 就是点歌后 1~3 秒的干等。其中两类结果短时间内是稳定的：
+//   · view：同一 bvid 的分 P 列表 / 元数据分钟级内不会变；
+//   · playurl：解析出的直链带签名 token，有效期远长于一次播放会话。
+// 命中缓存时整个解析直接跳过（重播 / 切下一首近乎秒开）；未命中走原链路，行为不变。
+// 直链真的过期（AVPlayer 报 error）时，由 MusicPlayer.reloadCurrentSource
+// 以 refresh=true 强制刷新兜底 —— 缓存永远不会把「过期链接」变成死胡同。
+
+/** 缓存条目：值 + 写入时间戳 */
+interface CacheEntry<T> {
+  value: T;
+  cachedAt: number;
+}
+
+const VIEW_CACHE_TTL_MS: number = 10 * 60 * 1000;
+const SOURCE_CACHE_TTL_MS: number = 30 * 60 * 1000;
+const VIEW_CACHE_MAX: number = 40;
+const SOURCE_CACHE_MAX: number = 120;
+
+const viewCache: Map<string, CacheEntry<VideoDetail>> = new Map<string, CacheEntry<VideoDetail>>();
+const sourceCache: Map<string, CacheEntry<TrackSource>> = new Map<string, CacheEntry<TrackSource>>();
+
+function cacheGet<T>(cache: Map<string, CacheEntry<T>>, key: string, ttlMs: number): T | null {
+  const hit: CacheEntry<T> | undefined = cache.get(key);
+  if (hit === undefined) {
+    return null;
+  }
+  if (Date.now() - hit.cachedAt > ttlMs) {
+    cache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function cachePut<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T, maxEntries: number): void {
+  // 超限时整体清空而不是逐条淘汰：条目都只有几 KB，简单粗暴既不会内存失控，
+  // 也完全避开迭代器语法的兼容性风险。
+  if (cache.size >= maxEntries) {
+    cache.clear();
+  }
+  cache.set(key, { value: value, cachedAt: Date.now() });
+}
+
+export async function getVideoDetail(
+  bvid: string,
+  refresh: boolean = false,
+  anonymous: boolean = false
+): Promise<VideoDetail> {
+  if (!refresh) {
+    const hit: VideoDetail | null = cacheGet<VideoDetail>(viewCache, bvid, VIEW_CACHE_TTL_MS);
+    if (hit !== null) {
+      // 合集诊断：缓存命中也带 pages/videos 数，与网络路径口径一致
+      console.info(`[Collection] view bvid=${bvid} cache=hit pages=${hit.pages ? hit.pages.length : 0} videos=${hit.videos}`);
+      return hit;
+    }
+  }
+  // 走重试版：view 是「这首歌能不能出声」链路的第一个请求，
+  // 它抖动一次整首就废，所以必须给它退避重试（理由见 biliFetchRetry 上方注释）。
+  const detail: VideoDetail = await biliFetchRetry<VideoDetail>(
+    '/x/web-interface/view', { bvid: bvid }, 'view', anonymous);
+  console.info(`[Collection] view bvid=${bvid} cache=net pages=${detail.pages ? detail.pages.length : 0} videos=${detail.videos}`);
+  cachePut<VideoDetail>(viewCache, bvid, detail, VIEW_CACHE_MAX);
+  return detail;
+}
+
+//
+// ────────── 置顶评论（「视频简介」弹层消费） ──────────
+//
+
+/**
+ * 置顶评论缓存条目包装：`TopReplyResult | null` 本身可空（视频没评论也要缓存，
+ * 防止每次打开弹层都重打一次注定空手而归的请求），直接拿 `TopReplyResult | null`
+ * 做 Map 值没法区分「没缓存」和「缓存了 null」—— 包一层对象做哨兵。
+ */
+interface TopReplyCacheValue {
+  reply: TopReplyResult | null;
+}
+
+const topReplyCache: Map<string, CacheEntry<TopReplyCacheValue>> =
+  new Map<string, CacheEntry<TopReplyCacheValue>>();
+
+/**
+ * 取视频「置顶评论」（`/x/v2/reply/wbi/main`，wbi 签名）：
+ * UP 主置顶楼（`data.top_replies[0]`）优先；无置顶回落 `data.replies[0]`
+ * （`mode=2` 热度序的首条，即热门评论）；全无（评论区为空 / 关闭）返回 null。
+ *
+ * 会话级缓存按 aid（上限 40 条，10 分钟 TTL，照 viewCache 模板）—— 置顶评论
+ * 基本不变，弹层反复开关不该反复请求；「null = 无评论」同样入缓存防重复请求。
+ * 风控依赖 HttpUtil 的 BiliRequestGate 全局闸（412/403/429 自动冷却上报）。
+ */
+export async function getTopReply(aid: number): Promise<TopReplyResult | null> {
+  const key: string = String(aid);
+  const hit: TopReplyCacheValue | null = cacheGet<TopReplyCacheValue>(topReplyCache, key, VIEW_CACHE_TTL_MS);
+  if (hit !== null) {
+    return hit.reply;
+  }
+  const query: string = await encodeWbi({
+    oid: aid,
+    type: 1,
+    mode: 2,
+    ps: 20,
+    next: 0
+  });
+  const data: BiliEnvelope<ReplyMainData> = await HttpUtil.requestJson<BiliEnvelope<ReplyMainData>>(
+    `${BILI_API}/x/v2/reply/wbi/main?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/v2/reply/wbi/main');
+  }
+  const main: ReplyMainData = data.data;
+  let picked: ReplyItem | null = null;
+  let isTop: boolean = false;
+  const topReplies: ReplyItem[] | null | undefined = main?.top_replies;
+  if (topReplies !== undefined && topReplies !== null && topReplies.length > 0) {
+    picked = topReplies[0];
+    isTop = true;
+  } else {
+    const replies: ReplyItem[] | null | undefined = main?.replies;
+    if (replies !== undefined && replies !== null && replies.length > 0) {
+      picked = replies[0];
+    }
+  }
+  let result: TopReplyResult | null = null;
+  if (picked !== null) {
+    result = {
+      isTop: isTop,
+      uname: picked.member?.uname ?? '',
+      message: picked.content?.message ?? '',
+      like: picked.like ?? 0,
+      ctime: picked.ctime ?? 0
+    };
+  }
+  cachePut<TopReplyCacheValue>(topReplyCache, key, { reply: result }, VIEW_CACHE_MAX);
+  return result;
+}
+
+/**
+ * 取视频**完整**分P列表（`/x/player/pagelist`，公开接口）。
+ *
+ * 背景：个别合集用 view 接口拿到的 `pages` 比服务端声称的总分P数（`videos`）少，
+ * 展开后的歌单/队列缺歌。pagelist 返回完整 `[{cid, page, part, duration}]`，
+ * 形状与 `VideoPageInfo` 一致，用它补全。失败向上抛（BiliApiError / 网络错误），
+ * 由调用方决定是否降级——**绝不静默吞错**，补全失败必须留 hilog 现场（见 expandVideoParts）。
+ */
+async function getVideoPageList(bvid: string): Promise<VideoPageInfo[]> {
+  const raw: VideoPageInfo[] = await biliFetch<VideoPageInfo[]>('/x/player/pagelist', { bvid: bvid });
+  const list: VideoPageInfo[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    // cid 无效的条目没法取流，直接滤掉
+    if (raw[i].cid > 0) {
+      list.push(raw[i]);
+    }
+  }
+  // page 字段齐全时按 page 升序，保证与 view 的 pages 顺序口径一致；缺失则保持返回序
+  let allNumbered: boolean = list.length > 0;
+  for (let i = 0; i < list.length; i++) {
+    if (!list[i].page || list[i].page <= 0) {
+      allNumbered = false;
+      break;
+    }
+  }
+  if (allNumbered) {
+    list.sort((a: VideoPageInfo, b: VideoPageInfo): number => (a.page ?? 0) - (b.page ?? 0));
+  }
+  return list;
+}
+
+interface PartTitle {
+  title: string;
+  artist: string;
+}
+
+/** 分 P 标题前缀："001."、"01 -"、"P1 "、"1P"（P 在数字后）等序号 */
+const PART_INDEX: RegExp = /^\s*[Pp]?\d{1,3}[Pp]?\s*[.、:：\-_|]*\s*/;
+/** 4 位以上数字开头（「1080P 高清」分辨率字样）不是分 P 序号，整段保留不剥 */
+const NOT_PART_INDEX: RegExp = /^\d{4,}/;
+/** "周杰伦-晴天" → 歌手「周杰伦」+ 标题「晴天」 */
+const PART_SPLIT: RegExp = /^(.{1,16}?)\s*[-–—]\s*(.+)$/;
+
+function splitPartTitle(part: string): PartTitle {
+  if (!part) {
+    return { title: '', artist: '' };
+  }
+  const t: string = part.trim();
+  // ⚠️ "1P" 这类数字在前的序号：旧正则只吃掉数字剩下孤零零的 "P"（BV1NH4y1A7fU
+  // 全套分 P 就叫 "1P""2P"…），必须连后面的 P 一起剥；"1080P" 则整段不剥。
+  const s: string = NOT_PART_INDEX.test(t) ? t : t.replace(PART_INDEX, '');
+  const m: RegExpMatchArray | null = s.match(PART_SPLIT);
+  if (m) {
+    return { artist: m[1].trim(), title: m[2].trim() };
+  }
+  return { title: s.trim(), artist: '' };
+}
+
+/**
+ * 把多 P 视频（B 站音乐的「50 首精选合集」这类）或 B 站「合集」（ugc_season，
+ * 多个独立视频的集合）展开成曲目列表；两者皆无的单视频返回空数组。
+ *
+ * 首个分 P 复用 base.id 的**前提**：base.id 不含 '#'（base 是合集入口条目 = P1 本身，
+ * 来自搜索 / 榜单 / UP 主页）。此时播放首个分 P 用的就是原 track，展开后当前曲目
+ * 在队列里的位置不变，currentIndex 不会错位、播放在展开瞬间不会打断。
+ *
+ * base 本身是具体分 P（id 形如 `BV…#cid`，来自歌单 / 队列 / 最近播放）时，
+ * 首 P 与其余分 P **一律**用 `bvid#cid` 作 id——cid 唯一，切歌 / 下载时能正确
+ * 取到对应分 P 的音频流。若此时仍复用 base.id：P1 的数据（cid 是 P1 的）会顶掉
+ * base 的 id，下载任务按 cid 取流把 P1 的音频存进 base 那个分 P 的文件
+ * （musicId 撞车 + getDownloadByMusicId 去重把真分 P 的任务跳过），播放时串音。
+ *
+ * ⚠️ expandSeason 默认 false：合集里每个条目的 view 响应**同样**带 ugc_season，
+ * 播放（MusicPlayer）/ 下载（DownloadManager）链路若也展开，下载合集里任意一集
+ * 都会被扩成整季（递归翻倍）。只有「保存合集为歌单」这种用户显式要整季的入口才传 true。
+ */
+export async function expandVideoParts(bvid: string, base?: Track, expandSeason: boolean = false): Promise<Track[]> {
+  if (!bvid) {
+    return [];
+  }
+  const detail: VideoDetail = await getVideoDetail(bvid);
+  let pages: VideoPageInfo[] = detail.pages ? detail.pages : [];
+  console.info(`[Collection] expand bvid=${bvid} pages=${pages.length} videos=${detail.videos} season=${detail.ugc_season ? 'yes' : 'no'}`);
+  // ⚠️ view 返回的 pages 比服务端声称的总分P数（videos）少时（个别合集加载
+  // 不完整的根因），用 pagelist 补全。补全失败/无改善 → 保留原 pages 继续，
+  // 但必须留 warn 现场。
+  if (detail.videos > 1 && pages.length < detail.videos) {
+    console.warn(`[Collection] 分P列表不完整：服务端共 ${detail.videos} P，实际收到 ${pages.length}，尝试 pagelist 补全`);
+    try {
+      const full: VideoPageInfo[] = await getVideoPageList(bvid);
+      if (full.length > pages.length) {
+        console.warn(`[Collection] pagelist 补全成功：${pages.length} → ${full.length} 条（服务端 ${detail.videos} P）`);
+        pages = full;
+      } else {
+        console.warn(`[Collection] pagelist 无改善：返回 ${full.length} 条，保留原 pages`);
+      }
+    } catch (e) {
+      const reason: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
+      console.warn(`[Collection] pagelist 补全失败：${reason}`);
+    }
+  }
+  if (pages.length <= 1) {
+    // 多 P 不存在；用户显式要求时再看合集（ugc_season）
+    return expandSeason ? expandSeasonEpisodes(bvid, detail, base) : [];
+  }
+  const fallbackArtist: string = base && base.artist ? base.artist : (detail.owner ? detail.owner.name : '');
+  const cover: string = base && base.coverUrl ? base.coverUrl : toHttpsUrl(detail.pic);
+  const aid: string = base && base.aid ? base.aid : String(detail.aid);
+  const out: Track[] = [];
+  const badPages: number[] = [];
+  // 同批 id 去重现场：id 冲突即下载 / 队列串音的源头（见函数头注释），必须留 warn 可见
+  const seenIds: Set<string> = new Set<string>();
+  for (let i = 0; i < pages.length; i++) {
+    const p: VideoPageInfo = pages[i];
+    if (p.cid <= 0 || p.duration <= 0) {
+      badPages.push(i + 1);
+    }
+    const parsed: PartTitle = splitPartTitle(p.part);
+    let title: string = parsed.title;
+    if (title.length === 0) {
+      // 分 P 名剥完序号为空（"1P""P1""01." 纯序号名，或根本没起名）：合成
+      // 「P{序号}」而非回落合集标题 —— 否则 25 个分 P 全显示同一行合集标题，
+      // 无法区分（BV1NH4y1A7fU 全套 "1P""2P"… 命名即此场景）。
+      const pageNo: number = p.page && p.page > 0 ? p.page : i + 1;
+      title = `P${pageNo}`;
+    }
+    // 首个分 P 复用调用方传入的原始条目（id 已如此），标题也优先用它的：
+    // 从搜索 / 榜单进来时这就是**合集标题**，下载页据此把整个合集显示成单个条目
+    //（见 DownloadsPage 的分组渲染）。base.id 带 # 说明 base 本身是某个分 P，
+    // 此时保持解析出的分 P 标题不变。
+    if (i === 0 && base && base.title.length > 0 && base.id.indexOf('#') < 0) {
+      title = base.title;
+    }
+    // 首 P id 复用条件（见函数头注释）：仅 base 是合集入口条目（id 不含 #，
+    // 即 base 本身就是 P1）时复用 base.id（base 缺省时退回纯 bvid，保持旧行为）；
+    // base 是具体分 P 时首 P 也用 bvid#cid，否则 P1 的数据顶掉 base 的 id →
+    // 下载任务 musicId 撞车 → 分 P 音频串音。
+    let partId: string = `${bvid}#${p.cid}`;
+    if (i === 0) {
+      if (base === undefined) {
+        partId = bvid;
+      } else if (base.id.indexOf('#') < 0) {
+        partId = base.id;
+      }
+    }
+    if (seenIds.has(partId)) {
+      console.warn(`[Collection] 展开出现重复 id：${partId}（page ${i + 1}/${pages.length}，bvid=${bvid}）`);
+    }
+    seenIds.add(partId);
+    out.push(buildTrack({
+      id: partId,
+      bvid: bvid,
+      aid: aid,
+      cid: String(p.cid),
+      title: title,
+      artist: parsed.artist.length > 0 ? parsed.artist : fallbackArtist,
+      coverUrl: cover,
+      duration: p.duration
+    }));
+  }
+  if (badPages.length > 0) {
+    const shown: string = badPages.slice(0, 5).join('、');
+    console.warn(`[Collection] 异常分P ${badPages.length} 个（cid/时长缺失）：P${shown}${badPages.length > 5 ? '…' : ''}`);
+  }
+  console.info(`[Collection] 展开 bvid=${bvid} 构建 ${out.length} 首（服务端 ${detail.videos} P），` +
+    `首「${out[0].title.slice(0, 30)}」末「${out[out.length - 1].title.slice(0, 30)}」`);
+  return out;
+}
+
+/**
+ * 展开 B 站「合集」（ugc_season）。与多 P（同一视频的 pages）不同，合集的每个
+ * 条目是**独立投稿**：自带 bvid/cid，各自解析音源 —— id 直接用其 bvid。
+ * 命中用户点开的那个视频（bvid 相同）时复用 base 条目，保持搜索结果的
+ * id / 标题 / 封面不变；其余条目用 episode 数据构建（标题过 splitPartTitle
+ * 剥掉 "01." 类序号并拆 "歌手-歌名"，与多 P 展开的命名口径一致）。
+ * 条目 bvid 异常（下架 / 付费，返回空串）直接跳过。
+ */
+function expandSeasonEpisodes(bvid: string, detail: VideoDetail, base?: Track): Track[] {
+  const season: UgcSeason | undefined = detail.ugc_season;
+  if (!season || !season.sections) {
+    console.info(`[Collection] season 缺失 bvid=${bvid}`);
+    return [];
+  }
+  // 跨 section 汇总（多数合集只有一个 section）
+  const eps: SeasonEpisode[] = [];
+  for (let i = 0; i < season.sections.length; i++) {
+    const list: SeasonEpisode[] = season.sections[i].episodes ? season.sections[i].episodes : [];
+    for (let j = 0; j < list.length; j++) {
+      eps.push(list[j]);
+    }
+  }
+  console.info(`[Collection] season「${season.title.slice(0, 30)}」sections=${season.sections.length} episodes=${eps.length}`);
+  if (eps.length <= 1) {
+    // 用户会看到「该视频只有一个分 P」toast，日志里留好当时的服务端数据以便对照
+    console.info(`[Collection] season 条目不足（${eps.length}），跳过展开`);
+    return [];
+  }
+  const fallbackArtist: string = base && base.artist ? base.artist : (detail.owner ? detail.owner.name : '');
+  const seasonCover: string = season.cover ? toHttpsUrl(season.cover)
+    : (base && base.coverUrl ? base.coverUrl : toHttpsUrl(detail.pic));
+  const baseBvid: string = base && base.bvid ? base.bvid : bvid;
+  const out: Track[] = [];
+  let skippedBad: number = 0;
+  let reusedBase: number = 0;
+  for (let i = 0; i < eps.length; i++) {
+    const ep: SeasonEpisode = eps[i];
+    if (!ep.bvid || ep.bvid.indexOf('BV') !== 0) {
+      // 条目 bvid 异常（下架 / 付费，返回空串）直接跳过
+      skippedBad++;
+      continue;
+    }
+    // 用户点开的视频：复用原条目（含 id），位置仍在合集的原顺序处
+    if (base && ep.bvid === baseBvid) {
+      reusedBase++;
+      out.push(base);
+      continue;
+    }
+    const partTitle: string = ep.page && ep.page.part && ep.page.part.length > 0 ? ep.page.part : ep.title;
+    const parsed: PartTitle = splitPartTitle(partTitle);
+    out.push(buildTrack({
+      id: ep.bvid,
+      bvid: ep.bvid,
+      aid: String(ep.aid),
+      cid: String(ep.cid),
+      title: parsed.title.length > 0 ? parsed.title : ep.title,
+      artist: parsed.artist.length > 0 ? parsed.artist : (ep.author ? ep.author.name : fallbackArtist),
+      coverUrl: ep.pic ? toHttpsUrl(ep.pic) : seasonCover,
+      duration: ep.duration ?? (ep.page ? ep.page.duration : 0),
+      upMid: ep.author ? String(ep.author.mid) : '',
+      pubdate: 0
+    }));
+  }
+  if (skippedBad > 0) {
+    console.warn(`[Collection] season ${skippedBad} 个条目 bvid 无效（下架/付费），已跳过`);
+  }
+  if (reusedBase > 0) {
+    console.info(`[Collection] season 复用当前条目 ${reusedBase} 个`);
+  }
+  console.info(`[Collection] season 展开：${eps.length} 条构建 ${out.length} 首`);
+  return out;
+}
+
+/**
+ * playurl 公共参数。
+ *
+ * ⚠️ fnval=4048：16 只拿基础 DASH 三档（64K/132K/192K），
+ * 杜比全景声需要 fnval 含 256 位（4048 已覆盖）**且请求带登录 Cookie（大会员）** 服务端
+ * 才会下发（杜比在 dash.dolby.audio、Hi-Res 在 dash.flac.audio，见 collectAudioStreams）。
+ * 匿名状态下 4048 与 16 返回完全一致（实测）。
+ *
+ * ⚠️ 风控指纹参数**不在这里**：它们每次请求都要重新随机，见 buildPlayUrlParams。
+ */
+const PLAYURL_BASE_PARAMS: Record<string, string | number> = {
+  qn: 0,
+  fnver: 0,
+  fnval: 4048,
+  fourk: 1
+};
+
+/**
+ * 组装 playurl 全量参数 = 业务参数 + 浏览器同款风控指纹（指纹字段对齐 PiliPlus）。
+ *
+ * 指纹部分（gaia_source / isGaiaAvoided / web_location / dm_img_*）取自
+ * utils/RiskShield.ts，每次调用重新随机 —— **不能做成常量**：一串固定不变的
+ * canvas 指纹在所有请求里反复出现，本身就是「机器行为」特征。
+ *
+ * `try_look`（免登录试看 1080p）只在**匿名**时加：
+ *   · 匿名请求走试看通道，档位比不带它时更高（实测 accept 112/80/64）；
+ *   · 登录态下加它没有收益，反而多一个「非播放器会发的参数」。
+ */
+function buildPlayUrlParams(
+  idParams: Record<string, string | number>,
+  anonymous: boolean
+): Record<string, string | number> {
+  const params: Record<string, string | number> =
+    Object.assign({}, idParams, PLAYURL_BASE_PARAMS, gaiaWebParams());
+  if (anonymous) {
+    params['try_look'] = 1;
+  }
+  return params;
+}
+
+/**
+ * wbi 端点取流（官方 web 播放器现用通道）。
+ * 与旧端点共用同一份参数（含风控指纹），只是签名方式不同。
+ */
+async function fetchPlayUrlViaWbi(params: Record<string, string | number>): Promise<PlayUrlData> {
+  const query: string = await encodeWbi(params);
+  const data: BiliEnvelope<PlayUrlData> = await HttpUtil.requestJson<BiliEnvelope<PlayUrlData>>(
+    `${BILI_API}/x/player/wbi/playurl?${query}`
+  );
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/player/wbi/playurl');
+  }
+  return data.data;
+}
+
+/**
+ * TV 端取流（APP 签名域，`/x/tv/playurl`）—— 取流链路的**最后一级兜底**。
+ *
+ * 为什么它能救场：Web 域与 APP 域是两套独立风控策略，同一 aivd 在 Web playurl
+ * 被 -352 拦死时，这条通常还能返回数据（实测：匿名 + appSign 即 code=0）。
+ *
+ * 代价明确：它只给 **durl（整段 mp4，音视频合一）**，没有 dash 音轨，
+ * 且 qn 最低档也有 ~400kbps（3.5 分钟约 10MB）。所以只在「dash 完全拿不到」时用，
+ * 由 resolveAudioSelection 的 durl 分支接住 —— 能出声，但费流量。
+ *
+ * qn=16（360P）是刻意的：音频播放器不渲染画面，取最低档把体积压到最小。
+ */
+async function fetchTvPlayUrl(aid: number, cid: number, anonymous: boolean): Promise<PlayUrlData> {  const params: Record<string, string> = {
+    actionKey: 'appkey',
+    cid: String(cid),
+    fourk: '1',
+    is_proj: '1',
+    mobi_app: 'android',
+    object_id: String(aid),
+    platform: 'android',
+    playurl_type: '1',
+    protocol: '0',
+    qn: '16'
+  };
+  const query: string = appSignQuery(params);
+  const data: BiliEnvelope<PlayUrlData> = await HttpUtil.requestJson<BiliEnvelope<PlayUrlData>>(
+    `${BILI_API}/x/tv/playurl?${query}`,
+    {
+      // UA 必须带 BiliDroid 标记：签名对了但 UA 是浏览器，服务端仍判 -400
+      headers: { 'User-Agent': BILI_TV_UA },
+      skipLoginCookie: anonymous
+    });
+  if (data.code !== 0) {
+    throw new BiliApiError(data.code, data.message, '/x/tv/playurl');
+  }
+  return data.data;
+}
+
+/**
+ * TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：
+ * 用 APP 签名域（安卓客户端 appkey）打 `/x/player/playurl`（platform=android），
+ * 验证 APP 通道的 dash 音轨是否下发 loudness 响度元数据（Web 通道已实测无）。
+ * 匿名请求（不带登录 Cookie，与账号零关联）；fire-and-forget：任何失败只记
+ * 日志，绝不影响取流主链路。
+ */
+function probeAppPlayUrlLoudness(avid: number, cid: number): void {
+  if (!(avid > 0) || !(cid > 0)) {
+    return;
+  }
+  // 公开的安卓客户端固定凭据（bilibili-API-collect 文档示例同款，第三方共用，非本项目密钥）
+  const androidKey: string = '1d8b6e7d45233436';
+  const androidSec: string = '560c52ccd288fed045859ed18bffd973';
+  const params: Record<string, string> = {
+    avid: String(avid),
+    cid: String(cid),
+    fnval: '4048',
+    fnver: '0',
+    fourk: '1',
+    mobi_app: 'android',
+    platform: 'android',
+    qn: '16',
+    type: ''
+  };
+  const query: string = appSignQueryWith(androidKey, androidSec, params);
+  HttpUtil.requestJson<BiliEnvelope<PlayUrlData>>(
+    `${BILI_API}/x/player/playurl?${query}`,
+    {
+      // BiliDroid 标记 UA（与 TV 通道同款）：APP 域端点按 UA 判客户端身份
+      headers: { 'User-Agent': BILI_TV_UA },
+      skipLoginCookie: true
+    }
+  ).then((data: BiliEnvelope<PlayUrlData>): void => {
+    if (data.code !== 0) {
+      console.info(`probe: app playurl code=${data.code} msg=${data.message}`);
+      return;
+    }
+    const raw: string = JSON.stringify(data);
+    console.info(`probe: app playurl 'loudness' idx=${raw.indexOf('loudness')}`);
+    const play: PlayUrlData | undefined = data.data;
+    const dash: DashData | undefined = play?.dash;
+    if (dash !== undefined && dash.audio && dash.audio.length > 0) {
+      console.info(`probe: app playurl audio[0] = ` +
+        `${JSON.stringify(dash.audio[0]).replace(/https?:[^"]+/g, '[url]')}`);
+    } else {
+      console.info(`probe: app playurl no dash audio (durl=${play?.durl ? 'yes' : 'no'})`);
+    }
+  }).catch((e: Error): void => {
+    console.info(`probe: app playurl failed: ${e.message}`);
+  });
+}
+
+/**
+ * 取流统一入口：**双 Web 通道交叉 + TV 域末级兜底**。
+ *
+ * 通道顺序（`wantHiRes` = 无损偏好 + 已登录 + 非匿名）：
+ *   1. wantHiRes → wbi 优先（旧端点不下发 flac/dolby），失败落旧端点；
+ *   2. 其余 → 旧端点优先（长期线上验证的稳定通道），失败落 wbi；
+ *   3. 两条 Web 通道都失败 → 且拿到了 aid → TV 端 playurl（durl 兜底）。
+ *
+ * 三条通道跑的是**不同风控策略**，所以这里的重试不是「同一策略多试几次」，
+ * 而是「换个策略再问一次」—— 这比退避重试更可能成功，尤其是 -352 类账号级判定。
+ *
+ * @param idParams 视频标识：{ bvid, cid } 或 { avid, cid }
+ * @param preferredQuality 首选音频档位 id（0 = 无偏好）
+ * @param anonymous true = 请求不带登录 Cookie（buvid 保留）
+ * @param aid 视频 avid（可空）：仅 TV 兜底需要，Web 请求不带它
+ */
+async function fetchPlayUrlData(
+  idParams: Record<string, string | number>,
+  preferredQuality: number,
+  anonymous: boolean = false,
+  aid: number = 0
+): Promise<PlayUrlData> {
+  const params: Record<string, string | number> = buildPlayUrlParams(idParams, anonymous);
+  const loggedIn: boolean = HttpUtil.getLoginCookie().length > 0;
+  const wantHiRes: boolean = !anonymous && preferredQuality === AUDIO_Q_HIRES && loggedIn;
+  let wbiTried: boolean = false;
+  let lastError: Object | null = null;
+
+  if (wantHiRes) {
+    wbiTried = true;
+    try {
+      return await fetchPlayUrlViaWbi(params);
+    } catch (e) {
+      if (e instanceof BiliApiError && !isRetryableFetchError(e)) {
+        throw e;
+      }
+      lastError = e;
+      console.warn(`wbi playurl failed, fallback to legacy: ${
+        e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+  }
+
+  try {
+    return await biliFetch<PlayUrlData>('/x/player/playurl', params, anonymous);
+  } catch (e) {
+    if (e instanceof BiliApiError && !isRetryableFetchError(e)) {
+      // -404（视频不存在 / cid 错配）这类确定性错误：换通道只会得到同样的答案
+      throw e;
+    }
+    lastError = e;
+    console.warn(`legacy playurl failed (${anonymous ? 'anon' : 'login'}): ${
+      e instanceof Error ? e.message : JSON.stringify(e)}`);
+  }
+
+  if (!wbiTried) {
+    try {
+      return await fetchPlayUrlViaWbi(params);
+    } catch (e) {
+      lastError = e;
+      console.warn(`wbi playurl (cross-channel) failed: ${
+        e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+  }
+
+  // TV 兜底需要 aid：优先用调用方显式传入的，其次从 idParams 的 avid 取
+  // （extractAudioByAvidCid 走的是 { avid, cid } 形态，这里键名必须是 avid）
+  const tvAid: number = aid > 0 ? aid : Number(idParams['avid']) || 0;
+  if (tvAid > 0) {
+    console.warn(`web playurl exhausted, trying tv playurl aid=${tvAid}`);
+    // TV 端失败就直接抛它自己的错：前两条通道的错已无信息增量，
+    // 这条是最后一跳，失败原因才是有用的那个
+    return await fetchTvPlayUrl(tvAid, Number(idParams['cid']) || 0, anonymous);
+  }
+  throw lastError instanceof Error ? lastError : new Error('playurl failed on all channels');
+}
+
+async function getPlayUrl(
+  bvid: string,
+  cid: number,
+  preferredQuality: number = 0,
+  anonymous: boolean = false,
+  aid: number = 0
+): Promise<PlayUrlData> {
+  // 同 view：这是决定「能不能出声」的最后一跳，必须退避重试
+  // （fetchPlayUrlData 内部已带「双 Web 通道 + TV 域」三级，这里再叠一层瞬态退避）
+  const total: number = SOURCE_RETRY_DELAYS_MS.length;
+  for (let attempt = 0; attempt <= total; attempt++) {
+    try {
+      return await fetchPlayUrlData({ bvid: bvid, cid: cid }, preferredQuality, anonymous, aid);
+    } catch (err) {
+      const left: number = total - attempt;
+      if (left <= 0 || !isRetryableFetchError(err)) {
+        throw err;
+      }
+      const delay: number = SOURCE_RETRY_DELAYS_MS[attempt];
+      console.warn(`playurl failed (attempt ${attempt + 1}/${total + 1}), retry in ${delay}ms: ${JSON.stringify(err)}`);
+      await sleep(delay);
+    }
+  }
+  // 循环内要么 return 要么 throw，这里只是让类型收敛
+  throw new Error('playurl failed after retry');
+}
+
+/**
+ * 音质偏好 → 「候选 quality id」序列（按偏好度从高到低）。
+ *
+ * 为什么要给一个序列而不是一个 id：服务端给哪几档是它说了算，用户选的档常常不存在。
+ * 例如只有 64K / 192K 的投稿，用户选「高品质(132K)」时应当退到 192K 而不是 64K。
+ * 三个序列的最后几项互为兜底，保证只要有一条音轨就一定能选出东西。
+ */
+function audioQualityCandidates(preferredId: number): number[] {
+  if (preferredId === AUDIO_Q_64K) {
+    // 「省流量」：越小越好，逐级放大只在没有更小的档时发生
+    return [AUDIO_Q_64K, AUDIO_Q_132K, AUDIO_Q_192K, AUDIO_Q_DOLBY, AUDIO_Q_HIRES];
+  }
+  if (preferredId === AUDIO_Q_HIRES) {
+    // 「无损」：优先 Hi-Res / 杜比，没有就退到能拿到的最高档
+    return [AUDIO_Q_HIRES, AUDIO_Q_DOLBY, AUDIO_Q_192K, AUDIO_Q_132K, AUDIO_Q_64K];
+  }
+  // 「高品质」(192K) 及未知取值：优先 192K → 132K → 无损（更大也不亏）→ 最后才 64K
+  return [AUDIO_Q_192K, AUDIO_Q_132K, AUDIO_Q_HIRES, AUDIO_Q_DOLBY, AUDIO_Q_64K];
+}
+
+/**
+ * 在服务端返回的音频流里按偏好挑一条。
+ *
+ * @param preferredQuality 首选档位 id；<= 0 表示「无所谓，取最高带宽」（播放侧的默认行为）
+ */
+function pickAudioStream(streams: AudioStream[], preferredQuality: number = 0): AudioStream {
+  if (preferredQuality > 0) {
+    const order: number[] = audioQualityCandidates(preferredQuality);
+    for (let i = 0; i < order.length; i++) {
+      for (let j = 0; j < streams.length; j++) {
+        if (streams[j].quality === order[i]) {
+          return streams[j];
+        }
+      }
+    }
+    // 走到这里说明服务端给的是未知档位 id（B 站会不打招呼地加新档），
+    // 不猜了，直接按带宽取最大 —— 至少不会比之前差。
+  }
+  let best: AudioStream = streams[0];
+  for (let i = 1; i < streams.length; i++) {
+    if (streams[i].bandwidth > best.bandwidth) {
+      best = streams[i];
+    }
+  }
+  return best;
+}
+
+/**
+ * 归一化单条音轨：把档位补进 `quality` 字段。
+ *
+ * ⚠️ B 站 playurl 响应的 dash 音轨对象**只有 `id` 没有 `quality`**
+ * （bilibili-API-collect 两个响应示例一致：id=30280/30232/30216…）。而档位选择
+ * （pickAudioStream）按 `quality` 匹配 —— 不归一化的话所有偏好选择都因
+ * `undefined === 30216` 永远匹配不上，全部落到「带宽最大」兜底，
+ * 表现即「登录与否、选标准还是无损，拿到的都是 192K」。
+ */
+function normalizeAudioStream(raw: AudioStream): AudioStream {
+  if (raw.quality > 0) {
+    return raw;
+  }
+  return {
+    id: raw.id,
+    quality: raw.id,
+    bandwidth: raw.bandwidth,
+    mimeType: raw.mimeType,
+    codecid: raw.codecid,
+    baseUrl: raw.baseUrl,
+    backupUrl: raw.backupUrl ?? [],
+    // 音量均衡元数据透传（LUFS，可缺）：缺失 = 服务端未下发 → 归一不生效
+    loudness: raw.loudness
+  };
+}
+
+/**
+ * 把响应里**所有**音轨归一化进一个候选列表：dash.audio（基础三档）+
+ * dash.flac.audio（Hi-Res，**单对象**）+ dash.dolby.audio（杜比，数组）。
+ *
+ * 为什么必须合并：B 站协议里高档位音轨**不放在 dash.audio**——
+ * 杜比在 dash.dolby.audio、Hi-Res 在 dash.flac.audio。
+ * 只读 dash.audio 会让 audioQualityCandidates 里 30250/30251 永远匹配不上，
+ * 「无损」选项最终按带宽最大兜底拿 192K，登录了也看不出区别。
+ * 无对应音轨时 flac 整体为 null、dolby.audio 为 null —— 一律真值判断。
+ */
+function collectAudioStreams(playData: PlayUrlData): AudioStream[] {
+  const out: AudioStream[] = [];
+  const dash: DashData | undefined = playData.dash;
+  if (!dash) {
+    return out;
+  }
+  // ⚠️ 这里**不能**在 dash.audio 为空时直接 return：服务端存在「只有 flac / dolby」的
+  // 极端响应，早退会让下面的合并逻辑整段失效。
+  const base: AudioStream[] = dash.audio ? dash.audio : [];
+  for (let i = 0; i < base.length; i++) {
+    pushIfPlayable(out, base[i]);
+  }
+  const flac: FlacStream | undefined = dash.flac;
+  const flacAudio: AudioStream | undefined = flac ? flac.audio : undefined;
+  if (flacAudio) {
+    pushIfPlayable(out, flacAudio);
+  }
+  const dolby: DolbyData | undefined = dash.dolby;
+  const dolbyAudio: AudioStream[] | null = dolby ? (dolby.audio ?? null) : null;
+  if (dolbyAudio) {
+    for (let i = 0; i < dolbyAudio.length; i++) {
+      pushIfPlayable(out, dolbyAudio[i]);
+    }
+  }
+  // 诊断日志：档位 id + 实测带宽（不含 URL / 凭据），用于核对「无损是否真的取到 30251」
+  const ids: string[] = [];
+  for (let i = 0; i < out.length; i++) {
+    ids.push(`${out[i].quality}@${out[i].bandwidth}`);
+  }
+  console.info(`playurl audio streams: n=${out.length} [${ids.join(', ')}]` +
+    ` flac=${flacAudio ? 'yes' : 'no'} dolby=${dolbyAudio && dolbyAudio.length > 0 ? String(dolbyAudio.length) : 'no'}`);
+  return out;
+}
+
+/**
+ * 只有「带真实地址」的音轨才算候选。
+ *
+ * 服务端偶尔会给出一条 baseUrl 为空串的占位音轨（多见于版权受限的稿件）；
+ * 若把它选成主音轨，switchSource 会因为空 URL 直接失败 —— 表现为「这首歌永远播不了」，
+ * 而同一响应里其实还有别的可用音轨。在这里滤掉，等于把兜底提前到选择阶段。
+ */
+function pushIfPlayable(out: AudioStream[], raw: AudioStream): void {
+  if (!raw) {
+    return;
+  }
+  const normalized: AudioStream = normalizeAudioStream(raw);
+  if (!normalized.baseUrl || normalized.baseUrl.length === 0) {
+    return;
+  }
+  out.push(normalized);
+}
+
+/**
+ * 「降档阶梯」：解析/播放失败时逐级向下换档位用的候选序列。
+ *
+ * 为什么要它：`audioQualityCandidates` 回答的是「用户想要的那一档不存在时退到哪」，
+ * 而且它的序列里**混着更大的档**（高品质 → 无损 → 杜比），语义是「不亏」。
+ * 这里要的是完全相反的语义 —— **只降不升**，专治「某一档音轨本身播不了」
+ * （flac 解码失败 / 该档 CDN 全部拒绝 / 该档 URL 被风控），
+ * 一路降到 64K 只要能出声就比「点了没反应」强。
+ *
+ * 首个元素恒为用户偏好档本身：第 1 次重试仍按原档重解析（最常见原因是直链过期，
+ * 换档反而把音质白白降掉），第 2 次起才开始降档。
+ */
+export function qualityDowngradePlan(preferredId: number): number[] {
+  if (preferredId === AUDIO_Q_HIRES) {
+    return [AUDIO_Q_HIRES, AUDIO_Q_DOLBY, AUDIO_Q_192K, AUDIO_Q_132K, AUDIO_Q_64K];
+  }
+  if (preferredId === AUDIO_Q_DOLBY) {
+    return [AUDIO_Q_DOLBY, AUDIO_Q_192K, AUDIO_Q_132K, AUDIO_Q_64K];
+  }
+  if (preferredId === AUDIO_Q_64K) {
+    // 省流量用户已经是地板档，再降无处可降
+    return [AUDIO_Q_64K];
+  }
+  if (preferredId === AUDIO_Q_132K) {
+    return [AUDIO_Q_132K, AUDIO_Q_64K];
+  }
+  // 192K 及未知取值（含 0 = 「无所谓」）：按品质从高到低给完整阶梯
+  return [AUDIO_Q_192K, AUDIO_Q_132K, AUDIO_Q_64K];
+}
+
+/**
+ * 统一音源选择结果：把 dash 音轨与 durl 分段流收敛成同一个形状，
+ * 让 buildTrackSource / extractAudioByAvidCid 两条组装路径不再各写一遍。
+ */
+interface AudioSelection {
+  url: string;
+  backupUrls: string[];
+  quality: number;
+  mimeType: string;
+  bandwidth: number;
+  /** 'dash' | 'durl'，仅用于日志与排查 */
+  container: string;
+  /** 所选音轨综合响度（LUFS，可缺）：音量均衡归一增益数据源；durl 兜底形态无此字段 */
+  loudness?: number;
+}
+
+/**
+ * 取流链路 warn 级诊断日志（写入 app 内日志页留档）。
+ * PlaybackLogStore 只采集 console.error 与 plog* 埋点、**不采集 console.warn**，
+ * 取流失败的关键证据（通道被拒 / durl 降级）以前只落在 hilog，用户反馈
+ * 「不能播」时日志页一片空白 —— 统一从这里补记。
+ */
+function blogWarn(message: string): void {
+  recordPlaybackLog(PLAYBACK_LOG_WARN, message);
+}
+
+/**
+ * 把当前生效的 CDN 播放线路（utils/CdnLine.ts）应用到音源选择结果：
+ * 主直链与备用直链一并替换 host（path + query 不动，签名与 host 无关）。
+ * 「默认」线路（uposHost 为空）原样返回 —— 行为与历史版本完全一致。
+ */
+function applyCdnLineToSelection(sel: AudioSelection): AudioSelection {
+  const line: CdnLineOption = effectiveCdnLine();
+  if (line.uposHost.length === 0) {
+    return sel;
+  }
+  const backups: string[] = [];
+  for (let i = 0; i < sel.backupUrls.length; i++) {
+    backups.push(replaceUposHost(sel.backupUrls[i], line));
+  }
+  return {
+    url: replaceUposHost(sel.url, line),
+    backupUrls: backups,
+    quality: sel.quality,
+    mimeType: sel.mimeType,
+    bandwidth: sel.bandwidth,
+    container: sel.container,
+    loudness: sel.loudness
+  };
+}
+
+/**
+ * durl 兜底：老视频 / 服务端把 fnval 降级成 durl 时，响应里**一条 dash 音轨都没有**，
+ * 只有整段 mp4 的分段地址。只认 dash 会在这里抛 `No audio stream available`，
+ * 表现就是「这个视频怎么点都播不出来」—— 而它其实是能出声的。
+ *
+ * 取舍：
+ *  · 只取第一段。多段视频（超长投稿）意味着后面的分段不播，但**比整首不能播强**，
+ *    且音乐场景几乎不会命中多段；
+ *  · 码率用 size/length 反算，比留 0 更有用（播放页会显示真实码率而不是空白）。
+ */
+function durlToAudioSelection(playData: PlayUrlData): AudioSelection | null {
+  const durl: DurlItem[] | undefined = playData.durl;
+  if (!durl || durl.length === 0) {
+    return null;
+  }
+  const first: DurlItem = durl[0];
+  if (!first || !first.url || first.url.length === 0) {
+    return null;
+  }
+  // 逐条真值判断而不是 Array.isArray：backup_url 是可缺属性，
+  // ArkTS 对「可选属性 + Array.isArray 收窄」的处理不如显式判空稳
+  const backups: string[] = [];
+  const rawBackups: string[] | undefined = first.backup_url;
+  if (rawBackups) {
+    for (let i = 0; i < rawBackups.length && backups.length < 3; i++) {
+      const u: string = rawBackups[i];
+      if (u && u.length > 0) {
+        backups.push(u);
+      }
+    }
+  }
+  let bandwidth: number = 0;
+  if (first.size > 0 && first.length > 0) {
+    // ⚠️ durl.length 是**毫秒**（实测 212394 对应 3 分 32 秒），
+    // 直接 size*8/length 会算出 396bps 这种荒谬值，播放页码率显示就全错了
+    const seconds: number = first.length / 1000;
+    bandwidth = Math.round((first.size * 8) / seconds);
+  }
+  console.warn(`no dash audio, fallback to durl (segments=${durl.length}, ` +
+    `bandwidth=${bandwidth})`);
+  return {
+    url: first.url,
+    backupUrls: backups,
+    // 档位 id 留 0 = 无档位概念：formatTrackQuality 会据此只显示实测码率
+    quality: 0,
+    mimeType: 'video/mp4',
+    bandwidth: bandwidth,
+    container: 'durl'
+  };
+}
+
+function resolveAudioSelection(playData: PlayUrlData, preferredQuality: number): AudioSelection {
+  // TEMP PROBE（音量均衡响度字段排查，确认后删除）：
+  // ① 全响应 substring 检查 'loudness'；② dash 音轨[0]原始字段 dump（URL 脱敏）
+  const probeRaw: string = JSON.stringify(playData);
+  console.info(`probe: playurl 'loudness' idx=${probeRaw.indexOf('loudness')}`);
+  const probeDash: DashData | undefined = playData.dash;
+  if (probeDash !== undefined && probeDash.audio && probeDash.audio.length > 0) {
+    console.info(`probe: playurl audio[0] = ` +
+      `${JSON.stringify(probeDash.audio[0]).replace(/https?:[^"]+/g, '[url]')}`);
+  }
+  const streams: AudioStream[] = collectAudioStreams(playData);
+  if (streams.length > 0) {
+    const best: AudioStream = pickAudioStream(streams, preferredQuality);
+    // 备用直链只取前 3 条：主直链被 CDN 拒绝 / 挂死时的快速回退用不了那么多，
+    // 多了只是白占 sourceCache 的内存。normalizeAudioStream 在 quality>0 的
+    // 早退分支里不补 backupUrl，这里必须真值判断，否则 slice 直接抛 undefined。
+    const rawBackups: string[] = Array.isArray(best.backupUrl) ? best.backupUrl.slice(0, 3) : [];
+    // CDN 播放线路在组装收口统一施加（主直链 + 备用直链一起换 host），
+    // 播放 / 下载 / 听后缓存三条取流链全部经由这里，一处生效。
+    return applyCdnLineToSelection({
+      url: best.baseUrl,
+      backupUrls: rawBackups,
+      quality: best.quality,
+      mimeType: best.mimeType,
+      bandwidth: best.bandwidth,
+      container: 'dash',
+      loudness: best.loudness
+    });
+  }
+  const byDurl: AudioSelection | null = durlToAudioSelection(playData);
+  if (byDurl !== null) {
+    return applyCdnLineToSelection(byDurl);
+  }
+  throw new Error('No audio stream available');
+}
+
+/**
+ * 按实际播放的 cid 组装音源。
+ * 多 P 合集里每个分 P 是一首歌：标题 / 时长必须取自该分 P（pages[i]），
+ * 否则播第二首时显示的还是合集的标题和总时长。
+ */
+function buildTrackSource(
+  detail: VideoDetail,
+  playData: PlayUrlData,
+  cid: number,
+  preferredQuality: number = 0
+): TrackSource {
+  // dash 音轨优先，没有则退 durl（老视频）；两者都空才抛错，见 resolveAudioSelection
+  const best: AudioSelection = resolveAudioSelection(playData, preferredQuality);
+  const pages: VideoPageInfo[] = detail.pages ? detail.pages : [];
+  let title: string = detail.title;
+  let artist: string = detail.owner ? detail.owner.name : '';
+  let duration: number = detail.duration;
+  for (let i = 0; i < pages.length; i++) {
+    if (pages[i].cid === cid) {
+      const parsed: PartTitle = splitPartTitle(pages[i].part);
+      if (parsed.title.length > 0) {
+        title = parsed.title;
+      } else if (pages.length > 1) {
+        // 纯序号分 P 名（"1P" 剥完为空）：合成 P 序号，不拿合集标题顶替 ——
+        // 否则多 P 连播时每首显示的都是同一个合集标题。
+        title = `P${pages[i].page && pages[i].page > 0 ? pages[i].page : i + 1}`;
+      }
+      if (parsed.artist.length > 0) {
+        artist = parsed.artist;
+      }
+      if (pages[i].duration > 0) {
+        duration = pages[i].duration;
+      }
+      break;
+    }
+  }
+  // TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：fire-and-forget
+  probeAppPlayUrlLoudness(detail.aid, cid);
+  return {
+    bvid: detail.bvid,
+    aid: detail.aid,
+    cid: cid,
+    title: title,
+    artist: artist,
+    coverUrl: toHttpsUrl(detail.pic),
+    duration: duration,
+    audioUrl: best.url,
+    audioBackupUrls: best.backupUrls,
+    audioQuality: best.quality,
+    audioMimeType: best.mimeType,
+    audioBandwidth: best.bandwidth,
+    audioLoudness: best.loudness
+  };
+}
+
+export interface PopularVideo {
+  bvid: string;
+  aid: number;
+  title: string;
+  pic: string;
+  owner: { mid: number; name: string; face: string };
+  stat: { view: number; danmaku: number; like: number; coin: number; favorite: number; share: number };
+  duration: number;
+  /** 视频发布时间（unix 秒）。原始响应带；可缺 —— 缺则 UI 不显示发布时间 */
+  pubdate?: number;
+  /**
+   * 分区名（tname）。首页筛选按它做分区屏蔽/仅看。
+   * 各通道完备度不一：热门/排行榜带；推荐流实测是否带由响应决定 ——
+   * 可缺（undefined），筛选引擎按「字段缺失放行」的 miss 语义兜底。
+   */
+  tname?: string;
+  /**
+   * 推荐理由（rcmd_reason.content，如「热门」「百万播放」）。
+   * 首页筛选的关键词匹配把它并入文本域；可缺。
+   */
+  rcmdReason?: string;
+}
+
+export async function getPopularVideos(ps: number = 10, pn: number = 1): Promise<PopularVideo[]> {
+  const data: { list: PopularVideo[] } = await biliFetch<{ list: PopularVideo[] }>(
+    '/x/web-interface/popular',
+    { ps: ps, pn: pn }
+  );
+  return data.list || [];
+}
+
+/**
+ * 首页首屏推荐。
+ *
+ * ⚠️ 两个实测约束，别拿它做「加载更多」：
+ *   1. **重复调用返回完全相同的一批**（按 buvid 缓存），一直翻只会看见同一批内容；
+ *   2. `ps` 只能给到 10 左右，给 20/30/50 一律返回 **0 条**（HTTP 200 + code 0，
+ *      看起来就像"真的没数据"）。
+ * 要翻页请用下面的 `getRecommendedFeed`。
+ */
+export async function getRecommendedVideos(ps: number = 10): Promise<PopularVideo[]> {
+  const data: { item: RcmdFeedItem[] } = await biliFetch<{ item: RcmdFeedItem[] }>(
+    '/x/web-interface/index/top/rcmd',
+    { ps: ps }
+  );
+  const list: RcmdFeedItem[] = data.item || [];
+  const out: PopularVideo[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const v: PopularVideo | null = mapRcmdItem(list[i]);
+    if (v !== null) {
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/**
+ * feed/rcmd 的原始条目。该接口会按位置夹带 `login_card` / `ad` 卡片：
+ * 这类条目 `bvid` 为空、`owner` 为 null，所以 owner 必须声明为可空。
+ */
+interface RcmdFeedItem {
+  goto?: string;
+  bvid: string;
+  aid?: number;
+  cid?: number;
+  title: string;
+  pic: string;
+  owner: { mid: number; name: string; face: string } | null;
+  duration: number;
+  stat?: { view: number; like?: number; coin?: number; favorite?: number; danmaku?: number };
+  /** 视频发布时间（unix 秒），可缺 —— 缺则 UI 不显示 */
+  pubdate?: number;
+  /** 分区名，可缺（推荐流是否下发以响应为准） */
+  tname?: string;
+  /** 推荐理由（如「热门」「百万播放」），可缺 */
+  rcmd_reason?: { content?: string };
+}
+
+/**
+ * rcmd 系原始条目 → PopularVideo 的统一映射：
+ * 剔除登录引导 / 广告卡片（无 bvid 或无 owner），透传分区名 / 推荐理由 / 点赞数。
+ * 首屏 top/rcmd 与翻页 feed/rcmd 两个接口共用，保证两个通道字段口径一致。
+ */
+function mapRcmdItem(it: RcmdFeedItem): PopularVideo | null {
+  if (!it.bvid || it.bvid.length === 0) {
+    return null;
+  }
+  const owner: { mid: number; name: string; face: string } | null = it.owner;
+  if (owner === null) {
+    return null;
+  }
+  return {
+    bvid: it.bvid,
+    aid: it.aid ?? 0,
+    title: it.title ?? '',
+    pic: it.pic ?? '',
+    owner: { mid: owner.mid, name: owner.name, face: owner.face },
+    stat: {
+      view: it.stat ? it.stat.view : 0,
+      // like 以下字段 feed/rcmd 通道可能不下发（实测 stat 往往只有 view）：
+      // 拿不到就填 0，筛选引擎按「0 = 未知」的 miss 语义放行，不误滤
+      danmaku: (it.stat && it.stat.danmaku) ? it.stat.danmaku : 0,
+      like: (it.stat && it.stat.like) ? it.stat.like : 0,
+      coin: (it.stat && it.stat.coin) ? it.stat.coin : 0,
+      favorite: (it.stat && it.stat.favorite) ? it.stat.favorite : 0,
+      share: 0
+    },
+    duration: it.duration ?? 0,
+    pubdate: it.pubdate,
+    tname: it.tname,
+    rcmdReason: it.rcmd_reason?.content ?? ''
+  };
+}
+
+/**
+ * 可翻页的推荐流。
+ *
+ * `/x/web-interface/index/top/feed/rcmd` 每换一个 `fresh_idx` 就下发一批新内容
+ * （实测 fresh_idx=1/2/3 三批之间几乎零重叠），这才是能支撑「上拉加载更多」的推荐源。
+ * `ps=20` 时约 17 条有效内容（其余是登录引导与广告卡片）。
+ */
+export async function getRecommendedFeed(freshIdx: number, ps: number = 20): Promise<PopularVideo[]> {
+  const data: { item: RcmdFeedItem[] } = await biliFetch<{ item: RcmdFeedItem[] }>(
+    '/x/web-interface/index/top/feed/rcmd',
+    {
+      ps: ps,
+      fresh_type: 3,
+      fresh_idx: freshIdx,
+      fresh_idx_1h: freshIdx,
+      feed_version: 'V8',
+      homepage_ver: 1
+    }
+  );
+  const list: RcmdFeedItem[] = data.item || [];
+  const out: PopularVideo[] = [];
+  for (let i = 0; i < list.length; i++) {
+    // 登录引导 / 广告卡片（无 bvid / 无 owner）在 mapRcmdItem 里统一剔除
+    const v: PopularVideo | null = mapRcmdItem(list[i]);
+    if (v !== null) {
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/** /x/tag/archive/tags 的原始条目（data 直接是数组，无 list 包装） */
+export interface VideoTagItem {
+  tag_name: string;
+}
+
+/**
+ * 视频标签（听歌日记「周期标签」用）。
+ *
+ * · B 站官方匿名接口：data = tag 数组，无需登录（buvid 由 biliFetch 保留）；
+ * · 失败（风控 / 断网）向上抛，由调用方（VideoTagStore）按「不缓存、本次记空」
+ *   兜底 —— 失败结果绝不落缓存，避免脏缓存让标签永远拉不回来。
+ */
+export async function getVideoTags(bvid: string): Promise<string[]> {
+  const data: VideoTagItem[] = await biliFetch<VideoTagItem[]>(
+    '/x/tag/archive/tags', { bvid: bvid });
+  const out: string[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const name: string = data[i].tag_name ?? '';
+    if (name.length > 0) {
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+//
+// 数据源对比（本机实测结论）：
+//   · `ranking/region?rid=3&day=3`（音乐区旧榜）只返回 **11 条**，且 pn/ps 完全无效，
+//     字段是 author(str) / duration("0:15") / 无 cid / 无 owner —— 既不能分页，信息也不全；
+//   · `ranking/v2?rid=3&type=all`（音乐区 v2 榜）一次返回 96 条，但 B 站已下线 web 分区
+//     排行榜，该接口**停更于 2025-03-31**（榜内 pubdate 全部冻结在那周）—— 死数据源
+//     （「排行榜日期都是很久」即此因）；
+//   · `ranking/v2?rid=0&type=all`（**全站排行榜**）仍在**每日更新**（实测：100 条，
+//     最新一条发布于测试前一日）—— 现行数据源。匿名 web API 中已无仍在更新的音乐专属排行榜。
+//
+// v2 **不支持 pn/ps**（传 pn=2 仍返回同一批），「上拉加载更多」只能前端分页：
+// 一次把整榜拿回内存，界面每次多放一屏（见 SearchPage 的 RANKING_PAGE_SIZE）。
+//
+// 另外注意：这里的 duration 是**秒**，跟旧 region 接口的 "0:15" 字符串不是一回事，
+// 两套映射函数不能混用（照抄 detail 字段会让整榜被 catch 成空）。
+
+export interface RankingVideoItem {
+  aid: number;
+  bvid: string;
+  cid: number;
+  title: string;
+  pic: string;
+  owner: VideoOwner;
+  stat: VideoStat;
+  /** 秒 */
+  duration: number;
+  /** 视频发布时间（unix 秒）。原始响应带；可缺 */
+  pubdate?: number;
+  /** 分区名，首页筛选用；可缺 */
+  tname?: string;
+}
+
+/** 全站排行榜（ranking/v2?rid=0，每日更新）。字段与"视频详情"一致：有 owner 对象、有 cid */
+export async function getGlobalRankingV2(): Promise<RankingVideoItem[]> {
+  const data: { list: RankingVideoItem[] } = await biliFetch<{ list: RankingVideoItem[] }>(
+    '/x/web-interface/ranking/v2',
+    { rid: 0, type: 'all' }
+  );
+  return data.list || [];
+}
+
+// ===== 音乐中心（music.bilibili.com 同源） =====
+
+export interface MusicCenterRelatedArchive {
+  aid: string;
+  bvid: string;
+  cid: string;
+  cover: string;
+  title: string;
+  duration?: number;
+}
+
+/**
+ * 音乐中心（/x/centralization/interface/...）返回的是**下划线风格**字段名：
+ *   music_id / music_title / author / cover / bvid / aid / cid / album / related_archive
+ * 若按驼峰读（musicId / musicTitle / relatedArchive）→ 标题全是 undefined，
+ * 只有 author（该字段名两边一致）能显示 —— 就是"只能显示歌手名字，歌名没有"。
+ * 这里两个名字都声明为可选，取的时候下划线优先、驼峰兜底，防止 B 站改回驼峰。
+ */
+export interface MusicCenterItem {
+  music_id?: string;
+  musicId?: string;
+  music_title?: string;
+  musicTitle?: string;
+  author: string;
+  bvid: string;
+  aid: string;
+  cid: string;
+  cover: string;
+  album?: string;
+  score?: number;
+  publish_time?: string;
+  publishTime?: string;
+  related_archive?: MusicCenterRelatedArchive;
+  relatedArchive?: MusicCenterRelatedArchive;
+}
+
+/**
+ * 音乐中心「综合榜」。
+ *
+ * 实测这个接口的 `pn` 是**真分页**：pn=1/2/3 各 20 条互不重叠（pn 一直翻到 20 都还有数据），
+ * 因此「上拉加载更多」就是在这里递增 pn。
+ */
+export async function getMusicComprehensiveRank(ps: number = 30, pn: number = 1): Promise<MusicCenterItem[]> {
+  const data: { list: MusicCenterItem[] } = await biliFetch<{ list: MusicCenterItem[] }>(
+    '/x/centralization/interface/music/comprehensive/web/rank',
+    { pn: pn, ps: ps }
+  );
+  return data.list || [];
+}
+
+/**
+ * 音乐中心「新歌榜」（最新发布）。
+ * 只有固定 18 条，`pn`/`ps` 传了也无效（返回同一批），所以只置顶音乐中心首屏、
+ * 不参与翻页（翻页走综合榜，见 SearchPage 的 loadMoreCenter）。
+ */
+export async function getNewMusic(): Promise<MusicCenterItem[]> {
+  const data: { list: MusicCenterItem[] } = await biliFetch<{ list: MusicCenterItem[] }>(
+    '/x/centralization/interface/new/music'
+  );
+  return data.list || [];
+}
+
+export interface FavoriteFolder {
+  id: number;
+  title: string;
+  mediaCount: number;
+}
+
+/**
+ * `folder/created/list-all` 的原始条目。
+ *
+ * ⚠️⚠️ **字段名是 snake_case**（`media_count`），而 `FavoriteFolder` 用 camelCase。
+ * 直接把原始响应当 `FavoriteFolder` 返回（零归一化）会让 `mediaCount` **恒为 undefined**，
+ * 下游 `folder.mediaCount <= PLAYLIST_MAX_ITEMS` 恒为 `false`，于是：
+ *   · 双向同步的删除分支**从不生效**（永远只增不减，与文档宣称的行为不一致）；
+ *   · 「单夹超上限只镜像最新 PLAYLIST_MAX_ITEMS 首」的判定同样失效；
+ *   · 「服务端自报非空却拿到 0 条」的风控识别也失效（undefined > 0 = false）。
+ * 真机日志实证：`mediaCount=undefined sizeOk=false`。两个名字都声明为可选，
+ * 归一化时下划线优先、驼峰兜底，防止 B 站哪天改回驼峰。
+ */
+interface FavoriteFolderRaw {
+  id?: number;
+  fid?: number;
+  mid?: number;
+  attr?: number;
+  title?: string;
+  media_count?: number;
+  mediaCount?: number;
+}
+
+/** 收藏夹列表结果（命名接口：内联对象类型违反 arkts-no-obj-literals-as-types） */
+export interface FavoriteFoldersResult {
+  count: number;
+  list: FavoriteFolder[];
+}
+
+/** 收藏夹列表（归一化成 camelCase；⚠️ 不能直接把原始响应返回给上层） */
+export async function getFavoriteFolders(mid: number): Promise<FavoriteFoldersResult> {
+  const raw: { count?: number; list?: FavoriteFolderRaw[] } =
+    await biliFetch<{ count?: number; list?: FavoriteFolderRaw[] }>('/x/v3/fav/folder/created/list-all', {
+      up_mid: mid
+    });
+  const src: FavoriteFolderRaw[] = (raw && raw.list) ? raw.list : [];
+  const list: FavoriteFolder[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const r: FavoriteFolderRaw = src[i];
+    const cnt: number = r.media_count ?? r.mediaCount ?? 0;
+    list.push({
+      id: r.id ?? 0,
+      title: r.title ?? '',
+      mediaCount: Number.isFinite(cnt) ? cnt : 0
+    });
+  }
+  return { count: (raw && typeof raw.count === 'number') ? raw.count : list.length, list: list };
+}
+
+// ===== 收藏夹内容（把收藏夹镜像成本地歌单）=====
+//
+// ⚠️ 首次真机运行必须打印 raw 响应核对：字段名（medias / info.media_count / has_more）、
+// `ps` 上限、`attr` 位语义、`duration` 单位（秒 or 毫秒）、是否需要 wbi 签名。
+
+/** 收藏夹接口风控兜底码表：与 FOLLOWINGS_RISK_CODES 同一套口径 */
+const FAV_RISK_CODES: number[] = [-352, -412, -509, -799];
+
+/**
+ * 收藏夹分页大小。
+ * 实测（匿名直连 `fav/resource/list`）：`ps=40` 正常返回 40 条，
+ * `has_more` / `info.media_count` 均正常 → 同样条数下请求数减半（对齐 BBPlayer 的口径）。
+ */
+const FAV_RESOURCE_PS: number = 40;
+
+/** 收藏夹条目内嵌的 UP 主信息 */
+interface FavUpper {
+  mid?: number;
+  name?: string;
+}
+
+/** 收藏夹条目的计数信息（只取播放量） */
+interface FavCntInfo {
+  play?: number;
+}
+
+/** fav/resource/list 的原始条目：字段可能全缺 → 必须归一化后才进 UI */
+interface FavResourceRawItem {
+  /** 收藏条目 id（**不是** aid） */
+  id?: number;
+  /** 2 = 视频 / 12 = 音频 / 21 = 合集……本功能只保留视频类（bvid 非空者） */
+  type?: number;
+  bvid?: string;
+  aid?: number;
+  title?: string;
+  cover?: string;
+  /** ⚠️ 待实测单位（秒 or 毫秒） */
+  duration?: number;
+  /** 发布时间（unix 秒） */
+  pubtime?: number;
+  upper?: FavUpper | null;
+  cnt_info?: FavCntInfo | null;
+  /** 失效/私密标记：非 0 → 该条目已不可播，同步时应过滤 */
+  attr?: number;
+  intro?: string;
+}
+
+/** 收藏夹元信息（fav/resource/list 里回带的 info） */
+interface FavFolderInfo {
+  id?: number;
+  title?: string;
+  media_count?: number;
+}
+
+interface FavResourceRawData {
+  info?: FavFolderInfo | null;
+  medias?: FavResourceRawItem[] | null;
+  has_more?: boolean;
+}
+
+/** 归一化后的收藏夹条目（不含可选/any 字段，可直接进 UI 与落库） */
+export interface FavResourceItem {
+  bvid: string;
+  aid: number;
+  title: string;
+  cover: string;
+  /** 秒（已按 normalizeFavDuration 归一） */
+  duration: number;
+  pubdate: number;
+  upMid: string;
+  upName: string;
+  playCount: number;
+  /** true = `attr` 非 0（失效/私密）或 bvid 缺失 —— 同步时应过滤掉 */
+  invalid: boolean;
+}
+
+/** 收藏夹单页结果 */
+interface FavResourcePage {
+  items: FavResourceItem[];
+  hasMore: boolean;
+  /** 服务端 info.media_count；0 = 未知 */
+  mediaCount: number;
+}
+
+/** 收藏夹全量拉取结果 */
+export interface FavAllResult {
+  /**
+   * 全部分页成功走完（每页 code=0 且 has_more 走到 false）= true。
+   * ⚠️ **只有 true 才允许执行「删除本地曲目」**（见 FavSyncManager 的删除安全门控）：
+   * 任一分页失败/风控 → false，此时必须只增不减，否则会把「没拉到」误判成「已取消收藏」。
+   */
+  complete: boolean;
+  items: FavResourceItem[];
+  /** 首个失败的人话原因；complete=true 时为空串 */
+  failReason: string;
+  /**
+   * 实际成功拉取的页数（诊断用）。
+   * 「首页 info.media_count=44 却只拉了 1 页」= has_more 判定异常 / 被拦，一眼可辨。
+   */
+  pages: number;
+  /** 首页 `info.media_count`（服务端自报总条目数；0 = 未知/未取到） */
+  reportedTotal: number;
+  /**
+   * ids 两段式通道拿到的**完整收藏顺序**（bvid，已剔除失效/隐藏条目）。
+   * 空数组 = 本轮走的是「全量分页」兜底通道。
+   *
+   * 调用方拿到非空 `orderedBvids` 时，应按它重建歌单顺序：
+   * `items` 里有该 bvid 就用它（新详情），否则用本地已有的 Track 补。
+   */
+  orderedBvids: string[];
+  /** ids 里有、但详情分页拉不到的 bvid（被 UP 隐藏 / 已删除），不会进入 `orderedBvids` */
+  hiddenBvids: string[];
+  /**
+   * true = 走了 ids 两段式通道 —— 此时 **`items` 只包含「本轮新拉到的详情」**，
+   * 不等于收藏夹全量（本地已有的不重复拉）。需要全量时不要看 `items`，看 `orderedBvids`。
+   */
+  usedIdsChannel: boolean;
+}
+
+/**
+ * duration 归一：⚠️ 待真机验证单位。B 站多数接口给「秒」，若给的是毫秒会出现
+ * 荒谬的大值（> 24h）→ 这里按 > 86400 视为毫秒换算回秒，作为防御性兜底。
+ */
+function normalizeFavDuration(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 0;
+  }
+  return raw > 86400 ? Math.round(raw / 1000) : raw;
+}
+
+/** 原始条目 → 归一化条目（服务端缺字段防御：宁可空值也不要 undefined 进 UI） */
+function normalizeFavItem(raw: FavResourceRawItem): FavResourceItem {
+  const bvid: string = raw.bvid ?? '';
+  const attr: number = raw.attr ?? 0;
+  const upper: FavUpper | null = raw.upper ?? null;
+  const cnt: FavCntInfo | null = raw.cnt_info ?? null;
+  return {
+    bvid: bvid,
+    aid: raw.aid ?? 0,
+    title: stripHtmlTags(raw.title ?? ''),
+    cover: raw.cover ?? '',
+    duration: normalizeFavDuration(raw.duration ?? 0),
+    pubdate: raw.pubtime ?? 0,
+    upMid: upper && upper.mid ? String(upper.mid) : '',
+    upName: upper && upper.name ? upper.name : '',
+    playCount: cnt && cnt.play ? cnt.play : 0,
+    invalid: attr !== 0 || bvid.length === 0
+  };
+}
+
+/**
+ * 拉取某个收藏夹的一页内容。
+ *
+ * 风控兜底与 getFollowings 同思路：先走明文 biliFetch，吃到风控码
+ * （FAV_RISK_CODES）再用 encodeWbi 签名重试**一次**；仍是风控码就原样抛
+ * —— 由同步管理器展示 code 让用户判断该等还是该换网。-101（未登录）属
+ * 确定性错误，直接抛不重试。
+ *
+ * ⚠️ 必须带 SESSDATA（HttpUtil 登录后自动附加）；匿名调用会返回 -101 或空。
+ */
+async function getFavResources(mediaId: number, pn: number = 1): Promise<FavResourcePage> {
+  const path: string = '/x/v3/fav/resource/list';
+  const params: Record<string, string | number> = {
+    media_id: mediaId,
+    pn: pn,
+    ps: FAV_RESOURCE_PS,
+    platform: 'web',
+    order: 'mtime'
+  };
+  let raw: FavResourceRawData | undefined;
+  try {
+    raw = await biliFetch<FavResourceRawData>(path, params);
+  } catch (err) {
+    if (!(err instanceof BiliApiError) || FAV_RISK_CODES.indexOf(err.code) < 0) {
+      throw err;
+    }
+    const query: string = await encodeWbi(params);
+    const env: BiliEnvelope<FavResourceRawData> =
+      await HttpUtil.requestJson<BiliEnvelope<FavResourceRawData>>(`${BILI_API}${path}?${query}`);
+    if (env.code !== 0) {
+      throw new BiliApiError(env.code, env.message, path);
+    }
+    raw = env.data;
+  }
+  // ⚠️⚠️ **空壳响应必须当风控，绝不能当「这个收藏夹空了」**（实测确认）：
+  // 被风控时接口仍然回 `code=0`，但 `data` 里只有 `v_voucher`（既无 `info` 也无 `medias`）。
+  // 若按「0 条 + has_more 缺省 false」处理，就会被判定成「已完整拉取、夹子确实空了」，
+  // 上层 `allowDelete` 随即把本地镜像**整单清空** —— 用户看到的现象就是「收藏夹突然变空」。
+  // 判据用「info 与 medias 两个字段全缺」：正常空收藏夹仍带 `info`（media_count=0），不会误伤。
+  if (!raw || (raw.info === undefined && raw.medias === undefined)) {
+    throw new BiliApiError(-412, '收藏夹接口返回空壳（疑似风控验证）', path);
+  }
+  const src: FavResourceRawItem[] = raw.medias ? raw.medias : [];
+  const items: FavResourceItem[] = [];
+  for (let i = 0; i < src.length; i++) {
+    items.push(normalizeFavItem(src[i]));
+  }
+  const info: FavFolderInfo | null = (raw && raw.info) ? raw.info : null;
+  return {
+    items: items,
+    hasMore: raw !== undefined && raw.has_more === true,
+    mediaCount: (info && info.media_count) ? info.media_count : 0
+  };
+}
+
+/** `fav/resource/ids` 的原始条目（一次返回整个收藏夹，不翻页） */
+interface FavIdRawItem {
+  /** ⚠️ 这个 id 是 **aid**（不是收藏条目 id）—— 推送 `deal` / `batch-del` 时直接可用 */
+  id?: number;
+  bvid?: string;
+  /** 2 = 视频稿件；12 = 音频；21 = 合集。本功能只保留 2（音频没有 bvid） */
+  type?: number;
+}
+
+/** ids 通道的一行（已过滤非视频） */
+interface FavIdEntry {
+  bvid: string;
+  aid: number;
+}
+
+/**
+ * 拉取收藏夹**全部**视频的 bvid / aid（`/x/v3/fav/resource/ids`）。
+ *
+ * 两段式同步（对齐 BBPlayer `lib/facades/syncBilibiliPlaylist/favorite.ts`）：
+ * 先用 ids **一个请求拿到全集与收藏顺序**，再只为「本地还没有的」补详情 ——
+ * 几百首的收藏夹从「25 页 × 350ms」降到「1 次 ids + 通常 1 页详情」，这才是风控的根本解法。
+ *
+ * 实测（匿名）：307 首的夹一次返回 307 条（303 视频 + 4 音频），
+ * 字段 `{id(aid), bvid, type}`，顺序 = 收藏顺序（最新在前）。
+ *
+ * ⚠️ 风控时 `data` 会变成对象（`{v_voucher}`）而不是数组 → 必须判 `Array.isArray`，
+ * 否则会拿到空数组被误判成「这个收藏夹空了」。
+ */
+async function getFavResourceIds(mediaId: number): Promise<FavIdEntry[]> {
+  const path: string = '/x/v3/fav/resource/ids';
+  const raw: FavIdRawItem[] = await biliFetch<FavIdRawItem[]>(path, { media_id: mediaId });
+  if (!Array.isArray(raw)) {
+    throw new BiliApiError(-412, '收藏夹 ids 返回非数组（疑似风控验证）', path);
+  }
+  const out: FavIdEntry[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const r: FavIdRawItem = raw[i];
+    const type: number = r.type ?? 0;
+    const bvid: string = r.bvid ?? '';
+    if (type === 2 && bvid.length > 0) {
+      out.push({ bvid: bvid, aid: r.id ?? 0 });
+    }
+  }
+  return out;
+}
+
+/** ids 通道失败时返回 null（让全量分页通道兜底），不向上抛 */
+async function tryGetFavResourceIds(mediaId: number): Promise<FavIdEntry[] | null> {
+  try {
+    return await getFavResourceIds(mediaId);
+  } catch (e) {
+    const msg: string = e instanceof Error ? e.message : JSON.stringify(e);
+    console.warn(`fav ids channel failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * 收藏夹全量拉取（**两段式**，对齐 BBPlayer `syncBilibiliPlaylist/favorite.ts`）。
+ *
+ * ① `fav/resource/ids` 一次拿全集 + 收藏顺序（1 个请求，不翻页）；
+ * ② 只为「本地还没有的 bvid」补详情（从 pn=1 顺序翻页，命中够即停，`ps=40`）。
+ *
+ * ids 通道失败 → 自动回落到旧的「全量分页」通道（保持鲁棒）。
+ *
+ * `knownBvids` 是**本地镜像里已有的 bvid**：传了它，通道②只拉新增条目 ——
+ * 稳态一次同步通常只用 2 个请求（ids + 1 页详情），几百首的夹不必再打 20+ 页。
+ * 不传（默认空）等价于「全量拉详情」，此时 `items` 就是完整列表（`PlaylistsPage` 的用法）。
+ *
+ * **complete 的判定是安全核心**：只有「确认拿到全集」才为 true，调用方才允许删本地条目。
+ */
+export async function getAllFavResources(
+  mediaId: number,
+  expectedMax: number,
+  pageDelayMs: number = 0,
+  knownBvids: string[] = []
+): Promise<FavAllResult> {
+  const ids: FavIdEntry[] | null = await tryGetFavResourceIds(mediaId);
+  if (ids !== null && ids.length > 0) {
+    return await collectFavByOrderedIds(mediaId, ids, expectedMax, pageDelayMs, knownBvids);
+  }
+  return await collectFavByFullPages(mediaId, expectedMax, pageDelayMs);
+}
+
+/**
+ * 通道 A：ids 全集 + 按需补详情（BBPlayer 两段式）。
+ *
+ * 顺序取 ids 的返回顺序（= 收藏顺序，最新在前）；`items` 只含**本轮新拉到的详情**，
+ * 本地已有的条目由调用方用本地 Track 补字段（`orderedBvids` 给出了完整顺序）。
+ */
+async function collectFavByOrderedIds(
+  mediaId: number,
+  ids: FavIdEntry[],
+  expectedMax: number,
+  pageDelayMs: number,
+  knownBvids: string[]
+): Promise<FavAllResult> {
+  const idsTotal: number = ids.length;
+  /** 超过单歌单上限 → 只镜像最新的前 expectedMax 条，且禁止删除（与旧口径一致） */
+  const capped: boolean = idsTotal > expectedMax;
+  const order: FavIdEntry[] = capped ? ids.slice(0, expectedMax) : ids;
+  const known: Set<string> = new Set<string>(knownBvids);
+
+  // 需要详情的 bvid = 本地没有的
+  const needIds: string[] = [];
+  const needSet: Set<string> = new Set<string>();
+  for (let i = 0; i < order.length; i++) {
+    const bvid: string = order[i].bvid;
+    if (!known.has(bvid) && !needSet.has(bvid)) {
+      needSet.add(bvid);
+      needIds.push(bvid);
+    }
+  }
+
+  const detailMap: Map<string, FavResourceItem> = new Map<string, FavResourceItem>();
+  let pages: number = 0;
+  let pending: number = needIds.length;
+  let detailFailed: boolean = false;
+  let failReason: string = '';
+  if (pending > 0) {
+    const maxPages: number = Math.ceil(expectedMax / FAV_RESOURCE_PS) + 1;
+    let pn: number = 1;
+    while (pn <= maxPages && pending > 0) {
+      let page: FavResourcePage;
+      try {
+        page = await getFavResources(mediaId, pn);
+      } catch (e) {
+        if (e instanceof BiliApiError) {
+          failReason = `接口返回 ${e.code}${e.message ? `（${e.message}）` : ''}`;
+        } else {
+          failReason = e instanceof Error ? e.message : JSON.stringify(e);
+        }
+        detailFailed = true;
+        break;
+      }
+      pages = pages + 1;
+      for (let i = 0; i < page.items.length; i++) {
+        const it: FavResourceItem = page.items[i];
+        if (needSet.has(it.bvid) && !detailMap.has(it.bvid)) {
+          detailMap.set(it.bvid, it);
+          pending = pending - 1;
+        }
+      }
+      // 空页 + has_more=true = 被拦或解析失效，继续翻只会重复空请求
+      if (page.items.length === 0) {
+        break;
+      }
+      if (!page.hasMore) {
+        break;
+      }
+      pn = pn + 1;
+      if (pageDelayMs > 0) {
+        await sleep(pageDelayMs);
+      }
+    }
+  }
+
+  const items: FavResourceItem[] = [];
+  const orderedBvids: string[] = [];
+  const hiddenBvids: string[] = [];
+  for (let i = 0; i < order.length; i++) {
+    const bvid: string = order[i].bvid;
+    const d: FavResourceItem | undefined = detailMap.get(bvid);
+    if (d !== undefined) {
+      if (d.invalid) {
+        // 失效 / 私密：与旧行为一致，不进镜像
+        hiddenBvids.push(bvid);
+      } else {
+        items.push(d);
+        orderedBvids.push(bvid);
+      }
+      continue;
+    }
+    if (known.has(bvid)) {
+      // 本地已有该曲目：不重复拉详情，顺序保留（字段由调用方用本地 Track 补）
+      orderedBvids.push(bvid);
+      continue;
+    }
+    // 既没详情、本地也没有 → 被 UP 隐藏 / 已删除 / 详情拉取中断
+    hiddenBvids.push(bvid);
+  }
+
+  if (detailFailed && failReason.length === 0) {
+    failReason = '详情分页失败，本轮按「没拉全」处理';
+  }
+  return {
+    complete: !capped && !detailFailed,
+    items: items,
+    failReason: capped ? `收藏夹超过 ${expectedMax} 首，只镜像最新 ${expectedMax} 首` : failReason,
+    pages: pages,
+    reportedTotal: idsTotal,
+    orderedBvids: orderedBvids,
+    hiddenBvids: hiddenBvids,
+    usedIdsChannel: true
+  };
+}
+
+/** 通道 B（兜底）：全量分页拉详情（ids 接口不可用时）。 */
+async function collectFavByFullPages(
+  mediaId: number,
+  expectedMax: number,
+  pageDelayMs: number
+): Promise<FavAllResult> {
+  const collected: FavResourceItem[] = [];
+  let fn: number = 1;
+  let complete: boolean = false;
+  let failReason: string = '';
+  /** 成功拉到的页数（诊断用） */
+  let pages: number = 0;
+  /** 第 1 页 info.media_count（服务端自报的条目数；pn>1 时该值为 0，只有首页可信） */
+  let reportedTotal: number = 0;
+  // 页数硬上限：单夹最多 expectedMax 首 ÷ 每页 FAV_RESOURCE_PS，再留 1 页余量，
+  // 防止服务端 has_more 恒 true 时死循环
+  const maxPages: number = Math.ceil(expectedMax / FAV_RESOURCE_PS) + 1;
+  while (fn <= maxPages) {
+    let page: FavResourcePage;
+    try {
+      page = await getFavResources(mediaId, fn);
+    } catch (e) {
+      // 失败即停：保留已收集的条目（调用方只会用它们做「只增」合并）
+      if (e instanceof BiliApiError) {
+        failReason = `接口返回 ${e.code}${e.message ? `（${e.message}）` : ''}`;
+      } else {
+        failReason = e instanceof Error ? e.message : JSON.stringify(e);
+      }
+      break;
+    }
+    for (let i = 0; i < page.items.length; i++) {
+      collected.push(page.items[i]);
+    }
+    pages = pages + 1;
+    if (fn === 1) {
+      reportedTotal = page.mediaCount;
+    }
+    if (!page.hasMore) {
+      complete = true;
+      /**
+       * 防御「首页满不了却标记无更多」：服务端自报 media_count 比首页条数多，
+       * 说明 `has_more` 缺省/异常（多见于收藏夹条目被分批下发或响应被裁剪）。
+       * 只判「仅拉到 1 页」这一种，避免把「最后一页恰好满页」误判成没拉全。
+       */
+      if (pages <= 1 && reportedTotal > page.items.length) {
+        complete = false;
+        failReason = `服务端报告 ${reportedTotal} 条，首页只返回 ${page.items.length} 条且标记无更多`;
+      }
+      break;
+    }
+    if (collected.length >= expectedMax) {
+      // 达到安全上限但服务端仍说还有 → 无法确认追平，禁止删
+      complete = false;
+      failReason = `收藏夹超过 ${expectedMax} 首，未完整拉取`;
+      break;
+    }
+    fn = fn + 1;
+    // 页间间隔（降风控）：收藏夹接口对高频分页敏感，调用方按需传 300~500ms
+    if (pageDelayMs > 0) {
+      await sleep(pageDelayMs);
+    }
+  }
+  // 安全上限截断（只影响返回结果，不改 collected 本身）
+  const items: FavResourceItem[] = collected.length > expectedMax
+    ? collected.slice(0, expectedMax)
+    : collected;
+  // ⚠️ 第二道防线：首页自报 N 条却一条没拿到 → 一定是被拦/解析失效，
+  // 绝不能算「完整拉取成功」，否则上层会按「用户清空了收藏夹」把本地镜像删光。
+  if (complete && collected.length === 0 && reportedTotal > 0) {
+    complete = false;
+    failReason = `服务端报告 ${reportedTotal} 条，实际一条都没拿到（疑似风控），本轮按「没拉全」处理`;
+  }
+  return {
+    complete: complete,
+    items: items,
+    failReason: failReason,
+    pages: pages,
+    reportedTotal: reportedTotal,
+    orderedBvids: [],
+    hiddenBvids: [],
+    usedIdsChannel: false
+  };
+}
+
+/**
+ * 收藏夹条目 → Track。
+ *
+ * `id` 取 `bvid`（与订阅流 / 搜索流的稳定去重键一致）；artist 优先用投稿者昵称、
+ * 缺失时回落到收藏夹名（保证列表不至于空着）。
+ */
+export function mapFavItem(item: FavResourceItem, favName: string): Track {
+  return buildTrack({
+    id: item.bvid,
+    bvid: item.bvid,
+    aid: String(item.aid),
+    title: item.title,
+    artist: item.upName.length > 0 ? item.upName : favName,
+    upMid: item.upMid,
+    coverUrl: toHttpsUrl(item.cover),
+    duration: item.duration,
+    playCount: item.playCount,
+    pubdate: item.pubdate
+  });
+}
+
+// ===== 收藏夹写接口（双向同步）=====
+// 本地 → B 站的回推走 `POST /x/v3/fav/resource/deal`（批量加 / 取消收藏，一次调用
+// 可同时带 add / del 列表）。收藏夹双向同步仅此一个写接口。
+
+/** bv2av 解码码表（B 站现行 bvid 编码，bvid_desc.md / issue #740 实测校准，58 字符） */
+const BV_ALPHABET: string = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf';
+/** 现行算法固定参数：去掩码阈值 2^51、异或盐值 */
+const BV_MASK_CODE: number = 2251799813685248;
+const BV_XOR_CODE: number = 23442827791579;
+const BV_BASE: number = 58;
+
+/**
+ * 51 位整数异或（JS 位运算 32 位截断，按 2^26 拆高低半分别异或再合成，
+ * Node 与 BigInt 参考实现对 4 组标准对验证一致）。
+ */
+function xor51(a: number, b: number): number {
+  const loA: number = a % 67108864;
+  const loB: number = b % 67108864;
+  const hiA: number = (a - loA) / 67108864;
+  const hiB: number = (b - loB) / 67108864;
+  return (hiA ^ hiB) * 67108864 + (loA ^ loB);
+}
+
+/**
+ * bvid → avid（纯本地解码，无需请求，现行算法）。
+ * 步骤：BV1 前缀 + 12 位长度校验 → 交换 3↔9、4↔7 → 下标 3..11 折 9 位 base58
+ * → 去掩码 → 异或盐值。4 组标准对见 `selfTestBv2av`。
+ * 注意：2020 年初的老 BV 号是旧版编码，本算法解不出（返回 -1）——
+ * 调用方（FavPushRunner）以意图携带的 aid 为主来源，此处仅兜底。
+ */
+export function bv2av(bvid: string): number {
+  if (!bvid || bvid.length !== 12 || bvid.indexOf('BV1') !== 0) {
+    return -1;
+  }
+  const chars: string[] = [];
+  for (let i = 0; i < bvid.length; i++) {
+    chars.push(bvid.charAt(i));
+  }
+  const tmp3: string = chars[3];
+  chars[3] = chars[9];
+  chars[9] = tmp3;
+  const tmp4: string = chars[4];
+  chars[4] = chars[7];
+  chars[7] = tmp4;
+  let tmp: number = 0;
+  for (let i = 3; i <= 11; i++) {
+    const idx: number = BV_ALPHABET.indexOf(chars[i]);
+    if (idx < 0) {
+      return -1;
+    }
+    tmp = tmp * BV_BASE + idx;
+  }
+  if (tmp >= BV_MASK_CODE) {
+    tmp = tmp - BV_MASK_CODE;
+  }
+  return xor51(tmp, BV_XOR_CODE);
+}
+
+/** bv2av 自检（现行算法 4 组标准对全过才算通过），首冲刷时打一次日志 */
+export function selfTestBv2av(): boolean {
+  const cases: string[][] = [
+    ['BV1L9Uoa9EUx', '111298867365120'],
+    ['BV1bY4y1j7RA', '643755790'],
+    ['BV1aP411K7it', '305988942'],
+    ['BV16x4y1H7M1', '1004871019']
+  ];
+  for (let i = 0; i < cases.length; i++) {
+    const bvid: string = cases[i][0];
+    const expect: number = Number(cases[i][1]);
+    const got: number = bv2av(bvid);
+    if (got !== expect) {
+      console.error(`[BilibiliApi] bv2av self-test FAILED, ${bvid} expect ${expect} got ${got}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 收藏夹批量写（加 / 取消收藏，`POST /x/v3/fav/resource/deal`）。
+ *
+ * · `rid` = 目标收藏夹所属视频的 avid（deal 的语义：把 rid 视频加入 / 移出
+ *   `add_media_ids` / `del_media_ids` 列出的收藏夹）；
+ * · add / del 列表均为收藏夹 media_id 数组，可同时携带；
+ * · `csrf`（bili_jct）由调用方传入（避免 BilibiliApi ↔ LoginStore 循环导入），
+ *   空串直接按未登录（-101）拒绝；
+ * · `code !== 0` 抛 `BiliApiError`，调用方（FavPushRunner）按 code 分级处理：
+ *   -352/-412/-509/-799 保留重试，-101/-111 中止需重登，其余丢弃计数。
+ */
+export async function dealFavResource(
+  rid: number,
+  addMediaIds: number[],
+  delMediaIds: number[],
+  csrf: string
+): Promise<void> {
+  if (!(rid > 0)) {
+    throw new BiliApiError(-400, `invalid rid: ${rid}`, '/x/v3/fav/resource/deal');
+  }
+  if ((addMediaIds.length === 0) && (delMediaIds.length === 0)) {
+    return;
+  }
+  if (!csrf) {
+    throw new BiliApiError(-101, 'not logged in (no bili_jct)', '/x/v3/fav/resource/deal');
+  }
+  const form: Record<string, string | number> = {
+    rid: rid,
+    type: 2,
+    csrf: csrf
+  };
+  if (addMediaIds.length > 0) {
+    form['add_media_ids'] = addMediaIds.join(',');
+  }
+  if (delMediaIds.length > 0) {
+    form['del_media_ids'] = delMediaIds.join(',');
+  }
+  await biliPost<object | null>('/x/v3/fav/resource/deal', form);
+}
+
+/** UP 主资料卡（头像 / 昵称 / 粉丝数 / 签名 / 投稿总数） */
+export interface UserCard {
+  mid: number;
+  name: string;
+  face: string;
+  fans: number;
+  sign: string;
+  /** UP 的投稿总数（响应顶层 data.archive_count，实测确认存在）；0 = 接口未返回 */
+  archiveCount: number;
+}
+
+/**
+ * UP 主资料。
+ *
+ * ⚠️ **必须用这个接口，不要用 `x/space/wbi/acc/info`**（匿名态实测）：
+ * 后者返回 `code = 0` 看着正常，实际 data 里**只有 `v_voucher` 一个字段**，
+ * name / face / fans 全 undefined —— 只看 code 会误判成「可用」。
+ * 老接口 `x/web-interface/card` 匿名正常返回 name / fans / face。
+ */
+export async function getUserCard(mid: number): Promise<UserCard | null> {
+  if (mid <= 0) {
+    return null;
+  }
+  const data: { card?: UserCard; archive_count?: number } =
+    await biliFetch<{ card?: UserCard; archive_count?: number }>('/x/web-interface/card', {
+      mid: mid
+    });
+  const card: UserCard | undefined = data ? data.card : undefined;
+  if (!card) {
+    return null;
+  }
+  return {
+    mid: card.mid ?? mid,
+    name: card.name ?? '',
+    face: card.face ?? '',
+    fans: card.fans ?? 0,
+    sign: card.sign ?? '',
+    archiveCount: data && typeof data.archive_count === 'number' ? data.archive_count : 0
+  };
+}
+
+// ===== 我的关注（登录用户的关注列表，FollowsPage 用） =====
+
+/** 关注列表条目（/x/relation/followings 的 data.list[] 元素，只取页面要用的字段） */
+export interface FollowedUp {
+  mid: number;
+  uname: string;
+  face: string;
+  sign: string;
+}
+
+/** 关注列表分页数据：total = 关注总数（页面靠它判断还有没有下一页） */
+export interface FollowingsData {
+  list: FollowedUp[];
+  total: number;
+}
+
+/**
+ * followings 风控兜底判定用：与音源链路（RETRYABLE_BIZ_CODES）同一套风控码口径。
+ * 只把「隔一会儿可能恢复」的风控码留给 wbi 重试；-101 未登录这类确定性错误直接抛，
+ * 重试只会得到同样的答案、白等一轮。
+ */
+const FOLLOWINGS_RISK_CODES: number[] = [-352, -412, -509, -799];
+
+/**
+ * 登录用户的关注列表（「设置 → 我的关注」页数据源）。
+ *
+ * 端点 `/x/relation/followings`：查**自己的**关注必须带 SESSDATA（HttpUtil 登录后
+ * 自动附加，这里不用额外传）；`order=desc` = 最新关注在前，符合订阅流的直觉。
+ *
+ * 风控兜底：该接口与空间接口同属风控重灾区，明文参数可能吃到
+ * -352/-799。处理方式与 playurl 双通道同思路——先走明文 biliFetch，吃到风控码
+ * 再用 encodeWbi 签名重试**一次**；仍是风控码就原样抛，由页面展示 code 让用户
+ * 自己判断该等还是该换网。
+ */
+export async function getFollowings(vmid: number, pn: number = 1): Promise<FollowingsData> {
+  const path: string = '/x/relation/followings';
+  const params: Record<string, string | number> = {
+    vmid: vmid,
+    order: 'desc',
+    pn: pn,
+    ps: 50
+  };
+  let raw: FollowingsData | undefined;
+  try {
+    raw = await biliFetch<FollowingsData>(path, params);
+  } catch (err) {
+    // 只对风控码做 wbi 签名重试；网络层错误 / 确定性业务错误原样抛给调用方
+    if (!(err instanceof BiliApiError) || FOLLOWINGS_RISK_CODES.indexOf(err.code) < 0) {
+      throw err;
+    }
+    const query: string = await encodeWbi(params);
+    const env: BiliEnvelope<FollowingsData> =
+      await HttpUtil.requestJson<BiliEnvelope<FollowingsData>>(`${BILI_API}${path}?${query}`);
+    if (env.code !== 0) {
+      throw new BiliApiError(env.code, env.message, path);
+    }
+    raw = env.data;
+  }
+  // 服务端缺字段防御（学 getUserCard 的归一化写法）：宁可空值也不要 undefined 进 UI
+  const src: FollowedUp[] = raw && raw.list ? raw.list : [];
+  const list: FollowedUp[] = src.map((u: FollowedUp): FollowedUp => {
+    return {
+      mid: u.mid ?? 0,
+      uname: u.uname ?? '',
+      face: u.face ?? '',
+      sign: u.sign ?? ''
+    };
+  });
+  return {
+    list: list,
+    total: raw && raw.total ? raw.total : list.length
+  };
+}
+
+// ===== 观看历史与稍后再看（「设置 → 登录后能力」数据源）=====
+
+/**
+ * 历史接口风控兜底码表：与 FOLLOWINGS_RISK_CODES 同一套口径 ——
+ * 只把「隔一会儿可能恢复」的风控码留给 wbi 重试；-101 这类确定性错误直接抛。
+ */
+const HISTORY_RISK_CODES: number[] = [-352, -412, -509, -799];
+
+/** 历史条目内嵌的 history 对象：标识具体视频与看过的分 P */
+interface BiliHistoryEntry {
+  /** 视频 aid */
+  oid: number;
+  bvid: string;
+  /** 看到的分 P 序号（从 1 起） */
+  page: number;
+  cid: number;
+  /** 业务类型：archive = 普通视频（本页只保留这类，直播 / 专栏不是音源） */
+  business: string;
+}
+
+/** 一条观看历史（getWatchHistory 归一化后的严格模型） */
+export interface BiliHistoryItem {
+  title: string;
+  cover: string;
+  author_name: string;
+  author_face: string;
+  author_mid: number;
+  /** 观看时间（秒级时间戳，列表按它倒序） */
+  view_at: number;
+  /** 已看秒数；-1 = 已看完 */
+  progress: number;
+  /** 总时长（秒） */
+  duration: number;
+  /** 分 P 名（非分 P 为空串） */
+  show_title: string;
+  /** 分 P 总数 */
+  videos: number;
+  is_finish: boolean;
+  history: BiliHistoryEntry;
+}
+
+/** 历史分页数据：cursorMax = 下一页游标（0 = 没有更多） */
+export interface BiliHistoryData {
+  list: BiliHistoryItem[];
+  cursorMax: number;
+}
+
+/** 服务端历史条目的原始结构（字段全部可缺，归一化后绝不进 UI） */
+interface HistoryRawEntry {
+  oid?: number;
+  bvid?: string;
+  page?: number;
+  cid?: number;
+  business?: string;
+}
+
+interface HistoryRawItem {
+  title?: string;
+  cover?: string;
+  author_name?: string;
+  author_face?: string;
+  author_mid?: number;
+  view_at?: number;
+  progress?: number;
+  duration?: number;
+  show_title?: string;
+  videos?: number;
+  is_finish?: boolean;
+  history?: HistoryRawEntry;
+}
+
+interface HistoryRawCursor {
+  max?: number;
+}
+
+interface HistoryRawData {
+  cursor?: HistoryRawCursor;
+  list?: HistoryRawItem[];
+}
+
+/**
+ * 登录用户的观看历史（游标分页）。
+ *
+ * 端点 `/x/web-interface/history/cursor`：必须带 SESSDATA（HttpUtil 登录后自动附加）；
+ * `business=archive` 只取普通视频；`max` 是上一页返回的 cursor.max（首页传 0），
+ * `ps` 固定 20（服务端上限 30，留余量）。风控兜底与 getFollowings 同款：
+ * 明文请求吃到风控码再用 encodeWbi 重试一次。
+ */
+export async function getWatchHistory(max: number, ps: number = 20): Promise<BiliHistoryData> {
+  const path: string = '/x/web-interface/history/cursor';
+  const params: Record<string, string | number> = {
+    max: max,
+    business: 'archive',
+    ps: ps
+  };
+  let raw: HistoryRawData | undefined;
+  try {
+    raw = await biliFetch<HistoryRawData>(path, params);
+  } catch (err) {
+    // 只对风控码做 wbi 签名重试；网络层错误 / 确定性业务错误原样抛给调用方
+    if (!(err instanceof BiliApiError) || HISTORY_RISK_CODES.indexOf(err.code) < 0) {
+      throw err;
+    }
+    const query: string = await encodeWbi(params);
+    const env: BiliEnvelope<HistoryRawData> =
+      await HttpUtil.requestJson<BiliEnvelope<HistoryRawData>>(`${BILI_API}${path}?${query}`);
+    if (env.code !== 0) {
+      throw new BiliApiError(env.code, env.message, path);
+    }
+    raw = env.data;
+  }
+  const src: HistoryRawItem[] = raw && raw.list ? raw.list : [];
+  const list: BiliHistoryItem[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const it: HistoryRawItem = src[i];
+    const h: HistoryRawEntry | undefined = it.history;
+    const bvid: string = h && h.bvid ? h.bvid : '';
+    // 无 bvid 的条目构不成音源（防御服务端脏数据），直接跳过
+    if (bvid.length === 0) {
+      continue;
+    }
+    const item: BiliHistoryItem = {
+      title: it.title ?? '',
+      cover: it.cover ?? '',
+      author_name: it.author_name ?? '',
+      author_face: it.author_face ?? '',
+      author_mid: it.author_mid ?? 0,
+      view_at: it.view_at ?? 0,
+      progress: it.progress ?? 0,
+      duration: it.duration ?? 0,
+      show_title: it.show_title ?? '',
+      videos: it.videos ?? 0,
+      is_finish: it.is_finish ?? false,
+      history: {
+        oid: h && h.oid ? h.oid : 0,
+        bvid: bvid,
+        page: h && h.page ? h.page : 1,
+        cid: h && h.cid ? h.cid : 0,
+        business: h && h.business ? h.business : 'archive'
+      }
+    };
+    list.push(item);
+  }
+  const cursorMax: number = raw && raw.cursor && raw.cursor.max ? raw.cursor.max : 0;
+  return {
+    list: list,
+    // 空页强制游标归零：列表没数据时「还有没有下一页」没有讨论意义
+    cursorMax: list.length === 0 ? 0 : cursorMax
+  };
+}
+
+/** 稍后再看条目的 UP 主信息 */
+interface BiliToViewOwner {
+  mid: number;
+  name: string;
+  face: string;
+}
+
+/** 一条稍后再看（getToView 归一化后的严格模型） */
+export interface BiliToViewItem {
+  bvid: string;
+  aid: number;
+  title: string;
+  pic: string;
+  owner: BiliToViewOwner;
+  /** 总时长（秒） */
+  duration: number;
+  /** 加入时间（秒级时间戳） */
+  add_at: number;
+  /** 分 P 数 */
+  count: number;
+}
+
+interface ToViewRawOwner {
+  mid?: number;
+  name?: string;
+  face?: string;
+}
+
+interface ToViewRawItem {
+  aid?: number;
+  bvid?: string;
+  title?: string;
+  pic?: string;
+  owner?: ToViewRawOwner;
+  duration?: number;
+  add_at?: number;
+  count?: number;
+}
+
+interface ToViewRawData {
+  list?: ToViewRawItem[];
+}
+
+/**
+ * 登录用户的「稍后再看」列表（一次性返回，无分页）。
+ *
+ * 端点 `/x/v2/history/toview/web`：必须带 SESSDATA。条目量级很小（B 站上限
+ * 也就几十条），不做 wbi 重试 —— 失败由页面失败态兜底，用户点重试即可。
+ */
+export async function getToView(): Promise<BiliToViewItem[]> {
+  const raw: ToViewRawData = await biliFetch<ToViewRawData>('/x/v2/history/toview/web');
+  const src: ToViewRawItem[] = raw && raw.list ? raw.list : [];
+  const list: BiliToViewItem[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const it: ToViewRawItem = src[i];
+    const bvid: string = it.bvid ?? '';
+    if (bvid.length === 0) {
+      continue;
+    }
+    const o: ToViewRawOwner | undefined = it.owner;
+    list.push({
+      bvid: bvid,
+      aid: it.aid ?? 0,
+      title: it.title ?? '',
+      pic: it.pic ?? '',
+      owner: {
+        mid: o && o.mid ? o.mid : 0,
+        name: o && o.name ? o.name : '',
+        face: o && o.face ? o.face : ''
+      },
+      duration: it.duration ?? 0,
+      add_at: it.add_at ?? 0,
+      count: it.count ?? 0
+    });
+  }
+  return list;
+}
+
+/**
+ * 解析一条视频的音频直链。
+ *
+ * @param preferredQuality 首选音频档位 id（见 model/MusicModels.downloadQualityId）。
+ *        默认 0 = 取最高带宽，即**播放侧的历史行为**；只有「下载」会传具体档位。
+ *        播放不跟着下载音质走是刻意的：试听要给最好的，下载才需要省流量。
+ * @param refresh true = 绕过缓存强制重新解析（直链过期重试时用），并回写新结果。
+ */
+export async function extractAudioFromVideo(
+  bvid: string,
+  fallback?: { aid?: string | number; cid?: string | number },
+  preferredQuality: number = 0,
+  refresh: boolean = false
+): Promise<TrackSource> {
+  // 缓存键用「调用时的入参」而不是解析出的 cid：解析前无法预知服务端最终采用哪个 cid，
+  // 但同一组入参的解析结果是确定的，重复调用（预取后播放、重播）直接复用即可。
+  // 换通道重试（见下方 catch）与正常解析共用该键：换通道解析成功的音源同样可播，
+  // 缓存命中后无需每次都重走「被拒 → 换通道」的弯路。
+  // 键尾追加当前生效的 CDN 线路 id：切线路（自动探测命中 / 手动切换）后旧线路的
+  // 直链必须整体失效，否则缓存命中会把已判死的主机再喂给播放器一轮。
+  const lineId: string = effectiveCdnLine().id;
+  const cacheKey: string = `${bvid}|${fallback && fallback.cid ? fallback.cid : 0}|${preferredQuality}|${lineId}`;
+  if (!refresh) {
+    const hit: TrackSource | null = cacheGet<TrackSource>(sourceCache, cacheKey, SOURCE_CACHE_TTL_MS);
+    if (hit !== null) {
+      return hit;
+    }
+  }
+
+  // ── ① 通道选择：默认走匿名（对齐 PiliPlus 的「取流独立槽位默认匿名」）──
+  // B 站对部分账号做**绑定登录 Cookie** 的风控：view/playurl 只要带 SESSDATA
+  // 就被拒（-352/-412/-799 或 HTTP 412），不带反而正常 —— 这正是
+  // 「登录后不能播放、退出登录又能播放」的成因。PiliPlus 的做法是让取流走一个
+  // **默认匿名**的账号槽位，这里等价为「默认不带登录 Cookie」：
+  //   · 只有「Hi-Res 无损」偏好必须带 Cookie（服务端只对大会员下发 flac/dolby）；
+  //   · 其余全部匿名 —— 匿名不可能触发账号级风控，从源头少撞一堵墙。
+  // 登录态本身不受影响：收藏 / 历史 / 大会员信息照旧，只是这首歌的解析走匿名通道。
+  //
+  // ⚠️ 未登录时也必须算 anonymous=true（虽然请求本来就没 Cookie，`skipLoginCookie`
+  // 无差别），因为 `anonymous` 同时决定要不要带 `try_look`（免登录试看通道）——
+  // 把它算成 false 会让匿名用户少拿一档清晰度。
+  const loggedIn: boolean = HttpUtil.getLoginCookie().length > 0;
+  const preferAnonymous: boolean = !(loggedIn && preferredQuality === AUDIO_Q_HIRES);
+
+  try {
+    const source: TrackSource =
+      await resolveTrackSource(bvid, fallback, preferredQuality, refresh, preferAnonymous);
+    cachePut<TrackSource>(sourceCache, cacheKey, source, SOURCE_CACHE_MAX);
+    return source;
+  } catch (e) {
+    // ── ② -404 自愈（view 缓存过期 → UP 删稿重传，cid 全变）──
+    // playurl 答 -404「啥都木有」≠ 稿件一定失效：view 有 10 分钟缓存，
+    // 缓存期内 UP 重传稿件（cid 全部更换）时，按旧 cid 问询必然 -404。
+    // 强刷 view 重解析一轮即愈：刷新后 belongs 校验基于最新 pages，
+    // track 旧 cid 不在 pages 里就自动落到新 detail.cid，重传稿一次就好；
+    // 真被删的稿件刷新后 view 自己就会 -404，错误口径更准（「稿件不存在」）。
+    // 仅未显式 refresh 的调用自愈（refresh=true 的调用 view 本就是新的，
+    // 重试只是原地复读，reloadCurrentSource 降级链不会重复触发）。
+    if (!refresh && e instanceof BiliApiError && e.code === -404) {
+      try {
+        const healed: TrackSource =
+          await resolveTrackSource(bvid, fallback, preferredQuality, true, preferAnonymous);
+        cachePut<TrackSource>(sourceCache, cacheKey, healed, SOURCE_CACHE_MAX);
+        console.warn(`-404 healed by view refresh: ${bvid} cid=${fallback && fallback.cid ? fallback.cid : 0}`);
+        return healed;
+      } catch (healErr) {
+        if (healErr instanceof BiliApiError && healErr.code === -404) {
+          // 刷新后仍 -404：稿件真失效（删除 / 仅特定用户可见）。avid+cid 兜底
+          // 用的还是那个已不存在的 cid，再问一次也是 -404 —— 直接抛出，
+          // 让播放层给出「已失效」提示而不是误导性的「请稍后重试」。
+          throw healErr;
+        }
+        // 自愈路径撞上瞬态错误（网络抖动 / 风控）：落回原兜底链继续尝试
+        console.warn(`-404 heal retry hit transient error, fall back to original chain: ${
+          healErr instanceof Error ? healErr.message : JSON.stringify(healErr)}`);
+      }
+    }
+    // ── ③ 换通道重试：登录存在 + 风控类错误 → 翻转登录/匿名再解析一轮 ──
+    // 通道翻转是**双向**的：匿名被拒（例如该 IP 的匿名配额用尽）
+    // 也要能带着登录态试一次。两个方向都只试一次，不来回震荡。
+    if (loggedIn && isChannelSwitchWorthy(e)) {
+      const flipAnonymous: boolean = !preferAnonymous;
+      const rejectDetail: string = e instanceof Error ? e.message : JSON.stringify(e);
+      console.warn(`track source rejected on ${preferAnonymous ? 'anonymous' : 'login'} channel ` +
+        `(${rejectDetail}), ` +
+        `retrying ${flipAnonymous ? 'anonymously' : 'with login cookie'}`);
+      // 通道被拒（风控 / 限流）是海外「能搜不能播」的第一现场，入日志页留档
+      blogWarn(`playurl rejected on ${preferAnonymous ? 'anonymous' : 'login'} channel: ${rejectDetail}`);
+      try {
+        const alt: TrackSource =
+          await resolveTrackSource(bvid, fallback, preferredQuality, refresh, flipAnonymous);
+        cachePut<TrackSource>(sourceCache, cacheKey, alt, SOURCE_CACHE_MAX);
+        return alt;
+      } catch (e2) {
+        console.warn(`channel-switch track source retry also failed: ${
+          e2 instanceof Error ? e2.message : JSON.stringify(e2)}`);
+        blogWarn(`playurl failed on both channels: ${
+          e2 instanceof Error ? e2.message : JSON.stringify(e2)}`);
+        // 两个通道都被拒：最后走 avid+cid 直取（用 preferAnonymous —— 刚失败的是
+        // 另一条通道，这条还没试过，不预先假设它也会被拒）。
+        if (fallback && fallback.aid && fallback.cid) {
+          const source: TrackSource =
+            await extractAudioByAvidCid(fallback.aid, fallback.cid, bvid, preferredQuality, preferAnonymous);
+          cachePut<TrackSource>(sourceCache, cacheKey, source, SOURCE_CACHE_MAX);
+          return source;
+        }
+        throw e2;
+      }
+    }
+    if (fallback && fallback.aid && fallback.cid) {
+      const source: TrackSource =
+        await extractAudioByAvidCid(fallback.aid, fallback.cid, bvid, preferredQuality, preferAnonymous);
+      cachePut<TrackSource>(sourceCache, cacheKey, source, SOURCE_CACHE_MAX);
+      return source;
+    }
+    throw e;
+  }
+}
+
+/**
+ * 「值得换一条通道再试一次」的错误判定 —— 只认风控 / 限流类错误：
+ *   · BiliApiError：-352/-412/-509/-799（账号级风控 / 限流时的业务码）；
+ *   · HTTP 412 / 403（风控直接在 HTTP 层拦截，响应体不是 JSON）。
+ * 网络瞬态错误（超时 / DNS）**不在此列**：它们有自己的退避重试，与登录态无关，
+ * 换通道重发只会白多一轮请求。
+ *
+ * ⚠️ 取流默认匿名，换通道是双向的（匿名 ↔ 登录），不是单向降级。
+ */
+function isChannelSwitchWorthy(e: Object): boolean {
+  if (e instanceof BiliApiError) {
+    return RETRYABLE_BIZ_CODES.indexOf(e.code) >= 0;
+  }
+  if (e instanceof Error) {
+    const msg: string = e.message;
+    return msg.indexOf('HTTP 412') >= 0 || msg.indexOf('HTTP 403') >= 0;
+  }
+  return false;
+}
+
+/**
+ * extractAudioFromVideo 的解析主体（view → playurl → 组装），换通道重试复用同一份。
+ * @param anonymous true = view/playurl 均不带登录 Cookie（buvid 保留）
+ */
+async function resolveTrackSource(
+  bvid: string,
+  fallback: { aid?: string | number; cid?: string | number } | undefined,
+  preferredQuality: number,
+  refresh: boolean,
+  anonymous: boolean
+): Promise<TrackSource> {
+  const detail: VideoDetail = await getVideoDetail(bvid, refresh, anonymous);
+  // 用 Array.isArray 而不是真值判断：pages 万一是对象而不是数组，
+  // 下面的 pages.some 会抛 TypeError，整首歌就白解析了
+  const pages: VideoPageInfo[] = Array.isArray(detail.pages) ? detail.pages : [];
+  // 曲目带 cid 时（多 P 合集的非首个分 P）必须用该 cid 取流；
+  // 直接用 detail.cid（默认第一个分 P）会让合集永远只能播第一首。
+  //
+  // ⚠️ 但**必须先校验这个 cid 真的属于该 bvid 的分 P**：
+  // 音乐中心（/x/centralization/interface/**）的 `related_archive.cid` 是**音频 cid**，
+  // 与视频分 P 的 cid 不是同一套编号体系。实测（线上对照实验）：
+  //   playurl?bvid=BV1kQhz6fEMZ&cid=117309800781135 → code=-404「啥都木有」
+  //   playurl?bvid=BV1kQhz6fEMZ&cid=42091416602  （pages[0]）→ code=0，dash.audio 有 3 条
+  // 不做校验就会用错配 cid 取流 → 抛异常 → 整条音乐中心列表点哪首都播不出来。
+  const wanted: number = fallback && fallback.cid ? Number(fallback.cid) : 0;
+  const belongs: boolean =
+    wanted > 0 && pages.some((p: VideoPageInfo): boolean => p.cid === wanted);
+  let useCid: number = belongs ? wanted : detail.cid;
+  if (!(useCid > 0) && pages.length > 0) {
+    useCid = pages[0].cid;
+  }
+  // 传 aid：fetchPlayUrlData 的第三级（TV 端 playurl）需要它，Web 请求不带。
+  const playData: PlayUrlData = await getPlayUrl(bvid, useCid, preferredQuality, anonymous, detail.aid);
+  return buildTrackSource(detail, playData, useCid, preferredQuality);
+}
+
+async function extractAudioByAvidCid(
+  aid: string | number,
+  cid: string | number,
+  bvid: string = '',
+  preferredQuality: number = 0,
+  anonymous: boolean = false
+): Promise<TrackSource> {
+  // 统一走 fetchPlayUrlData：参数（fnval=4048 等）与端点策略（无损+登录走 wbi）只有一份
+  const playData: PlayUrlData =
+    await fetchPlayUrlData({ avid: aid, cid: cid }, preferredQuality, anonymous);
+  // 与 buildTrackSource 共用同一条选择链：dash 优先 → durl 兜底 → 都没有才抛错
+  const best: AudioSelection = resolveAudioSelection(playData, preferredQuality);
+  // TEMP PROBE（音量均衡 APP 端通道排查，确认后删除）：fire-and-forget
+  probeAppPlayUrlLoudness(Number(aid) || 0, Number(cid) || 0);
+  return {
+    bvid: bvid,
+    aid: Number(aid) || 0,
+    cid: Number(cid) || 0,
+    title: '',
+    artist: '',
+    coverUrl: '',
+    duration: 0,
+    audioUrl: best.url,
+    audioBackupUrls: best.backupUrls,
+    audioQuality: best.quality,
+    audioMimeType: best.mimeType,
+    audioBandwidth: best.bandwidth,
+    audioLoudness: best.loudness
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 扫码登录（passport web 接口，无需 WBI 签名）
+//
+// 流程（对齐 BBPlayer / B 站 App 客户端行为）：
+//   1. generateQrLogin()  拿二维码内容 url + qrcode_key（二维码有效期约 180s）；
+//   2. pollQrLogin()      每 2s 轮询扫码状态。
+//
+// 登录 Cookie 的下发取决于 UA（日志确证，B 站按 UA 分流）：
+//   · web UA（PC Chrome）：成功时 data.url 是 crossDomain?ticket=... 跳转地址，
+//     登录 Cookie 在 302 重定向中间跳的 Set-Cookie 里（ohos 自动跟随重定向会吞掉）；
+//   · BiliApp UA（本实现，BBPlayer 同款 PASSPORT_UA）：登录 Cookie 直接在
+//     poll 响应的 Set-Cookie 里下发，无需跟进任何跳转。
+// 因此 generate / poll 全链路统一 BILI_APP_UA 且**均为裸请求**（skipCookie +
+// skipReferer）。crossDomain 跟进保留为条件兜底：仅当 poll 响应 Cookie 里没有
+// SESSDATA 时才走。
+//
+// ⚠️ 「二维码很快 86038」的根因之一是 poll 的 GET + queryParams 在本机引擎上
+// 发空参请求——服务端查无 key 一律答 86038（详见 pollQrLogin 注释）。
+// generate 裸化与 buvid 升级链路保留：它们对「新装机假 buvid 引发 -352 风控」
+// 的防御仍然成立。
+//
+// 成功帧登录 Cookie 的两种形态都要接（LoginStore.applyQrSuccess 双通道）：
+//   a) data.url 的 query 参数直接带 Cookie（老格式，值需 URL 解码）；
+//   b) 响应 Set-Cookie（k=v; k=v 串）—— 现行主通道。
+// 状态码语义（poll 返回的 data.code）：
+//   86101 未扫码 / 86090 已扫码待确认 / 86038 二维码已过期 / 0 登录成功
+// ════════════════════════════════════════════════════════════════════════
+
+/** 二维码凭据：qrUrl 是二维码内容（App 内用 QRCode 组件渲染），qrcodeKey 供轮询 */
+export interface QrLoginTicket {
+  qrUrl: string;
+  qrcodeKey: string;
+}
+
+/** 轮询结果：status 即 B 站的 data.code（86101/86090/86038/0） */
+export interface QrPollResult {
+  status: number;
+  /** 仅成功时有值：回调 url（老格式下 query 里带 Cookie 参数），由 LoginStore 解析 */
+  callbackUrl: string;
+  /**
+   * 仅成功时有意义：poll 响应（必要时含 crossDomain 跳转）的 Set-Cookie value 串
+   * （k=v; k=v，crossDomain 在前、同名键以先出现者为准）。
+   * BiliApp UA 下登录 Cookie 直接在 poll 响应 Set-Cookie 里，这是主通道。
+   */
+  responseCookies: string;
+  refreshToken: string;
+}
+
+interface QrGenerateEnvelope {
+  code: number;
+  message: string;
+  data: QrGenerateData;
+}
+
+interface QrGenerateData {
+  url: string;
+  qrcode_key: string;
+}
+
+interface QrPollEnvelope {
+  code: number;
+  message: string;
+  data: QrPollData;
+}
+
+interface QrPollData {
+  url: string;
+  refresh_token: string;
+  code: number;
+  message: string;
+}
+
+/**
+ * 生成扫码登录二维码（BiliApp UA，对齐 BBPlayer：其 client 默认头即 BiliApp UA）。
+ *
+ * **裸请求**（skipCookie + skipReferer，与 pollQrLogin 完全对齐）：
+ * 新装机（典型：平板）的 buvid 是本地 MD5 兜底假值（BiliDevice.getBuvid），
+ * 带着假指纹请求 generate 易触发 passport 风控**提前作废二维码**（真机表现：
+ * 生成后约 3s 即 86038、aliveMs<30s 且从未出现 86090，「二维码 3 秒就刷新、
+ * 来不及扫码」）。裸化后登录链路全程仅 BiliApp UA，与 BBPlayer 的
+ * credentials:'omit' 口径一致；失败路径由 LoginPage.startQrLogin 的
+ * expired 蒙层重试兜底，行为安全。
+ */
+export async function generateQrLogin(): Promise<QrLoginTicket> {
+  const path: string = '/x/passport-login/web/qrcode/generate';
+  const resp: QrGenerateEnvelope =
+    await HttpUtil.requestJson<QrGenerateEnvelope>(`${BILI_PASSPORT}${path}`, {
+      headers: { 'User-Agent': BILI_APP_UA },
+      skipCookie: true,
+      skipReferer: true
+    });
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  return { qrUrl: resp.data.url, qrcodeKey: resp.data.qrcode_key };
+}
+
+/**
+ * 轮询扫码状态（调用方每 2s 一次，过期后停止轮询等待用户刷新）。
+ *
+ * 裸请求（对齐 BBPlayer）：仅 BiliApp UA，不带 Cookie（skipCookie，等价
+ * credentials:'omit'）与 Referer —— BiliApp UA 下登录 Cookie 直接在本响应的
+ * Set-Cookie 里下发。走 requestTextWithCookies：普通 requestJson 会丢掉 Set-Cookie。
+ * crossDomain 跟进仅为兜底：poll 响应 Cookie 缺 SESSDATA 时才 GET data.url。
+ * **成功帧（data.code===0）绝不向上抛**：登录 Cookie 一次性下发，后处理任何异常只降级。
+ *
+ * ⚠️ qrcode_key 必须内联进 URL，**绝不能走 queryParams**：
+ * 本机引擎 GET + queryParams 发出的是空参请求（同 biliFetch 头注释里 view 接口
+ * -400 事故，工程内能用的 GET 全是 query 内联）——服务端查无此 key，一律回
+ * 86038「二维码已失效」。真机日志表现：每张码的**第一次** poll（+2s）即 86038
+ * （aliveMs≈2.1s）；开发机 curl 对照实验确证「无 key」与「错 key」的 poll 返回与
+ * App 收到的逐字节同形，而同 key 内联 URL 可正常存活 180s。
+ */
+export async function pollQrLogin(qrcodeKey: string): Promise<QrPollResult> {
+  const path: string = '/x/passport-login/web/qrcode/poll';
+  const url: string = `${BILI_PASSPORT}${path}?qrcode_key=${encodeURIComponent(qrcodeKey)}`;
+  const raw: HttpTextResult = await HttpUtil.requestTextWithCookies(url, {
+    headers: { 'User-Agent': BILI_APP_UA },
+    skipCookie: true,
+    skipReferer: true
+  });
+  const resp: QrPollEnvelope = JSON.parse(raw.text) as QrPollEnvelope;
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  let responseCookies: string = raw.responseCookies;
+  if (resp.data.code === 0) {
+    // 成功帧是「一次性」的：B 站只在成功那一帧下发登录 Cookie，处理中任何异常都会让它
+    // 永久丢失。因此成功分支整体 try/catch 降级，**绝不向上抛**；
+    // 诊断日志走 console（JSAPP 缓冲区实测比 hilog 可靠）。
+    try {
+      console.info(`poll success frame: cookiesLen=${raw.responseCookies.length}` +
+        `, cookieKeys=[${HttpUtil.cookieKeys(raw.responseCookies).join(', ')}]` +
+        `, urlLen=${resp.data.url.length}` +
+        `, hasSessdata=${HttpUtil.cookieHasKey(raw.responseCookies, 'SESSDATA')}`);
+      if (resp.data.url.length > 0 && !HttpUtil.cookieHasKey(raw.responseCookies, 'SESSDATA')) {
+        // 兜底：登录 Cookie 未随成功帧直接下发、data.url 是 crossDomain?ticket=... 跳转
+        // （web UA 形态）。BiliApp UA 下不该走到这里；走到了说明提取仍有问题，
+        // 保留跟进可多一次机会，上面的成功帧诊断日志负责暴露根因。
+        try {
+          const cross: HttpTextResult = await HttpUtil.requestTextWithCookies(resp.data.url, {
+            headers: { 'User-Agent': BILI_APP_UA },
+            skipCookie: true,
+            skipReferer: true
+          });
+          console.info(`crossDomain fallback cookies: [${HttpUtil.cookieKeys(cross.responseCookies).join(', ')}]`);
+          if (cross.responseCookies.length > 0) {
+            // crossDomain 在前：与 poll 响应重名时，解析以先出现者为准
+            responseCookies = raw.responseCookies.length > 0
+              ? `${cross.responseCookies}; ${raw.responseCookies}`
+              : cross.responseCookies;
+          }
+        } catch (e) {
+          // 跟进失败（网络瞬态等）：保留 poll 响应 cookie 继续走，由上层诊断日志给出细节
+          console.warn(`crossDomain fallback failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+        }
+      }
+    } catch (e) {
+      // 成功帧后处理失败：带着已拿到的数据返回，由 finishLogin 的双通道解析与日志兜底
+      console.warn(`poll success post-process failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
+  }
+  return {
+    status: resp.data.code,
+    callbackUrl: resp.data.url,
+    responseCookies: responseCookies,
+    refreshToken: resp.data.refresh_token
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 短信验证码登录（对齐 BBPlayer api.ts L1426 / L1477 / L1569）
+//
+// 三步链路（每步都是独立接口，第二步前必须先过极验滑块）：
+//   1. fetchSmsCaptchaToken()  拿图形验证 token + 极验 gt/challenge；
+//   2. 用户在 WebView 里完成极验滑块 → sendSmsLoginCode() 发送短信，
+//      返回 captcha_key（86211 / -105 = 图形验证已过期，需回到第 1 步重来）；
+//   3. loginWithSmsCode()      用短信验证码换登录 Cookie（响应 Set-Cookie）。
+// 三接口全部 BiliApp UA + 裸 Cookie（skipCookie，对齐 BBPlayer 的
+// credentials:'omit'）；2/3 为 POST 且**参数内联 query**（本引擎 queryParams
+// 发空参、表单体也会被吞，query 内联是唯一可靠通道），Referer / Origin 同 BBPlayer。
+// ════════════════════════════════════════════════════════════════════════
+
+/** 第 1 步产物：图形验证 token + 极验参数（WebView 里 initGeetest 用） */
+export interface SmsCaptchaInfo {
+  token: string;
+  gt: string;
+  challenge: string;
+}
+
+/** 第 2 步产物：captcha_key，第 3 步登录必带（一次性凭据） */
+export interface SmsSendResult {
+  captchaKey: string;
+}
+
+/** 第 3 步产物：登录 Cookie（Set-Cookie 串）+ refresh_token */
+export interface SmsLoginResult {
+  responseCookies: string;
+  refreshToken: string;
+}
+
+interface SmsCaptchaEnvelope {
+  code: number;
+  message: string;
+  data: SmsCaptchaData;
+}
+
+interface SmsCaptchaData {
+  token: string;
+  geetest: GeetestConfig;
+}
+
+interface GeetestConfig {
+  gt: string;
+  challenge: string;
+}
+
+interface SmsSendEnvelope {
+  code: number;
+  message: string;
+  data: SmsSendData;
+}
+
+interface SmsSendData {
+  captcha_key: string;
+}
+
+interface SmsLoginEnvelope {
+  code: number;
+  message: string;
+  data: SmsLoginData;
+}
+
+interface SmsLoginData {
+  refresh_token: string;
+}
+
+/** 获取手机登录图形验证信息（GET /x/passport-login/captcha，source=main_web） */
+export async function fetchSmsCaptchaToken(): Promise<SmsCaptchaInfo> {
+  const path: string = '/x/passport-login/captcha';
+  const resp: SmsCaptchaEnvelope = await HttpUtil.requestJson<SmsCaptchaEnvelope>(
+    `${BILI_PASSPORT}${path}?source=main_web&t=${Date.now()}`, {
+      headers: { 'User-Agent': BILI_APP_UA },
+      skipCookie: true
+    });
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  return { token: resp.data.token, gt: resp.data.geetest.gt, challenge: resp.data.geetest.challenge };
+}
+
+/**
+ * 发送短信验证码（POST /x/passport-login/web/sms/send，参数内联 query）。
+ * challenge 用**极验回传值**（而非第 1 步下发的原值——滑块通过后服务端会换发）。
+ * @throws BiliApiError：code 86211 / -105 = 图形验证已过期
+ */
+export async function sendSmsLoginCode(tel: string, cid: string, token: string,
+  challenge: string, validate: string, seccode: string): Promise<SmsSendResult> {
+  const path: string = '/x/passport-login/web/sms/send';
+  if (tel.length === 0 || cid.length === 0) {
+    // 服务端对空 tel / 空 cid 只回一句「-400 请求错误」，看不出是哪个字段，
+    // 这里先本地拦下给一句能看懂的（实测：-400 等价于「表单为空/缺字段」）
+    throw new BiliApiError(-400, '手机号缺失，请返回上一步重新输入', path);
+  }
+  // ⚠️ 参数必须**内联进 URL**，绝不能走 `params`（ohos 的
+  // queryParams）。本引擎 queryParams 会静默发出空参请求（view 接口
+  // -400、QR poll 86038 均同因），短信登录同款翻车：
+  // 滑块通过后 send 发空参 → 服务端 -400 → 页面退回手机号输入、短信没发出去。
+  // POST + query B 站接受（实测：同字段走 query → code=0 + captcha_key）。
+  const url: string = `${BILI_PASSPORT}${path}` +
+    `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
+    `&source=main_mini_login&token=${encodeURIComponent(token)}` +
+    `&challenge=${encodeURIComponent(challenge)}&validate=${encodeURIComponent(validate)}` +
+    `&seccode=${encodeURIComponent(seccode)}`;
+  const resp: SmsSendEnvelope = await HttpUtil.requestJson<SmsSendEnvelope>(url, {
+    method: http.RequestMethod.POST,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': BILI_APP_UA,
+      Origin: 'https://www.bilibili.com'
+    },
+    skipCookie: true
+  });
+  console.info(`sms send: code=${resp.code}, telLen=${tel.length}, ` +
+    `tokenLen=${token.length}, vLen=${validate.length}`);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  return { captchaKey: resp.data.captcha_key };
+}
+
+/**
+ * 短信验证码登录（POST /x/passport-login/web/login/sms，参数内联 query）。
+ * 走 requestTextWithCookies：登录 Cookie 在本响应的 Set-Cookie 里下发
+ * （与扫码 poll 同形态，由 LoginStore.applySmsLoginCookies 解析）。
+ */
+export async function loginWithSmsCode(tel: string, cid: string, code: string,
+  captchaKey: string): Promise<SmsLoginResult> {
+  const path: string = '/x/passport-login/web/login/sms';
+  // 同 sendSmsLoginCode：参数内联进 URL。
+  // 本引擎 queryParams 发空参（QR poll 86038 同款缺陷）、字符串表单体也会被吞
+  // （实测 -400），query 内联是唯一在所有引擎上都可靠的通道。
+  const url: string = `${BILI_PASSPORT}${path}` +
+    `?cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
+    `&code=${encodeURIComponent(code)}&source=main_mini_login` +
+    `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': BILI_APP_UA,
+    Origin: 'https://www.bilibili.com'
+  };
+  let raw: HttpTextResult = await HttpUtil.requestTextWithCookies(url, {
+    method: http.RequestMethod.POST,
+    headers: headers,
+    skipCookie: true
+  });
+  let resp: SmsLoginEnvelope = JSON.parse(raw.text) as SmsLoginEnvelope;
+  if (resp.code === -400) {
+    // 兜底：个别引擎只认表单体（与主路径二选一，正常只走一条）
+    raw = await HttpUtil.requestTextWithCookies(`${BILI_PASSPORT}${path}`, {
+      method: http.RequestMethod.POST,
+      headers: headers,
+      skipCookie: true,
+      body: `cid=${encodeURIComponent(cid)}&tel=${encodeURIComponent(tel)}` +
+        `&code=${encodeURIComponent(code)}&source=main_mini_login` +
+        `&captcha_key=${encodeURIComponent(captchaKey)}&keep=1`
+    });
+    resp = JSON.parse(raw.text) as SmsLoginEnvelope;
+    console.warn(`sms login: body fallback -> code=${resp.code}`);
+  }
+  console.info(`sms login: code=${resp.code}, cookiesLen=${raw.responseCookies.length}`);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  return { responseCookies: raw.responseCookies, refreshToken: resp.data.refresh_token };
+}
+
+/** 登录用户信息（nav 接口归一化后的形态） */
+interface NavUserInfo {
+  isLogin: boolean;
+  mid: number;
+  uname: string;
+  face: string;
+  vipStatus: number;
+  /** 会籍种类：0 无 / 1 月度大会员 / 2 年度大会员（nav 的 vipType） */
+  vipType: number;
+}
+
+interface NavEnvelope {
+  code: number;
+  message: string;
+  data: NavDataRaw;
+}
+
+interface NavDataRaw {
+  isLogin?: boolean;
+  mid?: number;
+  uname?: string;
+  face?: string;
+  vipStatus?: number;
+  vipType?: number;
+}
+
+const NOT_LOGGED_IN_USER: NavUserInfo = {
+  isLogin: false,
+  mid: 0,
+  uname: '',
+  face: '',
+  vipStatus: 0,
+  vipType: 0
+};
+
+/**
+ * 拉取当前登录用户信息（/x/web-interface/nav）。
+ *
+ * ⚠️ 未登录 / Cookie 失效时该接口返回 code -101 —— 这不是异常，是「未登录」的正常答案，
+ * 返回 isLogin=false 的占位对象；其余非 0 业务码才抛 BiliApiError。
+ * WbiSign 对同一接口的 -101 已有同样的容忍先例（wbi_img 照常可用）。
+ */
+export async function fetchNavUser(): Promise<NavUserInfo> {
+  const path: string = '/x/web-interface/nav';
+  const resp: NavEnvelope = await HttpUtil.requestJson<NavEnvelope>(`${BILI_API}${path}`);
+  if (resp.code === -101) {
+    return NOT_LOGGED_IN_USER;
+  }
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const d: NavDataRaw = resp.data;
+  return {
+    isLogin: d.isLogin === true,
+    mid: d.mid ?? 0,
+    uname: d.uname ?? '',
+    face: d.face ?? '',
+    vipStatus: d.vipStatus ?? 0,
+    vipType: d.vipType ?? 0
+  };
+}
+
+/**
+ * 撤销服务器端登录会话（POST /login/exit/v2，表单带 bili_jct 作 CSRF）。
+ * best-effort：调用方（LoginStore.logout）失败也继续本地清理，不会因此卡住退出。
+ */
+export async function revokeLogin(biliJct: string): Promise<void> {
+  await HttpUtil.requestText(`${BILI_PASSPORT}/login/exit/v2`, {
+    method: http.RequestMethod.POST,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `bili_jct=${encodeURIComponent(biliJct)}&csrf=${encodeURIComponent(biliJct)}`
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// B 站直播（「听直播」）
+//
+// 直播域 api.live.bilibili.com 与主站 Cookie 互通（buvid / SESSDATA 均有效），
+// 接口无需 WBI 签名、无需 gaia 风控指纹；参数必须**内联进 URL**（同 biliFetch
+// 头注释：本引擎 queryParams 会静默发空参请求）。
+// 直播流地址几分钟就过期 —— 调用方每次播放实时解析，绝不缓存、绝不落盘。
+// ════════════════════════════════════════════════════════════════════════
+
+/** 直播流解析产物：HLS（m3u8，首选）与 FLV（兜底）完整直链，取不到为空串 */
+export interface LiveStreamUrls {
+  hlsUrl: string;
+  flvUrl: string;
+}
+
+/** getRoomPlayInfo 响应外层（BiliEnvelope 同形） */
+interface LivePlayInfoEnvelope {
+  code: number;
+  message: string;
+  data: LivePlayInfoData;
+}
+
+interface LivePlayInfoData {
+  room_id: number;
+  short_id: number;
+  uid: number;
+  /** 0=未开播 1=直播中 2=轮播中 */
+  live_status: number;
+  playurl_info?: LivePlayUrlInfo;
+}
+
+interface LivePlayUrlInfo {
+  playurl?: LivePlayUrl;
+}
+
+interface LivePlayUrl {
+  stream?: LivePlayUrlStream[];
+}
+
+interface LivePlayUrlStream {
+  /** http_hls（m3u8）/ http_stream（flv） */
+  protocol_name: string;
+  format?: LivePlayFormat[];
+}
+
+interface LivePlayFormat {
+  /** ts / fmp4（HLS）；flv（http_stream） */
+  format_name: string;
+  codec?: LivePlayCodec[];
+}
+
+interface LivePlayCodec {
+  codec_name: string;
+  base_url: string;
+  url_info?: LiveUrlInfo[];
+}
+
+interface LiveUrlInfo {
+  host: string;
+  extra: string;
+  is_refer_enabled?: boolean;
+}
+
+/**
+ * 解析直播间流地址（HLS 首选 / FLV 兜底）。
+ *
+ * 端点：`/xlive/web-room/v2/index/getRoomPlayInfo`（稳定公开接口，匿名可用）。
+ * `protocol=0,1` 一次要齐 http_stream(FLV) 与 http_hls(HLS) 两族；
+ * HLS 内优先 ts 分段（最经典的 HLS 形态，解复用兼容性最好），fmp4 次之。
+ * URL 拼接规则（B 站直播特有）：`url_info[0].host + codec.base_url + url_info[0].extra`。
+ *
+ * @throws BiliApiError 直播间不存在 / 未开播 / 无可用流
+ */
+export async function fetchLiveStreamUrls(roomId: number): Promise<LiveStreamUrls> {
+  const path: string = '/xlive/web-room/v2/index/getRoomPlayInfo';
+  const url: string = `${BILI_LIVE_API}${path}` +
+    `?room_id=${roomId}&protocol=0,1&format=1,2&codec=0&qn=0` +
+    `&platform=web&ptype=16&dolby=5&panorama=1`;
+  const resp: LivePlayInfoEnvelope = await HttpUtil.requestJson<LivePlayInfoEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const d: LivePlayInfoData = resp.data;
+  if (d.live_status !== 1) {
+    throw new BiliApiError(1, '直播间未开播', path);
+  }
+  let hlsTsUrl: string = '';
+  let hlsFmp4Url: string = '';
+  let flvUrl: string = '';
+  const streams: LivePlayUrlStream[] = d.playurl_info?.playurl?.stream ?? [];
+  for (let i = 0; i < streams.length; i++) {
+    const stream: LivePlayUrlStream = streams[i];
+    const formats: LivePlayFormat[] = stream.format ?? [];
+    for (let j = 0; j < formats.length; j++) {
+      const format: LivePlayFormat = formats[j];
+      const codecs: LivePlayCodec[] = format.codec ?? [];
+      for (let k = 0; k < codecs.length; k++) {
+        const codec: LivePlayCodec = codecs[k];
+        const infos: LiveUrlInfo[] = codec.url_info ?? [];
+        if (codec.base_url.length === 0 || infos.length === 0 || infos[0].host.length === 0) {
+          continue;
+        }
+        const full: string = `${infos[0].host}${codec.base_url}${infos[0].extra}`;
+        if (stream.protocol_name === 'http_hls' && format.format_name === 'ts' && hlsTsUrl.length === 0) {
+          hlsTsUrl = full;
+        } else if (stream.protocol_name === 'http_hls' && format.format_name === 'fmp4'
+          && hlsFmp4Url.length === 0) {
+          hlsFmp4Url = full;
+        } else if (stream.protocol_name === 'http_stream' && flvUrl.length === 0) {
+          flvUrl = full;
+        }
+      }
+    }
+  }
+  const hlsUrl: string = hlsTsUrl.length > 0 ? hlsTsUrl : hlsFmp4Url;
+  if (hlsUrl.length === 0 && flvUrl.length === 0) {
+    throw new BiliApiError(2, '直播间无可用流地址', path);
+  }
+  return { hlsUrl: hlsUrl, flvUrl: flvUrl };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 直播列表与房间信息（LivePage 用）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 直播间信息（关注列表条目 / 房间号查询共用形态，只取页面要用的字段）。
+ * liveStatus：0=未开播 1=直播中 2=轮播中（轮播也出流，可听）。
+ */
+export interface LiveRoomInfo {
+  /** 真实房间号（GetWebList 的 roomid 已是真实号，短号由服务端解析） */
+  roomId: number;
+  title: string;
+  uname: string;
+  face: string;
+  cover: string;
+  liveStatus: number;
+  /** 观看数人话文案（watched_show.text_small，如「1.2万」），空串 = 接口没给 */
+  watchedText: string;
+  areaName: string;
+}
+
+/** 关注主播直播列表分页数据 */
+export interface FollowedLivePage {
+  /** 全部条目（含未开播的关注主播）——页面自行过滤开播中的 */
+  rooms: LiveRoomInfo[];
+  /** 是否还有下一页（GetWebList 的 has_more） */
+  hasMore: boolean;
+}
+
+/** GetWebList 响应模型（字段名与 B 站接口原样，下划线风格） */
+interface LiveFollowListEnvelope {
+  code: number;
+  message: string;
+  data?: LiveFollowListData;
+}
+
+interface LiveFollowListData {
+  count?: number;
+  has_more?: number;
+  list?: LiveFollowItemRaw[];
+}
+
+interface LiveFollowItemRaw {
+  roomid?: number;
+  title?: string;
+  uname?: string;
+  face?: string;
+  cover?: string;
+  live_status?: number;
+  area_name?: string;
+  watched_show?: LiveWatchedShowRaw;
+}
+
+interface LiveWatchedShowRaw {
+  text_small?: string;
+}
+
+/**
+ * 关注主播的直播间列表（「听直播」页数据源）。
+ *
+ * 端点：`/xlive/web-ucenter/v1/xfetter/GetWebList`（需登录，HttpUtil 自动带
+ * SESSDATA）。返回**全部关注主播**（开播在前），页面按 liveStatus 过滤。
+ * pagesize=30 与官方网页版同口径。
+ *
+ * @throws BiliApiError -101 未登录 / 风控码（页面据此分化提示）
+ */
+export async function getFollowedLiveList(page: number): Promise<FollowedLivePage> {
+  const path: string = '/xlive/web-ucenter/v1/xfetter/GetWebList';
+  const url: string = `${BILI_LIVE_API}${path}?page=${page}&pagesize=30`;
+  const resp: LiveFollowListEnvelope = await HttpUtil.requestJson<LiveFollowListEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const src: LiveFollowItemRaw[] = resp.data?.list ?? [];
+  const rooms: LiveRoomInfo[] = src.map((it: LiveFollowItemRaw): LiveRoomInfo => {
+    return {
+      roomId: it.roomid ?? 0,
+      title: (it.title ?? '').length > 0 ? stripHtmlTags(decodeHtmlEntities(it.title ?? '')) : '',
+      uname: it.uname ?? '',
+      face: it.face ?? '',
+      cover: it.cover ?? '',
+      liveStatus: it.live_status ?? 0,
+      watchedText: it.watched_show?.text_small ?? '',
+      areaName: it.area_name ?? ''
+    };
+  });
+  return {
+    rooms: rooms,
+    hasMore: resp.data?.has_more === 1
+  };
+}
+
+/** getInfoByRoom 响应模型 */
+interface LiveRoomInfoEnvelope {
+  code: number;
+  message: string;
+  data?: LiveRoomInfoData;
+}
+
+interface LiveRoomInfoData {
+  room_info?: LiveRoomBriefRaw;
+  anchor_info?: LiveAnchorInfoRaw;
+  watched_show?: LiveWatchedShowRaw;
+}
+
+interface LiveRoomBriefRaw {
+  room_id?: number;
+  title?: string;
+  live_status?: number;
+  cover?: string;
+  area_name?: string;
+}
+
+interface LiveAnchorInfoRaw {
+  base_info?: LiveAnchorBaseRaw;
+}
+
+interface LiveAnchorBaseRaw {
+  uname?: string;
+  face?: string;
+}
+
+/**
+ * 按房间号查直播间信息（手动输入房间号 / 链接的落地查询，匿名可用）。
+ *
+ * 端点：`/xlive/web-room/v1/index/getInfoByRoom`。
+ *
+ * @throws BiliApiError 房间不存在（code 1900x / -400 等）时原样抛，页面人话化
+ */
+export async function getRoomInfoByRoom(roomId: number): Promise<LiveRoomInfo> {
+  const path: string = '/xlive/web-room/v1/index/getInfoByRoom';
+  const url: string = `${BILI_LIVE_API}${path}?room_id=${roomId}`;
+  const resp: LiveRoomInfoEnvelope = await HttpUtil.requestJson<LiveRoomInfoEnvelope>(url);
+  if (resp.code !== 0) {
+    throw new BiliApiError(resp.code, resp.message, path);
+  }
+  const room: LiveRoomBriefRaw = resp.data?.room_info ?? {};
+  const base: LiveAnchorBaseRaw = resp.data?.anchor_info?.base_info ?? {};
+  return {
+    roomId: room.room_id ?? roomId,
+    title: stripHtmlTags(decodeHtmlEntities(room.title ?? '')),
+    uname: base.uname ?? '',
+    face: base.face ?? '',
+    cover: room.cover ?? '',
+    liveStatus: room.live_status ?? 0,
+    watchedText: resp.data?.watched_show?.text_small ?? '',
+    areaName: room.area_name ?? ''
+  };
+}
+
+/**
+ * 解析用户输入的直播间定位：纯数字房间号或 `live.bilibili.com/(h5/)?房间号` 链接。
+ *
+ * @returns 房间号；无法解析返回 -1（调用方提示格式不支持）
+ */
+export function parseLiveInput(input: string): number {
+  const trimmed: string = input.trim();
+  if (trimmed.length === 0) {
+    return -1;
+  }
+  if (/^\d{1,12}$/.test(trimmed)) {
+    return parseInt(trimmed);
+  }
+  const linkPattern: RegExp = /live\.bilibili\.com\/(?:h5\/)?(\d{1,12})/;
+  const matched: RegExpMatchArray | null = trimmed.match(linkPattern);
+  if (matched !== null && matched.length > 1) {
+    return parseInt(matched[1]);
+  }
+  return -1;
+}
+
+/**
+ * 直播间条目 → isLive Track（audioUrl 留空：播放内核 loadAndPlay 的直播分支
+ * 会按 roomId 实时取流，与本文件「直播地址绝不缓存」的约定一致）。
+ */
+export function buildLiveRoomTrack(room: LiveRoomInfo): Track {
+  return buildTrack({
+    id: `live-${room.roomId}`,
+    title: room.title.length > 0 ? room.title : `直播间 ${room.roomId}`,
+    artist: room.uname.length > 0 ? room.uname : 'B 站直播',
+    coverUrl: room.cover.length > 0 ? toHttpsUrl(room.cover) : toHttpsUrl(room.face),
+    duration: 0,
+    isLive: true,
+    roomId: room.roomId
+  });
+}
+

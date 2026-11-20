@@ -477,7 +477,8 @@ let playlistCache: Playlist[] | null = null;
  * 直接抛错。而 slimTrack 后的**一条曲目实测约 519 字节**（字段名与引号占大头，
  * 封面 URL 单独就 ~70 字节）→ 整张歌单塞进一个 key 时，
  * **超过约 11 首就写不进去**，表现是「加了歌，重启后消失」。
- * 所以：元信息（名字/封面/时间/订阅来源）留在 PREF_PLAYLISTS，曲目按每片 8 条拆到
+ * 所以：元信息（名字/封面/时间/订阅来源）也按字节预算分片到 `pl_meta_{片号}`
+ * 独立 key（见 PL_META_PREFIX），曲目按每片 8 条拆到
  * `pl_tracks_{歌单id}_{片号}` 独立 key。8 × 519 ≈ 4.1KB，离 6000 字节预算还有余量。
  */
 const PLAYLIST_CHUNK_ITEMS: number = 8;
@@ -488,9 +489,74 @@ export const PLAYLIST_MAX_ITEMS: number = 10000;
 const PL_TRACKS_PREFIX: string = 'pl_tracks_';
 
 /**
+ * 歌单**元信息**分片存储：`pl_meta_{n}` 独立 key。
+ *
+ * 为什么要分片（同 PL_TRACKS_PREFIX 的理由）：元信息虽不含曲目，但每个歌单
+ * 一条（名字 / 简介 / 封面 / 订阅来源……），随歌单数量**线性增长** —— 单 key
+ * （PREF_PLAYLISTS）塞下所有歌单时，几十个歌单就逼近 8192 字节硬上限，
+ * 超限那一刻 `put()` 抛错，**所有歌单的元信息一起写不进去**（表现为
+ * 新建 / 重命名的歌单重启后消失）。按累计字节数装包（每片预算
+ * PL_META_CHUNK_BUDGET_BYTES），读侧探测到 miss 为止；旧单键数据在
+ * 下一次落盘时迁入分片并清理旧键（同 recent / favorite 的迁移收尾）。
+ */
+const PL_META_PREFIX: string = 'pl_meta_';
+/** 单片元信息预算（字节）：留足余量，正常一片能装 15~30 个歌单 */
+const PL_META_CHUNK_BUDGET_BYTES: number = 4000;
+/** 读侧最大探测片数（防坏数据无限探测）；4000B/片 × 60 片，远超任何真实库 */
+const PL_META_MAX_CHUNKS: number = 60;
+/** 本次会话是否从旧格式（PREF_PLAYLISTS 单键）读到过元信息：分片落盘成功后清理旧键 */
+let legacyPlMetaSeen: boolean = false;
+
+function plMetaKeyOf(index: number): string {
+  return `${PL_META_PREFIX}${index}`;
+}
+
+/** 磁盘上现有元信息分片数（探测到 miss 为止，无分片返回 0） */
+function countPlMetaChunks(): number {
+  let count: number = 0;
+  while (count < PL_META_MAX_CHUNKS) {
+    const part: StoredPlaylist[] | null = AppPreferences.getObject<StoredPlaylist[]>(plMetaKeyOf(count));
+    if (!part || !Array.isArray(part)) {
+      break;
+    }
+    count++;
+  }
+  return count;
+}
+
+/**
+ * 读磁盘上的歌单元信息（分片优先，旧单键回落）。
+ * 全部读取点统一走这里：`pl_meta_{n}` 探测到 miss 为止，一片都没有 =
+ * 旧格式（PREF_PLAYLISTS 单键）或全新安装，回落旧键并标记待迁移。
+ */
+function loadStoredPlaylists(): StoredPlaylist[] {
+  const out: StoredPlaylist[] = [];
+  let found: boolean = false;
+  for (let i = 0; i < PL_META_MAX_CHUNKS; i++) {
+    const part: StoredPlaylist[] | null = AppPreferences.getObject<StoredPlaylist[]>(plMetaKeyOf(i));
+    if (!part || !Array.isArray(part)) {
+      break;
+    }
+    found = true;
+    for (let k = 0; k < part.length; k++) {
+      out.push(part[k]);
+    }
+  }
+  if (found) {
+    return out;
+  }
+  const legacy: StoredPlaylist[] | null = AppPreferences.getObject<StoredPlaylist[]>(PREF_PLAYLISTS);
+  if (legacy !== null && Array.isArray(legacy)) {
+    legacyPlMetaSeen = true;
+    return legacy;
+  }
+  return [];
+}
+
+/**
  * 磁盘上的歌单条目。
  *
- * `tracks` 只在**旧版本**写出的数据里存在（那时曲目与元信息同处 PREF_PLAYLISTS 一个 key）；
+ * `tracks` 只在**旧版本**写出的数据里存在（那时曲目与元信息同处一个 key）；
  * 新版本曲目在分片里，这个字段读出来是 undefined → 据此区分新旧格式并向下兼容，
  * 用户升级后老歌单不会变成空歌单。
  */
@@ -571,7 +637,7 @@ function toPlaylist(stored: StoredPlaylist): Playlist {
 
 export function getPlaylists(): Playlist[] {
   if (playlistCache === null) {
-    const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+    const stored: StoredPlaylist[] = loadStoredPlaylists();
     const list: Playlist[] = [];
     if (Array.isArray(stored)) {
       for (let i = 0; i < stored.length; i++) {
@@ -678,7 +744,7 @@ async function runPersist(): Promise<void> {
     // 歌单曲目**不截断**（截断等于悄悄丢用户的歌），只在超过 PLAYLIST_MAX_ITEMS 时截并告警。
     const metas: StoredPlaylist[] = [];
   const oldChunkCounts: Map<string, number> = new Map();
-  const oldStored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+  const oldStored: StoredPlaylist[] = loadStoredPlaylists();
   if (Array.isArray(oldStored)) {
     for (let i = 0; i < oldStored.length; i++) {
       oldChunkCounts.set(oldStored[i].id, oldStored[i].chunkCount ?? 0);
@@ -737,19 +803,59 @@ async function runPersist(): Promise<void> {
     });
   }
 
-  const metasJson: string = JSON.stringify(metas);
-    const bytes: number = utf8Length(metasJson);
-    if (bytes > PREF_VALUE_BUDGET_BYTES) {
-      // 元信息不含曲目，正常情况只有几百字节；走到这里说明歌单数量异常多
-      console.error(`playlists meta too large: ${bytes} bytes (budget ${PREF_VALUE_BUDGET_BYTES})`);
+  // 元信息分片装包（同 recent / pl_tracks 分片理由）：单 key（PREF_PLAYLISTS）
+  // 随歌单数量线性增长，迟早撞 8192 字节硬上限 —— 超限那一刻所有歌单元信息
+  // 一起写不进去。按累计字节数装到 PL_META_CHUNK_BUDGET_BYTES 一片，各自独立 key。
+  const metaChunks: StoredPlaylist[][] = [];
+  let curChunk: StoredPlaylist[] = [];
+  let curBytes: number = 2; // '[]' 的骨架字节
+  for (let i = 0; i < metas.length; i++) {
+    const entryBytes: number = utf8Length(JSON.stringify(metas[i])) + 1; // +1 逗号
+    if (curChunk.length > 0 && curBytes + entryBytes > PL_META_CHUNK_BUDGET_BYTES) {
+      metaChunks.push(curChunk);
+      curChunk = [];
+      curBytes = 2;
     }
-    // 元信息也并进同一批（同一次 flush 落盘）
-    writes[PREF_PLAYLISTS] = metasJson;
+    curChunk.push(metas[i]);
+    curBytes += entryBytes;
+  }
+  if (curChunk.length > 0) {
+    metaChunks.push(curChunk);
+  } else {
+    // 空库也要写一个空片：它是读侧「分片格式已启用」的标记 ——
+    // 一片不写时读侧会回落旧单键，已迁完的用户删光歌单后会读到旧键里的陈旧元信息
+    metaChunks.push([]);
+  }
+  for (let c = 0; c < metaChunks.length; c++) {
+    const partJson: string = JSON.stringify(metaChunks[c]);
+    // 保险检查（不截断，对齐曲目行为）：单片超预算只告警 —— 只有单条畸形肥数据
+    // （超长简介等）独占一片时才可能发生，日志能定位到具体片
+    if (utf8Length(partJson) > PREF_VALUE_BUDGET_BYTES) {
+      console.warn(`playlists meta chunk ${c} exceeds budget (${metaChunks[c].length} entries)`);
+    }
+    writes[plMetaKeyOf(c)] = partJson;
+  }
+  // 元信息片数变少时清掉多余分片：读侧按片探测到 miss 为止，残留尾片会被
+  // 拼进结果（歌单重复出现），这组 removes 是正确性所需、不只是磁盘卫生
+  const oldMetaChunkCount: number = countPlMetaChunks();
+  for (let c = metaChunks.length; c < oldMetaChunkCount; c++) {
+    removes.push(plMetaKeyOf(c));
+  }
+  // 迁移收尾：旧单键（PREF_PLAYLISTS）数据已随分片写入迁完，删掉释放 ~7KB
+  if (legacyPlMetaSeen) {
+    legacyPlMetaSeen = false;
+    removes.push(PREF_PLAYLISTS);
+  }
     // fire-and-forget：与既有风格一致（内存快照才是真源，见 playlistCache 注释）
+    let metaPersisted: boolean = true;
     await AppPreferences.putMany(writes).catch((e: Error): void => {
+      metaPersisted = false;
       console.error(`savePlaylists failed: ${e.message}`);
     });
-    if (removes.length > 0) {
+    // ⚠️ 多余分片与旧键只在**分片写入成功后**才清：
+    // 写入失败时先删旧数据 = 把元信息唯一副本删掉（putMany 部分失败时尾片
+    // 残留导致的重复会在下一次成功落盘时自愈，反向的丢失则无法自愈）。
+    if (metaPersisted && removes.length > 0) {
       await AppPreferences.removeMany(removes).catch((e: Error): void => {
         console.error(`remove playlist chunk keys failed: ${e.message}`);
       });
@@ -798,7 +904,7 @@ function prewarmPlaylists(): Promise<void> {
 async function runPrewarm(): Promise<void> {
   try {
     // 元信息是单 key 小 JSON（正常几百字节），同步读可忽略
-    const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+    const stored: StoredPlaylist[] = loadStoredPlaylists();
     const list: Playlist[] = [];
     let chunksSinceYield: number = 0;
     if (Array.isArray(stored)) {
@@ -1091,7 +1197,7 @@ export function clearTitleSorted(): void {
 function purgePlaylistData(id: string): void {
   // 连分片一起清掉：留着不会被误读（读只取 chunkCount 个 key），但会一直占磁盘。
   // 攒一批走 removeMany（一次 flush），避免逐片 remove 造成上千次串行 flush。
-  const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+  const stored: StoredPlaylist[] = loadStoredPlaylists();
   if (Array.isArray(stored)) {
     const keys: string[] = [];
     for (let i = 0; i < stored.length; i++) {
@@ -2372,7 +2478,7 @@ export function getPlaylistsForSync(): Playlist[] {
  * 清空一个歌单时，runPersist 会同步把 chunkCount 写成 0，两边一致 → 不误报。
  */
 export function countPlaylistsWithUnloadedChunks(): number {
-  const stored: StoredPlaylist[] = AppPreferences.getPlaylists<StoredPlaylist>();
+  const stored: StoredPlaylist[] = loadStoredPlaylists();
   if (!Array.isArray(stored) || stored.length === 0) {
     return 0;
   }

@@ -592,6 +592,18 @@ export const STORE_TRANSCRIBE_TRACK_ID: string = 'lyricTranscribeTrackId';
 export const STORE_TRANSCRIBE_DONE_SEQ: string = 'lyricTranscribeDoneSeq';
 
 /**
+ * 第三方 ASR 当前引擎 id 镜像（AsrEngineRegistry 发布，歌词面板订阅）。
+ * 默认 'system' = 现有系统识别；其余为 AsrModelCatalog 的模型 id。
+ */
+export const STORE_ASR_ENGINE_ID: string = 'asrEngineId';
+
+/**
+ * 模型下载进度快照（AsrModelManager 发布，AsrModelPage 订阅）。
+ * 值为 AsrDownloadProgress 的 JSON 字符串（简单对象，AppStorage 原生支持）。
+ */
+export const STORE_ASR_MODEL_PROGRESS: string = 'asrModelProgress';
+
+/**
  * 沉浸光感材质档位镜像（AppSettings.immersiveMaterialTier 的运行时镜像）：
  * EntryAbility 启动首发、外观页菜单切换时重发，MaterialTokens 档位感知
  * 解析统一消费 —— exquisite 精美（EXQUISITE，设备能力门控）/ gentle 轻柔

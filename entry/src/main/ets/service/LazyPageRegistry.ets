@@ -41,6 +41,11 @@ function ensureLazyPage(name: string): Promise<void> {
 
 async function loadByName(name: string): Promise<void> {
   switch (name) {
+    case 'AsrModels': {
+      const m = await import('../pages/AsrModelPage');
+      builders.set(name, m.AsrModelPageWrapped);
+      break;
+    }
     case 'Player': {
       const m = await import('../pages/PlayerPage');
       builders.set(name, m.PlayerPageWrapped);
@@ -204,7 +209,7 @@ async function loadByName(name: string): Promise<void> {
 /** 预热顺序：最常用的播放页 / 搜索二级页 / 歌单详情优先，其余按导航入口热度排列。 */
 const PRELOAD_ORDER: string[] = ['Player', 'Search', 'PlaylistDetail', 'NeteasePlaylist', 'Recent', 'Follows', 'Live',
   'UpSpace', 'SeasonSeriesDetail', 'CollectionDetail', 'WatchHistory', 'CloudSync', 'PlaylistImport', 'PlaybackSettings',
-  'HomeFeedFilter', 'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'Downloads', 'ListenCacheList', 'PlaylistBackup', 'PlaybackLog', 'HuaweiCloudSync', 'DiaryNewFaces', 'DiaryTimeline', 'Reward', 'About', 'Login', 'DownloadRestore'];
+  'HomeFeedFilter', 'PlayerFuncOrder', 'AppearanceSettings', 'AppIconSettings', 'DownloadSettings', 'Downloads', 'ListenCacheList', 'PlaylistBackup', 'PlaybackLog', 'HuaweiCloudSync', 'DiaryNewFaces', 'DiaryTimeline', 'Reward', 'About', 'Login', 'DownloadRestore', 'AsrModels'];
 
 function preloadAt(index: number): void {
   if (index >= PRELOAD_ORDER.length) {

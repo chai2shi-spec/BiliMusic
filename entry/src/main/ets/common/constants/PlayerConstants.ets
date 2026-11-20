@@ -31,28 +31,13 @@ export class PlayerConstants {
   static readonly LANDSCAPE_COVER_GAP_VP: number = 12;
 
   /**
-   * 阔折叠判定——折起外屏（竖屏）窗口宽高比下限。
-   * 系统无公开 API 区分阔折叠（Pura X 类）与常规折叠（Mate X 类），按外屏
-   * 宽高比分档：阔折叠外屏 ≈0.62（近方偏宽），常规折叠外屏 ≈0.49（窄长），
-   * 取两档中分为阈值。宽高比与 px/vp 密度换算无关（比例恒定）。
-   * 配套真机诊断日志见 PlayerInfoComponent 的 [PlayerInfo] 前缀输出。
+   * 阔折叠形态阈值已收敛到 common/utils/DeviceForm（resolveForm 统一判定源）：
+   * 小方屏外屏（Pura X 折叠态 326×326，比例 ≥0.93 且短边 ≤360）、阔折叠外屏
+   * （Pura X Max 折叠态 459×672，比例 ∈ [0.66,0.76) 且短边 ∈ [420,500]）、
+   * Pura X 展开内屏（440×707，比例 ∈ [0.58,0.66)）。旧
+   * WIDE_FOLD_OUTER_ASPECT_MIN（0.56）/ WIDE_FOLD_INNER_ASPECT_MAX（0.75）
+   * 已删除 —— 前者会把 1:1 小方屏外屏吞进阔折叠外屏分支（两形态断点完全
+   * 相同 sm×md，本次修的核心误判）。配套真机诊断日志见
+   * PlayerInfoComponent 的 [PlayerInfo] 前缀输出。
    */
-  static readonly WIDE_FOLD_OUTER_ASPECT_MIN: number = 0.56;
-
-  /**
-   * 阔折叠判定——展开内屏（竖屏）窗口宽高比上限。
-   * 阔折叠（Pura X 类）内外屏同为 16:10 长屏：展开内屏竖屏宽高比 ≈0.62
-   * （1320/2120），与折起外屏（≈0.62）同比例；常规折叠（Mate X 类）展开
-   * 内屏近方偏宽 ≈0.83~0.92（三星 Fold ≈0.83、Mate X5 ≈0.89）。取两档
-   * 中分为阈值：≤0.75 判阔折叠（按直板机版式渲染，用户拍板：仅阔折叠展开
-   * 去分栏，常规折叠展开保持左右分栏——md 断点下两类折叠屏均出现，无法按
-   * 断点区分，只能按宽高比）。宽高比与 px/vp 密度换算无关（比例恒定）。
-   * ⚠️ 修正史：早期按「展开内屏 ≈1.04 近方」设下限 0.97 —— 与真机不符
-   * （Pura X 展开内屏为 16:10 长屏而非近方屏，竖屏宽高比 ≈0.62），展开
-   * 竖屏从未命中过阔折叠分支、一直落常规折叠分栏，已按真机实测修正为上限。
-   * 已知边界：三折叠全展开竖屏（≈0.70）落本口径会走直板机版式；系统无公开
-   * API 按机型区分，暂不处理。
-   * 配套真机诊断日志见 PlayerInfoComponent 的 [PlayerInfo] 前缀输出。
-   */
-  static readonly WIDE_FOLD_INNER_ASPECT_MAX: number = 0.75;
 }

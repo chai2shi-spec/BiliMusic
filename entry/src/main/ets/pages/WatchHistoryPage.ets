@@ -62,7 +62,8 @@ import {
   STORE_SAFE_TOP,
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP,
-  STORE_THEME_ON
+  STORE_THEME_ON,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
@@ -71,6 +72,7 @@ import {
   TWO_COL_GAP_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import {
   NAV_TRANSITION_MS,
   BUTTON_RADIUS_VP,
@@ -186,6 +188,12 @@ export struct WatchHistoryPage {
 
   /** 主题色运行时值：分段按钮配色与操作按钮跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   /** 当前断点（Index 常驻注册写入）：大屏上内容列收窄居中 */
@@ -988,7 +996,8 @@ export struct WatchHistoryPage {
       }
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }

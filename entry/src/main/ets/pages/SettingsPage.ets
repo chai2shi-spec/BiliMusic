@@ -1,17 +1,17 @@
 /**
  * 设置页（一级入口页）—— 2026-11-09 重设计实施版。
  *
- * 四张卡：
- *   A「账户与同步」：账户三态行（未登录 / 已登录 / 登录已失效）+ **云空间同步
+ * 四张卡（2026-11-19 各标题统一为四个字）：
+ *   A「账户同步」：账户三态行（未登录 / 已登录 / 登录已失效）+ **云端同步
  *     直达**（无条件渲染，未登录也可见，→ 'HuaweiCloudSync'）+ 登录后才有的
- *     「更多账号功能」折叠（B 站收藏夹同步 / 观看历史 / 我的关注 / 听直播）；
+ *     「更多功能」折叠（收藏同步 / 观看历史 / 我的关注 / 收听直播）；
  *   C「常用设置」：播放 / 下载 / 外观 / 首页筛选，行尾回显当前值；
- *   D「数据与工具」：歌单与备份 / 应用图标 / 报错记录，行尾回显当前值；
- *   E「关于与帮助」：5 行常驻卡片（用户 2026-11-09 23:35 定稿：不做折叠）。
+ *   D「数据工具」：歌单备份 / 应用图标 / 报错记录，行尾回显当前值；
+ *   E「关于帮助」：5 行常驻卡片（用户 2026-11-09 23:35 定稿：不做折叠）。
  *
  * ⚠️ 两个「同步」是不同功能、不同路由，别合并（design/设置页-重新设计-方案.md §0.1）：
- *   · 云空间同步 → 'HuaweiCloudSync' → CloudSyncPage（华为云空间，与登录无关）
- *   · B 站收藏夹同步 → 'CloudSync' → FavSyncPage（收藏夹镜像，登录后才渲染）
+ *   · 云端同步 → 'HuaweiCloudSync' → CloudSyncPage（华为云空间，与登录无关）
+ *   · 收藏同步 → 'CloudSync' → FavSyncPage（收藏夹镜像，登录后才渲染）
  *
  * 动作用尾部符号区分：进页 › / 弹窗 ⓘ / 外链 ↗ / 复制 ⧉ / 折叠 ⌄。
  * 图标色不再用 9 个硬编码 iOS 色；全部 18 个入口行**统一**使用
@@ -39,7 +39,8 @@ import {
   STORE_THEME_PRIMARY,
   STORE_THEME_DEEP,
   STORE_THEME_SURFACE,
-  STORE_THEME_ON
+  STORE_THEME_ON,
+  STORE_ASR_ENGINE_ID
 } from '../common/Constants';
 import { AppSettings, ThemeMode } from '../model/MusicModels';
 import { AppPreferences } from '../preferences/AppPreferences';
@@ -299,6 +300,11 @@ export struct SettingsPage {
     if (key === 'logs') {
       return this.valueLogs;
     }
+    if (key === 'asr') {
+      // 当前引擎随 STORE_ASR_ENGINE_ID 变化；这里现算短标签，不进带参 Builder
+      const id: string = AppStorage.get<string>(STORE_ASR_ENGINE_ID) ?? 'system';
+      return id === 'system' ? '系统识别' : '第三方模型';
+    }
     if (key === 'version') {
       return this.appVersion;
     }
@@ -310,10 +316,10 @@ export struct SettingsPage {
 
   /** 消歧副标题：两个「同步」靠它区分，其余行为空 */
   private subtitleOf(title: string): string {
-    if (title === '云空间同步') {
+    if (title === '云端同步') {
       return '华为云空间 · 自动备份';
     }
-    if (title === 'B 站收藏夹同步') {
+    if (title === '收藏同步') {
       return '收藏夹 → 本地歌单';
     }
     return '';
@@ -524,7 +530,7 @@ export struct SettingsPage {
       }
     }
       .width('100%')
-      // 52vp：真机首屏实测 56vp 会把「关于与帮助」折叠卡压到悬浮胶囊下方，
+      // 52vp：真机首屏实测 56vp 会把「关于帮助」折叠卡压到悬浮胶囊下方，
       // 收到 52vp（图标 28 + 上下 12）仍 ≥44vp 命中区，静止态第 4 张卡完整可见。
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
       .alignItems(VerticalAlign.Center)
@@ -550,9 +556,9 @@ export struct SettingsPage {
               .height(this.safeTop + NAV_TITLE_BAR_HEIGHT)
           }
 
-          // ── A 账户与同步 ──
+          // ── A 账户同步 ──
           ListItem() {
-            SectionHeader({ headerText: '账户与同步' })
+            SectionHeader({ headerText: '账户同步' })
           }
           ListItem() {
             InsetCard() {
@@ -660,9 +666,9 @@ export struct SettingsPage {
 
               CardDivider()
 
-              // 决策 1：无条件渲染，未登录也可见可进。与折叠内的 B 站收藏夹同步
+              // 决策 1：无条件渲染，未登录也可见可进。与折叠内的收藏同步
               // 是两个独立功能/路由（§0.1 勘误），副标题负责消歧。
-              this.SettingEntryRow('云空间同步', $r('sys.symbol.icloud'),
+              this.SettingEntryRow('云端同步', $r('sys.symbol.icloud'),
                 'cloud', ENTRY_ACTION_PAGE, (): void => {
                   this.pushPage('HuaweiCloudSync');
                 })
@@ -670,18 +676,18 @@ export struct SettingsPage {
               // 登录后能力收进折叠，避免首屏随登录态跳变（原 4 行等权重铺开）
               if (this.loginUser !== null) {
                 CardDivider()
-                this.SettingEntryRow('更多账号功能', $r('sys.symbol.ellipsis_circle'),
+                this.SettingEntryRow('更多功能', $r('sys.symbol.ellipsis_circle'),
                   '', ENTRY_ACTION_FOLD_ACCOUNT, (): void => {
                     this.accountExpanded = !this.accountExpanded;
                   })
                 if (this.accountExpanded) {
                   CardDivider()
-                  this.SettingEntryRow('B 站收藏夹同步', $r('sys.symbol.arrow_clockwise'),
+                  this.SettingEntryRow('收藏同步', $r('sys.symbol.arrow_clockwise'),
                     '', ENTRY_ACTION_PAGE, (): void => {
                       this.pushPage('CloudSync');
                     })
                   CardDivider()
-                  this.SettingEntryRow('观看历史与稍后再看', $r('sys.symbol.clock_fill'),
+                  this.SettingEntryRow('观看历史', $r('sys.symbol.clock_fill'),
                     '', ENTRY_ACTION_PAGE, (): void => {
                       this.pushPage('WatchHistory');
                     })
@@ -691,7 +697,7 @@ export struct SettingsPage {
                       this.pushPage('Follows');
                     })
                   CardDivider()
-                  this.SettingEntryRow('听直播', $r('sys.symbol.dot_radiowaves_left_and_right'),
+                  this.SettingEntryRow('收听直播', $r('sys.symbol.dot_radiowaves_left_and_right'),
                     '', ENTRY_ACTION_PAGE, (): void => {
                       this.pushPage('Live');
                     })
@@ -711,7 +717,7 @@ export struct SettingsPage {
                   this.pushPage('PlaybackSettings');
                 })
               CardDivider()
-              this.SettingEntryRow('下载与存储', $r('sys.symbol.arrow_down_to_line'),
+              this.SettingEntryRow('下载存储', $r('sys.symbol.arrow_down_to_line'),
                 'download', ENTRY_ACTION_PAGE, (): void => {
                   this.pushPage('DownloadSettings');
                 })
@@ -728,13 +734,13 @@ export struct SettingsPage {
             }
           }
 
-          // ── D 数据与工具 ──
+          // ── D 数据工具 ──
           ListItem() {
-            SectionHeader({ headerText: '数据与工具' })
+            SectionHeader({ headerText: '数据工具' })
           }
           ListItem() {
             InsetCard() {
-              this.SettingEntryRow('歌单与备份', $r('sys.symbol.doc_filled_on_doc'),
+              this.SettingEntryRow('歌单备份', $r('sys.symbol.doc_filled_on_doc'),
                 'playlists', ENTRY_ACTION_PAGE, (): void => {
                   this.pushPage('PlaylistBackup');
                 })
@@ -748,18 +754,23 @@ export struct SettingsPage {
                 'logs', ENTRY_ACTION_PAGE, (): void => {
                   this.pushPage('PlaybackLog');
                 })
+              CardDivider()
+              this.SettingEntryRow('转写模型', $r('sys.symbol.waveform'),
+                'asr', ENTRY_ACTION_PAGE, (): void => {
+                  this.pushPage('AsrModels');
+                })
             }
           }
 
-          // ── E 关于与帮助（用户 2026-11-09 23:35 定稿：不做折叠，5 行常驻）──
+          // ── E 关于帮助（用户 2026-11-09 23:35 定稿：不做折叠，5 行常驻）──
           // 分组标题 + 常驻卡片，与其它三区同构；没有展开/收起状态。
           // 代价：首屏放不下 5 行，靠列表滚动（contentEndOffset 已为胶囊让位）。
           ListItem() {
-            SectionHeader({ headerText: '关于与帮助' })
+            SectionHeader({ headerText: '关于帮助' })
           }
           ListItem() {
             InsetCard() {
-              this.SettingEntryRow('查看更新日志', $r('sys.symbol.list_bullet'),
+              this.SettingEntryRow('更新日志', $r('sys.symbol.list_bullet'),
                 '', ENTRY_ACTION_DIALOG, (): void => {
                   showFullChangelog();
                 })
@@ -769,12 +780,12 @@ export struct SettingsPage {
                   this.pushPage('Reward');
                 })
               CardDivider()
-              this.SettingEntryRow('PiLink 邀测', $r('sys.symbol.TV_tv'),
+              this.SettingEntryRow('应用邀测', $r('sys.symbol.TV_tv'),
                 '', ENTRY_ACTION_LINK, (): void => {
                   this.confirmPiLinkJump();
                 })
               CardDivider()
-              this.SettingEntryRow('关于本项目', $r('sys.symbol.info_circle_fill'),
+              this.SettingEntryRow('关于项目', $r('sys.symbol.info_circle_fill'),
                 'version', ENTRY_ACTION_PAGE, (): void => {
                   this.pushPage('About');
                 })

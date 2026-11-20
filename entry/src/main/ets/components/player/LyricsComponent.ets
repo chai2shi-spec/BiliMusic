@@ -40,6 +40,14 @@ import {
   isTranscribeSupported,
   startTranscribe
 } from '../../service/LyricTranscribeService';
+import {
+  cancelAsrTranscribe,
+  startThirdPartyTranscribe
+} from '../../service/asr/AsrTranscribeCoordinator';
+import {
+  currentEngineId,
+  currentEngineLabel
+} from '../../service/asr/AsrEngineRegistry';
 import { showConfirm } from '../AppAlertDialog';
 import { postAppToast } from '../../common/ToastChannel';
 import { MaterialCompat } from '../../utils/MaterialCompat';
@@ -63,8 +71,10 @@ import {
   STORE_TRANSCRIBE_TRACK_ID,
   STORE_VIDEO_CHAPTERS,
   STORE_CURRENT_CHAPTER_INDEX,
-  STORE_CHAPTERS_TRACK_ID
+  STORE_CHAPTERS_TRACK_ID,
+  STORE_WINDOW_HEIGHT_VP
 } from '../../common/Constants';
+import { dialogBodyMaxHeightVp } from '../../common/utils/DeviceForm';
 import {
   ENTRANCE_DURATION_MS,
   LAYER_DELAY_CONTROL,
@@ -168,6 +178,12 @@ export struct LyricsComponent {
    * （换歌瞬间旧章表不得污染新曲的按章取词）。
    */
   @StorageProp(STORE_CHAPTERS_TRACK_ID) chaptersTrackId: string = '';
+  /**
+   * 窗口高（vp，Index 常驻回写）：候选 / 字幕选择列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   /** 是否随歌词渲染底部控制区（SM 歌词页 true；LG/折叠分栏布局 false，控制区在封面侧） */
   isShowControl: boolean = true;
   /** 常规行字号（vp，默认 20 = LrcView 缺省档） */
@@ -479,18 +495,27 @@ export struct LyricsComponent {
         ? '解码中…'
         : `转写中 ${this.transcribeProgress}%`;
     }
-    return 'AI 转写歌词';
+    // 第三方引擎显示引擎名（动态值在方法内现算，不进带参 Builder）
+    const engine: string = this.activeAsrEngine();
+    return engine === 'system' ? 'AI 转写歌词' : `AI 转写 · ${currentEngineLabel()}`;
+  }
+
+  /** 当前实际生效的引擎 id（第三方总开关关闭时恒 system） */
+  private activeAsrEngine(): string {
+    return currentEngineId();
   }
 
   /**
-   * 转写可发起：非运行中 + 本机有离线识别能力 + 有曲目 + 有本地音频
-   * （track.localFilePath / 下载完成 / 听后缓存任一存在）。纯 stat 判定。
+   * 转写可发起：非运行中 + 当前引擎可用 + 有曲目 + 有本地音频
+   *（track.localFilePath / 下载完成 / 听后缓存任一存在）。纯 stat 判定。
+   * 第三方引擎不再依赖系统 SpeechRecognizer 能力。
    */
   private canStartTranscribe(): boolean {
     if (this.transcribeRunning) {
       return false;
     }
-    if (!isTranscribeSupported()) {
+    const engine: string = this.activeAsrEngine();
+    if (engine === 'system' && !isTranscribeSupported()) {
       return false;
     }
     const track: Track | null = this.currentTrack;
@@ -505,7 +530,8 @@ export struct LyricsComponent {
     if (this.transcribeRunning) {
       return '';
     }
-    if (!isTranscribeSupported()) {
+    const engine: string = this.activeAsrEngine();
+    if (engine === 'system' && !isTranscribeSupported()) {
       return '本机不支持离线语音识别，无法转写';
     }
     const track: Track | null = this.currentTrack;
@@ -527,12 +553,21 @@ export struct LyricsComponent {
     if (track === null || track === undefined) {
       return;
     }
+    const engine: string = this.activeAsrEngine();
+    const engineName: string = currentEngineLabel();
+    const message: string = engine === 'system'
+      ? '将用本机离线语音识别生成歌词，耗时约等于歌曲时长，期间请保持应用在前台。完成后自动绑定本曲，可再点「编辑歌词」修正。'
+      : `将用 ${engineName} 模型在本地生成歌词。演唱含伴奏时识别准确率有限，结果作为草稿，请用「编辑歌词」修正。首次加载模型需几秒，期间请保持应用在前台。`;
     showConfirm(this.getUIContext(), {
       title: 'AI 转写歌词',
-      message: '将用本机离线语音识别生成歌词，耗时约等于歌曲时长，期间请保持应用在前台。完成后自动绑定本曲，可再点「编辑歌词」修正。',
+      message: message,
       confirmText: '开始转写',
       onConfirm: (): void => {
-        void startTranscribe(track);
+        if (engine === 'system') {
+          void startTranscribe(track);
+        } else {
+          void startThirdPartyTranscribe(track);
+        }
       }
     });
   }
@@ -1646,7 +1681,8 @@ export struct LyricsComponent {
           }, (choice: SubtitleChoice): string => choice.id)
         }
         .width(StyleConstants.FULL_WIDTH)
-        .constraintSize({ maxHeight: 300 })
+        // 矮窗口（小方屏外屏）按窗口高 90% 收口，防候选列表超高截断
+        .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 300) })
         .divider({
           strokeWidth: 1,
           color: $r('app.color.bg_divider'),
@@ -1781,7 +1817,8 @@ export struct LyricsComponent {
               }, (cand: LyricCandidate): string => cand.id)
             }
             .width(StyleConstants.FULL_WIDTH)
-            .constraintSize({ maxHeight: 300 })
+            // 矮窗口（小方屏外屏）按窗口高 90% 收口，防字幕选择列表超高截断
+            .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 300) })
             .divider({
               strokeWidth: 1,
               color: $r('app.color.bg_divider'),
@@ -1988,7 +2025,11 @@ export struct LyricsComponent {
             .fontColor(this.themePrimary)
             .padding({ left: 8, right: 8, top: 6, bottom: 6 })
             .onClick((): void => {
-              cancelTranscribe();
+              if (this.activeAsrEngine() === 'system') {
+                cancelTranscribe();
+              } else {
+                cancelAsrTranscribe();
+              }
             })
         }
         .width(StyleConstants.FULL_WIDTH)

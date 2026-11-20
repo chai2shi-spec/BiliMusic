@@ -66,7 +66,8 @@ import {
   STORE_THEME_SURFACE,
   STORE_THEME_DEEP,
   STORE_THEME_ON,
-  STORE_SELECT_ICONS_HINT_SHOWN
+  STORE_SELECT_ICONS_HINT_SHOWN,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
@@ -76,6 +77,7 @@ import {
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { showAppToast } from '../components/AppToast';
 import { UpSpaceCacheEntry, getUpSpaceCache, saveUpSpaceCache } from '../service/UpSpaceCacheStore';
 import { NavTitleRow } from '../components/NavTitleRow';
@@ -197,6 +199,12 @@ export struct PlaylistDetail {
 
   /** 主题色运行时值：头部浅底按钮（Surface 底 + Primary 字）与弹层新建行深粉字（Deep）跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   /** 主 CTA 实底上的深字色（播放全部 themePrimary 底 + themeOn 字，设计方案 §2 规则 2） */
@@ -1852,7 +1860,8 @@ export struct PlaylistDetail {
       }
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }

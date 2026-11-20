@@ -93,8 +93,10 @@ import {
   STORE_HOME_SEARCH_ENTRY_ACTIVE,
   STORE_HOME_CHIPS_ACTIVE,
   STORE_LIBRARY_REV,
-  STORE_WINDOW_WIDTH_VP
+  STORE_WINDOW_WIDTH_VP,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { FlingSampler } from '../components/FlingSampler';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
@@ -438,6 +440,12 @@ export struct HomePage {
    * 与铺满上限；@StorageProp 初值同步不触发 @Watch，aboutToAppear 显式补一次。
    */
   @StorageProp(STORE_WINDOW_WIDTH_VP) @Watch('onColumnsChanged') windowWidthVp: number = 0;
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
 
   /** 条目展示（外观设置「条目展示」）：长条（默认）/ 大封面双列网格 */
   @StorageProp(STORE_ITEM_DISPLAY_STYLE) @Watch('onColumnsChanged') itemDisplay: string = ITEM_DISPLAY_LIST;
@@ -2512,15 +2520,16 @@ export struct HomePage {
         )
       }
       .width('100%')
-      // 边界回弹：歌单多到可滚时，到边界的反馈动效
+      // 边界回弹：歌单多到可滚时，到边的反馈动效
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }
 
   /**
-   * 「添加歌单到首页」弹窗正文：说明 + 候选歌单列表（封面 + 订阅徽标）。
+    * 「添加歌单到首页」弹窗正文：说明 + 候选歌单列表（封面 + 订阅徽标）。
    * 标题在 primaryTitle；取消在 buttons 槽（自动关闭）。
    */
   @Builder
@@ -2586,15 +2595,16 @@ export struct HomePage {
         )
       }
       .width('100%')
-      // 边界回弹：歌单多到可滚时，到边界的反馈动效（「加入歌单」弹窗同款）
+      // 边界回弹：歌单多到可滚时，到边的反馈动效（「加入歌单」弹窗同款）
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 320 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 320) })
     }
     .width('100%')
   }
 
   /**
-   * 「更换首页歌单」弹窗正文：被替换的原歌单说明 + 候选歌单列表
+    * 「更换首页歌单」弹窗正文：被替换的原歌单说明 + 候选歌单列表
    * （封面 + 订阅徽标，AddCardPickerBody 同款版式）。标题在 primaryTitle；
    * 取消在 buttons 槽（自动关闭）。
    */
@@ -2661,15 +2671,16 @@ export struct HomePage {
         )
       }
       .width('100%')
-      // 边界回弹：歌单多到可滚时，到边界的反馈动效（「加入歌单」弹窗同款）
+      // 边界回弹：歌单多到可滚时，到边的反馈动效（「加入歌单」弹窗同款）
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 320 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 320) })
     }
     .width('100%')
   }
 
   /**
-   * 多列行渲染（RowOf N 槽，平板横屏铺满改造）：行内 ForEach 展开 N 槽，
+    * 多列行渲染（RowOf N 槽，平板横屏铺满改造）：行内 ForEach 展开 N 槽，
    * 槽间 Blank 间隔（网格）/ 槽 left margin（长条，TrackItem 自带内边距不加
    * 额外页边距）；空槽（奇数末行尾部）Blank 占位保持满行列宽。
    * 网格路径卡均 layoutWeight(1) 零 margin + 固定宽间隔条 → 左右封面严格等宽；

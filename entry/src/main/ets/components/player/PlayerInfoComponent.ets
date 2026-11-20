@@ -16,18 +16,19 @@
  *   · MD/LG 断点（真平板 / 大窗口 / 阔折叠外屏横屏；!isFoldFull 且非
  *     阔折叠折起竖屏守卫）→ 栅格分栏（封面 + 标题块 + 控制区 | 歌词）；
  *   · SM 断点 / 阔折叠展开竖屏（isWideFoldFull：isFoldFull && 竖屏 &&
- *     内屏宽高比 ≤ WIDE_FOLD_INNER_ASPECT_MAX，≈0.62 的 16:10 长屏）/
- *     阔折叠折起外屏（isCompactFold，
- *     如 Pura X 折起；用户拍板：折起态不再走出血专属版式，与直板机完全同版式）→
- *     Swiper 双页（封面页 | 歌词页）+ 顶栏叠加，版式与直板机一致。
+ *     形态 PuraXInner，440×707 ≈0.622 的 16:10 长屏）/ 阔折叠折起外屏
+ *     （isCompactFold，Pura X Max 折叠态 459×672；小方屏外屏
+ *     isSmallSquareFold，Pura X 折叠态 326×326；用户拍板：折起态不再走
+ *     出血专属版式，与直板机完全同版式）→ Swiper 双页（封面页 | 歌词页）
+ *     + 顶栏叠加，版式与直板机一致。
  *
- * ⚠️ 真机实测结论（Pura X）：折起外屏落 sm 断点（<600vp）、展开内屏落 md
- * 断点（600~840vp）—— 与早期注释里「外屏 632×924vp 落 md / 展开 ≥840vp 落 lg」
- * 的假设不符，故阔折叠判定不卡断点，改按窗口宽高比（阔折叠外屏 ≈0.62 /
- * 展开内屏 ≈0.62 —— 内外屏同为 16:10 长屏；常规折叠 ≈0.49 / ≈0.83~0.92，
- * 宽高比与密度换算无关）。⚠️ 早期版本曾按「展开内屏 ≈1.04 近方」设下限
- * 0.97，与真机 16:10 长屏不符（展开竖屏从未命中、一直落分栏），已修正为
- * 上限 0.75。
+ * ⚠️ 形态判定（common/utils/DeviceForm.resolveForm，全仓唯一判定源）：
+ * Pura X 折叠外屏（326×326，1:1）与 Pura X Max 折叠外屏（459×672，
+ * ≈0.683）断点完全相同（sm×md），仅凭断点必误判 —— 判定由「折叠态 +
+ * 宽高比 + 尺寸区间」承担（小方屏：比例 ≥0.93 且短边 ≤360；阔折叠外屏：
+ * 比例 ∈ [0.66,0.76) 且短边 ∈ [420,500]），断点只驱动结构参数。
+ * 真机实测：Pura X 折起外屏落 sm 断点、展开内屏（440×707）落 sm 断点，
+ * 故阔折叠判定不卡断点，只按窗口宽高比 + 尺寸区间。
  *
  * 小折叠（Pocket / Nova Flip 系列，用户拍板：展开态播放页与直板机完全一致）：
  * display.isFoldable() 对小折叠返回 false（官方《双折叠应用开发》），FormFactorHolder
@@ -64,6 +65,7 @@ import {
 } from '../../model/MusicModels';
 import { PlayerConstants } from '../../common/constants/PlayerConstants';
 import { ColorConversion } from '../../common/utils/ColorConversion';
+import { DeviceForm, deviceFormName, resolveForm } from '../../common/utils/DeviceForm';
 import { CoverPaletteResult, buildRgba, extractCoverPaletteTask } from '../../common/utils/CoverPalette';
 import { StyleConstants } from '../../common/constants/StyleConstants';
 import { BreakpointConstants } from '../../common/constants/BreakpointConstants';
@@ -280,43 +282,63 @@ export struct PlayerInfoComponent {
   @StorageProp(STORE_DEVICE_FOLDABLE) deviceFoldable: boolean = false;
 
   /**
-   * 阔折叠折起外屏判定：折叠屏设备 && 非展开态 && 竖屏 &&
-   * 外屏宽高比 ≥ WIDE_FOLD_OUTER_ASPECT_MIN —— 精准锁定阔折叠外屏
-   * （Pura X 折起 ≈0.62，近方偏宽）。常规折叠外屏（≈0.49，窄长）、普通手机、
-   * 平板（非折叠设备）、折叠展开（isFoldFull 分支优先）均不命中。
-   * 不卡断点：真机 Pura X 外屏落 sm（早期假设的「外屏 632×924vp 落 md」
-   * 与实测不符），宽高比门控在任意断点下都成立。
+   * 当前设备形态（common/utils/DeviceForm 的 resolveForm 统一判定源）：
+   * 输入 = 整窗宽高（windowRect 口径，STORE_WINDOW_*_VP）+ 折叠态
+   * （折叠屏设备且非展开态，FormFactorHolder 两键派生）。
+   * Pura X 折叠外屏 326×326（1:1）→ SmallSquare、Pura X Max 折叠外屏
+   * 459×672 → WideFoldCover、Pura X 展开内屏 440×707 → PuraXInner。
+   * 两台阔折叠折起态断点完全相同（sm×md），断点不参与形态判定。
+   */
+  private currentForm(): DeviceForm {
+    return resolveForm(this.windowWidthVp, this.windowHeightVp,
+      this.deviceFoldable && !this.isFoldFull);
+  }
+
+  /**
+   * 小方屏外屏判定（Pura X 折叠态 326×326，1:1）：与阔折叠外屏
+   * （Pura X Max 折叠态 459×672）断点完全相同，只能靠「折叠态 +
+   * 宽高比 ≥0.93 + 短边 ≤360」区分（resolveForm.SmallSquare）。
+   * 布局走直板机 SM Swiper 双页组件树（同一组件树只改宽度 / 显隐，
+   * 不重建），圆盘 / 封面壳按测量预算自适应收缩，不额外建小方屏专属树。
+   */
+  private isSmallSquareFold(): boolean {
+    return this.currentForm() === DeviceForm.SmallSquare;
+  }
+
+  /**
+   * 阔折叠折起外屏判定（Pura X Max 折叠态 459×672）：折叠态 &&
+   * 宽高比 ∈ [0.66,0.76) && 短边 ∈ [420,500]（resolveForm.WideFoldCover）。
+   * ⚠️ 本次修正：旧口径仅卡「宽高比 ≥0.56」，1:1 小方屏外屏（326×326，
+   * 比例 1.0）同样命中、被吞进阔折叠外屏分支 —— 两形态断点又完全相同，
+   * 只能靠比例 + 尺寸区间双约束区分（Pura X 外屏归 isSmallSquareFold）。
+   * 常规折叠外屏（≈0.49，窄长）、普通手机、平板（非折叠设备）、折叠展开
+   * （isFoldFull 分支优先）均不命中。横屏排除：折起外屏横屏落紧凑横屏 /
+   * md·lg 栅格分栏，不走直板机竖屏版式。
    * 用户拍板：折起态播放页不再走出血专属版式，与直板机完全同版式 ——
    * 本判定仅用于把折起态挡在下方 MD/LG 平板分栏之外（sm 断点天然不进该
    * 分栏，守卫只为兜住未来更宽的阔折叠外屏），穿透到 SM Swiper 双页分支。
    */
   private isCompactFold(): boolean {
-    // 横屏排除：折起外屏横屏落紧凑横屏 / md·lg 栅格分栏，不走直板机竖屏版式。
-    return this.deviceFoldable && !this.isFoldFull && !this.isLandscape
-      && this.windowAspect() >= PlayerConstants.WIDE_FOLD_OUTER_ASPECT_MIN;
+    return this.currentForm() === DeviceForm.WideFoldCover && !this.isLandscape;
   }
 
   /**
    * 阔折叠展开判定（用户拍板「去分栏、全宽铺满、仅阔折叠」）：折叠屏展开
-   * （isFoldFull）且竖屏且内屏宽高比 ≤ WIDE_FOLD_INNER_ASPECT_MAX（阔折叠
-   * Pura X 类展开内屏为 16:10 长屏，竖屏宽高比 ≈0.62；常规折叠 Mate X 类展开
-   * 近方偏宽 ≈0.83~0.92，> 阈值不命中仍走分栏）。不卡断点：真机 Pura X
-   * 展开落 md（差一点未到早期假设的 lg≥840），md 断点下两类折叠屏均出现，
-   * 只能按宽高比区分。
+   * （isFoldFull）且竖屏且形态 = PuraXInner（宽高比 ∈ [0.58,0.66)，
+   * Pura X 展开内屏 440×707 ≈0.622 的 16:10 长屏；常规折叠 Mate X 类展开
+   * 近方偏宽 ≈0.83~0.92 > 阈值不命中仍走分栏）。判定源收敛到 resolveForm：
+   * 窗口未就位（宽 / 高 ≤0）返回 Normal，旧口径的 aspect > 0 守卫天然覆盖。
+   * 不卡断点：真机 Pura X 展开落 md（差一点未到 lg≥840），md 断点下两类
+   * 折叠屏均出现，只能按宽高比区分。
    * 命中时 build() 的 isFoldFull 分栏分支放行，穿透到 SM Swiper 双页分支
    * （直板机版式）。横屏排除：直板机 Swiper 版式不处理横屏，展开横屏命中
    * isCompactLandscape（isFoldFull && isLandscape）。
-   * aspect > 0 守卫不可省：窗口高度未就位时 windowAspect() 返回 0，0 ≤ 上限
-   * 会误命中（首帧闪错版式再跳变）；旧「≥ 下限」方向 0 天然不命中，反转
-   * 比较方向后必须显式挡零。
    * PlayerPage.dragDismissEnabled 为同口径双份实现（morph_swipe 下拉手势
    * 扩展），改判定口径时两处同步。
    */
   private isWideFoldFull(): boolean {
-    const aspect: number = this.windowAspect();
     return this.isFoldFull && !this.isLandscape
-      && aspect > 0
-      && aspect <= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MAX;
+      && this.currentForm() === DeviceForm.PuraXInner;
   }
 
   /**
@@ -349,6 +371,7 @@ export struct PlayerInfoComponent {
     const aspect: number = this.windowAspect();
     console.info(`[PlayerInfo] fold-state expanded=${this.isFoldFull} landscape=${this.isLandscape}`
       + ` w=${this.windowWidthVp} h=${this.windowHeightVp} aspect=${aspect.toFixed(2)}`
+      + ` form=${deviceFormName(this.currentForm())} smallSquare=${this.isSmallSquareFold()}`
       + ` wideFoldFull=${this.isWideFoldFull()}`);
   }
   /** 水平安全区（vp）：横屏下状态栏侧边条带避让；竖屏两值为 0，padding 不生效 */

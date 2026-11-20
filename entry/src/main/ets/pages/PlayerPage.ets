@@ -46,7 +46,8 @@ import {
   STORE_PLAYER_DRAG_ACTIVE,
   STORE_WINDOW_WIDTH_VP,
   STORE_WINDOW_HEIGHT_VP,
-  STORE_FOLD_EXPANDED
+  STORE_FOLD_EXPANDED,
+  STORE_DEVICE_FOLDABLE
 } from '../common/Constants';
 import {
   SLIDE_DISMISS_THRESHOLD_VP,
@@ -54,7 +55,7 @@ import {
   SLIDE_BACK_MS
 } from '../common/constants/InteractionConstants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
-import { PlayerConstants } from '../common/constants/PlayerConstants';
+import { DeviceForm, resolveForm } from '../common/utils/DeviceForm';
 import { PLAYER_CLOSE_STYLE_MORPH_SWIPE } from '../model/MusicModels';
 
 @Component
@@ -69,10 +70,13 @@ export struct PlayerPage {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = 'sm';
   /**
    * 折叠屏展开态 + 横竖屏：下拉手势覆盖阔折叠展开竖屏（isWideFoldFull 同口径
-   * 双份实现 —— 播放页该形态走直板机 Swiper 版式，交互随之对齐；见
-   * PlayerInfoComponent.isWideFoldFull，宽高比门控，改判定口径时两处同步）。
+   * 双份实现 —— 播放页该形态走直板机 Swiper 版式，交互随之对齐；判定源已
+   * 收敛到 common/utils/DeviceForm.resolveForm，见
+   * PlayerInfoComponent.isWideFoldFull，改判定口径时两处同步）。
    */
   @StorageProp(STORE_FOLD_EXPANDED) isFoldFull: boolean = false;
+  /** 折叠屏设备标志（FormFactorHolder 写入）：resolveForm 折叠态输入的派生键之一 */
+  @StorageProp(STORE_DEVICE_FOLDABLE) deviceFoldable: boolean = false;
   @StorageProp(BreakpointConstants.IS_LANDSCAPE) isLandscape: boolean = false;
   /** 整页位移（vp）：手势逐帧写 + Index.slideOutClose 终态动画写，根节点 translate 绑定 */
   @StorageProp(STORE_PLAYER_SLIDE_OFFSET) slideOffset: number = 0;
@@ -106,10 +110,11 @@ export struct PlayerPage {
     return this.closeAnimStyle === PLAYER_CLOSE_STYLE_MORPH_SWIPE
       && (this.currentBreakpoint === BreakpointConstants.BREAKPOINT_SM
       || (this.isFoldFull && !this.isLandscape
-        && this.windowWidthVp > 0 && this.windowHeightVp > 0
-        // 同口径双份实现：PlayerInfoComponent.isWideFoldFull（内屏宽高比
-        // ≤ 上限判阔折叠；宽 > 0 守卫不可省，反转比较方向后 0 会误命中）
-        && this.windowWidthVp / this.windowHeightVp <= PlayerConstants.WIDE_FOLD_INNER_ASPECT_MAX))
+        // 同口径双份实现：PlayerInfoComponent.isWideFoldFull —— 形态判定
+        // 收敛到 resolveForm（PuraXInner 档：440×707 ≈0.622 的 16:10 内屏；
+        // 窗口未就位返回 Normal 天然挡零，旧口径的宽高 > 0 守卫不再需要）
+        && resolveForm(this.windowWidthVp, this.windowHeightVp,
+          this.deviceFoldable && !this.isFoldFull) === DeviceForm.PuraXInner))
       && this.playerOpen
       && !this.transitioning;
   }

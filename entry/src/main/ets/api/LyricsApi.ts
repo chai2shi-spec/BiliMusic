@@ -1005,6 +1005,20 @@ export function sourceLabel(source: string | undefined): string {
   if (source === 'device-asr') {
     return '本机转写';
   }
+  // 第三方模型转写（source = 'sherpa-{modelId}'，模型页下载的开源模型）
+  if (source.indexOf('sherpa-') === 0) {
+    const modelId: string = source.substring(7);
+    const names: Record<string, string> = {
+      'whisper-small': 'Whisper 转写',
+      // 旧版本装过的模型（已从清单下架，老缓存仍可能带这个 source）
+      'whisper-tiny': 'Whisper 转写',
+      'qwen3-asr-0.6b': 'Qwen3-ASR 转写',
+      'paraformer-zh-small': 'Paraformer 转写',
+      'sensevoice-int8': 'SenseVoice 转写',
+      'telespeech-ctc-int8': 'TeleSpeech 转写'
+    };
+    return names[modelId] ?? '模型转写';
+  }
   if (source === 'manual-edit') {
     return '本地编辑';
   }

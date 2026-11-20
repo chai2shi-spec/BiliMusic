@@ -74,7 +74,7 @@ import { HeaderIconButton } from '../components/HeaderIconButton';
 import { filterTracksByKeyword } from '../utils/TrackFilter';
 import { common } from '@kit.AbilityKit';
 import { CustomContentDialog } from '@kit.ArkUI';
-import { CONTENT_END_OFFSET, STORE_SAFE_TOP, STORE_ITEM_DISPLAY_STYLE, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON, STORE_SELECT_ICONS_HINT_SHOWN } from '../common/Constants';
+import { CONTENT_END_OFFSET, STORE_SAFE_TOP, STORE_ITEM_DISPLAY_STYLE, STORE_THEME_PRIMARY, STORE_THEME_SURFACE, STORE_THEME_DEEP, STORE_THEME_ON, STORE_SELECT_ICONS_HINT_SHOWN, STORE_WINDOW_HEIGHT_VP } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
@@ -84,6 +84,7 @@ import {
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import {
   NAV_TRANSITION_MS,
   BUTTON_RADIUS_VP,
@@ -319,6 +320,12 @@ export struct UpSpacePage {
 
   /** 主题色运行时值：操作按钮与订阅按钮跟随切色刷新 */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
@@ -1663,13 +1670,14 @@ export struct UpSpacePage {
       }
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }
 
   /**
-   * 大封面网格配对行（ListItem 内容）：LazyForEach / ForEach 双渲染路径共用。
+    * 大封面网格配对行（ListItem 内容）：LazyForEach / ForEach 双渲染路径共用。
    * 选择态在这读取（DownloadsPage.GroupContent 同款）：ForEach 路径随页面
    * @State 重跑 builder 就地更新勾选；LazyForEach 路径仅在非多选态挂载，
    * 选择态恒为关。

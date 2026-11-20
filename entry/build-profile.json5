@@ -6,6 +6,14 @@
       "arguments": "",
       "cppFlags": "",
       "abiFilters": ["arm64-v8a"]
+    },
+    // 手动创建的 Worker 线程文件必须在此注册，否则不会打包进 HAP，
+    // 运行时报「The worker file path is invalid, can't find the file」。
+    // 路径规则：写法一 {moduleName}/ets/{src/main/ets 下相对路径}.ets。
+    "sourceOption": {
+      "workers": [
+        "./src/main/ets/service/asr/AsrRecognizeWorker.ets"
+      ]
     }
   },
   "buildOptionSet": [

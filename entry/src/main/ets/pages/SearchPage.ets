@@ -66,13 +66,15 @@ import {
   STORE_THEME_DEEP,
   STORE_THEME_ON,
   STORE_THEME_PRIMARY,
-  STORE_SEARCH_KEYWORD
+  STORE_SEARCH_KEYWORD,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import {
   PairOf,
   PairDataSource,
@@ -194,6 +196,12 @@ export struct SearchPage {
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   /** 新建常用搜索词弹窗「添加」自绘按钮的实底/文字色（见 AddWordBody） */
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
   @State @Watch('onListSourceChanged') results: Track[] = SearchStateHolder.results;
   // ===== 列表数据源（LazyForEach 渲染）=====
@@ -2210,15 +2218,16 @@ export struct SearchPage {
         )
       }
       .width('100%')
-      // 边界回弹：歌单多到可滚时，到边界的反馈动效
+      // 边界回弹：歌单多到可滚时，到边的反馈动效
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }
 
   /**
-   * 页内「最近搜索 / B 站热搜」页签区。
+    * 页内「最近搜索 / B 站热搜」页签区。
    *
    * 渲染条件见 SearchStateArea：还没搜过。两个页签：
    *   · 最近搜索 —— 有历史才显示该页签；「删除搜索记录」清空后自动切到热搜；

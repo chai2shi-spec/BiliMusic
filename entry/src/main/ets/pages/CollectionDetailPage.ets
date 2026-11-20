@@ -61,10 +61,12 @@ import {
   STORE_THEME_SURFACE,
   STORE_THEME_DEEP,
   STORE_THEME_ON,
-  STORE_SELECT_ICONS_HINT_SHOWN
+  STORE_SELECT_ICONS_HINT_SHOWN,
+  STORE_WINDOW_HEIGHT_VP
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { showAppToast } from '../components/AppToast';
 import { NavTitleRow } from '../components/NavTitleRow';
 import { handleSubPageBackPress } from '../utils/SubPageBackPress';
@@ -193,6 +195,12 @@ export struct CollectionDetailPage {
   /** 已下载完成的分 P id 集合（数组而非 Set —— @State 感知不到 Set 内容变化） */
   @State downloadedIds: string[] = [];
   @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
   @StorageProp(STORE_THEME_SURFACE) themeSurface: string = '#FFF1F5';
   @StorageProp(STORE_THEME_DEEP) themeDeep: string = '#C2185B';
   @StorageProp(STORE_THEME_ON) themeOn: string = '#3D0018';
@@ -1348,7 +1356,8 @@ export struct CollectionDetailPage {
       }
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }

@@ -51,6 +51,7 @@ import {
   STORE_THEME_DEEP,
   STORE_THEME_SURFACE,
   STORE_WINDOW_WIDTH_VP,
+  STORE_WINDOW_HEIGHT_VP,
   formatTrackQuality
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
@@ -60,6 +61,7 @@ import {
   TWO_COL_GAP_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { TabScrollerHolder } from '../service/TabScrollerHolder';
 import { PRESS_SCALE, PRESS_ANIM_MS, SELECT_SLOT_VP, SELECT_TOGGLE_MS, DOWNLOAD_SMOOTH_MS, BUTTON_RADIUS_VP, NAV_TRANSITION_MS } from '../common/constants/InteractionConstants';
 import { NAV_TITLE_BAR_HEIGHT, NAV_H_PADDING } from '../utils/NavTitleStyle';
@@ -174,6 +176,13 @@ export struct DownloadsPage {
    * ForEach 路径无需 @Watch——@StorageProp 变化直接触发 build 重跑。
    */
   @StorageProp(STORE_WINDOW_WIDTH_VP) windowWidthVp: number = 0;
+
+  /**
+   * 窗口高（vp，Index 常驻回写）：弹窗正文列表的高度上限在矮窗口
+   * （Pura X 折叠外屏 326×326 等）按窗口高 90% 收口防截断，
+   * 见 dialogBodyMaxHeightVp。
+   */
+  @StorageProp(STORE_WINDOW_HEIGHT_VP) windowHeightVp: number = 0;
 
   /** 下载组行数：非两列态 1；两列激活 clamp(floor((w-32)/400), 2, 4) */
   private listCols(): number {
@@ -2330,13 +2339,14 @@ export struct DownloadsPage {
       }
       .width('100%')
       .edgeEffect(EdgeEffect.Spring)
-      .constraintSize({ maxHeight: 260 })
+      // 矮窗口（小方屏外屏）按窗口高 90% 收口，防 AlertDialog 超高截断
+      .constraintSize({ maxHeight: dialogBodyMaxHeightVp(this.windowHeightVp, 260) })
     }
     .width('100%')
   }
 
   /**
-   * 标题行内容（titleBar 的 stackBuilder 承载）：复用 NavTitleRow ——
+    * 标题行内容（titleBar 的 stackBuilder 承载）：复用 NavTitleRow ——
    * HDS stackBuilder 宿主几何的唯一正确锚定（Column('100%') 中间层 +
    * Center 居中 + 行首 Blank 让出默认返回键 48vp），标题才会与返回键
    * 同轴、排在其右侧。手写定高 Row 直接作 stackBuilder 根会被宿主顶锚

@@ -1,5 +1,5 @@
 /**
- * 后台长时任务（continuousTask）保活 —— 双意愿协调器。
+ * 后台长时任务（continuousTask）保活 —— 多意愿协调器。
  *
  * 为什么必须有它：只在 module.json5 声明 ohos.permission.KEEP_BACKGROUND_RUNNING
  * 并不足以让音乐在后台继续播放。应用退到后台或锁屏后，进程会被系统挂起，
@@ -13,22 +13,25 @@
  * 系统依旧会挂起任务。因此 MusicPlayer 侧必须同时 activate 会话并持续上报播放状态。
  *
  * ── 协调器设计 ──────────────────────────────────────────────────────
- * 系统硬约束：**同一应用同一时刻只能持有一个长时任务**。而本应用有两个后台诉求：
+ * 系统硬约束：**同一应用同一时刻只能持有一个长时任务**。而本应用有三个后台诉求：
  *   ① 音乐播放 → AUDIO_PLAYBACK（MusicPlayer 申报）
  *   ② 下载队列 → DATA_TRANSFER（DownloadManager 申报）
+ *   ③ 歌单导入匹配 → DATA_TRANSFER（ImportTaskManager 申报）
  *
  * 若两个模块各自 start/stop，必然互相顶掉、甚至在对方不知情时把任务停掉
  * （典型 bug：后台暂停音乐 → MusicPlayer.stop → 进程失去保活 → 下载冻结）。
  *
- * 因此本类收敛为唯一的任务持有者，内部只维护两个「意愿位」：
+ * 因此本类收敛为唯一的任务持有者，内部只维护三个「意愿位」：
  *   wantAudio   —— 正在播放音乐
  *   wantTransfer —— 下载队列有活（排队/传输/重试退避中）
+ *   wantImport  —— 歌单导入匹配任务在跑（含限流自动退避冷却）
  * 每次意愿变化都跑一遍对账（reconcile）：
- *   目标 = wantAudio ? AUDIO_PLAYBACK : (wantTransfer ? DATA_TRANSFER : null)
+ *   目标 = wantAudio ? AUDIO_PLAYBACK
+ *        : ((wantTransfer || wantImport) ? DATA_TRANSFER : null)
  *   目标与 currentMode 不同 → 先 stop 旧任务、再 start 新任务。
- * 优先级上播放 > 传输：播放中进程本就存活，下载跟着活；播放停止但下载未完时，
- * 任务从 AUDIO_PLAYBACK 切换到 DATA_TRANSFER 而不是直接释放 —— 这正是
- * 「后台暂停音乐后下载仍继续」的关键路径。
+ * 优先级上播放 > 传输：播放中进程本就存活，下载/导入跟着活；播放停止但下载或
+ * 导入未完时，任务从 AUDIO_PLAYBACK 切换到 DATA_TRANSFER 而不是直接释放 ——
+ * 这正是「后台暂停音乐后下载仍继续」的关键路径。
  *
  * 对账串行化（syncing/pendingReconcile）：start/stop 都是异步且可能并发到达
  * （用户边暂停音乐边点恢复下载），不串行会让 stop A/start B 与 stop B/start A
@@ -53,6 +56,8 @@ export class BackgroundPlayback {
   private wantAudio: boolean = false;
   /** DownloadManager 申报：队列有活，需要 DATA_TRANSFER 保活。 */
   private wantTransfer: boolean = false;
+  /** ImportTaskManager 申报：歌单导入匹配在跑，需要 DATA_TRANSFER 保活。 */
+  private wantImport: boolean = false;
   /** 当前实际持有的长时任务模式；null = 未持有任何任务。 */
   private currentMode: backgroundTaskManager.BackgroundMode | null = null;
   /** 一轮对账（stop 旧 + start 新）是否正在进行中。 */
@@ -129,6 +134,20 @@ export class BackgroundPlayback {
     await this.applyWants(context);
   }
 
+  /**
+   * 导入侧保活意愿开关（ImportTaskManager 调用）。
+   *
+   * 传 wanted=true 表示歌单导入匹配任务在跑（含限流自动退避冷却期——那恰恰是
+   * 弱网/风控下最需要保活的窗口），false 表示任务结束（完成 / RISK 暂停 /
+   * 用户中断 / 放弃）。与播放、下载侧同理：true 不一定新起任务（播放中复用
+   * 既有保活），false 不一定释放任务（播放仍在则保留 AUDIO_PLAYBACK）。
+   * 所有异常在本层消化，绝不把长时任务的失败传染给导入流程。
+   */
+  async setImportWanted(context: common.Context, wanted: boolean): Promise<void> {
+    this.wantImport = wanted;
+    await this.applyWants(context);
+  }
+
   /** 串行对账入口：已在跑则只登记补跑，保证任意时序下最终持有最新意愿对应的任务。 */
   private async applyWants(context: common.Context): Promise<void> {
     if (this.syncing) {
@@ -156,7 +175,8 @@ export class BackgroundPlayback {
   private async reconcileOnce(context: common.Context): Promise<void> {
     const target: backgroundTaskManager.BackgroundMode | null = this.wantAudio
       ? backgroundTaskManager.BackgroundMode.AUDIO_PLAYBACK
-      : (this.wantTransfer ? backgroundTaskManager.BackgroundMode.DATA_TRANSFER : null);
+      : ((this.wantTransfer || this.wantImport)
+        ? backgroundTaskManager.BackgroundMode.DATA_TRANSFER : null);
     if (target === this.currentMode) {
       return;
     }
@@ -196,6 +216,7 @@ export class BackgroundPlayback {
   reset(): void {
     this.wantAudio = false;
     this.wantTransfer = false;
+    this.wantImport = false;
     this.currentMode = null;
     this.syncing = false;
     this.pendingReconcile = false;

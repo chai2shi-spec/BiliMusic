@@ -14,12 +14,16 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { initRdb } from '../database/RdbHelper';
 import { MusicPlayer } from '../player/MusicPlayer';
 import { DownloadManager } from './DownloadManager';
+import { ImportTaskManager } from './PlaylistImporter';
 import { initBuvidCookie, upgradeBuvidCookie, isBuvidFallback, activateBuvid } from './BiliDevice';
 import { initLoginState } from './LoginStore';
 import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
 import { initLyricTranscribeStore } from './LyricTranscribeService';
+import { initAsrModelManager, setAsrProgressSink } from './asr/AsrModelManager';
+import { initAsrEngineRegistry, currentEngineId } from './asr/AsrEngineRegistry';
+import { initAsrPaths } from './asr/AsrPaths';
 import { initIntroSkipStore } from './IntroSkipStore';
 import { initChapterCacheStore } from './ChapterCacheStore';
 import { initTrackVolumeStore } from './TrackVolumeStore';
@@ -27,7 +31,10 @@ import { initHomeFeedFilterStore } from './HomeFeedFilterStore';
 import { initPlayerStateStore } from './PlayerStateStore';
 import { AppPreferences } from '../preferences/AppPreferences';
 import { AppSettings } from '../model/MusicModels';
-import { PREF_FAV_PUSH_QUEUE, STORE_STARTUP_HINT_MSG, STORE_STARTUP_HINT_SEQ } from '../common/Constants';
+import {
+  PREF_FAV_PUSH_QUEUE, STORE_STARTUP_HINT_MSG, STORE_STARTUP_HINT_SEQ,
+  STORE_ASR_MODEL_PROGRESS, STORE_ASR_ENGINE_ID
+} from '../common/Constants';
 import { CardPublisher } from './card/CardPublisher';
 import { initCloudSync } from './CloudSyncManager';
 
@@ -99,6 +106,16 @@ export class AppContainer {
     // 本机转写临时 PCM 目录：cacheDir/transcribe（临时产物，系统可清理）。
     // 只登记路径，目录由任务发起时懒建，不拖慢启动。
     initLyricTranscribeStore(context);
+    // 第三方 ASR 模型目录 + 引擎选择：只登记 filesDir/asr_models 路径、
+    // 读 manifest.json 与一个偏好字符串，毫秒级；模型本体按需下载，不占安装包。
+    initAsrModelManager(context);
+    // 下载进度发布到 AppStorage，模型管理页订阅（字符串 JSON 快照）
+    setAsrProgressSink((p): void => {
+      AppStorage.setOrCreate(STORE_ASR_MODEL_PROGRESS, JSON.stringify(p));
+    });
+    initAsrEngineRegistry();
+    initAsrPaths(context);
+    AppStorage.setOrCreate(STORE_ASR_ENGINE_ID, currentEngineId());
     // 按曲「跳过开头」秒数表：filesDir/intro_skip.json 装载进内存 Map。
     // 同款小 JSON（2000 条上限），毫秒级；未装载时写入静默跳过、
     // 查询返回 0，无害降级为「该曲目不跳过」。
@@ -129,6 +146,9 @@ export class AppContainer {
     AppContainer.purgeLegacyFavPushQueue();
 
     DownloadManager.getInstance().init(context);
+    // 歌单导入匹配的后台保活申报需要 Context（匹配期间 DATA_TRANSFER 长时任务，
+    // 见 PlaylistImporter.ImportTaskManager.syncBgTask / BackgroundPlayback 协调器）。
+    ImportTaskManager.getInstance().init(context);
     // 本地优先播放：启动即把下载任务表装填进内存 ——
     // MusicPlayer.loadAndPlay 切歌时同步查 completedLocalPath(musicId)，
     // 内存表为空的话已下载曲目会静默回落在线流（功能失效但不报错）。

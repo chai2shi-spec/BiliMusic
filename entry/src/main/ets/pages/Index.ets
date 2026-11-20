@@ -242,6 +242,13 @@ const SCREEN_PAN_TRIGGER_VP: number = 12;
 const TAB_SWITCH_BASE_MS: number = 300;
 const TAB_SWITCH_STEP_MS: number = 120;
 const TAB_SWITCH_MAX_MS: number = 540;
+/**
+ * windowSizeChange 节流（ms）：折叠开合 / 旋转动画期间事件连续触发，
+ * 末次生效（clearTimeout + setTimeout 重置）—— 逐次直写会让形态判定
+ * （DeviceForm.resolveForm 按比例 + 尺寸区间分档）在中间尺寸上抖动闪切
+ * 版式；宽高是形态输入而非逐帧动画量，150ms 末帧重算无视觉代价。
+ */
+const WINDOW_SIZE_CHANGE_THROTTLE_MS: number = 150;
 
 @Entry
 @Component
@@ -959,6 +966,13 @@ struct Index {
   private mainWindow: window.Window | null = null;
 
   /**
+   * windowSizeChange 节流定时器句柄：折叠开合 / 旋转动画期间事件连续触发，
+   * 逐次直写会让形态判定（resolveForm）在中间尺寸上抖动 —— 节流 ~150ms，
+   * 连续触发只做最后一次重算（-1 = 无在途定时器）。
+   */
+  private windowSizeTimer: number = -1;
+
+  /**
    * 断点监听（sm/md/lg → AppStorage）：**全局唯一**的注册点。
    *
    * 本页是常驻根页面，注册一次全程有效，折叠屏开合 / 平板旋转时所有页面都能跟着变。
@@ -1146,8 +1160,17 @@ struct Index {
           // （STORE_WINDOW_WIDTH_VP / _HEIGHT_VP）旋转后会陈旧，
           // 播放页紧凑横屏分支因此永不命中。窗口级 windowSizeChange 与
           // avoidAreaChange 同管线（后者旋转后实测有回调），才是可靠写点。
+          // 节流 ~150ms（末次生效）：开合 / 旋转动画期间事件连发，逐次直写
+          // 会让形态判定（resolveForm 按比例 + 尺寸区间分档）在中间尺寸上
+          // 抖动闪切版式；宽高非逐帧动画输入，末帧重算无视觉代价。
           win.on('windowSizeChange', (): void => {
-            this.applyWindowSize(win);
+            if (this.windowSizeTimer >= 0) {
+              clearTimeout(this.windowSizeTimer);
+            }
+            this.windowSizeTimer = setTimeout((): void => {
+              this.windowSizeTimer = -1;
+              this.applyWindowSize(win);
+            }, WINDOW_SIZE_CHANGE_THROTTLE_MS);
           });
         })
         .catch((err: BusinessError): void => {
@@ -1170,6 +1193,11 @@ struct Index {
     } catch (e) {
       const msg: string = e instanceof Error ? `${e.name}: ${e.message}` : JSON.stringify(e);
       console.error(`unbindAvoidArea failed: ${msg}`);
+    }
+    // 在途节流定时器一并作废：窗口监听已注销，末次重算无意义
+    if (this.windowSizeTimer >= 0) {
+      clearTimeout(this.windowSizeTimer);
+      this.windowSizeTimer = -1;
     }
     this.mainWindow = null;
   }

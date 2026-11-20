@@ -5,7 +5,8 @@
   "description": "BiliMusic - 基于哔哩哔哩的鸿蒙音乐播放器（原生 ArkTS）",
   "dependencies": {
     "pako": "2.1.0",
-    "@types/pako": "2.0.0"
+    "@types/pako": "2.0.0",
+    "sherpa_onnx": "1.13.3"
   },
   "devDependencies": {
     "@ohos/hypium": "1.0.19",
