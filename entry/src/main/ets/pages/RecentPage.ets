@@ -48,11 +48,13 @@ import {
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import {
   PairOf,
+  PairDataSource,
   makePairs,
   TWO_COL_GAP_VP,
   GRID_EDGE_PADDING_VP,
   TwoColumnLayout
 } from '../common/utils/TwoColumnList';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { NAV_TRANSITION_MS, BUTTON_RADIUS_VP } from '../common/constants/InteractionConstants';
 import { showAppToast } from '../components/AppToast';
 import { showConfirm } from '../components/AppAlertDialog';
@@ -76,6 +78,11 @@ const RECENT_ACTIONS_ROW_HEIGHT: number = 44;
  */
 const RECENT_REVEAL_PAGE_SIZE: number = 20;
 
+/** 配对行 LazyForEach 的 key：两列 id 拼接（缺右列用 'x' 占位） */
+function pairKeyOf(pair: PairOf<Track>): string {
+  return `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`;
+}
+
 @Component
 export struct RecentPage {
   /**
@@ -87,6 +94,14 @@ export struct RecentPage {
   @State tracks: Track[] = [];
   /** 最近播放全量（读取真源）：播放全部 / 条数文案 / 空态判断都按全量算 */
   private allTracks: Track[] = [];
+  /**
+   * LazyForEach 驱动源：与 tracks 切片保持同步 —— refresh() 走整表重载
+   * （libraryRev 变化 = 数据换新，含 lastPosSec 变化后的 heardText 刷新），
+   * onReachEnd 走 append（只通知新增下标，滚动中不重建、不跳变）。
+   */
+  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
+  /** 两列视图数据源（无状态视图）：trackSource 变化处显式 sync() */
+  private trackPairs: PairDataSource<Track> = new PairDataSource<Track>(this.trackSource);
   /**
    * HDS 标题栏整体让位量（vp）= safeTop + 标题行 56 + 按钮行 44（有记录时）。
    * 标题行与 bottomBuilder 按钮行高度均为定值，无需实测——
@@ -210,6 +225,8 @@ export struct RecentPage {
     // 至少一批；清空时 list.length = 0，切片自然归零
     const keep: number = Math.max(this.tracks.length, RECENT_REVEAL_PAGE_SIZE);
     this.tracks = list.slice(0, Math.min(keep, list.length));
+    this.trackSource.reload(this.tracks);
+    this.trackPairs.sync();
   }
 
   /** 是否还有未揭示的记录（底部状态行与 onReachEnd 闸门共用） */
@@ -226,13 +243,18 @@ export struct RecentPage {
       return;
     }
     // 增量揭示（SearchPage.revealMoreRanking 同款）：push 揭示区间，
-    // 不 slice 整表重新赋值，ForEach 只 diff 新增 key。
+    // LazyForEach 走 append（只通知新增下标，可视区已建节点不重建），
+    // 两列视图无状态、显式 sync。
     const from: number = this.tracks.length;
     const next: number = Math.min(from + RECENT_REVEAL_PAGE_SIZE,
       this.allTracks.length);
+    const added: Track[] = [];
     for (let i = from; i < next; i++) {
       this.tracks.push(this.allTracks[i]);
+      added.push(this.allTracks[i]);
     }
+    this.trackSource.append(added);
+    this.trackPairs.sync();
   }
 
   /**
@@ -403,6 +425,94 @@ export struct RecentPage {
     .hitTestBehavior(HitTestMode.Transparent)
   }
 
+  /** 大封面网格配对行（ListItem 内容）：LazyForEach itemGenerator 与占位/状态条共用 */
+  @Builder
+  GridPairRow(pair: PairOf<Track>): void {
+    Row() {
+      TrackCard({
+        track: pair.first,
+        heardText: this.heardTextOf(pair.first),
+        onPlay: (tr: Track): void => {
+          this.player.playRecentFromHistory(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+      }).layoutWeight(1)
+      // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
+      // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
+      // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
+      // 间隔条，末卡与满行卡等宽。
+      Blank().width(TWO_COL_GAP_VP)
+      if (pair.second !== null) {
+        TrackCard({
+          track: pair.second,
+          heardText: this.heardTextOf(pair.second),
+          onPlay: (tr: Track): void => {
+            this.player.playRecentFromHistory(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+        }).layoutWeight(1)
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+    // 网格行页边距：两边留白 + 封面整体
+    // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
+    .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
+    // Top 对齐：卡高随标题行数 /
+    // heardText 浮动，Row 默认 Center 会把矮卡垂直居中 → 左右
+    // 封面错位；Top 让左右封面严格同高起步。
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /** 横屏宽屏配对行（ListItem 内容） */
+  @Builder
+  TwoColPairRow(pair: PairOf<Track>, pIndex: number): void {
+    Row() {
+      TrackItem({
+        track: pair.first,
+        entranceIndex: pIndex * 2,
+        heardText: this.heardTextOf(pair.first),
+        onPlay: (tr: Track): void => {
+          this.player.playRecentFromHistory(tr);
+        },
+        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+      }).layoutWeight(1)
+      if (pair.second !== null) {
+        TrackItem({
+          track: pair.second,
+          entranceIndex: pIndex * 2 + 1,
+          heardText: this.heardTextOf(pair.second),
+          onPlay: (tr: Track): void => {
+            this.player.playRecentFromHistory(tr);
+          },
+          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+        }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
+      } else {
+        // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
+        Blank().layoutWeight(1)
+      }
+    }
+    .width('100%')
+  }
+
+  /** 单列行（ListItem 内容） */
+  @Builder
+  SingleTrackRow(t: Track, index: number): void {
+    TrackItem({
+      track: t,
+      entranceIndex: index,
+      heardText: this.heardTextOf(t),
+      onPlay: (tr: Track): void => {
+        // 位置记忆入口：当前曲目 → 播/暂停切换；
+        // 其余按记录的上次位置续播（阈值内），否则从头播
+        this.player.playRecentFromHistory(tr);
+      },
+      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
+    })
+  }
+
   build() {
     HdsNavDestination() {
       Stack() {
@@ -421,110 +531,39 @@ export struct RecentPage {
                   .width('100%')
                   .height(this.barTotalHeight())
               }
-              // 条目渲染（PlaylistDetail 同款）：@State tracks 揭示切片直接驱动
-              // ForEach，追加 / 整表替换靠数组赋值，不经 ArrayDataSource 双份拷贝。
-               // 横屏宽屏：条目配对，每个 ListItem 左右两列；
+              // 条目渲染（LazyForEach，PlaylistDetail 同款）：trackSource /
+              // trackPairs 按需建行（本页无多选态，无需 ForEach 双路径），
+              // 追加走 append、换新走 reload（同步点见 refresh / onReachEnd）。
+              // 横屏宽屏：条目配对，每个 ListItem 左右两列；
               // 占位 / 尾部状态条保持整行宽（配对方案不动整行结构，见 TwoColumnList 注释）。
-               // 大封面模式（外观设置「条目展示」）：条目配对成双列
+              // 大封面模式（外观设置「条目展示」）：条目配对成双列
               // 网格卡（TrackCard），交互契约与行内版一致（整卡点击续播、「⋯」菜单）。
               if (this.isGrid()) {
-                ForEach(
-                  makePairs<Track>(this.tracks),
+                LazyForEach(
+                  this.trackPairs,
                   (pair: PairOf<Track>): void => {
                     ListItem() {
-                      Row() {
-                        TrackCard({
-                          track: pair.first,
-                          heardText: this.heardTextOf(pair.first),
-                          onPlay: (tr: Track): void => {
-                            this.player.playRecentFromHistory(tr);
-                          },
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        // 固定宽间隔条（非 weighted）：两卡均 layoutWeight(1) 且零
-                        // margin → 左右封面严格等宽（layoutWeight 份额含 margin，
-                        // margin 挂 weighted 卡会让该卡窄 12vp）；奇数末行也保留
-                        // 间隔条，末卡与满行卡等宽。
-                        Blank().width(TWO_COL_GAP_VP)
-                        if (pair.second !== null) {
-                          TrackCard({
-                            track: pair.second,
-                            heardText: this.heardTextOf(pair.second),
-                            onPlay: (tr: Track): void => {
-                              this.player.playRecentFromHistory(tr);
-                            },
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1)
-                        } else {
-                          // 奇数末尾：右侧槽留空占位，左列卡宽与前面各行一致
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
-                       // 网格行页边距：两边留白 + 封面整体
-                      // 缩小约 15%，见 GRID_EDGE_PADDING_VP 注释。
-                      .padding({ left: GRID_EDGE_PADDING_VP, right: GRID_EDGE_PADDING_VP })
-                       // Top 对齐：卡高随标题行数 /
-                      // heardText 浮动，Row 默认 Center 会把矮卡垂直居中 → 左右
-                      // 封面错位；Top 让左右封面严格同高起步。
-                      .alignItems(VerticalAlign.Top)
+                      this.GridPairRow(pair)
                     }
                   },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  pairKeyOf
                 )
               } else if (this.isTwoCol()) {
-                ForEach(
-                  makePairs<Track>(this.tracks),
+                LazyForEach(
+                  this.trackPairs,
                   (pair: PairOf<Track>, pIndex: number): void => {
                     ListItem() {
-                      Row() {
-                        TrackItem({
-                          track: pair.first,
-                          entranceIndex: pIndex * 2,
-                          heardText: this.heardTextOf(pair.first),
-                          onPlay: (tr: Track): void => {
-                            this.player.playRecentFromHistory(tr);
-                          },
-                          moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                        }).layoutWeight(1)
-                        if (pair.second !== null) {
-                          TrackItem({
-                            track: pair.second,
-                            entranceIndex: pIndex * 2 + 1,
-                            heardText: this.heardTextOf(pair.second),
-                            onPlay: (tr: Track): void => {
-                              this.player.playRecentFromHistory(tr);
-                            },
-                            moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                          }).layoutWeight(1).margin({ left: TWO_COL_GAP_VP })
-                        } else {
-                          // 奇数末尾：右侧槽留空占位，左列行宽与前面各行一致
-                          Blank().layoutWeight(1)
-                        }
-                      }
-                      .width('100%')
+                      this.TwoColPairRow(pair, pIndex)
                     }
                   },
-                  (pair: PairOf<Track>): string =>
-                    `${pair.first.id}|${pair.second !== null ? pair.second.id : 'x'}`
+                  pairKeyOf
                 )
               } else {
-                ForEach(
-                  this.tracks,
+                LazyForEach(
+                  this.trackSource,
                   (t: Track, index: number): void => {
                     ListItem() {
-                      TrackItem({
-                        track: t,
-                        entranceIndex: index,
-                        heardText: this.heardTextOf(t),
-                        onPlay: (tr: Track): void => {
-                          // 位置记忆入口：当前曲目 → 播/暂停切换；
-                          // 其余按记录的上次位置续播（阈值内），否则从头播
-                          this.player.playRecentFromHistory(tr);
-                        },
-                        moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr)
-                      })
+                      this.SingleTrackRow(t, index)
                     }
                   },
                   (t: Track): string => t.id
