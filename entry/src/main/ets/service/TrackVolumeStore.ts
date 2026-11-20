@@ -50,13 +50,24 @@ interface StoredTrackVolume {
 let storePath: string = '';
 const entries: Map<string, StoredTrackVolume> = new Map<string, StoredTrackVolume>();
 let flushTimer: number = -1;
+/** 异步装载是否完成（完成前落盘顺延，防止半载状态 TRUNC 覆盖丢旧数据） */
+let loaded: boolean = false;
 
-/** 初始化：装载 track_volume.json 进内存表。AppContainer.init 调用，同步执行（毫秒级）。 */
+/**
+ * 初始化：登记路径并**异步**装载 track_volume.json（AppContainer.initRest
+ * 调用，fire-and-forget 不阻塞启动链）。装载完成前查询返回 0（默认音量）、
+ * 写入暂存内存表，落盘由 scheduleFlush 顺延到装载完成后 —— 与原同步实现的
+ * 差异仅在「启动后极短窗口内增益未生效」，VolumeChip 拖动远晚于该窗口，无感。
+ */
 export function initTrackVolumeStore(context: common.Context): void {
+  storePath = `${context.filesDir}/track_volume.json`;
+  loadAsync();
+}
+
+async function loadAsync(): Promise<void> {
   try {
-    storePath = `${context.filesDir}/track_volume.json`;
-    if (fs.accessSync(storePath)) {
-      const raw: string = fs.readTextSync(storePath);
+    if (await fs.access(storePath)) {
+      const raw: string = await fs.readText(storePath);
       const parsed: StoredTrackVolume[] = JSON.parse(raw) as StoredTrackVolume[];
       // 损坏即弃：解析失败 / 非数组 / 字段不合法的条目逐条跳过，绝不把脏值带进查表
       if (Array.isArray(parsed)) {
@@ -65,10 +76,13 @@ export function initTrackVolumeStore(context: common.Context): void {
           if (typeof item?.id === 'string' && item.id.length > 0
             && typeof item.g === 'number' && Number.isFinite(item.g)
             && item.g !== 0 && Math.abs(item.g) <= MAX_GAIN_DB) {
-            entries.set(item.id, {
-              id: item.id,
-              g: roundDb1(item.g)
-            });
+            // 装载不覆盖装载前的新写入（内存值更新）
+            if (!entries.has(item.id)) {
+              entries.set(item.id, {
+                id: item.id,
+                g: roundDb1(item.g)
+              });
+            }
           }
         }
       }
@@ -76,6 +90,8 @@ export function initTrackVolumeStore(context: common.Context): void {
   } catch (e) {
     console.error(`initTrackVolumeStore failed: ${JSON.stringify(e)}`);
     // 装载失败不致命：记录表从空开始，后续写入照常累积（覆盖写会自愈）
+  } finally {
+    loaded = true;
   }
 }
 
@@ -110,6 +126,11 @@ function scheduleFlush(): void {
   }
   flushTimer = setTimeout((): void => {
     flushTimer = -1;
+    if (!loaded) {
+      // 异步装载未完成：顺延一拍再落盘，避免半载状态 TRUNC 覆盖丢旧数据
+      scheduleFlush();
+      return;
+    }
     persist();
   }, FLUSH_DELAY_MS);
 }

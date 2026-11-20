@@ -149,23 +149,26 @@ export class AppContainer {
     // 歌单导入匹配的后台保活申报需要 Context（匹配期间 DATA_TRANSFER 长时任务，
     // 见 PlaylistImporter.ImportTaskManager.syncBgTask / BackgroundPlayback 协调器）。
     ImportTaskManager.getInstance().init(context);
-    // 本地优先播放：启动即把下载任务表装填进内存 ——
-    // MusicPlayer.loadAndPlay 切歌时同步查 completedLocalPath(musicId)，
-    // 内存表为空的话已下载曲目会静默回落在线流（功能失效但不报错）。
-    // 本链与 loadContent 并行执行，这里多 await 一次 RDB 读不影响首帧。
-    // loadFromDb 顺带把上次进程被杀的中间态标为失败并清半截文件。
-    await DownloadManager.getInstance().ensureLoaded();
-    // 升级一次性引导：沙箱存量老用户提示可开启「保存到系统下载目录」。
-    // fire-and-forget 不 await：不拖慢启动链；标记先行写入（at-most-once），
-    // 引导只弹一次，搬移由用户开启开关后经设置页「同步已完成歌曲」完成。
-    AppContainer.runPublicDirMigration().catch((e: BusinessError): void => {
-      console.error(`[AppContainer] public dir migration failed: ${e.code} ${e.message}`);
-    });
     // 播放器状态目录：双 JSON 文件（标量状态 + 队列全量）。
     // Preferences 单值 8192 字节上限装不下队列（旧实现被截到 ~10 首），
     // 须先于 MusicPlayer.init 建好目录，恢复链（restoreState）从这读快照。
     initPlayerStateStore(context);
-    await MusicPlayer.getInstance().init(context);
+    // 本地优先播放与播放器初始化**互不依赖**（后者只依赖 initPlayerStateStore）：
+    // 原先串行 await 白白拉长 initRest 总时长（卡片 call 冷启动路径直接受益于缩短）。
+    // 下载表装载：把上次进程被杀的中间态标为失败并清半截文件；
+    // MusicPlayer.loadAndPlay 切歌时同步查 completedLocalPath(musicId)，
+    // 真正消费该表的时点（用户首次点播）远晚于本 Promise.all 完成。
+    await Promise.all([
+      DownloadManager.getInstance().ensureLoaded(),
+      MusicPlayer.getInstance().init(context)
+    ]);
+    // 升级一次性引导：沙箱存量老用户提示可开启「保存到系统下载目录」。
+    // fire-and-forget 不 await：不拖慢启动链；标记先行写入（at-most-once），
+    // 引导只弹一次，搬移由用户开启开关后经设置页「同步已完成歌曲」完成。
+    // 依赖 ensureLoaded 完成后的内存表（hasSandboxCompletedTask），故置于并行汇合点之后。
+    AppContainer.runPublicDirMigration().catch((e: BusinessError): void => {
+      console.error(`[AppContainer] public dir migration failed: ${e.code} ${e.message}`);
+    });
 
     // 后台换取官方 buvid（不 await：本地兜底值已足够过 412，不能拖慢启动）
     // upgrade 成功后内部会立刻向 ExClimbWuzhi 上报一次

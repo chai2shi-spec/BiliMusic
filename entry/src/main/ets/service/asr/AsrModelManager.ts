@@ -102,7 +102,9 @@ export function initAsrModelManager(context: common.Context): void {
   } catch (e) {
     console.error(`[AsrModelManager] mkdir failed: ${JSON.stringify(e)}`);
   }
-  loadManifest();
+  // manifest 惰性装载（ensureManifestLoaded）：ASR 属低频功能，读取
+  // manifest.json 的同步 IO 从启动链挪到首次访问安装状态时，
+  // 启动期唯一触达点是 2.5s 后的 pruneRetiredModels（内部自会装载）。
   // 清单收敛（2026-11-20 只留 SenseVoice）后清掉已下架模型的残留：
   // 延迟执行，不占首屏时间；删目录是纯 unlink，几百 MB 也就几十毫秒
   setTimeout((): void => {
@@ -125,7 +127,18 @@ export function getInstalledModelDir(modelId: string): string {
   return `${modelsDir}/${modelId}`;
 }
 
+/** manifest 是否已装载（惰性：首次访问安装状态时装载，不占启动链） */
+let manifestLoaded: boolean = false;
+
+/** 惰性装载兜底：任何读/写 manifest 的公开入口先调这里（幂等，毫秒级） */
+function ensureManifestLoaded(): void {
+  if (!manifestLoaded) {
+    loadManifest();
+  }
+}
+
 function loadManifest(): void {
+  manifestLoaded = true;
   manifest = {};
   try {
     if (!fs.accessSync(manifestPath)) {
@@ -273,6 +286,7 @@ export function getModelState(modelId: string): AsrModelState {
 
 /** 累计已安装模型占用的磁盘字节数 */
 export function installedBytes(): number {
+  ensureManifestLoaded();
   let sum: number = 0;
   const ids: string[] = Object.keys(manifest);
   for (let i = 0; i < ids.length; i++) {
@@ -294,6 +308,7 @@ export function cancelAsrDownload(): void {
  * 同一时刻只允许一个任务，重复调用直接返回 false。
  */
 export async function downloadModel(modelId: string): Promise<boolean> {
+  ensureManifestLoaded();
   const spec: AsrModelSpec | undefined = findModel(modelId);
   if (spec === undefined || downloadRunning) {
     return false;
@@ -711,6 +726,7 @@ async function downloadOne(
 
 /** 删除一个已安装模型（同步清理目录 + manifest） */
 export function deleteModel(modelId: string): boolean {
+  ensureManifestLoaded();
   const spec: AsrModelSpec | undefined = findModel(modelId);
   if (spec === undefined) {
     return false;
@@ -740,6 +756,7 @@ export function pruneRetiredModels(): void {
     // 有下载在跑：等下次启动再清（不能删正在写的 .part）
     return;
   }
+  ensureManifestLoaded();
   try {
     if (!fs.accessSync(modelsDir)) {
       return;

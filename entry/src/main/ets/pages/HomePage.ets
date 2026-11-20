@@ -1069,15 +1069,20 @@ export struct HomePage {
     *      网络不佳时用户看到的不再是 15 秒骨架屏；
     *   2) 完全离线：跳过 4 个注定各挂 15s 超时的请求，toast 提示后直接返回，
     *      等网络恢复信号（STORE_NET_RETRY_REV → onNetRetry）补拉；
-    *   3) 在线：正常联网校验（缓存在场时静默校验、成功才替换并更新缓存）。
-    * 两个 tab 顺序 await 即可 —— 单文件毫秒级，先于任何网络回调完成，无竞态。
-    * 热歌榜 / 热门歌单是网易云第三方源，不进启动轮（懒加载见 maybeLoadHotChart /
-    * maybeLoadNetease）。
-    */
+   * 3) 在线：正常联网校验（缓存在场时静默校验、成功才替换并更新缓存）。
+   * 两个缓存文件并行读（Promise.all）—— 缩短「缓存内容上屏」等待；
+   * 单文件毫秒级，先于任何网络回调完成，无竞态。
+   * 热歌榜 / 热门歌单是网易云第三方源，不进启动轮（懒加载见 maybeLoadHotChart /
+   * maybeLoadNetease）。
+   */
   private async initHomeFeed(): Promise<void> {
     const offline: boolean = !hasNetwork();
-    const rec: HomeFeedCacheEntry | null = await getHomeFeedCache('recommend');
-    const ctr: HomeFeedCacheEntry | null = await getHomeFeedCache('center');
+    const cachePair: [HomeFeedCacheEntry | null, HomeFeedCacheEntry | null] = await Promise.all([
+      getHomeFeedCache('recommend'),
+      getHomeFeedCache('center')
+    ]);
+    const rec: HomeFeedCacheEntry | null = cachePair[0];
+    const ctr: HomeFeedCacheEntry | null = cachePair[1];
     // 恢复：整体赋值 @State → onListSourceChanged 自动 reload 数据源；
     // 不碰 pending 标志 → homeLoading() 保持 false → 直接出内容、不闪骨架
     if (rec !== null) {

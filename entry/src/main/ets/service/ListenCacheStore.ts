@@ -72,18 +72,24 @@ const queuedIds: Set<string> = new Set<string>();
 /** 队列消费者是否在跑（防重入：enqueue 每次都 pump，没有标志会起两个消费者下同一首） */
 let pumping: boolean = false;
 
-/** 初始化缓存目录。AppContainer.initRest 调用：同步建目录 + 扫描索引（文件数百级，毫秒级） */
+/**
+ * 初始化缓存目录。AppContainer.initRest 调用：同步建目录（毫秒级）+
+ * **异步**扫描索引（512MB~1GB 目录文件数百级，listFileSync 曾在启动链上
+ * 与首页首帧竞争主线程；改 fs.listFile 异步扫描，索引建好前
+ * cachedListenPath 返回空串回落在线流，无害降级）。
+ */
 export function initListenCache(context: common.Context): void {
   try {
     cacheDir = `${context.filesDir}/listen_cache`;
     if (!fs.accessSync(cacheDir)) {
       fs.mkdirSync(cacheDir, true);
     }
-    rebuildIndex();
   } catch (e) {
     console.error(`initListenCache failed: ${JSON.stringify(e)}`);
     cacheDir = '';
+    return;
   }
+  rebuildIndex();
 }
 
 /** trackId 可能含 `:` `/` `#` 等路径字符（bvid::cid / bvid#cid），统一转安全文件名 */
@@ -96,14 +102,18 @@ function isAudioFileName(name: string): boolean {
   return name.endsWith('.m4a') || name.endsWith('.flac') || name.endsWith('.mp3');
 }
 
-/** 扫描目录重建内存索引（init 与全量清理后调用） */
-function rebuildIndex(): void {
+/**
+ * 扫描目录重建内存索引（init 与全量清理后调用，异步 fire-and-forget）。
+ * listenIndex.clear() 同步先行（调用方返回时索引即已清空），
+ * 文件枚举 await fs.listFile 在事件循环上完成，不占启动链主线程。
+ */
+async function rebuildIndex(): Promise<void> {
   listenIndex.clear();
   if (cacheDir.length === 0) {
     return;
   }
   try {
-    const names: string[] = fs.listFileSync(cacheDir);
+    const names: string[] = await fs.listFile(cacheDir);
     for (let i = 0; i < names.length; i++) {
       const name: string = names[i];
       if (!isAudioFileName(name)) {

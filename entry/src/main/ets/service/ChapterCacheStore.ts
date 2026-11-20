@@ -42,6 +42,8 @@ interface StoredChapterEntry {
 let storePath: string = '';
 const entries: Map<string, StoredChapterEntry> = new Map<string, StoredChapterEntry>();
 let flushTimer: number = -1;
+/** 异步装载是否完成（完成前落盘顺延，防止半载状态 TRUNC 覆盖丢旧数据） */
+let loaded: boolean = false;
 
 /**
  * 落盘/装载共用的条目消毒：分段逐条校验（from/to 有限且 to > from ≥ 0、
@@ -76,12 +78,21 @@ function sanitizeChapters(raw: VideoChapter[]): VideoChapter[] {
   return out;
 }
 
-/** 初始化：装载 chapter_cache.json 进内存表。AppContainer.init 调用，同步执行（毫秒级）。 */
+/**
+ * 初始化：登记路径并**异步**装载 chapter_cache.json（AppContainer.initRest
+ * 调用，fire-and-forget 不阻塞启动链）。装载完成前读恒 null（回落网络链路）、
+ * 写入暂存内存表，落盘由 scheduleFlush 顺延到装载完成后 —— 与原同步实现的
+ * 差异仅在「启动后极短窗口内缓存未命中」，分段请求本就带网络兜底，无感。
+ */
 export function initChapterCacheStore(context: common.Context): void {
+  storePath = `${context.filesDir}/chapter_cache.json`;
+  loadAsync();
+}
+
+async function loadAsync(): Promise<void> {
   try {
-    storePath = `${context.filesDir}/chapter_cache.json`;
-    if (fs.accessSync(storePath)) {
-      const raw: string = fs.readTextSync(storePath);
+    if (await fs.access(storePath)) {
+      const raw: string = await fs.readText(storePath);
       const parsed: StoredChapterEntry[] = JSON.parse(raw) as StoredChapterEntry[];
       // 损坏即弃：解析失败 / 非数组 / 字段不合法的条目逐条跳过，绝不把脏值带进查表
       if (Array.isArray(parsed)) {
@@ -100,13 +111,18 @@ export function initChapterCacheStore(context: common.Context): void {
           if (chapters.length === 0) {
             continue;
           }
-          entries.set(item.c, { c: item.c, ch: chapters, t: item.t });
+          // 装载不覆盖装载前的新写入（内存值更新）
+          if (!entries.has(item.c)) {
+            entries.set(item.c, { c: item.c, ch: chapters, t: item.t });
+          }
         }
       }
     }
   } catch (e) {
     console.error(`initChapterCacheStore failed: ${JSON.stringify(e)}`);
     // 装载失败不致命：缓存表从空开始，后续写入照常累积（覆盖写会自愈）
+  } finally {
+    loaded = true;
   }
 }
 
@@ -141,6 +157,11 @@ function scheduleFlush(): void {
   }
   flushTimer = setTimeout((): void => {
     flushTimer = -1;
+    if (!loaded) {
+      // 异步装载未完成：顺延一拍再落盘，避免半载状态 TRUNC 覆盖丢旧数据
+      scheduleFlush();
+      return;
+    }
     persist();
   }, FLUSH_DELAY_MS);
 }
