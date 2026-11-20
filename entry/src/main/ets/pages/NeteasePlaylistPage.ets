@@ -804,7 +804,10 @@ export struct NeteasePlaylistPage {
                         })
                       }
                     },
-                    (song: ExternalSong, index: number): string => `${index}_${song.title}`
+                    // key 用 title|artist|durationSec 业务复合键（ExternalSong
+                    // 无接口 id），不带下标 —— 头部增删 / 过滤换表时未变行
+                    // 按 key 复用，不再全行失效。
+                    (song: ExternalSong): string => `${song.title}|${song.artist}|${song.durationSec}`
                   )
                   // 搜索状态行（关键词激活时常驻）：命中 N 首给计数，
                   // 0 命中给人话提示（PlaylistDetail 同口径）。

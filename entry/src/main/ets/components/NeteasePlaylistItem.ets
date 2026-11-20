@@ -53,11 +53,21 @@ function openPlaylistPreview(p: NeteasePlaylistSummary): void {
  * 封面 64（高度预算 = 名字两行 lineHeight(21)×2 + 间距 4 + 副行 lineHeight(17)
  * = 63 ≤ 64，短名单行时行高不变），名字双行省略，副行「N播放 · N首」。
  */
+@Reusable
 @Component
 export struct NeteasePlaylistRow {
   @Prop summary: NeteasePlaylistSummary;
   /** 按压缩放（独立动画状态，本行独占，TrackItem 同款） */
   @State pressScale: number = 1;
+
+  /**
+   * 复用兜底（@Reusable）：按压中途被回收进复用池的节点 pressScale 停在
+   * 0.9（Touch Up 未到点），不复位会渲染成缩小行；外部数据全走 @Prop，
+   * 复用时框架重赋值即刷新，无需额外处理。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    this.pressScale = 1;
+  }
 
   build() {
     Row() {
@@ -115,11 +125,20 @@ export struct NeteasePlaylistRow {
  * 大封面模式卡（TrackCard 同款版式）：整卡宽方形封面（Stack aspectRatio 1，
  * radius 10）+ 两行名区（外层定高 34 锁两行、内层锁 lineHeight）+ 副题。
  */
+@Reusable
 @Component
 export struct NeteasePlaylistCard {
   @Prop summary: NeteasePlaylistSummary;
   /** 按压缩放（TrackCard 同款收敛档 0.96） */
   @State pressScale: number = 1;
+
+  /**
+   * 复用兜底（@Reusable，NeteasePlaylistRow 同款）：按压中途回收的节点
+   * pressScale 停在 0.96，不复位会渲染成缩小卡。
+   */
+  aboutToReuse(params: Record<string, Object>): void {
+    this.pressScale = 1;
+  }
 
   build() {
     Column() {

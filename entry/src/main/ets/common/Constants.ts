@@ -464,6 +464,15 @@ export const STORE_PROGRESS_STYLE: string = 'playerProgressStyle';
 export const STORE_MINI_BAR_PROGRESS: string = 'miniBarProgressShown';
 
 /**
+ * 热歌榜「匹配中」榜位镜像（HomePage 点榜单曲后实时搜 B 站匹配期间的行尾
+ * 转圈指示，-1 = 无）：HomePage @StorageLink 写、HotSongRow 子组件
+ * @StorageProp 订阅 —— 不走 @Prop 下推（LazyForEach 不会因父组件状态变化
+ * 重跑 itemGenerator，@Prop 不会重新下推；AppStorage 订阅在子组件内自成
+ * 重渲染，@Reusable 复用节点也能即时跟随）。
+ */
+export const STORE_HOT_MATCHING_INDEX: string = 'hotChartMatchingIndex';
+
+/**
  * 迷你栏自动展开收起开关镜像（AppSettings.miniBarAutoExpand 的运行时镜像）：
  * EntryAbility 启动首发、设置页切换时重发，Index @StorageProp 订阅 ——
  * 控制「屏幕上滑展开、下滑收起迷你栏」的全屏手势是否生效（默认开；

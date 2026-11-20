@@ -94,8 +94,10 @@ import {
   STORE_HOME_CHIPS_ACTIVE,
   STORE_LIBRARY_REV,
   STORE_WINDOW_WIDTH_VP,
-  STORE_WINDOW_HEIGHT_VP
+  STORE_WINDOW_HEIGHT_VP,
+  STORE_HOT_MATCHING_INDEX
 } from '../common/Constants';
+import { HotSongRow } from '../components/HotSongRow';
 import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { FlingSampler } from '../components/FlingSampler';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
@@ -548,7 +550,13 @@ export struct HomePage {
   /** 首次加载已成功过（幂等闸门：切走再切回不重拉，空态重试 / 下拉刷新除外） */
   private hotChartLoadedOnce: boolean = false;
   /** 正在匹配播放的行下标（-1 = 空闲；单飞互斥防 B 站搜索风控，行尾转圈反馈） */
-  @State matchingIndex: number = -1;
+  /**
+   * 热歌榜「匹配中」榜位（playHotSongAt 单飞互斥，-1 = 无）。
+   * 刻意走 AppStorage（@StorageLink）而非页内 @State：HotSongRow 已抽成
+   * @Reusable 子组件，LazyForEach 不会因本页状态变化重跑 itemGenerator，
+   * 子组件靠 @StorageProp(STORE_HOT_MATCHING_INDEX) 自订阅即时跟随。
+   */
+  @StorageLink(STORE_HOT_MATCHING_INDEX) matchingIndex: number = -1;
   /** 热歌榜「播放全部」首曲匹配进行中（CTA 图标位转 LoadingProgress，防连点） */
   @State hotChartPlayAllPending: boolean = false;
   /**
@@ -1966,61 +1974,6 @@ export struct HomePage {
     * 整行点按即播（playHotSongAt 实时匹配 B 站音源）；匹配中的行行尾转圈。
     * 版式参照 NeteasePlaylistPage 曲目行，加封面与前三名高亮。
     */
-  @Builder
-  HotSongRow(song: NeteaseHotSong, index: number): void {
-    Row({ space: 12 }) {
-      Text(`${index + 1}`)
-        .fontSize(13)
-        .fontColor(index < 3 ? this.themeDeep : $r('app.color.text_tertiary'))
-        .width(24)
-        .textAlign(TextAlign.Center)
-      CoverImage({
-        url: toThumbUrl(song.coverUrl, 96),
-        imgWidth: 48,
-        imgHeight: 48,
-        imgRadius: 8,
-        altText: song.title
-      })
-      Column() {
-        Text(song.title)
-          .fontSize(15)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text(`${song.artist} · ${formatDurationText(song.durationSec)}`)
-          .fontSize(11)
-          .fontColor($r('app.color.text_tertiary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .margin({ top: 3 })
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-
-      // 行尾不放常驻播放键（整行点按即播）：仅匹配中的行在行尾给转圈反馈
-      if (this.matchingIndex === index) {
-        LoadingProgress()
-          .width(18)
-          .height(18)
-          .color(this.themeDeep)
-      }
-    }
-    .width('100%')
-    // 左右让位 NAV_H_PADDING 基线：与搜索框行 / chip 条 / 播放全部 CTA 同一条
-    // 水平缘（TrackItem / SkeletonTrackItem 同款 16vp），序号不贴屏幕左缘。
-    .padding({ left: NAV_H_PADDING, right: NAV_H_PADDING, top: 10, bottom: 10 })
-    .alignItems(VerticalAlign.Center)
-    .stateStyles({
-      pressed: { .backgroundColor($r('app.color.press_overlay')) },
-      normal: { .backgroundColor(Color.Transparent) }
-    })
-    .onClick((): void => {
-      this.playHotSongAt(index);
-    })
-  }
-
   /**
    * 入口式搜索框：只承载「点进去搜」的意图 —— 真实输入 / 历史 / 结果全在 'Search' 二级页
    * （push 后输入框自动聚焦）。样式与二级页 Search 输入框同语言
@@ -2974,10 +2927,21 @@ export struct HomePage {
                   this.hotSongSource,
                   (s: NeteaseHotSong, index: number): void => {
                     ListItem() {
-                      this.HotSongRow(s, index)
+                      // @Reusable 独立组件（TrackItem 同款纪律）：滚动时行节点
+                      // 进出复用池，「匹配中」转圈经 AppStorage 自订阅跟随。
+                      HotSongRow({
+                        song: s,
+                        index: index,
+                        onPlay: (song: NeteaseHotSong): void => {
+                          this.playHotSongAt(this.hotSongs.indexOf(song));
+                        }
+                      })
                     }
                   },
-                  (s: NeteaseHotSong, index: number): string => `${index}_${s.title}`
+                  // key 用 title|artist|durationSec 业务复合键（NeteaseHotSong
+                  // 无接口 id），不带下标 —— 榜单换新时未变行可按 key 复用，
+                  // 头部增删不再全行失效。
+                  (s: NeteaseHotSong): string => `${s.title}|${s.artist}|${s.durationSec}`
                 )
               }
             } else if (this.tab === 'center') {
