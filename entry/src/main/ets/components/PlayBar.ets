@@ -58,8 +58,11 @@
  *   · 直线 —— 整行内容（展开 / 垂直两层 / 宽屏）：槽位底边 2vp（Stack Bottom
  *     叠加 + 淡主题色底轨 + 左右内缩避开胶囊圆角；只铺播放栏槽位，HDS clip
  *     会把内容裁在槽位内，延伸不到页签段）。
- *   数据源 STORE_PROGRESS / STORE_DURATION（秒，500ms 分桶推送）+ STORE_THEME_PRIMARY；
- *   duration<=0（加载中 / 未解析）不渲染，切歌瞬间随清零短暂隐藏属预期。
+ *   进度数据订阅（STORE_PROGRESS / STORE_DURATION，500ms 分桶推送）不在本组件：
+ *   圆环 / 直线分别圈死在 PlayBarRingProgress / PlayBarLineProgress 子组件内
+ *   （见 components/PlayBarProgress.ets，PlayerProgressArea 同款纪律），本组件
+ *   播放期间零重渲染。duration<=0（加载中 / 未解析）不渲染，切歌瞬间随清零
+ *   短暂隐藏属预期。
  *
  * 状态复用（不新建数据）：@StorageLink / @StorageProp 绑既有播放状态
  *   STORE_QUEUE / STORE_CURRENT_TRACK / STORE_IS_PLAYING；播放控制直调
@@ -93,15 +96,12 @@ import {
   MINI_BAR_ANIM_TO_COLLAPSE,
   STORE_BAR_LAYOUT,
   STORE_MINI_BAR_PROGRESS,
-  STORE_PROGRESS,
-  STORE_DURATION,
-  STORE_THEME_PRIMARY,
   GEOMETRY_ID_PLAYER_DISC,
   GEOMETRY_ID_PLAYER_SURFACE,
   PLAYER_SURFACE_RADIUS_START_VP
 } from '../common/Constants';
-import { MaterialCompat } from '../utils/MaterialCompat';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
+import { PlayBarRingProgress, PlayBarLineProgress, CONTENT_FADE_MS } from './PlayBarProgress';
 
 /**
  * 封面圆盘边长（vp）：**展开态 / 宽屏 / 水平融合**的固定值。
@@ -123,26 +123,12 @@ const MINI_DISC_COLLAPSED_VERTICAL: number = 28;
 const PLAY_ICON_SIZE: number = 32;
 /** 控制键之间间距（收窄，为文字区让宽） */
 const CTRL_SPACING: number = 8;
-/** 收起态圆环进度描边宽（vp）：同尺寸叠在圆盘边缘、盖在封面上 */
-const RING_STROKE_VP: number = 2.5;
-/** 整行内容底边直线进度条厚度（vp） */
-const LINE_HEIGHT_VP: number = 2;
-/** 直线进度底轨的主题色透明度（淡显，不与文字抢焦点） */
-const LINE_TRACK_ALPHA: number = 0.18;
-/** 直线进度左右内缩（vp）：避开胶囊圆角（只铺播放栏槽位，HDS 会裁槽位外内容） */
-const LINE_INSET_VP: number = 8;
 /**
  * 垂直两层收起/展开时圆盘尺寸（28↔40）的过渡时长（ms）。
  * 与 HDS 槽位形变动画近似同步（HDS 不暴露时长，取常规动效档 300）；
  * 起止由 onMiniBarAnimationStart/End 对齐，微小时长差在 clip 裁剪下不可见。
  */
 const MINI_BAR_DISC_ANIM_MS: number = 300;
-/**
- * 内容体（Body）/ 直线进度 与 圆环进度 交叉淡入淡出的时长（ms）。
- * 刻意略长于 HDS 槽位形变（内建约 250~300ms，不可配）—— 收放结束后留一点
- * 柔和余韵；观感拖沓只调这一处。
- */
-const CONTENT_FADE_MS: number = 400;
 
 @Component
 export struct PlayBar {
@@ -188,16 +174,12 @@ export struct PlayBar {
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string =
     BreakpointConstants.BREAKPOINT_SM;
 
-  /** 播放进度（秒，MusicPlayer 500ms 分桶推送）：驱动圆环 / 直线进度指示 */
-  @StorageProp(STORE_PROGRESS) progressSec: number = 0;
-  /** 曲目总时长（秒）：<=0（加载中 / 未解析）时不渲染进度指示 */
-  @StorageProp(STORE_DURATION) durationSec: number = 0;
-  /** 主题色主色（hex 字符串，ThemeColors 发布）：进度指示用色，切主题即时跟随 */
-  @StorageProp(STORE_THEME_PRIMARY) themePrimary: string = '#FB7299';
   /**
    * 迷你栏进度指示开关（设置 → 外观「迷你栏进度条」，AppSettings.miniBarProgress
    * 的运行时镜像，EntryAbility 首帧前首发真值）：关闭后底部直线进度条与水平
    * 收起态圆环进度均不渲染（两处渲染条件都挂它）。纯显示层开关，不影响播放状态。
+   * 进度数据订阅（STORE_PROGRESS 2Hz）不在本组件 —— 圆环 / 直线分别圈死在
+   * PlayBarRingProgress / PlayBarLineProgress 子组件内，本组件播放期间零重渲染。
    */
   @StorageProp(STORE_MINI_BAR_PROGRESS) miniBarProgress: boolean = true;
 
@@ -303,14 +285,6 @@ export struct PlayBar {
   }
   private coverUrl(): string {
     return this.currentTrack !== null ? this.currentTrack.coverUrl : '';
-  }
-
-  /** 播放进度比例（0~1，钳制）：duration<=0 返回 0（该情形下进度指示根本不渲染） */
-  private progressPct(): number {
-    if (this.durationSec <= 0) {
-      return 0;
-    }
-    return Math.min(1, Math.max(0, this.progressSec / this.durationSec));
   }
 
   /**
@@ -491,17 +465,10 @@ export struct PlayBar {
       // → 描边画在组件边界内侧、贴圆盘边缘，不触发 enableMiniBarClip 裁剪；
       // 不参与 geometryTransition
       // （转场时环留在槽位内，无跳变）。挂 OPACITY transition 与 Body 交叉淡入淡出。
-      // 底轨透明：封面不被灰圈压住，只显示主题色弧线。duration<=0（加载中）不渲染；
-      // 迷你栏进度条开关（miniBarProgress）关闭时同样不渲染。
-      if (this.ringVisible() && this.miniBarProgress && this.durationSec > 0) {
-        Progress({ value: Math.min(this.progressSec, this.durationSec), total: this.durationSec, type: ProgressType.Ring })
-          .width(this.discSizeVp)
-          .height(this.discSizeVp)
-          .style({ strokeWidth: RING_STROKE_VP })
-          .color(this.themePrimary)
-          .backgroundColor(Color.Transparent)
-          .hitTestBehavior(HitTestMode.Transparent)
-          .transition(TransitionEffect.OPACITY.animation({ duration: CONTENT_FADE_MS, curve: Curve.EaseInOut }))
+      // 进度订阅圈死在子组件内（PlayBar 播放期间零重渲染）；迷你栏进度条开关
+      // （miniBarProgress）关闭时同样不渲染。
+      if (this.ringVisible() && this.miniBarProgress) {
+        PlayBarRingProgress({ sizeVp: this.discSizeVp })
       }
     }
   }
@@ -620,21 +587,10 @@ export struct PlayBar {
         // 只铺播放栏槽位 —— HDS enableMiniBarClip 把 miniBar 内容裁在槽位内，
         // 延伸不到右侧页签段。底轨 = 淡主题色，进度 = 实主题色，左右内缩避开
         // 胶囊圆角；hitTest 透传：2vp 细条不截胡整行的「点击进播放页」。
-        // duration<=0（加载中）不渲染；迷你栏进度条开关（miniBarProgress）
-        // 关闭时同样不渲染。
-        if (this.bodyVisible() && this.miniBarProgress && this.durationSec > 0) {
-          Row() {
-            Row()
-              .width(`${(this.progressPct() * 100).toFixed(1)}%`)
-              .height('100%')
-              .backgroundColor(this.themePrimary)
-          }
-          .width('100%')
-          .height(LINE_HEIGHT_VP)
-          .padding({ left: LINE_INSET_VP, right: LINE_INSET_VP })
-          .backgroundColor(MaterialCompat.withAlpha(this.themePrimary, LINE_TRACK_ALPHA))
-          .hitTestBehavior(HitTestMode.Transparent)
-          .transition(TransitionEffect.OPACITY.animation({ duration: CONTENT_FADE_MS, curve: Curve.EaseInOut }))
+        // 进度订阅圈死在子组件内（PlayBar 播放期间零重渲染）；迷你栏进度条开关
+        // （miniBarProgress）关闭时同样不渲染。
+        if (this.bodyVisible() && this.miniBarProgress) {
+          PlayBarLineProgress()
         }
       }
       .width('100%')
