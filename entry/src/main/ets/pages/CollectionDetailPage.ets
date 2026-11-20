@@ -66,6 +66,7 @@ import {
 } from '../common/Constants';
 import { BreakpointConstants } from '../common/constants/BreakpointConstants';
 import { TwoColumnLayout } from '../common/utils/TwoColumnList';
+import { ArrayDataSource } from '../utils/ArrayDataSource';
 import { dialogBodyMaxHeightVp } from '../common/utils/DeviceForm';
 import { showAppToast } from '../components/AppToast';
 import { NavTitleRow } from '../components/NavTitleRow';
@@ -152,6 +153,9 @@ export struct CollectionDetailPage {
   @State parts: Track[] = [];
   /** 已揭示切片（渲染数据源，onReachEnd 增量放行） */
   @State tracks: Track[] = [];
+  /** LazyForEach 数据源：与 tracks 同步（load / 搜索 / 排序走 reload，
+   * onReachEnd 走 append 只通知新增下标），多选态走 ForEach 双路径 */
+  private trackSource: ArrayDataSource<Track> = new ArrayDataSource<Track>([]);
   /** 头部区展示字段（load() 预计算，@Builder 体内不做拼接 / 判空） */
   @State headerTitle: string = '';
   @State coverUrl: string = '';
@@ -328,6 +332,7 @@ export struct CollectionDetailPage {
       this.parts = parts;
       this.applyLocalFilter();
       this.tracks = this.activeSource().slice(0, CD_REVEAL_PAGE_SIZE);
+      this.syncTrackSource();
       this.loadFailed = false;
       this.failReason = '';
     } catch (e) {
@@ -377,6 +382,7 @@ export struct CollectionDetailPage {
     this.failReason = '';
     this.parts = [];
     this.tracks = [];
+    this.syncTrackSource();
     this.exitSelecting();
     this.load();
   }
@@ -400,11 +406,22 @@ export struct CollectionDetailPage {
     if (this.tracks.length >= all.length) {
       return;
     }
+    // 增量揭示：push 揭示区间，LazyForEach 走 append（只通知新增下标，
+    // 滚动中不整表重建、不跳变），PlaylistDetail.revealMore 同款。
     const from: number = this.tracks.length;
     const next: number = Math.min(from + CD_REVEAL_PAGE_SIZE, all.length);
+    const added: Track[] = [];
     for (let i = from; i < next; i++) {
       this.tracks.push(all[i]);
+      added.push(all[i]);
     }
+    this.trackSource.append(added);
+  }
+
+  /** tracks 切片整表同步进 LazyForEach 数据源（换源 / 重置 / 徽标集合变化后调用）：
+   * 整表 reload，可视区外的节点按需重建，滚动锚点保持。 */
+  private syncTrackSource(): void {
+    this.trackSource.reload(this.tracks);
   }
 
   // ===== 页内搜索（纯本地过滤） =====
@@ -432,6 +449,7 @@ export struct CollectionDetailPage {
       this.filterDebounceTimer = -1;
       this.applyLocalFilter();
       this.tracks = this.activeSource().slice(0, CD_REVEAL_PAGE_SIZE);
+      this.syncTrackSource();
     }, SEARCH_FILTER_DEBOUNCE_MS);
   }
 
@@ -447,6 +465,7 @@ export struct CollectionDetailPage {
     this.searchKeyword = '';
     this.applyLocalFilter();
     this.tracks = this.activeSource().slice(0, CD_REVEAL_PAGE_SIZE);
+    this.syncTrackSource();
   }
 
   /**
@@ -485,7 +504,15 @@ export struct CollectionDetailPage {
         ids.push(t.musicId);
       }
     }
+    // 集合没变就不动数据源：下载快照每 500ms 推一次（进度推进也推），
+    // LazyForEach 徽标靠整表重载刷新，无差别 reload 会让列表在下载中频繁重建
+    //（PlaylistDetail.rebuildDownloadedIds 同款纪律）。
+    const changed: boolean = ids.length !== this.downloadedIds.length
+      || ids.some((id: string): boolean => this.downloadedIds.indexOf(id) < 0);
     this.downloadedIds = ids;
+    if (changed) {
+      this.syncTrackSource();
+    }
   }
 
   /** 这首分 P 是否已下载完成：musicId 精确匹配（P1 纯 bvid 与 `bvid#cid` 各自独立判定） */
@@ -1362,6 +1389,27 @@ export struct CollectionDetailPage {
     .width('100%')
   }
 
+  /** 单列行（ListItem 内容）：ForEach（多选）/ LazyForEach 双路径共用。
+   * 已下载徽标：LazyForEach 路径靠 rebuildDownloadedIds 集合变化时
+   * syncTrackSource 整表重载刷新（见其注释）。 */
+  @Builder
+  TrackRow(t: Track, index: number): void {
+    TrackItem({
+      track: t,
+      entranceIndex: index,
+      downloaded: this.isDownloaded(t),
+      onPlay: (tr: Track): void => {
+        this.player.playOrToggle(tr);
+      },
+      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
+      selecting: this.selecting,
+      selected: this.selectedIds.indexOf(t.id) >= 0,
+      onToggleSelect: (tr: Track): void => {
+        this.toggleSelected(tr);
+      }
+    })
+  }
+
   build() {
     HdsNavDestination() {
       Stack() {
@@ -1377,28 +1425,30 @@ export struct CollectionDetailPage {
                   .width('100%')
                   .height(this.barTotalHeight())
               }
-              ForEach(
-                this.tracks,
-                (t: Track, index: number): void => {
-                  ListItem() {
-                    TrackItem({
-                      track: t,
-                      entranceIndex: index,
-                      downloaded: this.isDownloaded(t),
-                      onPlay: (tr: Track): void => {
-                        this.player.playOrToggle(tr);
-                      },
-                      moreMenuItems: (tr: Track): MenuElement[] => this.trackMenuItems(tr),
-                      selecting: this.selecting,
-                      selected: this.selectedIds.indexOf(t.id) >= 0,
-                      onToggleSelect: (tr: Track): void => {
-                        this.toggleSelected(tr);
-                      }
-                    })
-                  }
-                },
-                (t: Track): string => t.id
-              )
+              // 条目渲染（PlaylistDetail 同款双路径纪律）：多选态走 ForEach
+              //（selected / selecting 每次点击都要整列刷新勾选样式），
+              // 非多选走 LazyForEach（trackSource 增量通知，滚动中不整表重建）。
+              if (this.selecting) {
+                ForEach(
+                  this.tracks,
+                  (t: Track, index: number): void => {
+                    ListItem() {
+                      this.TrackRow(t, index)
+                    }
+                  },
+                  (t: Track): string => t.id
+                )
+              } else {
+                LazyForEach(
+                  this.trackSource,
+                  (t: Track, index: number): void => {
+                    ListItem() {
+                      this.TrackRow(t, index)
+                    }
+                  },
+                  (t: Track): string => t.id
+                )
+              }
               // 搜索状态行（关键词激活时常驻，UpSpacePage footer 口径对齐）：
               // 命中 N 个给计数，0 命中给人话提示。
               //（底部状态行门控 tracks.length > 0，0 命中时不与「没有匹配」同现。）
