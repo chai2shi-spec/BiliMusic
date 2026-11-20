@@ -26,6 +26,13 @@ import { STORE_THEME_PRIMARY, STORE_THEME_SURFACE } from '../common/Constants';
 import { reuseParamMissing } from '../utils/ReuseUtil';
 
 /**
+ * 填充模式（fillParent）的解码上限（px，约 240vp@3x）：实际显示尺寸由父容器
+ * 决定、拿不到可靠 vp 值，按大封面卡档取保守上限 —— sourceSize 仅在目标
+ * 小于图源时生效，小图原图解码不受影响。
+ */
+const DECODE_CAP_PX: number = 720;
+
+/**
  * @Reusable：行内封面随宿主列表（LazyForEach）复用 ——
  * 复用时 url 经 @Prop 重赋值，@Watch onUrlChanged 复位失败标记，
  * 数据链自洽，无需 aboutToReuse 额外处理。
@@ -104,6 +111,25 @@ export struct CoverImage {
     return this.fillParent ? 40 : Math.min(this.imgWidth ?? 48, this.imgHeight ?? 48) * 0.4;
   }
 
+  /**
+   * 解码尺寸（px）：限制图片解码分辨率 —— 网易云等外链原图动辄千像素 MB 级，
+   * 全尺寸解码的内存占用是列表滚动卡顿大户；sourceSize 仅在目标小于图源时
+   * 生效（小图原图解码，零影响），SVG / PixelMap 图源不支持（本组件只显网络
+   * 位图，不涉及）。行内按显示 vp × 3（3x 屏密度）取整；填充模式见
+   * DECODE_CAP_PX 注释。
+   */
+  private decodeSizePx(): ImageSourceSize {
+    if (this.fillParent) {
+      return { width: DECODE_CAP_PX, height: DECODE_CAP_PX };
+    }
+    const w: number = this.imgWidth ?? 48;
+    const h: number = this.imgHeight ?? 48;
+    if (w <= 0 || h <= 0) {
+      return { width: DECODE_CAP_PX, height: DECODE_CAP_PX };
+    }
+    return { width: Math.ceil(w * 3), height: Math.ceil(h * 3) };
+  }
+
   build() {
     if ((this.url ?? '').length === 0 || this.loadFailed) {
       Stack() {
@@ -129,6 +155,8 @@ export struct CoverImage {
         .height(this.sizeH())
         .borderRadius(this.imgRadius ?? 8)
         .objectFit(ImageFit.Cover)
+        // 解码尺寸上限（见 decodeSizePx）：限制外链原图全尺寸解码的内存占用
+        .sourceSize(this.decodeSizePx())
         .backgroundColor(this.themeSurface)
         // Image 默认启用长按拖拽，会抢占宿主 bindContextMenu 的长按菜单手势
         //（首页歌单卡长按「移出首页 / 更换歌单」弹不出来即此因，官方 FAQ

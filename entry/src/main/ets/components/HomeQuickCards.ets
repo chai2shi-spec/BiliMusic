@@ -24,8 +24,11 @@
  *
  * 几何（MusicHome 187×234 按手机屏占比缩小）：卡 156×184 / 圆角 16 / 间距 12，
  * 行左右缘 NAV_H_PADDING 与搜索框行、chip 条共用同一条水平基线；两卡半可见
- * 暗示可横滑。信息条底衬半透明深色 + BACKGROUND_ULTRA_THICK 模糊
- * （MusicHome 同款），白字在任意封面下都可读。
+ * 暗示可横滑。信息条底衬半透明深色 + BACKGROUND_THICK 模糊，白字在任意
+ * 封面下都可读（曾用 BACKGROUND_ULTRA_THICK「超远距景深」档，真机 GPU
+ * 开销过高降一档；半透明深衬底已在，降档后可读性无损。BlurStyle 无
+ * MATERIAL 档 —— 该档为 iOS 术语，HarmonyOS 对应阶梯是
+ * BACKGROUND_THIN/REGULAR/THICK/ULTRA_THICK）。
  */
 
 import { Track, Playlist } from '../model/MusicModels';
@@ -342,7 +345,8 @@ export struct HomeQuickCards {
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     .backgroundColor('rgba(0, 0, 0, 0.30)')
-    .backgroundBlurStyle(BlurStyle.BACKGROUND_ULTRA_THICK)
+    // BACKGROUND_THICK 档（BACKGROUND_ULTRA_THICK 降一档，见文件头注释）
+    .backgroundBlurStyle(BlurStyle.BACKGROUND_THICK)
   }
 
   /** 快捷卡外壳（最近播放卡）：内容 + 尺寸圆角 + 按压缩放 + 点卡导航 */
