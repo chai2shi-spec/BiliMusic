@@ -571,7 +571,7 @@ export const STORE_LYRIC_CENTERED: string = 'lyricCenteredShown';
 export const STORE_DRAG_LYRIC_SEEK: string = 'dragLyricSeekOn';
 
 /**
- * 本机 AI 转写歌词运行状态（LyricTranscribeService 发布，歌词面板订阅）：
+ * 本机 AI 转写歌词运行状态（AsrTranscribeCoordinator 发布，歌词面板订阅）：
  * true = 转写任务进行中（解码或识别阶段），按钮转禁用 + 进度横幅显示。
  */
 export const STORE_TRANSCRIBE_RUNNING: string = 'lyricTranscribeRunning';
@@ -595,14 +595,14 @@ export const STORE_TRANSCRIBE_PROGRESS: string = 'lyricTranscribeProgress';
 export const STORE_TRANSCRIBE_TRACK_ID: string = 'lyricTranscribeTrackId';
 
 /**
- * 转写完成信号（自增序号）：LyricsTranscribeService 落库后递增，
+ * 转写完成信号（自增序号）：AsrTranscribeCoordinator 落库后递增，
  * 歌词页 @Watch 检测递增且曲目匹配时重载歌词（manual 缓存自动命中）。
  */
 export const STORE_TRANSCRIBE_DONE_SEQ: string = 'lyricTranscribeDoneSeq';
 
 /**
  * 第三方 ASR 当前引擎 id 镜像（AsrEngineRegistry 发布，歌词面板订阅）。
- * 默认 'system' = 现有系统识别；其余为 AsrModelCatalog 的模型 id。
+ * 空串 = 未选择（转写入口引导去「转写模型」页下载）；其余为 AsrModelCatalog 的模型 id。
  */
 export const STORE_ASR_ENGINE_ID: string = 'asrEngineId';
 

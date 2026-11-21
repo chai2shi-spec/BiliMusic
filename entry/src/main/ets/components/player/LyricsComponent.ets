@@ -35,19 +35,15 @@ import { LrcEntry, Word } from '../../lyric/LrcEntry';
 import { LyricScrollEffect, LyricTopPosition } from '../../lyric/LyricConst';
 import { parseLrcLyric, serializeLrcEntries } from '../../lyric/LrcUtils';
 import {
-  cancelTranscribe,
-  hasLocalAudioSource,
-  isTranscribeSupported,
-  startTranscribe
-} from '../../service/LyricTranscribeService';
-import {
   cancelAsrTranscribe,
+  hasLocalAudioSource,
   startThirdPartyTranscribe
 } from '../../service/asr/AsrTranscribeCoordinator';
 import {
-  currentEngineId,
-  currentEngineLabel
+  currentEngineLabel,
+  hasReadyAsrEngine
 } from '../../service/asr/AsrEngineRegistry';
+import { NavStackHolder } from '../../service/NavStackHolder';
 import { showConfirm } from '../AppAlertDialog';
 import { postAppToast } from '../../common/ToastChannel';
 import { MaterialCompat } from '../../utils/MaterialCompat';
@@ -58,6 +54,7 @@ import {
   STORE_PROGRESS,
   STORE_FOLD_EXPANDED,
   STORE_PLAYER_OPEN,
+  STORE_PLAYER_CLOSE_REQUEST,
   STORE_PLAYER_CONTENT_EXIT,
   STORE_THEME_PRIMARY,
   STORE_THEME_SURFACE,
@@ -488,35 +485,29 @@ export struct LyricsComponent {
     this.syncSessionLyric(track);
   }
 
-  /** 转写按钮文案：进行中带阶段/百分比，闲时固定入口名 */
+  /** 转写按钮文案：进行中带阶段/百分比，闲时按引擎就绪态显示 */
   private transcribeButtonLabel(): string {
     if (this.transcribeRunning) {
       return this.transcribePhase === 'decoding'
         ? '解码中…'
         : `转写中 ${this.transcribeProgress}%`;
     }
-    // 第三方引擎显示引擎名（动态值在方法内现算，不进带参 Builder）
-    const engine: string = this.activeAsrEngine();
-    return engine === 'system' ? 'AI 转写歌词' : `AI 转写 · ${currentEngineLabel()}`;
-  }
-
-  /** 当前实际生效的引擎 id（第三方总开关关闭时恒 system） */
-  private activeAsrEngine(): string {
-    return currentEngineId();
+    // 引擎就绪显示引擎名（动态值在方法内现算，不进带参 Builder）；
+    // 未就绪固定入口名，点击走「前往下载」引导
+    return hasReadyAsrEngine() ? `AI 转写 · ${currentEngineLabel()}` : 'AI 转写';
   }
 
   /**
-   * 转写可发起：非运行中 + 当前引擎可用 + 有曲目 + 有本地音频
+   * 转写可发起：非运行中 +（引擎就绪时）有曲目 + 有本地音频
    *（track.localFilePath / 下载完成 / 听后缓存任一存在）。纯 stat 判定。
-   * 第三方引擎不再依赖系统 SpeechRecognizer 能力。
+   * 引擎未就绪时按钮恒可点 —— 点击跳「转写模型」页引导下载，不受音频源限制。
    */
   private canStartTranscribe(): boolean {
     if (this.transcribeRunning) {
       return false;
     }
-    const engine: string = this.activeAsrEngine();
-    if (engine === 'system' && !isTranscribeSupported()) {
-      return false;
+    if (!hasReadyAsrEngine()) {
+      return true;
     }
     const track: Track | null = this.currentTrack;
     if (track === null || track === undefined || (track.id ?? '').length === 0) {
@@ -525,14 +516,13 @@ export struct LyricsComponent {
     return hasLocalAudioSource(track);
   }
 
-  /** 转写不可用原因（按钮灰显时的提示行；可用 / 运行中返回空串不显示） */
+  /** 转写不可用原因（按钮灰显时的提示行；可点 / 运行中返回空串不显示） */
   private transcribeUnavailableHint(): string {
     if (this.transcribeRunning) {
       return '';
     }
-    const engine: string = this.activeAsrEngine();
-    if (engine === 'system' && !isTranscribeSupported()) {
-      return '本机不支持离线语音识别，无法转写';
+    if (!hasReadyAsrEngine()) {
+      return '未下载转写模型，点击前往下载';
     }
     const track: Track | null = this.currentTrack;
     if (track === null || track === undefined || (track.id ?? '').length === 0) {
@@ -544,30 +534,43 @@ export struct LyricsComponent {
     return '';
   }
 
-  /** 转写发起：确认弹窗 → startTranscribe（进度横幅由 AppStorage 五键驱动） */
+  /**
+   * 转写发起（进度横幅由 AppStorage 五键驱动）：
+   *   · 引擎未就绪 → 确认框「前往下载」→ 收起播放页 + 推「转写模型」页
+   *     （播放页是 Index 根 Stack 上的 overlay，须先递增
+   *     STORE_PLAYER_CLOSE_REQUEST 收起再 push，ControlAreaComponent 同款范式）；
+   *   · 引擎就绪 → 确认框 → startThirdPartyTranscribe。
+   */
   private confirmTranscribe(): void {
     if (!this.canStartTranscribe()) {
+      return;
+    }
+    if (!hasReadyAsrEngine()) {
+      showConfirm(this.getUIContext(), {
+        title: '下载转写模型',
+        message: 'AI 转写需要先下载第三方转写模型（如 SenseVoice，约 229MB），'
+          + '下载到本机后可离线转写歌词。\n\n是否前往「转写模型」页下载？',
+        confirmText: '前往下载',
+        onConfirm: (): void => {
+          const closeSeq: number | undefined =
+            AppStorage.get<number>(STORE_PLAYER_CLOSE_REQUEST);
+          AppStorage.setOrCreate(STORE_PLAYER_CLOSE_REQUEST, (closeSeq ?? 0) + 1);
+          NavStackHolder.push('AsrModels', undefined);
+        }
+      });
       return;
     }
     const track: Track | null = this.currentTrack;
     if (track === null || track === undefined) {
       return;
     }
-    const engine: string = this.activeAsrEngine();
     const engineName: string = currentEngineLabel();
-    const message: string = engine === 'system'
-      ? '将用本机离线语音识别生成歌词，耗时约等于歌曲时长，期间请保持应用在前台。完成后自动绑定本曲，可再点「编辑歌词」修正。'
-      : `将用 ${engineName} 模型在本地生成歌词。演唱含伴奏时识别准确率有限，结果作为草稿，请用「编辑歌词」修正。首次加载模型需几秒，期间请保持应用在前台。`;
     showConfirm(this.getUIContext(), {
       title: 'AI 转写歌词',
-      message: message,
+      message: `将用 ${engineName} 模型在本地生成歌词。演唱含伴奏时识别准确率有限，结果作为草稿，请用「编辑歌词」修正。首次加载模型需几秒，期间请保持应用在前台。`,
       confirmText: '开始转写',
       onConfirm: (): void => {
-        if (engine === 'system') {
-          void startTranscribe(track);
-        } else {
-          void startThirdPartyTranscribe(track);
-        }
+        void startThirdPartyTranscribe(track);
       }
     });
   }
@@ -2025,11 +2028,7 @@ export struct LyricsComponent {
             .fontColor(this.themePrimary)
             .padding({ left: 8, right: 8, top: 6, bottom: 6 })
             .onClick((): void => {
-              if (this.activeAsrEngine() === 'system') {
-                cancelTranscribe();
-              } else {
-                cancelAsrTranscribe();
-              }
+              cancelAsrTranscribe();
             })
         }
         .width(StyleConstants.FULL_WIDTH)

@@ -20,7 +20,6 @@ import { initLoginState } from './LoginStore';
 import { initUpSpaceCache } from './UpSpaceCacheStore';
 import { initLyricCache } from './LyricCacheStore';
 import { initListenCache } from './ListenCacheStore';
-import { initLyricTranscribeStore } from './LyricTranscribeService';
 import { initAsrModelManager, setAsrProgressSink } from './asr/AsrModelManager';
 import { initAsrEngineRegistry, currentEngineId } from './asr/AsrEngineRegistry';
 import { initAsrPaths } from './asr/AsrPaths';
@@ -103,9 +102,6 @@ export class AppContainer {
     // 听后缓存目录：filesDir/listen_cache，512MB LRU。
     // 同步建目录 + 扫描索引（文件数百级有上界），毫秒级不拖慢启动。
     initListenCache(context);
-    // 本机转写临时 PCM 目录：cacheDir/transcribe（临时产物，系统可清理）。
-    // 只登记路径，目录由任务发起时懒建，不拖慢启动。
-    initLyricTranscribeStore(context);
     // 第三方 ASR 模型目录 + 引擎选择：只登记 filesDir/asr_models 路径、
     // 读 manifest.json 与一个偏好字符串，毫秒级；模型本体按需下载，不占安装包。
     initAsrModelManager(context);

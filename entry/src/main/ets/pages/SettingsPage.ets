@@ -302,8 +302,8 @@ export struct SettingsPage {
     }
     if (key === 'asr') {
       // 当前引擎随 STORE_ASR_ENGINE_ID 变化；这里现算短标签，不进带参 Builder
-      const id: string = AppStorage.get<string>(STORE_ASR_ENGINE_ID) ?? 'system';
-      return id === 'system' ? '系统识别' : '第三方模型';
+      const id: string = AppStorage.get<string>(STORE_ASR_ENGINE_ID) ?? '';
+      return id.length === 0 ? '未选择' : '第三方模型';
     }
     if (key === 'version') {
       return this.appVersion;

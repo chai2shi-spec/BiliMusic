@@ -2,8 +2,7 @@
  * ASR 临时目录路径（纯 .ts 模块，供 AppContainer.ts 这类 .ts 文件导入，
  * 避免 .ts 导入 .ets 被 ArkTS 拒绝）。
  *
- * 与 LyricTranscribeService 共用 ${cacheDir}/transcribe —— 同一类临时 PCM 产物，
- * 文件以 _asr_{seq}.pcm 命名隔离，不会互删。
+ * 临时 PCM 产物统一落 ${cacheDir}/transcribe，文件以 _asr_{seq}.pcm 命名隔离。
  */
 
 let transcribeDir: string = '';

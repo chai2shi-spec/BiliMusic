@@ -37,7 +37,7 @@ import {
   downloadModel, getModelState, installedBytes, isAsrDownloadRunning
 } from '../service/asr/AsrModelManager';
 import {
-  currentEngineId, isThirdPartyAsrEnabled, selectAsrEngine, setThirdPartyAsrEnabled
+  selectAsrEngine, clearAsrEngine
 } from '../service/asr/AsrEngineRegistry';
 
 /** 卡片行左右内边距（与 InsetCardGroup 的 16vp 对齐） */
@@ -48,12 +48,10 @@ export struct AsrModelPage {
   @StorageLink(STORE_SAFE_TOP) safeTop: number = 0;
   @StorageLink(STORE_SAFE_BOTTOM) safeBottom: number = 0;
   @StorageProp(BreakpointConstants.CURRENT_BREAKPOINT) currentBreakpoint: string = BreakpointConstants.BREAKPOINT_SM;
-  /** 当前引擎 id（模型行高亮 + 选择入口） */
-  @StorageProp(STORE_ASR_ENGINE_ID) @Watch('onEngineChanged') engineId: string = 'system';
+  /** 当前引擎 id（模型行高亮 + 选择入口；空串 = 未选择） */
+  @StorageProp(STORE_ASR_ENGINE_ID) @Watch('onEngineChanged') engineId: string = '';
   /** 下载进度快照（JSON 字符串，解析到 @State 对象驱动逐行刷新） */
   @StorageProp(STORE_ASR_MODEL_PROGRESS) @Watch('onProgressChanged') progressText: string = '';
-  /** 第三方总开关（内存镜像，切换时同步持久化） */
-  @State thirdPartyOn: boolean = true;
   /** 每个模型的安装状态（版本号式刷新：数组元素变更触发 ForEach 重建） */
   @State modelStates: AsrModelState[] = [];
   /** 下载中模型 id */
@@ -110,7 +108,6 @@ export struct AsrModelPage {
 
   aboutToAppear(): void {
     this.syncTopBlurProgress();
-    this.thirdPartyOn = isThirdPartyAsrEnabled();
     this.refreshStates();
     this.onProgressChanged();
   }
@@ -195,11 +192,6 @@ export struct AsrModelPage {
       return;
     }
     AppStorage.setOrCreate(STORE_ASR_ENGINE_ID, id);
-    // 选了第三方引擎但总开关关着 → 自动打开
-    if (!this.thirdPartyOn) {
-      await setThirdPartyAsrEnabled(true);
-      this.thirdPartyOn = true;
-    }
     showAppToast(`已切换到 ${name}`, 2000);
   }
 
@@ -221,20 +213,14 @@ export struct AsrModelPage {
           return;
         }
         if (this.engineId === spec.id) {
-          void selectAsrEngine('system');
-          AppStorage.setOrCreate(STORE_ASR_ENGINE_ID, 'system');
-          showAppToast('已回退到系统识别', 2000);
+          // 删除在用模型：引擎回「未选择」态，转写入口重新走下载引导
+          void clearAsrEngine();
+          AppStorage.setOrCreate(STORE_ASR_ENGINE_ID, '');
+          showAppToast('已停用转写模型，重新下载后可再次使用', 2000);
         }
         this.refreshStates();
       }
     });
-  }
-
-  private async onToggleThirdParty(enabled: boolean): Promise<void> {
-    this.thirdPartyOn = enabled;
-    await setThirdPartyAsrEnabled(enabled);
-    AppStorage.setOrCreate(STORE_ASR_ENGINE_ID, currentEngineId());
-    showAppToast(enabled ? '已启用第三方转写引擎' : '已回退到系统识别', 2000);
   }
 
   /** 单个模型行 */
@@ -263,7 +249,7 @@ export struct AsrModelPage {
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
-          if (this.engineId === spec.id && this.thirdPartyOn) {
+          if (this.engineId === spec.id) {
             Text('使用中')
               .fontSize(13)
               .fontColor($r('app.color.text_secondary'))
@@ -373,7 +359,7 @@ export struct AsrModelPage {
     if (!st.installed) {
       return st.bytes > 0 ? '续传' : '下载';
     }
-    if (this.engineId === ASR_MODEL_CATALOG[index].id && this.thirdPartyOn) {
+    if (this.engineId === ASR_MODEL_CATALOG[index].id) {
       return '删除';
     }
     return '使用';
@@ -385,7 +371,7 @@ export struct AsrModelPage {
     if (st === undefined || !st.installed) {
       return false;
     }
-    return !(this.engineId === ASR_MODEL_CATALOG[index].id && this.thirdPartyOn);
+    return this.engineId !== ASR_MODEL_CATALOG[index].id;
   }
 
   @Builder
@@ -406,30 +392,6 @@ export struct AsrModelPage {
         Scroll(this.pageScroller) {
           Column() {
             Blank().height(this.safeTop + NAV_TITLE_BAR_HEIGHT).width('100%')
-
-            SectionHeader({ headerText: '引擎' })
-            InsetCard() {
-              Row() {
-                Column() {
-                  Text('第三方转写引擎')
-                    .fontSize(16)
-                    .fontColor($r('app.color.text_primary'))
-                  Text('关闭时一律使用系统内置识别，行为与旧版一致')
-                    .fontSize(13)
-                    .fontColor($r('app.color.text_secondary'))
-                    .margin({ top: 4 })
-                    .maxLines(2)
-                }
-                .layoutWeight(1)
-                .alignItems(HorizontalAlign.Start)
-                Toggle({ type: ToggleType.Switch, isOn: this.thirdPartyOn })
-                  .onChange((v: boolean): void => {
-                    void this.onToggleThirdParty(v);
-                  })
-              }
-              .width('100%')
-              .padding({ left: ROW_H_PADDING, right: ROW_H_PADDING, top: 14, bottom: 14 })
-            }
 
             SectionHeader({ headerText: '内置模型' })
             InsetCard() {

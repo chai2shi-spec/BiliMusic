@@ -1,10 +1,9 @@
 /**
- * ASR 转写总调度：复用现有 PCM 解码与歌词落库，按当前引擎分派。
+ * ASR 转写总调度（只服务第三方转写模型；系统 speechRecognizer 链路已移除）。
  *
- * 与现有 LyricTranscribeService 的关系：
- *   · 不动那个文件（系统识别链路保持原样）；
- *   · 本模块服务「第三方模型」路径，但共用同一组 AppStorage 进度键与
- *     manual 歌词缓存 —— 播放页的进度横幅、完成刷新零改动即可工作。
+ * 链路：PCM 解码（libentry.so）→ sherpa-onnx 引擎推理 → manual 歌词缓存落库。
+ * 进度发布走 AppStorage 五键（STORE_TRANSCRIBE_*），播放页进度横幅 /
+ * 完成刷新订阅同一组键即可工作。
  */
 
 import fs from '@ohos.file.fs';
@@ -15,7 +14,7 @@ import { cachedListenPath } from '../ListenCacheStore';
 import { decodeAudioToPcm } from 'libentry.so';
 import { postAppToast } from '../../common/ToastChannel';
 import {
-  ASR_ENGINE_SYSTEM, AsrEngine, AsrEngineId, AsrInitOptions, AsrLine
+  AsrEngine, AsrEngineId, AsrInitOptions, AsrLine
 } from './AsrEngine';
 import {
   currentEngineId, currentModelDir, currentEngineLabel
@@ -34,8 +33,7 @@ let runSeq: number = 0;
 let activeEngine: AsrEngine | null = null;
 
 /**
- * 从 Track 解析本地音频（与 LyricTranscribeService.resolveAudioPath 同口径）：
- * track.localFilePath > 下载完成文件 > 听后缓存。
+ * 从 Track 解析本地音频（track.localFilePath > 下载完成文件 > 听后缓存）。
  */
 function resolveAudioPath(track: Track): string {
   const local: string = track.localFilePath ?? '';
@@ -53,12 +51,13 @@ function resolveAudioPath(track: Track): string {
   return '';
 }
 
+/** 曲目是否有可用于转写的本地音频（歌词面板按钮可用态判定；纯 stat，无副作用） */
+export function hasLocalAudioSource(track: Track): boolean {
+  return resolveAudioPath(track).length > 0;
+}
+
 /** 创建引擎实例（NPU 扩展点：将来在此加 case） */
 function makeEngine(id: AsrEngineId): AsrEngine | null {
-  if (id === ASR_ENGINE_SYSTEM) {
-    // 系统引擎走原 LyricTranscribeService.startTranscribe，不经本协调器
-    return null;
-  }
   const spec = findModel(id);
   if (spec === undefined) {
     return null;
@@ -74,7 +73,7 @@ export function cancelAsrTranscribe(): void {
   }
 }
 
-/** 发起第三方模型转写（系统引擎路径请用 LyricTranscribeService.startTranscribe） */
+/** 发起第三方模型转写 */
 export async function startThirdPartyTranscribe(track: Track): Promise<void> {
   if (running) {
     return;
@@ -84,9 +83,18 @@ export async function startThirdPartyTranscribe(track: Track): Promise<void> {
     postAppToast('转写服务未就绪，请稍后重试', 1800);
     return;
   }
+  // 懒建临时 PCM 目录：native 侧 fopen 只建文件不建目录，目录缺失会报「无法创建临时转写文件」
+  try {
+    if (!fs.accessSync(contextDir)) {
+      fs.mkdirSync(contextDir, true);
+    }
+  } catch (e) {
+    postAppToast('转写临时目录创建失败，请稍后重试', 2200);
+    return;
+  }
   const id: string = currentEngineId();
-  if (id === ASR_ENGINE_SYSTEM) {
-    postAppToast('当前是系统识别引擎', 1800);
+  if (id.length === 0) {
+    postAppToast('尚未选择转写模型，请到「转写模型」页选用', 2400);
     return;
   }
   if (!getModelState(id).installed) {

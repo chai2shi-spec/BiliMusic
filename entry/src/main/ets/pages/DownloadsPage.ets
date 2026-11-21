@@ -84,6 +84,9 @@ import * as BilibiliApi from '../api/BilibiliApi';
 import { NavStackHolder } from '../service/NavStackHolder';
 import { UpSpaceRouteParam, CollectionDetailRouteParam } from '../service/NavRouteParams';
 import { LibraryStore } from '../service/LibraryStore';
+import { startThirdPartyTranscribe } from '../service/asr/AsrTranscribeCoordinator';
+import { hasReadyAsrEngine, currentEngineLabel } from '../service/asr/AsrEngineRegistry';
+import { STORE_TRANSCRIBE_RUNNING } from '../common/Constants';
 import { TopGradientBlurOverlay, TopBlurProgressUpdater } from '../components/TopGradientBlurOverlay';
 import { MaterialTokens } from '../common/style/MaterialTokens';
 
@@ -1384,6 +1387,12 @@ export struct DownloadsPage {
         action: (): void => {
           this.openUpSpaceFromTask(t);
         }
+      },
+      {
+        value: 'AI 转写',
+        action: (): void => {
+          this.transcribeFromTask(t);
+        }
       }
     ];
     // 文件丢失条目的「重新下载」：插在删除前（破坏性操作恒最后）；
@@ -1403,6 +1412,45 @@ export struct DownloadsPage {
       }
     });
     return items;
+  }
+
+  /**
+   * 条目「AI 转写」（LyricsComponent.confirmTranscribe 同款链路，入口换下载条目）：
+   *   · 未下载完成 → toast 拦截（转写需要本地音频，本页没有听后缓存兜底语义）；
+   *   · 引擎未就绪 → 确认框引导去「转写模型」页下载；
+   *   · 已在转写 → toast 拦截（coordinator 内 running 守卫是静默的，菜单入口补可感知反馈）；
+   *   · 就绪 → 确认框 → startThirdPartyTranscribe（进度横幅由 AppStorage 五键驱动）。
+   */
+  private transcribeFromTask(t: DownloadTask): void {
+    if (t.status !== DownloadStatus.COMPLETED || t.localFilePath.length === 0) {
+      this.toast('下载完成后才能转写', 1500);
+      return;
+    }
+    if (!hasReadyAsrEngine()) {
+      showConfirm(this.getUIContext(), {
+        title: '下载转写模型',
+        message: 'AI 转写需要先下载第三方转写模型（如 SenseVoice，约 229MB），'
+          + '下载到本机后可离线转写歌词。\n\n是否前往「转写模型」页下载？',
+        confirmText: '前往下载',
+        onConfirm: (): void => {
+          NavStackHolder.push('AsrModels', undefined);
+        }
+      });
+      return;
+    }
+    if (AppStorage.get<boolean>(STORE_TRANSCRIBE_RUNNING) === true) {
+      this.toast('已有转写任务进行中', 1500);
+      return;
+    }
+    showConfirm(this.getUIContext(), {
+      title: 'AI 转写歌词',
+      message: `将用 ${currentEngineLabel()} 模型在本地生成歌词。演唱含伴奏时识别准确率有限，`
+        + '结果作为草稿，请用「编辑歌词」修正。首次加载模型需几秒，期间请保持应用在前台。',
+      confirmText: '开始转写',
+      onConfirm: (): void => {
+        void startThirdPartyTranscribe(this.toMenuTrack(t));
+      }
+    });
   }
 
   /** 组头「⋯」菜单：加入队列取组内已完成、加入歌单收组内全部、UP 主页取第一首、删除 = 整组（沿用二次确认） */

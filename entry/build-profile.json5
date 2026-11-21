@@ -14,6 +14,13 @@
       "workers": [
         "./src/main/ets/service/asr/AsrRecognizeWorker.ets"
       ]
+    },
+    // sherpa_onnx HAR 自带 x86_64 四个 so（onnxruntime 等，未压缩约 21MB），
+    // 仅 x86 模拟器可用；真机为 arm64，排除后 HAP 减小约 14MB（压缩后）。
+    "napiLibFilterOption": {
+      "excludes": [
+        "**/x86_64/**.so"
+      ]
     }
   },
   "buildOptionSet": [
